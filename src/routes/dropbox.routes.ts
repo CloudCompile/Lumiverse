@@ -17,7 +17,7 @@
 
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { getSecret, putSecret, deleteSecret } from "../services/secrets.service";
+import { getSecret, getSecretForStatus, putSecret, deleteSecret } from "../services/secrets.service";
 
 const app = new Hono();
 
@@ -176,9 +176,9 @@ app.post("/auth/callback", async (c) => {
 // GET /auth/status
 app.get("/auth/status", async (c) => {
   const userId = c.get("userId");
-  const appKey = await getAppKey(userId);
-  const customKey = await getSecret(userId, DBX_APP_KEY_SECRET);
-  const refreshToken = await getSecret(userId, DBX_REFRESH_TOKEN);
+  const customKey = await getSecretForStatus(userId, DBX_APP_KEY_SECRET);
+  const refreshToken = await getSecretForStatus(userId, DBX_REFRESH_TOKEN);
+  const appKey = customKey || DEFAULT_APP_KEY || null;
 
   return c.json({
     configured: !!appKey,
@@ -216,7 +216,7 @@ app.delete("/auth/credentials", async (c) => {
 // POST /auth/revoke
 app.post("/auth/revoke", async (c) => {
   const userId = c.get("userId");
-  const accessToken = await getSecret(userId, DBX_ACCESS_TOKEN);
+  const accessToken = await getSecretForStatus(userId, DBX_ACCESS_TOKEN);
 
   if (accessToken) {
     try {

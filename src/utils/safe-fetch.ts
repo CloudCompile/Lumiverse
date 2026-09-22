@@ -13,6 +13,16 @@ import { getEffectiveDnsSettings } from "../services/dns-settings.service";
 const MAX_REDIRECTS = 5;
 const DEFAULT_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_DNS_TIMEOUT_MS = 5_000;
+const DEFAULT_USER_AGENT = (() => {
+  try {
+    const pkg = require("../../package.json") as { version?: string };
+    const version = typeof pkg.version === "string" && pkg.version.trim() ? pkg.version.trim() : "unknown";
+    return `Lumiverse/${version}`;
+  } catch {
+    return "Lumiverse/unknown";
+  }
+})();
+
 const DOH_TIMEOUT_MS = 5_000;
 
 // DNS record type codes used by RFC 8484 JSON DoH responses.
@@ -190,6 +200,10 @@ export interface ValidateHostOptions {
   dnsTimeoutMs?: number;
 }
 
+function allowsLoopback(options?: ValidateHostOptions): boolean {
+  return Boolean(options?.allowLoopback || options?.allowPrivate);
+}
+
 export async function validateHost(hostname: string, options?: ValidateHostOptions): Promise<void> {
   hostname = normalizeHostname(hostname);
 
@@ -198,13 +212,13 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
   }
 
   if (isLocalhostName(hostname)) {
-    if (options?.allowLoopback) return;
+    if (allowsLoopback(options)) return;
     throw new SSRFError(`URL resolves to private IP: ${hostname}`);
   }
 
   // If hostname is already an IP literal, check directly
   if (/^\d+\.\d+\.\d+\.\d+$/.test(hostname)) {
-    if (options?.allowLoopback && isLoopbackIPv4(hostname)) return;
+    if (allowsLoopback(options) && isLoopbackIPv4(hostname)) return;
     if (options?.allowPrivate && isPrivateIPv4(hostname)) return;
     if (isPrivateIPv4(hostname)) {
       throw new SSRFError(`URL resolves to private IP: ${hostname}`);
@@ -213,7 +227,7 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
   }
   if (hostname.startsWith("[") || hostname.includes(":")) {
     const bare = hostname.replace(/^\[|\]$/g, "");
-    if (options?.allowLoopback && isLoopbackIPv6(bare)) return;
+    if (allowsLoopback(options) && isLoopbackIPv6(bare)) return;
     if (options?.allowPrivate && isPrivateIPv6(bare)) return;
     if (isPrivateIPv6(bare)) {
       throw new SSRFError(`URL resolves to private IP: ${bare}`);
@@ -301,7 +315,7 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
   }
 
   for (const ip of v4Addrs) {
-    if (options?.allowLoopback && isLoopbackIPv4(ip)) continue;
+    if (allowsLoopback(options) && isLoopbackIPv4(ip)) continue;
     if (options?.allowPrivate && isPrivateIPv4(ip)) continue;
     if (isPrivateIPv4(ip)) {
       throw new SSRFError(`URL resolves to private IP: ${ip} (from ${hostname})`);
@@ -309,7 +323,7 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
   }
 
   for (const ip of v6Addrs) {
-    if (options?.allowLoopback && isLoopbackIPv6(ip)) continue;
+    if (allowsLoopback(options) && isLoopbackIPv6(ip)) continue;
     if (options?.allowPrivate && isPrivateIPv6(ip)) continue;
     if (isPrivateIPv6(ip)) {
       throw new SSRFError(`URL resolves to private IP: ${ip} (from ${hostname})`);
@@ -320,6 +334,7 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
 // ─── safeFetch ────────────────────────────────────────────────────────────
 
 export interface SafeFetchOptions {
+  signal?: AbortSignal;
   method?: string;
   body?: BodyInit | null;
   maxBytes?: number;
@@ -328,6 +343,8 @@ export interface SafeFetchOptions {
   headers?: HeadersInit;
   allowLoopback?: boolean;
   allowPrivate?: boolean;
+  /** Restrict the initial URL and every redirect hop to these exact origins. */
+  allowedOrigins?: readonly string[];
 }
 
 export async function safeFetch(
@@ -336,12 +353,16 @@ export async function safeFetch(
 ): Promise<Response> {
   const maxBytes = options?.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options?.timeoutMs ?? 30_000;
+  const allowedOrigins = options?.allowedOrigins
+    ? new Set(options.allowedOrigins.map((origin) => new URL(origin).origin.toLowerCase()))
+    : null;
 
   let currentUrl = url;
   let method = options?.method ?? "GET";
   let body = options?.body ?? null;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+    options?.signal?.throwIfAborted();
     let parsed: URL;
     try {
       parsed = new URL(currentUrl);
@@ -351,6 +372,9 @@ export async function safeFetch(
 
     if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
       throw new SSRFError(`Only http and https URLs are allowed, got: ${parsed.protocol}`);
+    }
+    if (allowedOrigins && !allowedOrigins.has(parsed.origin.toLowerCase())) {
+      throw new SSRFError(`URL origin is not allowed: ${parsed.origin.toLowerCase()}`);
     }
 
     await validateHost(parsed.hostname, {
@@ -373,12 +397,16 @@ export async function safeFetch(
 
     let response: Response;
     try {
+      const headers = new Headers(options?.headers);
+      if (!headers.get("user-agent")?.trim()) {
+        headers.set("User-Agent", DEFAULT_USER_AGENT);
+      }
       response = await fetch(currentUrl, {
         method,
         body,
         redirect: "manual",
-        signal: controller.signal,
-        headers: options?.headers,
+        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
+        headers,
       });
     } catch (err: any) {
       clearTimeout(timer);

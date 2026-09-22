@@ -1,15 +1,25 @@
 import sharp from "../utils/sharp-config";
+import { convertImageToPng, readImageMetadata } from "../utils/image-pipeline";
 import { extname } from "path";
 import { zipSync } from "fflate";
 import { LANDING_PERSPECTIVE_LAYERS_KEY, getCharacter, normalizeLandingPerspectiveLayers } from "./characters.service";
 import { getExpressionConfig, getExpressionGroups } from "./expressions.service";
 import { listGallery } from "./character-gallery.service";
+import {
+  galleryArchiveStem,
+  parseGalleryImageReference,
+  remapGreetingBackgrounds,
+} from "../utils/gallery-image-reference";
 import { getImage, getImageFilePath } from "./images.service";
 import { exportWorldBook, getWorldBook } from "./world-books.service";
-import { isNsfwExpressionLabel } from "./character-card.service";
+import { isNsfwExpressionLabel, stableCharxAlternateAvatarId } from "./character-card.service";
 import { getCharacterBoundScripts } from "./regex-scripts.service";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
+import { mapWithConcurrency } from "../utils/concurrency";
 import type { Character } from "../types/character";
+
+/** Concurrent disk reads used while assembling a CHARX archive. */
+const CHARX_ASSET_READ_CONCURRENCY = 8;
 
 // ── CRC-32 (lookup table) ───────────────────────────────────────────────────
 
@@ -192,12 +202,15 @@ const INTERNAL_EXTENSION_KEYS = new Set([
   "expression_groups",
   "alternate_fields",
   "alternate_avatars",
+  "avatar_bindings",
   "world_book_id",
   "world_book_ids",
   "avatar_crop_image_id",
   "original_image_id",
   "_lumiverse_source_filename",
   "risu_asset_map",
+  "gallery_reference_sequence",
+  "gallery_reference_names",
 ]);
 
 export function buildCCSv3Json(userId: string, character: Character): Record<string, any> {
@@ -331,9 +344,9 @@ export async function exportAsPng(userId: string, characterId: string): Promise<
   }
 
   // Ensure it's PNG format
-  const metadata = await sharp(avatarBuffer).metadata();
+  const metadata = await readImageMetadata(avatarBuffer);
   if (metadata.format !== "png") {
-    avatarBuffer = await sharp(avatarBuffer).png().toBuffer();
+    avatarBuffer = await convertImageToPng(avatarBuffer);
   }
 
   // The on-disk avatar is often the original card upload, which still carries
@@ -367,9 +380,46 @@ export interface LumiverseModulesExport {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  avatar_bindings?: Record<string, { description?: string | null; personality?: string | null; scenario?: string | null; greeting_index?: number | null }>;
   landing_perspective_layers?: Array<{ id: string; label?: string; path: string; intensity: number }>;
   world_books?: Record<string, any>[];
   regex_scripts?: import("./character-card.service").BundledRegexScript[];
+}
+
+export type CharxExportProgress =
+  | { phase: "collecting_assets"; completed: number; total: number }
+  | { phase: "compressing" }
+  | { phase: "complete"; bytes: number };
+
+export interface CharxExportOptions {
+  /** Best-effort lifecycle updates for callers that can surface export progress. */
+  onProgress?: (progress: CharxExportProgress) => void;
+}
+
+function reportCharxProgress(options: CharxExportOptions, progress: CharxExportProgress): void {
+  try {
+    options.onProgress?.(progress);
+  } catch {
+    // Progress reporting must never make an otherwise valid export fail.
+  }
+}
+
+/**
+ * Create the archive in Bun's server process.
+ *
+ * fflate's callback-based `zip` API delegates sufficiently large entries to
+ * browser Web Workers. In Bun that worker callback can return no data, which
+ * surfaces as the opaque `dat.length` exception. `zipSync` is the supported
+ * server-side path; expensive image reads still happen through the bounded
+ * concurrent pool before this final compression step.
+ */
+function zipCharx(entries: Record<string, Uint8Array>): Uint8Array {
+  for (const [path, bytes] of Object.entries(entries)) {
+    if (!(bytes instanceof Uint8Array)) {
+      throw new Error(`CHARX archive entry is not binary data: ${path}`);
+    }
+  }
+  return zipSync(entries);
 }
 
 /** Sanitize a string for use as a filename component inside the archive. */
@@ -377,12 +427,32 @@ function sanitizeArchiveName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_\-. ]/g, "_").trim() || "unnamed";
 }
 
-export async function exportAsCharx(userId: string, characterId: string): Promise<Uint8Array | null> {
+export async function exportAsCharx(
+  userId: string,
+  characterId: string,
+  options: CharxExportOptions = {},
+): Promise<Uint8Array | null> {
   const character = getCharacter(userId, characterId);
   if (!character) return null;
 
+  // listGallery also ensures every image has a stable gallery:// reference.
+  // Replace local database IDs in the CHARX card payload with those portable
+  // references; JSON and PNG exports intentionally remain plain CCSv3 cards
+  // because those formats cannot bundle the corresponding gallery assets.
+  const galleryItems = listGallery(userId, characterId);
   const ccsv3 = buildCCSv3Json(userId, character);
+  const exportedExtensions = ccsv3.data?.extensions;
+  if (exportedExtensions && typeof exportedExtensions === "object" && !Array.isArray(exportedExtensions)) {
+    const localToPortable = new Map(
+      galleryItems.map((item) => [item.image_id, item.reference] as const),
+    );
+    exportedExtensions.greeting_backgrounds = remapGreetingBackgrounds(
+      exportedExtensions.greeting_backgrounds,
+      localToPortable,
+    );
+  }
   const entries: Record<string, Uint8Array> = {};
+  const assetTasks: Array<() => Promise<void>> = [];
 
   // card.json at root
   entries["card.json"] = new TextEncoder().encode(JSON.stringify(ccsv3, null, 2));
@@ -390,80 +460,72 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
   // Primary avatar — CHARX spec: assets/{category}/{type}/{filename}.
   // Strip any stale card tEXt chunks so the archive's avatar can't shadow
   // card.json for readers that peek at PNG text chunks.
-  for (const imageId of getExportAvatarImageIds(character)) {
-    const img = await readImageBytes(userId, imageId);
-    if (img) {
-      const cleaned = stripCardTextChunks(img.bytes);
-      entries[`assets/icon/image/main${img.ext}`] = new Uint8Array(cleaned);
-      break;
+  assetTasks.push(async () => {
+    for (const imageId of getExportAvatarImageIds(character)) {
+      const img = await readImageBytes(userId, imageId);
+      if (img) {
+        const cleaned = stripCardTextChunks(img.bytes);
+        entries[`assets/icon/image/main${img.ext}`] = new Uint8Array(cleaned);
+        break;
+      }
     }
-  }
+  });
 
   // Build lumiverse_modules.json
   const modules: LumiverseModulesExport = { version: 1 };
 
   // Expression images
   const exprConfig = getExpressionConfig(userId, characterId);
+  const exprMappings: Record<string, string> = {};
   if (exprConfig && Object.keys(exprConfig.mappings).length > 0) {
-    const exprMappings: Record<string, string> = {};
     for (const [label, imageId] of Object.entries(exprConfig.mappings)) {
-      const img = await readImageBytes(userId, imageId);
-      if (img) {
-        const safeName = sanitizeArchiveName(label);
-        const archivePath = `assets/other/image/expr_${safeName}${img.ext}`;
-        entries[archivePath] = img.bytes;
-        exprMappings[label] = archivePath;
-      }
-    }
-    if (Object.keys(exprMappings).length > 0) {
-      modules.expressions = {
-        enabled: exprConfig.enabled,
-        defaultExpression: exprConfig.defaultExpression,
-        mappings: exprMappings,
-      };
-      if (Object.keys(exprMappings).some(isNsfwExpressionLabel)) {
-        modules.has_nsfw_expressions = true;
-      }
+      assetTasks.push(async () => {
+        const img = await readImageBytes(userId, imageId);
+        if (img) {
+          const safeName = sanitizeArchiveName(label);
+          const archivePath = `assets/other/image/expr_${safeName}${img.ext}`;
+          entries[archivePath] = img.bytes;
+          exprMappings[label] = archivePath;
+        }
+      });
     }
   }
 
   // Multi-character expression groups
   const exprGroups = getExpressionGroups(userId, characterId);
+  const groupMappings: Record<string, Record<string, string>> = {};
+  const expressionGroupMappings: Array<{ groupName: string; mappings: Record<string, string> }> = [];
   if (exprGroups && Object.keys(exprGroups).length > 0) {
-    const groupMappings: Record<string, Record<string, string>> = {};
-
     for (const [groupName, labels] of Object.entries(exprGroups)) {
       const safeName = sanitizeArchiveName(groupName);
       const labelMappings: Record<string, string> = {};
 
       for (const [label, imageId] of Object.entries(labels)) {
-        const img = await readImageBytes(userId, imageId);
-        if (img) {
-          const safeLabel = sanitizeArchiveName(label);
-          const archivePath = `assets/other/image/exprg_${safeName}--${safeLabel}${img.ext}`;
-          entries[archivePath] = img.bytes;
-          labelMappings[label] = archivePath;
-          if (isNsfwExpressionLabel(label)) modules.has_nsfw_expressions = true;
-        }
+        assetTasks.push(async () => {
+          const img = await readImageBytes(userId, imageId);
+          if (img) {
+            const safeLabel = sanitizeArchiveName(label);
+            const archivePath = `assets/other/image/exprg_${safeName}--${safeLabel}${img.ext}`;
+            entries[archivePath] = img.bytes;
+            labelMappings[label] = archivePath;
+            if (isNsfwExpressionLabel(label)) modules.has_nsfw_expressions = true;
+          }
+        });
       }
 
-      if (Object.keys(labelMappings).length > 0) {
-        groupMappings[groupName] = labelMappings;
-      }
-    }
-
-    if (Object.keys(groupMappings).length > 0) {
-      modules.expression_groups = { groups: groupMappings };
+      expressionGroupMappings.push({ groupName, mappings: labelMappings });
     }
   }
 
   // Gallery images
-  const galleryItems = listGallery(userId, characterId);
   for (const item of galleryItems) {
-    const img = await readImageBytes(userId, item.image_id);
-    if (img) {
-      entries[`assets/other/image/gallery_${item.id}${img.ext}`] = img.bytes;
-    }
+    assetTasks.push(async () => {
+      const img = await readImageBytes(userId, item.image_id);
+      if (img) {
+        const token = parseGalleryImageReference(item.reference);
+        entries[`assets/other/image/${galleryArchiveStem(token ?? item.id)}${img.ext}`] = img.bytes;
+      }
+    });
   }
 
   // Alternate fields
@@ -477,45 +539,49 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
     }
   }
 
+  const avatarBindings = character.extensions?.avatar_bindings;
+  if (avatarBindings && typeof avatarBindings === "object" && !Array.isArray(avatarBindings)) {
+    modules.avatar_bindings = avatarBindings;
+  }
+
   // Alternate avatars
-  const altAvatars: Array<{ id: string; label: string; path: string }> = [];
+  const altAvatarsByPosition = new Map<number, { id: string; label: string; path: string }>();
   const altAvatarEntries = character.extensions?.alternate_avatars;
   if (Array.isArray(altAvatarEntries)) {
-    for (const entry of altAvatarEntries) {
+    for (const [position, entry] of altAvatarEntries.entries()) {
       if (!entry.image_id || !entry.label) continue;
-      const img = await readImageBytes(userId, entry.image_id);
-      if (img) {
-        const archivePath = `assets/icon/image/${entry.id}${img.ext}`;
-        const cleaned = stripCardTextChunks(img.bytes);
-        entries[archivePath] = new Uint8Array(cleaned);
-        altAvatars.push({ id: entry.id, label: entry.label, path: archivePath });
-      }
+      const stableId = stableCharxAlternateAvatarId(entry.id, position);
+      assetTasks.push(async () => {
+        const img = await readImageBytes(userId, entry.image_id);
+        if (img) {
+          const archivePath = `assets/icon/image/${stableId}${img.ext}`;
+          const cleaned = stripCardTextChunks(img.bytes);
+          entries[archivePath] = new Uint8Array(cleaned);
+          // Asset reads run concurrently. Key by the source position instead of
+          // pushing in completion order so re-import preserves the avatar strip.
+          altAvatarsByPosition.set(position, { id: stableId, label: entry.label, path: archivePath });
+        }
+      });
     }
   }
-  if (altAvatars.length > 0) {
-    modules.alternate_avatars = altAvatars;
-  }
-
   // Landing perspective layers (ordered back → front)
   const landingLayers = normalizeLandingPerspectiveLayers(character.extensions?.[LANDING_PERSPECTIVE_LAYERS_KEY]);
-  const exportedLandingLayers: Array<{ id: string; label?: string; path: string; intensity: number }> = [];
-  for (const layer of landingLayers) {
-    const img = await readImageBytes(userId, layer.image_id);
-    if (!img) continue;
-    const safeName = sanitizeArchiveName(layer.label || layer.id || "layer");
-    const archivePath = `assets/other/image/landing_layer_${safeName}_${layer.id}${img.ext}`;
-    entries[archivePath] = img.bytes;
-    exportedLandingLayers.push({
-      id: layer.id,
-      ...(layer.label ? { label: layer.label } : {}),
-      path: archivePath,
-      intensity: layer.intensity,
+  const exportedLandingLayersByPosition = new Map<number, { id: string; label?: string; path: string; intensity: number }>();
+  for (const [position, layer] of landingLayers.entries()) {
+    assetTasks.push(async () => {
+      const img = await readImageBytes(userId, layer.image_id);
+      if (!img) return;
+      const safeName = sanitizeArchiveName(layer.label || layer.id || "layer");
+      const archivePath = `assets/other/image/landing_layer_${safeName}_${layer.id}${img.ext}`;
+      entries[archivePath] = img.bytes;
+      exportedLandingLayersByPosition.set(position, {
+        id: layer.id,
+        ...(layer.label ? { label: layer.label } : {}),
+        path: archivePath,
+        intensity: layer.intensity,
+      });
     });
   }
-  if (exportedLandingLayers.length > 0) {
-    modules.landing_perspective_layers = exportedLandingLayers;
-  }
-
   // World books (individual Lumiverse-format exports for lossless round-trips)
   const charWorldBookIds = getCharacterWorldBookIds(character.extensions);
   if (charWorldBookIds.length > 0) {
@@ -553,16 +619,64 @@ export async function exportAsCharx(userId: string, characterId: string): Promis
     }));
   }
 
-  // Only include lumiverse_modules.json if there's content
+  let completedAssets = 0;
+  reportCharxProgress(options, {
+    phase: "collecting_assets",
+    completed: completedAssets,
+    total: assetTasks.length,
+  });
+  await mapWithConcurrency(assetTasks, CHARX_ASSET_READ_CONCURRENCY, async (task) => {
+    await task();
+    completedAssets++;
+    reportCharxProgress(options, {
+      phase: "collecting_assets",
+      completed: completedAssets,
+      total: assetTasks.length,
+    });
+  });
+
+  if (exprConfig && Object.keys(exprMappings).length > 0) {
+    modules.expressions = {
+      enabled: exprConfig.enabled,
+      defaultExpression: exprConfig.defaultExpression,
+      mappings: exprMappings,
+    };
+    if (Object.keys(exprMappings).some(isNsfwExpressionLabel)) {
+      modules.has_nsfw_expressions = true;
+    }
+  }
+  for (const { groupName, mappings } of expressionGroupMappings) {
+    if (Object.keys(mappings).length > 0) groupMappings[groupName] = mappings;
+  }
+  if (Object.keys(groupMappings).length > 0) {
+    modules.expression_groups = { groups: groupMappings };
+  }
+  const altAvatars = [...altAvatarsByPosition.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, avatar]) => avatar);
+  if (altAvatars.length > 0) {
+    modules.alternate_avatars = altAvatars;
+  }
+  const exportedLandingLayers = [...exportedLandingLayersByPosition.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, layer]) => layer);
+  if (exportedLandingLayers.length > 0) {
+    modules.landing_perspective_layers = exportedLandingLayers;
+  }
+
+  // Only include lumiverse_modules.json if there's content.
   const hasModules =
-    modules.expressions || modules.expression_groups || modules.alternate_fields || modules.alternate_avatars || modules.landing_perspective_layers || modules.world_books?.length || modules.regex_scripts;
+    modules.expressions || modules.expression_groups || modules.alternate_fields || modules.alternate_avatars || modules.avatar_bindings || modules.landing_perspective_layers || modules.world_books?.length || modules.regex_scripts;
   if (hasModules) {
     entries["lumiverse_modules.json"] = new TextEncoder().encode(
       JSON.stringify(modules, null, 2)
     );
   }
 
-  return zipSync(entries);
+  reportCharxProgress(options, { phase: "compressing" });
+  const archive = zipCharx(entries);
+  reportCharxProgress(options, { phase: "complete", bytes: archive.byteLength });
+  return archive;
 }
 
 // ── Filename sanitizer for Content-Disposition ──────────────────────────────

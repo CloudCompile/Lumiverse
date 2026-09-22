@@ -1,23 +1,16 @@
 import { useState, useEffect } from 'react'
-
-const DEFAULT_BREAKPOINT = 600
+import { isMobileViewportOrDevice, MOBILE_VIEWPORT_BREAKPOINT } from '@/lib/mobile'
 
 const pointerQuery = typeof window !== 'undefined'
   ? window.matchMedia('(pointer: coarse)')
   : null
 
-function check(breakpoint: number) {
-  if (typeof window === 'undefined') return false
-  // pointer: coarse catches touch devices even when browser zoom inflates
-  return pointerQuery?.matches || window.innerWidth <= breakpoint
-}
-
-export default function useIsMobile(breakpoint = DEFAULT_BREAKPOINT) {
-  const [isMobile, setIsMobile] = useState(() => check(breakpoint))
+export default function useIsMobile(breakpoint = MOBILE_VIEWPORT_BREAKPOINT) {
+  const [isMobile, setIsMobile] = useState(() => isMobileViewportOrDevice(breakpoint))
 
   useEffect(() => {
     const update = () => {
-      const next = check(breakpoint)
+      const next = isMobileViewportOrDevice(breakpoint)
       setIsMobile((prev) => (prev !== next ? next : prev))
     }
 

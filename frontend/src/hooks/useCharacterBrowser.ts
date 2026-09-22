@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate } from 'react-router'
 import { toast } from '@/lib/toast'
 import { charactersApi } from '@/api/characters'
@@ -12,6 +12,7 @@ import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImportModal'
 import type { AlternateFieldsSummaryInfo } from '@/components/modals/AlternateFieldsSummaryModal'
 import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
+import { sortFolderGroups } from '@/lib/folderSorting'
 import i18n from '@/i18n'
 
 /**
@@ -128,7 +129,7 @@ export function useCharacterBrowser() {
         )
       },
     )
-  }, [!!importProgress])
+  }, [importProgress])
 
   // Refresh gallery when LumiHub install completes (external mutation)
   useEffect(() => {
@@ -144,12 +145,28 @@ export function useCharacterBrowser() {
     const offCreated = wsClient.on(EventType.CHARACTER_CREATED, refresh)
     const offEdited = wsClient.on(EventType.CHARACTER_EDITED, refresh)
     const offDeleted = wsClient.on(EventType.CHARACTER_DELETED, refresh)
+    const offLibraryChanged = wsClient.on(EventType.CHARACTER_LIBRARY_CHANGED, refresh)
     return () => {
       offCreated()
       offEdited()
       offDeleted()
+      offLibraryChanged()
     }
   }, [])
+
+  // The sort key changes when a one-on-one chat is created or deleted. Group
+  // chats are ignored by this sort at the API layer, so their refreshes are
+  // harmless and keep the event handling straightforward.
+  useEffect(() => {
+    if (sortField !== 'most_chats') return
+    const refresh = () => setFetchVersion((v) => v + 1)
+    const offCreated = wsClient.on(EventType.CHAT_CREATED, refresh)
+    const offDeleted = wsClient.on(EventType.CHAT_DELETED, refresh)
+    return () => {
+      offCreated()
+      offDeleted()
+    }
+  }, [sortField])
 
   // ─── Server-side paginated summaries (the fast path) ────────────────────
   const [browserItems, setBrowserItems] = useState<CharacterSummary[]>([])
@@ -158,6 +175,28 @@ export function useCharacterBrowser() {
   const [favoriteCharacters, setFavoriteCharacters] = useState<CharacterSummary[]>([])
   const favoriteMutationSeqRef = useRef(0)
   const favoritesRef = useRef(favorites)
+
+  const groupedCharacters = useMemo(() => {
+    const groups: Array<{ folder: string; characters: CharacterSummary[] }> = []
+    const folderMap = new Map<string, CharacterSummary[]>()
+    for (const character of browserItems) {
+      const key = character.folder || ''
+      if (!folderMap.has(key)) {
+        folderMap.set(key, [])
+        groups.push({ folder: key, characters: folderMap.get(key)! })
+      }
+      folderMap.get(key)!.push(character)
+    }
+    return sortFolderGroups(groups)
+  }, [browserItems])
+
+  const allFolders = useMemo(() => {
+    const folders = new Set<string>()
+    for (const character of characters) {
+      if (character.folder) folders.add(character.folder)
+    }
+    return Array.from(folders).sort((a, b) => a.localeCompare(b))
+  }, [characters])
 
   // Debounced search
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(undefined)
@@ -503,15 +542,17 @@ export function useCharacterBrowser() {
         setBrowserTotal((t) => Math.max(0, t - result.deleted.length))
       } catch {
         let done = 0
+        const deleted: string[] = []
         for (const id of ids) {
           try {
             await charactersApi.delete(id)
+            deleted.push(id)
             done++
           } catch { /* skip */ }
           setBatchDeleteProgress({ done, total: ids.length })
         }
-        removeCharacters(ids)
-        setBrowserTotal((t) => Math.max(0, t - ids.length))
+        removeCharacters(deleted)
+        setBrowserTotal((t) => Math.max(0, t - deleted.length))
       }
       setBatchMode(false)
       setBatchDeleteProgress(null)
@@ -574,6 +615,38 @@ export function useCharacterBrowser() {
     },
     [removeCharacters]
   )
+
+  const applyFolderUpdates = useCallback((updated: Character[]) => {
+    if (updated.length === 0) return
+    const updatedById = new Map(updated.map((character) => [character.id, character]))
+    const currentCharacters = useStore.getState().characters
+    setCharacters(currentCharacters.map((character) => updatedById.get(character.id) ?? character))
+    setBrowserItems((items) => items.map((item) => {
+      const character = updatedById.get(item.id)
+      return character ? { ...item, folder: character.folder, updated_at: character.updated_at } : item
+    }))
+  }, [setCharacters])
+
+  const renameFolder = useCallback(async (oldName: string, newName: string) => {
+    const result = await charactersApi.renameFolder(oldName, newName)
+    applyFolderUpdates(result.updated)
+    setFetchVersion((version) => version + 1)
+    return result
+  }, [applyFolderUpdates])
+
+  const deleteFolder = useCallback(async (name: string) => {
+    const result = await charactersApi.deleteFolder(name)
+    applyFolderUpdates(result.updated)
+    setFetchVersion((version) => version + 1)
+    return result
+  }, [applyFolderUpdates])
+
+  const bulkUpdateFolder = useCallback(async (ids: string[], folder: string) => {
+    const result = await charactersApi.bulkUpdateFolder(ids, folder)
+    applyFolderUpdates(result.updated)
+    setFetchVersion((version) => version + 1)
+    return result
+  }, [applyFolderUpdates])
 
   const openModal = useStore((s) => s.openModal)
   const showChatCreationToast = useCallback(
@@ -711,7 +784,7 @@ export function useCharacterBrowser() {
       const wasFavorite = favorites.includes(id)
       const nextFavorites = wasFavorite
         ? favorites.filter((favoriteId) => favoriteId !== id)
-        : [...favorites, id].slice(0, 15)
+        : [...favorites, id]
       const requestSeq = ++favoriteMutationSeqRef.current
 
       toggleFavorite(id)
@@ -773,7 +846,9 @@ export function useCharacterBrowser() {
   return {
     // State — browser items come from server-side pagination
     characters: browserItems,
+    groupedCharacters,
     allCharacters: characters,
+    allFolders,
     totalFiltered: browserTotal,
     favoriteCharacters,
     loading: loading || !settingsLoaded,
@@ -827,6 +902,9 @@ export function useCharacterBrowser() {
     duplicateCharacter,
     uploadAvatar,
     deleteCharacter,
+    renameFolder,
+    deleteFolder,
+    bulkUpdateFolder,
     importFile,
     importFiles,
     importUrl,

@@ -423,7 +423,10 @@ function snapshotVaultContents(
        FROM chat_chunks cc
        LEFT JOIN memory_salience ms ON ms.chunk_id = cc.id
        WHERE cc.chat_id = ? AND cc.vectorized_at IS NOT NULL
-       ORDER BY cc.created_at ASC`,
+       ORDER BY cc.message_range_start IS NULL ASC,
+                cc.message_range_start ASC,
+                cc.message_range_end ASC,
+                cc.id ASC`,
     ).all(chatId) as Array<{
       id: string; content: string; entity_ids: string | null; created_at: number;
       salience_score: number | null; emotional_tags: string | null;

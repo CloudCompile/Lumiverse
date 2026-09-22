@@ -30,6 +30,158 @@
   padding-bottom: 56px;
 }
 
+.sourceTabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-bottom: 14px;
+  padding: 4px;
+  border: 1px solid var(--lumiverse-border-light, rgba(255, 255, 255, 0.075));
+  border-radius: 8px;
+  background: var(--lumiverse-bg-deeper, rgba(0, 0, 0, 0.14));
+}
+.sourceTab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  cursor: pointer;
+}
+.sourceTab:hover {
+  color: var(--lumiverse-text-muted, rgba(255, 255, 255, 0.65));
+  background: var(--lumiverse-bg-hover, rgba(255, 255, 255, 0.04));
+}
+.sourceTabActive {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  background: var(--lumiverse-primary-010, rgba(147, 112, 219, 0.1));
+}
+
+.galleryPicker {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px;
+  border: 1px solid var(--lumiverse-border, rgba(147, 112, 219, 0.12));
+  border-radius: 8px;
+}
+.galleryIntro {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+}
+.gallerySearch {
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--lumiverse-border-light, rgba(255, 255, 255, 0.075));
+  border-radius: 6px;
+  outline: none;
+  background: var(--lumiverse-bg-deeper, rgba(0, 0, 0, 0.14));
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  font: inherit;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+}
+.gallerySearch:focus {
+  border-color: var(--lumiverse-border-hover, rgba(147, 112, 219, 0.25));
+}
+.galleryList {
+  max-height: min(330px, 38vh);
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
+}
+.galleryRow {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  width: 100%;
+  padding: 8px 5px;
+  border: 0;
+  border-bottom: 1px solid var(--lumiverse-border-light, rgba(255, 255, 255, 0.075));
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.galleryRow:hover:not(:disabled) {
+  background: var(--lumiverse-bg-hover, rgba(255, 255, 255, 0.04));
+}
+.galleryRow:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+.galleryRow > svg {
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+}
+.galleryAvatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  overflow: hidden;
+  border: 1px solid var(--lumiverse-border, rgba(147, 112, 219, 0.12));
+  border-radius: 7px;
+  background: var(--lumiverse-primary-010, rgba(147, 112, 219, 0.1));
+  color: var(--lumiverse-primary-text, rgba(196, 181, 253, 0.95));
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-weight: 700;
+}
+.galleryAvatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.galleryIdentity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.galleryName,
+.galleryMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.galleryName {
+  color: var(--lumiverse-text, rgba(255, 255, 255, 0.92));
+  font-size: calc(12.5px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+}
+.galleryMeta {
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+}
+.galleryEmpty,
+.galleryStatus {
+  padding: 24px 8px;
+  color: var(--lumiverse-text-dim, rgba(255, 255, 255, 0.4));
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+  text-align: center;
+}
+.galleryStatus {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.galleryMore {
+  display: flex;
+  justify-content: center;
+  padding-top: 10px;
+}
+
 .drop {
   display: flex;
   flex-direction: column;

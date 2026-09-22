@@ -1,8 +1,10 @@
 export enum EventType {
   // Connection
   CONNECTED = "CONNECTED",
+  FRONTEND_SESSION_CLOSED = 'FRONTEND_SESSION_CLOSED',
 
   // Chat lifecycle
+  CHAT_CREATED = "CHAT_CREATED",
   CHAT_CHANGED = "CHAT_CHANGED",
   CHAT_SWITCHED = "CHAT_SWITCHED",
   CHAT_DELETED = "CHAT_DELETED",
@@ -38,6 +40,8 @@ export enum EventType {
   CHARACTER_EDITED = "CHARACTER_EDITED",
   CHARACTER_DELETED = "CHARACTER_DELETED",
   CHARACTER_DUPLICATED = "CHARACTER_DUPLICATED",
+  /** Coarse invalidation for bulk workflows that intentionally suppress per-row events. */
+  CHARACTER_LIBRARY_CHANGED = "CHARACTER_LIBRARY_CHANGED",
   PERSONA_CHANGED = "PERSONA_CHANGED",
 
   // Images
@@ -80,8 +84,10 @@ export enum EventType {
   SPINDLE_PRE_GENERATION_ACTIVITY = "SPINDLE_PRE_GENERATION_ACTIVITY",
   SPINDLE_BULK_UPDATE_PROGRESS = "SPINDLE_BULK_UPDATE_PROGRESS",
   SPINDLE_BULK_UPDATE_COMPLETE = "SPINDLE_BULK_UPDATE_COMPLETE",
+  SPINDLE_BATCH_CHANGED = "SPINDLE_BATCH_CHANGED",
   SPINDLE_FRONTEND_MSG = "SPINDLE_FRONTEND_MSG",
   SPINDLE_FRONTEND_PROCESS = "SPINDLE_FRONTEND_PROCESS",
+  SPINDLE_FRONTEND_RUNTIME_CAPABILITY_CHANGED = "SPINDLE_FRONTEND_RUNTIME_CAPABILITY_CHANGED",
   SPINDLE_TOAST = "SPINDLE_TOAST",
   MESSAGE_TAG_INTERCEPTED = "MESSAGE_TAG_INTERCEPTED",
 
@@ -106,15 +112,19 @@ export enum EventType {
 
   // World Books
   WORLD_BOOK_CHANGED = "WORLD_BOOK_CHANGED",
+  /** Coarse invalidation for bulk workflows that suppress per-book payloads. */
+  WORLD_BOOK_LIBRARY_CHANGED = "WORLD_BOOK_LIBRARY_CHANGED",
   WORLD_BOOK_DELETED = "WORLD_BOOK_DELETED",
   WORLD_BOOK_ENTRY_CHANGED = "WORLD_BOOK_ENTRY_CHANGED",
   WORLD_BOOK_ENTRY_DELETED = "WORLD_BOOK_ENTRY_DELETED",
 
   // Expressions
   EXPRESSION_CHANGED = "EXPRESSION_CHANGED",
+  MULTI_CHARACTER_EXPRESSIONS_CHANGED = "MULTI_CHARACTER_EXPRESSIONS_CHANGED",
 
   // Avatar
   CHARACTER_AVATAR_CHANGED = "CHARACTER_AVATAR_CHANGED",
+  CHARACTER_EXPORT_PROGRESS = "CHARACTER_EXPORT_PROGRESS",
 
   // Image Gen Connections
   IMAGE_GEN_CONNECTION_CHANGED = "IMAGE_GEN_CONNECTION_CHANGED",
@@ -139,6 +149,9 @@ export enum EventType {
   // Spindle permission changes (broadcast with extensionId so frontends can scope)
   SPINDLE_PERMISSION_CHANGED = "SPINDLE_PERMISSION_CHANGED",
 
+  // Spindle provider registry (recipient-scoped; never a system broadcast)
+  SPINDLE_PROVIDER_CHANGED = "SPINDLE_PROVIDER_CHANGED",
+
   // Spindle command palette commands
   SPINDLE_COMMANDS_CHANGED = "SPINDLE_COMMANDS_CHANGED",
 
@@ -158,7 +171,11 @@ export enum EventType {
   LUMIHUB_INSTALL_STARTED = "LUMIHUB_INSTALL_STARTED",
   LUMIHUB_INSTALL_COMPLETED = "LUMIHUB_INSTALL_COMPLETED",
   LUMIHUB_INSTALL_FAILED = "LUMIHUB_INSTALL_FAILED",
+
   LUMIHUB_CONNECTION_CHANGED = "LUMIHUB_CONNECTION_CHANGED",
+
+  // Illarin linked instance
+  ILLARIN_LINK_STATE_CHANGED = "ILLARIN_LINK_STATE_CHANGED",
 
   // SillyTavern Migration
   MIGRATION_PROGRESS = "MIGRATION_PROGRESS",
@@ -170,6 +187,8 @@ export enum EventType {
   OPERATOR_LOG = "OPERATOR_LOG",
   OPERATOR_STATUS = "OPERATOR_STATUS",
   OPERATOR_PROGRESS = "OPERATOR_PROGRESS",
+  IMAGE_THUMBNAIL_QUEUE = "IMAGE_THUMBNAIL_QUEUE",
+
 
   // Memory Cortex
   CORTEX_REBUILD_PROGRESS = "CORTEX_REBUILD_PROGRESS",
@@ -201,6 +220,7 @@ export enum EventType {
 
   // System health
   SYSTEM_DISK_LOW = "SYSTEM_DISK_LOW",
+  SYSTEM_SMART_ALERT = "SYSTEM_SMART_ALERT",
 
   // Multiplayer rooms (broadcast to the room:{roomId} topic). Peer chat
   // messages and bot stream tokens reuse MESSAGE_SENT / STREAM_TOKEN_RECEIVED /
@@ -219,7 +239,22 @@ export enum EventType {
   ROOM_INVITE_CODE = "ROOM_INVITE_CODE",
 }
 
+export type ProviderRegistryChangeAction = "add" | "remove" | "change";
+export type ProviderRegistryAction = ProviderRegistryChangeAction | "snapshot";
+
+/** Recipient-scoped provider registry event. `userId` is required on the wire. */
+export interface ProviderRegistryChangedPayload {
+  userId: string;
+  scope: string;
+  action: ProviderRegistryAction;
+  generation: number;
+  revision: number;
+  payload: unknown;
+}
+
 export interface EventMessage {
+  runtimeMutationId?: string;
+  stateRevision?: import('../spindle/runtime-state-revision').RuntimeStateRevision;
   event: EventType;
   payload: any;
   timestamp: number;

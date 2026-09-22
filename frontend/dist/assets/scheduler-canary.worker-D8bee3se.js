@@ -1,0 +1,1 @@
+(function(){let e=self;function t(){e.postMessage({type:`heartbeat`})}t(),setInterval(t,100)})();

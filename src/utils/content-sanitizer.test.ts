@@ -76,6 +76,26 @@ describe("stripNonProseTags", () => {
     ).toBe('Before <font color="#ff0000">red text</font> after');
   });
 
+  test("preserves configured thought delimiters inside font blocks until attribution", () => {
+    const options = { keepFontTags: true, preserveFontInnerTags: ["thinking"] };
+    expect(
+      stripNonProseTags(
+        '<font color="#c8a2c8"><thinking>Juniper must not hesitate.</thinking></font>',
+        options,
+      ),
+    ).toBe('<font color="#c8a2c8"><thinking>Juniper must not hesitate.</thinking></font>');
+
+    // The same tag remains non-prose outside a color block, and colors inside
+    // structural wrappers remain excluded from attribution.
+    expect(stripNonProseTags('Before <thinking>private reasoning</thinking> after', options)).toBe("Before after");
+    expect(
+      stripNonProseTags(
+        '<details><font color="#c8a2c8"><thinking>private reasoning</thinking></font></details>',
+        options,
+      ),
+    ).toBe("");
+  });
+
   test("preserves color span tags when keepFontTags is set", () => {
     expect(
       stripNonProseTags(
@@ -158,6 +178,40 @@ describe("stripNonProseTags", () => {
 });
 
 describe("stripHtmlFormattingTags", () => {
+  test("never captures Markdown details summary boxes", () => {
+    const details = [
+      '<details class="story-summary" open>',
+      "<summary><strong>Chapter summary</strong></summary>",
+      "The party reached **Westfall**.",
+      '<div class="details-layout">Nested authored content stays intact.</div>',
+      "</details>",
+    ].join("\n");
+    const input = [
+      "Before.",
+      details,
+      '<div class="html-island">Disposable widget</div>',
+      "After <b>bold prose</b>.",
+    ].join("\n");
+
+    const stripped = stripHtmlFormattingTags(input);
+
+    expect(stripped).toContain(details);
+    expect(stripped).not.toContain("Disposable widget");
+    expect(stripped).toContain("After bold prose.");
+  });
+
+  test("preserves summary markup extracted by details keep-only mode", () => {
+    expect(stripHtmlFormattingTags("<summary>Chapter summary</summary>\nFacts remain."))
+      .toBe("<summary>Chapter summary</summary>\nFacts remain.");
+  });
+
+  test("preserves a trailing unclosed details box from an interrupted generation", () => {
+    const input = "Before <b>bold</b>.\n<details><summary>Live summary</summary>\nStill streaming";
+    expect(stripHtmlFormattingTags(input)).toBe(
+      "Before bold.\n<details><summary>Live summary</summary>\nStill streaming",
+    );
+  });
+
   test("removes block-level HTML islands and preserves inline formatted prose", () => {
     const input = [
       'I say <font color="#8B7355">"Y-yeah, that\'s me."</font>',

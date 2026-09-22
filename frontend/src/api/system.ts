@@ -1,5 +1,8 @@
 import { get } from './client'
 
+// Machine-identifying fields (os.release, os.hostname, cpu, memory, disk, git)
+// are redacted server-side for non-admin sessions: strings arrive empty and
+// counts arrive as 0. Treat "empty/zero" as "not available".
 export interface SystemInfo {
   os: {
     platform: string

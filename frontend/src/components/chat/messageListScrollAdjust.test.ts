@@ -17,6 +17,47 @@ describe('shouldAdjustMessageListScrollOnResize', () => {
     })).toBe(false)
   })
 
+  test('does not adjust when regeneration initially shrinks an unpinned row across the viewport top', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: -420,
+      itemStart: 1200,
+      itemEnd: 1700,
+      scrollOffset: 1350,
+      scrollDirection: 'forward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: true,
+    })).toBe(false)
+  })
+
+  test('does not adjust an unpinned viewport inside a replaced swipe variant', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: -240,
+      itemStart: 1200,
+      itemEnd: 1700,
+      scrollOffset: 1350,
+      scrollDirection: 'forward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: false,
+      isSwipeVariantChange: true,
+    })).toBe(false)
+  })
+
+  test('keeps compensation when a replaced swipe is wholly above the viewport', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: -240,
+      itemStart: 800,
+      itemEnd: 1100,
+      scrollOffset: 1350,
+      scrollDirection: 'forward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: false,
+      isSwipeVariantChange: true,
+    })).toBe(true)
+  })
+
   test('keeps the default adjustment for non-streaming rows above the viewport', () => {
     expect(shouldAdjustMessageListScrollOnResize({
       delta: 48,
@@ -56,6 +97,48 @@ describe('shouldAdjustMessageListScrollOnResize', () => {
     })).toBe(false)
   })
 
+  test('preserves the viewport for programmatic content reflow while scrolling backward', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: 420,
+      itemStart: 900,
+      itemEnd: 1200,
+      scrollOffset: 1350,
+      scrollDirection: 'backward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: false,
+      isProgrammaticContentReflow: true,
+    })).toBe(true)
+  })
+
+  test('does not compensate programmatic reflow below the viewport anchor', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: 420,
+      itemStart: 1400,
+      itemEnd: 1700,
+      scrollOffset: 1350,
+      scrollDirection: 'backward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: false,
+      isProgrammaticContentReflow: true,
+    })).toBe(false)
+  })
+
+  test('keeps the unpinned streaming-tail exception during programmatic reflow', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: 180,
+      itemStart: 1200,
+      itemEnd: 1700,
+      scrollOffset: 1350,
+      scrollDirection: 'backward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: true,
+      isProgrammaticContentReflow: true,
+    })).toBe(false)
+  })
+
   test('does not compensate remeasurement of the focused editable row', () => {
     expect(shouldAdjustMessageListScrollOnResize({
       delta: 48,
@@ -67,6 +150,20 @@ describe('shouldAdjustMessageListScrollOnResize', () => {
       isPinned: false,
       isStreamingTail: false,
       isFocusedEditableRow: true,
+    })).toBe(false)
+  })
+
+  test('does not compensate remeasurement of a user-toggled collapsible row', () => {
+    expect(shouldAdjustMessageListScrollOnResize({
+      delta: -180,
+      itemStart: 1200,
+      itemEnd: 1700,
+      scrollOffset: 1350,
+      scrollDirection: 'forward',
+      hasMeasuredSize: true,
+      isPinned: false,
+      isStreamingTail: false,
+      isUserToggledCollapsibleRow: true,
     })).toBe(false)
   })
 

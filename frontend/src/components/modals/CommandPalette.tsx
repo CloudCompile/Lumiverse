@@ -9,7 +9,9 @@ import { useTranslation } from 'react-i18next'
 import { buildCommands, GROUP_ORDER, type Command, type CommandScope } from '@/lib/commands'
 import { commandGroupLabel, translateCommand } from '@/lib/i18n/resolveLabel'
 import { extensionTabsToCommands, extensionCommandsToCommands, sanitizeHiddenDrawerTabIds } from '@/lib/drawer-tab-registry'
+import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 import styles from './CommandPalette.module.css'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 // ── Match highlight ────────────────────────────────────────────────────────────
 
@@ -28,7 +30,7 @@ function highlightMatch(text: string, query: string): ReactNode {
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
-export default function CommandPalette() {
+function CommandPaletteNative() {
   const { t, i18n } = useTranslation('commands')
   const isOpen = useStore((s) => s.commandPaletteOpen)
   const close = useStore((s) => s.closeCommandPalette)
@@ -37,6 +39,7 @@ export default function CommandPalette() {
   const drawerSettings = useStore((s) => s.drawerSettings)
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
   const extensionCommands = useStore((s) => s.extensionCommands)
+  const extensions = useStore((s) => s.extensions)
   const activeChatId = useStore((s) => s.activeChatId)
   const messageCount = useStore((s) => s.messages.length)
   const streaming = useStore((s) => s.isStreaming)
@@ -85,7 +88,9 @@ export default function CommandPalette() {
   )
 
   const { grouped, orderedFlat, flatIndexMap } = useMemo(() => {
-    const allCommands = [...buildCommands(userRole), ...extensionTabsToCommands(drawerTabs), ...extensionCommandsToCommands(extensionCommands)]
+    const enabledDrawerTabs = filterEnabledFrontendContributions(drawerTabs, extensions)
+    const enabledExtensionCommands = filterEnabledFrontendContributions(extensionCommands, extensions)
+    const allCommands = [...buildCommands(userRole), ...extensionTabsToCommands(enabledDrawerTabs), ...extensionCommandsToCommands(enabledExtensionCommands)]
       .map(translateCommand)
 
     let filtered = allCommands.filter((cmd) => {
@@ -140,7 +145,7 @@ export default function CommandPalette() {
     }
 
     return { grouped: groups, orderedFlat: flat, flatIndexMap: idxMap }
-  }, [query, userRole, drawerTabs, drawerSettings.hiddenTabIds, hiddenPlacements, extensionCommands, activeScopes, location.pathname, hiddenTabIds, hiddenPlacementIds, i18n.language])
+  }, [query, userRole, drawerTabs, extensionCommands, extensions, activeScopes, location.pathname, hiddenTabIds, hiddenPlacementIds])
 
   // Clamp active index when filtered list shrinks
   useEffect(() => {
@@ -182,7 +187,8 @@ export default function CommandPalette() {
       case 'Escape':
         e.preventDefault()
         e.stopPropagation()
-        close()
+        if (query) clearQuery()
+        else close()
         break
       case 'Tab':
         e.preventDefault()
@@ -318,6 +324,7 @@ export default function CommandPalette() {
 
             {/* ── Footer ── */}
             <div className={styles.footer}>
+              <span data-spindle-mount="command_palette_actions" data-spindle-scope="command-palette:actions" style={{ display: 'contents' }} />
               <span className={styles.footerHint}>
                 <kbd className={styles.kbd}>↑</kbd>
                 <kbd className={styles.kbd}>↓</kbd>
@@ -338,4 +345,8 @@ export default function CommandPalette() {
     </AnimatePresence>,
     document.body
   )
+}
+
+export default function CommandPalette() {
+  return useSpindleComponentOverride('CommandPalette', CommandPaletteNative, {})
 }

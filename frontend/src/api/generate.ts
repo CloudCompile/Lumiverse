@@ -1,5 +1,6 @@
 import { get, post, type RequestOptions } from './client'
 import { flushSettingsNow } from '@/store/slices/settings'
+import { flushPresetForGeneration } from '@/lib/loom/preset-save-coordinator'
 
 /** Generation requests go through prompt assembly + council + embedding calls
  *  which can legitimately take longer than the default 30s client timeout. */
@@ -7,7 +8,7 @@ const LONG: RequestOptions = { timeout: 120_000 }
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet'
 
-export type ImpersonateMode = 'prompts' | 'oneliner' | 'sovereign_hand'
+export type ImpersonateMode = 'prompts' | 'preset' | 'oneliner' | 'sovereign_hand'
 
 export interface GenerateRequest {
   chat_id: string
@@ -23,11 +24,14 @@ export interface GenerateRequest {
   impersonate_mode?: ImpersonateMode
   /** For impersonate: free-form text from the input box, appended to the impersonation prompt. */
   impersonate_input?: string
+  /** Exact input-bar draft snapshot captured when this generation started. */
+  user_input?: string
   /** For impersonate: stream to input box instead of creating a message. */
   impersonate_draft?: boolean
   target_character_id?: string
   regen_feedback?: string
   regen_feedback_position?: 'system' | 'user'
+  regen_feedback_format?: string
   retain_council?: boolean
   /** Dry-run only: reassemble as if this message were absent from history. */
   exclude_message_id?: string
@@ -56,6 +60,8 @@ export interface SummarizeRequest {
   chat_id: string
   /** Number of recent messages to include in the prompt. */
   message_context: number
+  /** Number of newest messages to exclude from the prompt. */
+  message_lag?: number
   /** Previously stored summary text (may be empty). */
   existingSummary?: string
   /** Active persona / user name. */
@@ -86,6 +92,8 @@ export interface QuietGenerateResponse {
   content: string
   reasoning?: string
   finish_reason: string
+  stop_details?: { type: string; category?: string | null; explanation?: string | null } | null
+  stop_sequence?: string | null
   usage?: {
     prompt_tokens: number
     completion_tokens: number
@@ -210,7 +218,7 @@ export interface DryRunResponse {
       | 'skipped_no_active_banks'
       | 'skipped_embeddings_disabled'
     retrievedChunks: Array<{
-      score: number
+      score: number | null
       tokenEstimate: number
       documentName: string
       databankId: string
@@ -288,6 +296,9 @@ export interface GenerationStatusResponse {
   completedMessageId?: string
   completedAt?: number
   error?: string
+  errorCode?: string
+  errorMessage?: string
+  connectionName?: string
 }
 
 export interface ActiveGenerationEntry {
@@ -305,6 +316,7 @@ export interface ActiveGenerationEntry {
 export const generateApi = {
   async start(request: GenerateRequest) {
     await flushSettingsNow()
+    await flushPresetForGeneration(request.preset_id)
     return post<GenerateResponse>('/generate', request, LONG)
   },
 
@@ -319,11 +331,13 @@ export const generateApi = {
 
   async regenerate(request: GenerateRequest) {
     await flushSettingsNow()
+    await flushPresetForGeneration(request.preset_id)
     return post<GenerateResponse>('/generate/regenerate', request, LONG)
   },
 
   async continueGeneration(request: GenerateRequest) {
     await flushSettingsNow()
+    await flushPresetForGeneration(request.preset_id)
     return post<GenerateResponse>('/generate/continue', request, LONG)
   },
 
@@ -358,6 +372,7 @@ export const generateApi = {
 
   async dryRun(request: GenerateRequest) {
     await flushSettingsNow()
+    await flushPresetForGeneration(request.preset_id)
     return post<DryRunResponse>('/generate/dry-run', request, LONG)
   },
 

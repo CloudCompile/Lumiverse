@@ -385,7 +385,7 @@ export async function renderField(
     persistField(userId, sessionId, field.id, "", "flagged", provenance, emptyUsage());
   }
 
-  if (steer) addSteer(userId, steer);
+  if (steer) addSteer(userId, sessionId, steer);
 
   setStage(userId, sessionId, "render");
   return getField(userId, sessionId, field.id)!;

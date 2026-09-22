@@ -30,6 +30,7 @@ interface MessageContentProcessorCtx {
   chatId: string
   messageId?: string                              // undefined for "create"
   content: string
+  isUser: boolean                                 // true for a user-authored row
   extra?: Record<string, unknown>                 // populated with { role, is_user } for "render"
   origin: "create" | "update" | "swipe_add" | "swipe_update" | "render"
   swipeIndex?: number                             // set for "swipe_update"
@@ -56,7 +57,7 @@ Cycling through existing swipes (`{direction: "left"|"right"}`) does not fire th
 
 ### Render origin
 
-`render` is a non-persisting origin. The frontend calls `POST /api/v1/chats/:chatId/display-preprocess` once per visible message, the chain runs in the same priority order as write-time origins, and the returned content feeds into the display-regex pass before the host's `richHtmlSanitizer` paints it.
+`render` is a non-persisting origin. The frontend calls `POST /api/v1/chats/:chatId/display-preprocess` for visible messages and coalesces rapid updates to the same streaming message. The chain runs in the same priority order as write-time origins, and the returned content feeds into the display-regex pass before the host's `richHtmlSanitizer` paints it. When no content processor applies to the current user, the response also marks append-only plain-text streaming as safe to paint while the next coalesced request is pending; macro-like suffixes still wait for preprocessing.
 
 The transformed content is visible only on the rendered message. It is invisible to:
 

@@ -1,6 +1,23 @@
 import { get, put, post, del, patch } from "./client";
+import {
+  createProviderRegistryProjection,
+  FRONTEND_PROVIDER_SCOPE,
+  type ProviderRegistryChangedPayload,
+  type ProviderRegistryEntry,
+} from "@/ws/provider-registry-projection";
 
 // ─── Types ─────────────────────────────────────────────────────
+
+export interface CortexModelEndpoint {
+  connectionProfileId: string | null;
+  model: string | null;
+}
+
+export interface CortexModelFallbackPair {
+  primary: CortexModelEndpoint;
+  secondary: CortexModelEndpoint | null;
+  fallbacks?: CortexModelEndpoint[];
+}
 
 export interface CortexConfig {
   enabled: boolean;
@@ -14,6 +31,8 @@ export interface CortexConfig {
   };
   salienceScoring: boolean;
   salienceScoringMode: "heuristic" | "sidecar";
+  queryGeneration: CortexModelFallbackPair;
+  memorySummarization: CortexModelFallbackPair;
   sidecar: {
     connectionProfileId: string | null;
     model: string | null;
@@ -31,8 +50,6 @@ export interface CortexConfig {
   sidecarTimeoutMs: number;
   sidecarReliability: {
     fallback: "heuristic" | "skip";
-    maxRetries: number;
-    retryDelayMs: number;
     arbitratesHeuristics: boolean;
     gradesExistingRecords: boolean;
   };
@@ -77,6 +94,13 @@ export interface CortexConfig {
   >;
 }
 
+export interface CortexChatSettings {
+  /** Effective state after applying global config and this chat's override. */
+  enabled: boolean;
+  globalEnabled: boolean;
+  disabledByChat: boolean;
+}
+
 export interface SalienceBreakdown {
   mentionComponent: number;
   arcComponent: number;
@@ -110,6 +134,8 @@ export interface CortexEntity {
   saliencePeak: number;
   // Enriched by route: excerpt from the most recent mention (display only)
   latestExcerpt?: string | null;
+  /** Source chat messages for the latest excerpt, with archived-ID fallback. */
+  latestMessageReferences?: CortexChunkMessageReference[];
 }
 
 export interface CortexRelation {
@@ -138,6 +164,43 @@ export interface CortexRelation {
   // Enriched by route
   sourceName?: string;
   targetName?: string;
+}
+
+export interface CortexChunkMessageReference {
+  /** Persistent ID retained as a fallback for archived source messages. */
+  messageId: string;
+  /** The source chat's displayed message number, if the message still exists. */
+  messageNumber: number | null;
+}
+
+export interface CortexChunk {
+  id: string;
+  chat_id: string;
+  content: string;
+  token_count: number;
+  message_count: number;
+  retrieval_count: number;
+  last_retrieved_at: number | null;
+  vectorized_at: number | null;
+  salience_score: number | null;
+  emotional_tags: string | null;
+  entity_ids: string | null;
+  created_at: number;
+  updated_at: number;
+  messageReferences: CortexChunkMessageReference[];
+}
+
+export interface CortexConsolidation {
+  id: string;
+  tier: number;
+  title: string | null;
+  summary: string;
+  messageRangeStart: number | null;
+  messageRangeEnd: number | null;
+  entityIds: string[];
+  salienceAvg: number | null;
+  emotionalTags: string[];
+  messageReferences: CortexChunkMessageReference[];
 }
 
 export type CortexRelationType =
@@ -216,6 +279,14 @@ export interface CortexIngestionStatus {
   updatedAt: number;
   pendingJobs: number;
   error?: string;
+  sidecarState?: "ok" | "unavailable" | "timeout" | "aborted" | null;
+  /** Historical diagnostic only; it does not mean ingestion is still active. */
+  lastError?: {
+    message: string;
+    sidecarState: "ok" | "unavailable" | "timeout" | "aborted" | null;
+    occurredAt: number;
+    chunkId: string | null;
+  } | null;
   timings?: CortexIngestionTimings | null;
 }
 
@@ -233,6 +304,16 @@ export interface CortexProbeStatus {
   durationMs?: number | null;
   timedOut?: boolean;
   error?: string | null;
+}
+
+export interface CortexSidecarEndpointHealth {
+  connectionProfileId: string | null;
+  connectionName: string | null;
+  provider: string | null;
+  model: string | null;
+  hasApiKey: boolean;
+  ready: boolean;
+  unavailableReason?: string;
 }
 
 export interface CortexWarmupResponse {
@@ -287,6 +368,17 @@ export interface CortexHealthReport {
     model: string | null;
     hasApiKey: boolean;
     ready: boolean;
+    availability?: "ok" | "unavailable" | "timeout";
+    queryGeneration?: {
+      primary: CortexSidecarEndpointHealth;
+      secondary: CortexSidecarEndpointHealth | null;
+      fallbacks?: CortexSidecarEndpointHealth[];
+    };
+    memorySummarization?: {
+      primary: CortexSidecarEndpointHealth;
+      secondary: CortexSidecarEndpointHealth | null;
+      fallbacks?: CortexSidecarEndpointHealth[];
+    };
     connectivity: CortexProbeStatus;
   };
   chat: {
@@ -358,6 +450,149 @@ export interface CortexFontColor {
   sampleExcerpt: string | null;
 }
 
+export function emptyCortexModelEndpoint(): CortexModelEndpoint {
+  return { connectionProfileId: null, model: null };
+}
+
+export function normalizeCortexModelEndpoint(raw: unknown): CortexModelEndpoint {
+  if (!raw || typeof raw !== "object") return emptyCortexModelEndpoint();
+  const record = raw as Record<string, unknown>;
+  return {
+    connectionProfileId: typeof record.connectionProfileId === "string" && record.connectionProfileId.trim()
+      ? record.connectionProfileId.trim()
+      : null,
+    model: typeof record.model === "string" && record.model.trim() ? record.model.trim() : null,
+  };
+}
+
+export function migrateSidecarIntoEndpointPairs(
+  sidecar: { connectionProfileId?: string | null; model?: string | null } | undefined,
+  queryGeneration?: Partial<CortexModelFallbackPair> | null,
+  memorySummarization?: Partial<CortexModelFallbackPair> | null,
+): { queryGeneration: CortexModelFallbackPair; memorySummarization: CortexModelFallbackPair } {
+  const migratedPrimary: CortexModelEndpoint = {
+    connectionProfileId: sidecar?.connectionProfileId ?? null,
+    model: sidecar?.model ?? null,
+  };
+  const normalizePair = (input: Partial<CortexModelFallbackPair> | null | undefined): CortexModelFallbackPair => {
+    const primary = input?.primary
+      ? {
+          connectionProfileId: input.primary.connectionProfileId ?? migratedPrimary.connectionProfileId,
+          model: input.primary.model ?? migratedPrimary.model,
+        }
+      : { ...migratedPrimary };
+    const extras: CortexModelEndpoint[] = [];
+    const seen = new Set<string>();
+    const push = (raw: unknown) => {
+      const endpoint = normalizeCortexModelEndpoint(raw);
+      if (!endpoint.connectionProfileId || seen.has(endpoint.connectionProfileId)) return;
+      seen.add(endpoint.connectionProfileId);
+      extras.push(endpoint);
+    };
+    push(input?.secondary);
+    for (const extra of input?.fallbacks ?? []) push(extra);
+    const fallbacks = extras.slice(1);
+    return fallbacks.length > 0
+      ? { primary, secondary: extras[0] ?? null, fallbacks }
+      : { primary, secondary: extras[0] ?? null };
+  };
+  return {
+    queryGeneration: normalizePair(queryGeneration),
+    memorySummarization: normalizePair(memorySummarization),
+  };
+}
+
+export type SidecarProviderOption = {
+  id: string;
+  kind: "sidecar";
+  name: string;
+  source: "registry";
+  status: "ok" | "unavailable" | "timeout";
+};
+
+const sidecarListeners = new Set<() => void>();
+let sidecarProjection = createProviderRegistryProjection({
+  authorizedUserId: "local",
+  authorizedScope: FRONTEND_PROVIDER_SCOPE,
+});
+
+function sidecarEntryDenied(entry: ProviderRegistryEntry): boolean {
+  return entry.denied === true || entry.visible === false || entry.status === "denied";
+}
+
+function sidecarEntryStatus(entry: ProviderRegistryEntry): "ok" | "unavailable" | "timeout" {
+  if (entry.status === "timeout" || entry.availability === "timeout") return "timeout";
+  if (entry.status === "unavailable" || entry.availability === "unavailable") return "unavailable";
+  return "ok";
+}
+
+export function resetSidecarProviderProjection(userId = "local"): void {
+  sidecarProjection = createProviderRegistryProjection({
+    authorizedUserId: userId,
+    authorizedScope: FRONTEND_PROVIDER_SCOPE,
+  });
+}
+
+export function applySidecarProviderRegistryEvent(
+  event: ProviderRegistryChangedPayload,
+): "applied" | "queued" | "ignored" {
+  try {
+    const result = sidecarProjection.applyEvent(event);
+    if (result === "applied") {
+      for (const listener of sidecarListeners) listener();
+    }
+    return result;
+  } catch {
+    return "ignored";
+  }
+}
+
+export function subscribeSidecarProviders(listener: () => void): () => void {
+  sidecarListeners.add(listener);
+  return () => { sidecarListeners.delete(listener); };
+}
+
+/** Live spindle-registered sidecar drivers from the frontend projection. */
+export function listSidecarProviders(): SidecarProviderOption[] {
+  const extras: SidecarProviderOption[] = [];
+  for (const entry of sidecarProjection.list()) {
+    try {
+      if (entry.kind != null && entry.kind !== "sidecar") continue;
+      if (sidecarEntryDenied(entry)) continue;
+      extras.push({
+        id: entry.id,
+        kind: "sidecar",
+        name: typeof entry.name === "string" && entry.name ? entry.name : entry.id,
+        source: "registry",
+        status: sidecarEntryStatus(entry),
+      });
+    } catch {
+      // Isolated: one bad sidecar row cannot hide the others.
+    }
+  }
+  return extras;
+}
+
+export function resolveCortexSidecarVisibility(options: {
+  health?: Pick<CortexHealthReport["sidecar"], "availability" | "ready" | "connectivity"> | null;
+  ingestion?: Pick<CortexIngestionStatus, "sidecarState" | "error"> | null;
+  profileMissing?: boolean;
+}): "ok" | "unavailable" | "timeout" | null {
+  if (options.ingestion?.sidecarState === "timeout" || options.health?.availability === "timeout" || options.health?.connectivity?.timedOut) {
+    return "timeout";
+  }
+  if (
+    options.profileMissing
+    || options.ingestion?.sidecarState === "unavailable"
+    || options.health?.availability === "unavailable"
+    || options.health?.ready === false
+  ) {
+    return "unavailable";
+  }
+  if (options.ingestion?.sidecarState === "ok" || options.health?.availability === "ok") return "ok";
+  return null;
+}
+
 function normalizeOptionalString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -388,6 +623,7 @@ const BASE = "/memory-cortex";
 export const memoryCortexApi = {
   // Config
   getConfig: () => get<CortexConfig>(`${BASE}/config`),
+  providers: () => get<{ providers: SidecarProviderOption[] }>(`${BASE}/providers`),
   updateConfig: (data: Partial<CortexConfig>) => put<CortexConfig>(`${BASE}/config`, data),
   applyPreset: (mode: string) => post<CortexConfig>(`${BASE}/config/preset`, { mode }),
   getHealth: (options?: { chatId?: string; probeConnectivity?: boolean }) =>
@@ -446,11 +682,11 @@ export const memoryCortexApi = {
 
   // Consolidations
   getConsolidations: (chatId: string, tier?: number) =>
-    get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/consolidations`, tier != null ? { tier } : undefined),
+    get<{ data: CortexConsolidation[]; total: number }>(`${BASE}/chats/${chatId}/consolidations`, tier != null ? { tier } : undefined),
 
   // Chunks
   getChunks: (chatId: string, limit = 50, offset = 0) =>
-    get<{ data: any[]; total: number }>(`${BASE}/chats/${chatId}/chunks`, { limit, offset }),
+    get<{ data: CortexChunk[]; total: number }>(`${BASE}/chats/${chatId}/chunks`, { limit, offset }),
 
   // Salience
   getSalience: (chatId: string, limit = 50, offset = 0) =>
@@ -458,6 +694,9 @@ export const memoryCortexApi = {
 
   // Stats
   getStats: (chatId: string) => get<CortexUsageStats>(`${BASE}/chats/${chatId}/cortex-stats`),
+  getChatSettings: (chatId: string) => get<CortexChatSettings>(`${BASE}/chats/${chatId}/settings`),
+  updateChatSettings: (chatId: string, enabled: boolean) =>
+    put<CortexChatSettings>(`${BASE}/chats/${chatId}/settings`, { enabled }),
 
   // Rebuild
   rebuild: (chatId: string) =>

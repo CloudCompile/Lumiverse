@@ -3,9 +3,11 @@ import {
   Sliders, MessageSquare, Users, PanelRight,
   Compass, Reply, HardDrive, Puzzle, Database, Hash, Activity,
   Globe, Bell, Import, Brain, Terminal, Volume2, Plug, Search, UserRound,
-  PackageOpen,
+  PackageOpen, KeyRound,
+  Keyboard,
 } from 'lucide-react'
 import { useStore } from '@/store'
+import { joinExtensionSettingsTabs } from '@/lib/spindle/settings-tab-bridge'
 import { translateSettingsField, translateSettingsSectionTitle } from '@/lib/i18n/resolveLabel'
 import type { Command, CommandScope } from '@/lib/commands'
 
@@ -61,7 +63,11 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabName: 'Account Settings',
     tabDescription: 'Manage your account details and password',
     tabIcon: UserRound,
-    keywords: ['account', 'profile', 'password', 'credentials', 'security', 'me'],
+    keywords: ['account', 'profile', 'password', 'credentials', 'security', 'me', 'request', 'history', 'raw', 'json', 'generation'],
+    sections: [
+      { key: 'general', titleKey: 'account.title', titleFallback: 'Account', keywords: ['account', 'password', 'profile'] },
+      { key: 'requestHistory', titleKey: 'requestHistory.title', titleFallback: 'Recent generation requests', keywords: ['request history', 'raw body', 'json', 'provider', 'tracking', 'copy'] },
+    ],
     component: INLINE_SENTINEL,
   },
   {
@@ -70,8 +76,9 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabName: 'Display & Layout',
     tabDescription: 'Panel width, sidebar position, and layout options',
     tabIcon: PanelRight,
-    keywords: ['display', 'layout', 'sidebar', 'drawer', 'width', 'panel', 'position', 'modal', 'chat heads'],
+    keywords: ['display', 'layout', 'sidebar', 'drawer', 'width', 'panel', 'position', 'modal', 'chat heads', 'long messages', 'read more'],
     sections: [
+      { key: 'longMessages', titleKey: 'display.longMessages.title', titleFallback: 'Long Messages', keywords: ['long messages', 'assistant messages', 'collapse', 'read more', 'show less', 'message height'] },
       { key: 'modalWidth', titleKey: 'display.modalWidth.title', titleFallback: 'Modal Width', keywords: ['modal width', 'width', 'max width', 'full', 'comfortable', 'compact', 'custom'] },
       { key: 'drawer', titleKey: 'display.drawer.title', titleFallback: 'Drawer', keywords: ['drawer', 'sidebar', 'side', 'panel width', 'tab position', 'tab size', 'tab labels'] },
       { key: 'toast', titleKey: 'display.toast.title', titleFallback: 'Notifications', keywords: ['toast', 'toast position', 'popup position', 'alert position'] },
@@ -91,7 +98,7 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
       { key: 'general', titleKey: 'chat.title', titleFallback: 'Chat', keywords: ['message display', 'display mode', 'bubble', 'minimal', 'immersive', 'enter to send', 'streaming', 'markdown'] },
       { key: 'width', titleKey: 'chat.widthTitle', titleFallback: 'Chat Width', keywords: ['chat width', 'content width', 'message width'] },
       { key: 'messagesPerPage', titleKey: 'chat.messagesPerPageTitle', titleFallback: 'Messages Per Page', keywords: ['messages per page', 'pagination', 'page size', 'load more'] },
-      { key: 'input', titleKey: 'chat.inputTitle', titleFallback: 'Input', keywords: ['input', 'composer', 'textarea', 'send', 'enter key'] },
+      { key: 'input', titleKey: 'chat.inputTitle', titleFallback: 'Input', keywords: ['input', 'composer', 'textarea', 'send', 'enter key', 'impersonate', 'impersonation mode', 'default'] },
       { key: 'regen', titleKey: 'chat.regenTitle', titleFallback: 'Regeneration Feedback', keywords: ['regeneration', 'regen', 'feedback', 'swipe regenerate'] },
       { key: 'messageInfo', titleKey: 'chat.messageInfoTitle', titleFallback: 'Message Info', keywords: ['message info', 'timestamp', 'token count', 'metadata'] },
       { key: 'swipe', titleKey: 'chat.swipeTitle', titleFallback: 'Swipe Navigation', keywords: ['swipe', 'swipe navigation', 'alternate responses', 'variations'] },
@@ -150,11 +157,11 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     id: 'webSearch',
     shortName: 'Web Search',
     tabName: 'Web Search',
-    tabDescription: 'Configure SearXNG-backed web search for council tools',
+    tabDescription: 'Configure SearXNG, Exa, or Tavily web search for council tools',
     tabIcon: Search,
-    keywords: ['web search', 'searxng', 'search', 'browse', 'internet', 'web', 'council tool'],
+    keywords: ['web search', 'searxng', 'exa', 'search', 'browse', 'internet', 'web', 'council tool'],
     sections: [
-      { key: 'general', titleKey: 'webSearch.title', titleFallback: 'Web Search', keywords: ['web search', 'searxng', 'browse', 'internet', 'council tool'] },
+      { key: 'general', titleKey: 'webSearch.title', titleFallback: 'Web Search', keywords: ['web search', 'searxng', 'exa', 'browse', 'internet', 'council tool'] },
     ],
     component: INLINE_SENTINEL,
   },
@@ -214,7 +221,7 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabIcon: Sliders,
     keywords: ['advanced', 'debug', 'config', 'technical', 'expert', 'context filters', 'reasoning'],
     sections: [
-      { key: 'general', titleKey: 'advanced.title', titleFallback: 'Advanced', keywords: ['advanced', 'image optimization', 'long term memory', 'chunking', 'retrieval', 'query', 'formatting', 'similarity', 'top k', 'context filters', 'reasoning'] },
+      { key: 'general', titleKey: 'advanced.title', titleFallback: 'Advanced', keywords: ['advanced', 'long term memory', 'chunking', 'retrieval', 'query', 'formatting', 'similarity', 'top k', 'context filters', 'reasoning'] },
     ],
     component: INLINE_SENTINEL,
   },
@@ -227,6 +234,18 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     keywords: ['lumihub', 'cloud', 'sync', 'sharing', 'online', 'hub'],
     sections: [
       { key: 'general', titleKey: 'lumihub.title', titleFallback: 'LumiHub', keywords: ['lumihub', 'cloud', 'sync', 'manifest', 'sharing', 'online'] },
+    ],
+    component: INLINE_SENTINEL,
+  },
+  {
+    id: 'illarin',
+    shortName: 'Illarin',
+    tabName: 'Illarin',
+    tabDescription: 'Illarin asset delivery and account linking',
+    tabIcon: Globe,
+    keywords: ['illarin', 'cloud', 'sync', 'assets', 'online', 'link'],
+    sections: [
+      { key: 'general', titleKey: 'illarin.title', titleFallback: 'Illarin', keywords: ['illarin', 'link', 'device code', 'assets'] },
     ],
     component: INLINE_SENTINEL,
   },
@@ -248,17 +267,42 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     keywords: ['diagnostics', 'health', 'performance', 'debug', 'info', 'system', 'status', 'metrics'],
     component: INLINE_SENTINEL,
   },
+  {
+    id: 'streamDeck',
+    shortName: 'Stream Deck',
+    tabName: 'Stream Deck Integration',
+    tabDescription: 'Create and revoke restricted tokens for the Stream Deck plugin',
+    tabIcon: Keyboard,
+    keywords: ['stream deck', 'elgato', 'hardware', 'shortcut', 'integration token'],
+    component: INLINE_SENTINEL,
+  },
 
   // ── Admin/Owner-gated tabs ────────────────────────────────────────────────────
 
+  {
+    id: 'ssoProviders',
+    shortName: 'SSO',
+    tabName: 'Single Sign-On',
+    tabDescription: 'Configure owner-managed OpenID Connect sign-in providers',
+    tabIcon: KeyRound,
+    keywords: ['sso', 'single sign-on', 'openid', 'oidc', 'oauth', 'authelia', 'authentik', 'keycloak', 'identity provider'],
+    role: 'owner',
+    sections: [
+      { key: 'general', titleKey: 'ssoProviders.title', titleFallback: 'Single Sign-On', keywords: ['sso', 'oidc', 'openid connect', 'identity provider', 'client id', 'client secret', 'issuer', 'redirect uri'] },
+    ],
+    component: INLINE_SENTINEL,
+  },
   {
     id: 'operator',
     shortName: 'Operator',
     tabName: 'Operator Panel',
     tabDescription: 'Server management, updates, and restart controls',
     tabIcon: Terminal,
-    keywords: ['operator', 'server', 'restart', 'update', 'git', 'branch', 'logs', 'admin'],
+    keywords: ['operator', 'server', 'restart', 'update', 'git', 'branch', 'logs', 'admin', 'image processing', 'image optimization', 'thumbnails', 'sharp'],
     role: 'owner',
+    sections: [
+      { key: 'imageProcessing', titleKey: 'operator.imageProcessing', titleFallback: 'Image Processing', keywords: ['image processing', 'image optimization', 'thumbnails', 'rebuild thumbnails', 'sharp', 'small tier', 'large tier', 'deferred'] },
+    ],
     component: INLINE_SENTINEL,
   },
   {
@@ -294,16 +338,19 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
 ]
 
 /** Filter settings tabs based on current user role. */
-export function getVisibleSettingsTabs(userRole?: string): SettingsTabEntry[] {
+export function getVisibleSettingsTabs(userRole?: string, productivityTabPosition?: string): SettingsTabEntry[] {
   const isOwner = userRole === 'owner'
   const isAdmin = isOwner || userRole === 'admin'
 
-  return SETTINGS_TABS.filter((tab) => {
+  const visibleCoreTabs = SETTINGS_TABS.filter((tab) => {
     if (!tab.role) return true
     if (tab.role === 'owner') return isOwner
     if (tab.role === 'admin') return isAdmin
     return false
   })
+
+  const pos = productivityTabPosition ?? (typeof useStore !== 'undefined' ? (useStore.getState() as any)?.productivityTabPosition : undefined) ?? 'after-display'
+  return joinExtensionSettingsTabs(visibleCoreTabs, userRole, SETTINGS_TABS, undefined, pos)
 }
 
 /**

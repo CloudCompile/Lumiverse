@@ -1,5 +1,6 @@
 import type { AstNode, MacroNode } from "../types";
 import { registry } from "../MacroRegistry";
+import { shieldLiteralBraces } from "../literal-braces";
 import { evaluateMacroCondition } from "../conditions";
 
 const ELSE_MARKER = "\x00ELSE_MARKER\x00";
@@ -78,6 +79,28 @@ export function registerCoreMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
+    // The body has to reach the handler un-resolved: a plain scoped macro is
+    // handed an already-evaluated body, which is exactly what this block must
+    // prevent. delayArgResolution keeps ctx.body as the body's source text.
+    delayArgResolution: true,
+    name: "escape",
+    category: "Core",
+    description:
+      "Emit the enclosed text literally — macros inside it do not run. Usage: {{#escape}}...{{/escape}}",
+    returnType: "string",
+    handler: (ctx) => {
+      if (!ctx.isScoped) return "";
+      // Shield the braces so the later macro passes (this evaluation's own
+      // convergence loop and prompt assembly's post-regex pass) cannot expand
+      // the body; prompt assembly restores them once every pass is done.
+      // Risu's optional `::keep` form is accepted: the body is always verbatim.
+      return shieldLiteralBraces(ctx.bodySource);
+    },
+  });
+
+  registry.registerMacro({
+    builtIn: true,
     name: "input",
     category: "Core",
     description: "Resolves to the raw user input (last user message)",
@@ -117,12 +140,31 @@ export function registerCoreMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    name: "persona_outlet",
+    category: "Core",
+    description: "Resolve an enabled persona add-on outlet by name",
+    returnType: "string",
+    args: [{ name: "name", description: "Outlet name configured on a persona add-on" }],
+    aliases: ["personaOutlet"],
+    handler: (ctx) => {
+      const name = (ctx.args[0] || "").trim().toLowerCase();
+      if (!name) return "";
+      const outlets = ctx.env.extra?.personaAddonOutlets as Record<string, unknown> | undefined;
+      const value = outlets?.[name];
+      return typeof value === "string" ? value : "";
+    },
+  });
+
+  registry.registerMacro({
+    builtIn: true,
     name: "wi_marker",
+    aliases: ["wiMarker"],
     category: "Core",
     description:
       "Resolve all activated world-info entries set to 'At Marker' position, joined by double newlines",
     returnType: "string",
     handler: (ctx) => {
+      ctx.env.extra._worldInfoAtMarkerMacroUsed = true;
       const pool = ctx.env.extra?.worldInfoAtMarker as string | undefined;
       return typeof pool === "string" ? pool : "";
     },
@@ -144,36 +186,24 @@ export function registerCoreMacros(): void {
     builtIn: true,
     name: "if",
     category: "Core",
-    description: "Conditional block. Usage: {{if::condition}}...{{else}}...{{/if}}",
+    description: "Conditional block. Usage: {{if::condition}}...{{elseif::other}}...{{else}}...{{/if}}",
     returnType: "string",
     delayArgResolution: true,
     handler: async (ctx) => {
-      // Join multiple space-delimited args into one condition expression
-      // e.g. {{if .myvar == 5}} → rawArgs = [[getvar], ["=="], ["5"]] → join with spaces
-      let conditionNodes: any[] = ctx.rawArgs[0] || [];
-      if (ctx.rawArgs.length > 1) {
-        conditionNodes = [];
-        for (let i = 0; i < ctx.rawArgs.length; i++) {
-          if (i > 0) conditionNodes.push({ type: "text" as const, value: " " });
-          conditionNodes.push(...ctx.rawArgs[i]);
-        }
-      }
-      let conditionStr = (await ctx.resolveNodes(conditionNodes)).trim();
-
-      // With recursive inline expansion, resolveNodes already fully expands
-      // nested macros. One safety re-resolve covers the rare edge case where
-      // a macro result depends on state mutated by a later macro in the same
-      // template that hasn't been evaluated yet.
-      if (conditionStr.includes("{{")) {
-        const next = (await ctx.resolve(conditionStr)).trim();
-        if (next !== conditionStr) conditionStr = next;
-      }
-
-      const result = evaluateMacroCondition(conditionStr, ctx.env.variables);
+      const result = await conditionIsTruthy(ctx, conditionArgNodes(ctx.rawArgs));
 
       if (ctx.isScoped) {
-        const parts = splitOnElseNodes(ctx.bodyRaw);
-        return await ctx.resolveNodes(result ? parts.truthy : parts.falsy);
+        const branches = splitConditionalBranches(ctx.bodyRaw);
+        if (result) {
+          return await ctx.resolveNodes(branches[0]?.body ?? ctx.bodyRaw);
+        }
+        for (const branch of branches.slice(1)) {
+          if (!branch.condition) return await ctx.resolveNodes(branch.body);
+          if (await conditionIsTruthy(ctx, branch.condition)) {
+            return await ctx.resolveNodes(branch.body);
+          }
+        }
+        return "";
       }
 
       return result ? "true" : "";
@@ -188,6 +218,92 @@ export function registerCoreMacros(): void {
     returnType: "string",
     handler: () => ELSE_MARKER,
   });
+
+  registry.registerMacro({
+    builtIn: true,
+    terminal: true,
+    name: "elseif",
+    category: "Core",
+    description: "Else-if marker for {{if}} blocks",
+    returnType: "string",
+    aliases: ["elif"],
+    handler: () => "",
+  });
+
+  registry.registerMacro({
+    builtIn: true,
+    name: "unless",
+    category: "Core",
+    description: "Inverse conditional block. Usage: {{unless::condition}}...{{else}}...{{/unless}}",
+    returnType: "string",
+    delayArgResolution: true,
+    handler: async (ctx) => {
+      const result = await conditionIsTruthy(ctx, conditionArgNodes(ctx.rawArgs));
+      if (!ctx.isScoped) return result ? "" : "true";
+
+      const parts = splitOnElseNodes(ctx.bodyRaw);
+      return await ctx.resolveNodes(result ? parts.falsy : parts.truthy);
+    },
+  });
+}
+
+function conditionArgNodes(rawArgs: AstNode[][]): AstNode[] {
+  // Join multiple space-delimited args into one condition expression:
+  // {{if .myvar == 5}} -> [[getvar], ["=="], ["5"]] -> ".myvar == 5"
+  if (rawArgs.length <= 1) return rawArgs[0] ?? [];
+  const nodes: AstNode[] = [];
+  for (let i = 0; i < rawArgs.length; i++) {
+    if (i > 0) nodes.push({ type: "text", value: " " });
+    nodes.push(...rawArgs[i]);
+  }
+  return nodes;
+}
+
+async function conditionIsTruthy(
+  ctx: {
+    resolve: (text: string) => string | Promise<string>;
+    resolveNodes: (nodes: AstNode[]) => string | Promise<string>;
+    env: { variables: Parameters<typeof evaluateMacroCondition>[1] };
+  },
+  nodes: AstNode[],
+): Promise<boolean> {
+  let conditionStr = (await ctx.resolveNodes(nodes)).trim();
+
+  // With recursive inline expansion, resolveNodes already fully expands nested
+  // macros. One safety re-resolve covers the rare edge case where a macro
+  // result depends on state mutated later in the same template.
+  if (conditionStr.includes("{{")) {
+    const next = (await ctx.resolve(conditionStr)).trim();
+    if (next !== conditionStr) conditionStr = next;
+  }
+
+  return evaluateMacroCondition(conditionStr, ctx.env.variables);
+}
+
+type ConditionalBranch = {
+  condition: AstNode[] | null;
+  body: AstNode[];
+};
+
+function splitConditionalBranches(body: AstNode[]): ConditionalBranch[] {
+  const branches: ConditionalBranch[] = [{ condition: null, body: [] }];
+
+  for (const node of body) {
+    if (node.type === "macro" && !node.flags.close) {
+      const name = node.name.toLowerCase();
+      if (name === "elseif" || name === "elif") {
+        branches.push({ condition: conditionArgNodes(node.args), body: [] });
+        continue;
+      }
+      if (name === "else") {
+        branches.push({ condition: null, body: [] });
+        continue;
+      }
+    }
+    branches[branches.length - 1]!.body.push(node);
+  }
+
+  return branches;
 }
 
 function splitOnElseNodes(body: AstNode[]): { truthy: AstNode[]; falsy: AstNode[] } {

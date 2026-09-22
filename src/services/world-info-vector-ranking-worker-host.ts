@@ -1,12 +1,7 @@
 import {
-  rankVectorWorldInfoCandidates,
   type VectorWorldInfoRankingInput,
   type VectorWorldInfoRankingResult,
 } from "./world-info-vector-ranking";
-import {
-  shouldUseBunWorkers,
-  warnBunWorkerFallback,
-} from "../utils/bun-worker-guard";
 
 type RankRequest = {
   type: "rank";
@@ -22,11 +17,6 @@ export function rankVectorWorldInfoCandidatesInWorker(
   payload: VectorWorldInfoRankingInput,
   signal?: AbortSignal,
 ): Promise<VectorWorldInfoRankingResult> {
-  if (!shouldUseBunWorkers()) {
-    warnBunWorkerFallback("world-info vector ranking");
-    return Promise.resolve(rankVectorWorldInfoCandidates(payload));
-  }
-
   return new Promise<VectorWorldInfoRankingResult>((resolve, reject) => {
     if (signal?.aborted) {
       reject(signal.reason ?? new DOMException("Aborted", "AbortError"));

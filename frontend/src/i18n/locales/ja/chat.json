@@ -43,7 +43,7 @@
     "backHome": "ホームに戻る",
     "regenerate": "再生成",
     "continue": "続行",
-    "sendAsPersona": "次のメッセージをペルソナとして送信",
+    "sendAsPersona": "このチャットのペルソナを切り替え",
     "personaAddons": "ペルソナアドオン",
     "personaAddonsCustomized": "ペルソナアドオン—このチャット用にカスタマイズ",
     "guidedGenerations": "ガイド付き世代",
@@ -57,7 +57,7 @@
     "switchConnectionActive": "接続: {{name}}",
     "attachFiles": "ファイルを添付",
     "attachFile": "ファイルの添付",
-    "attachImageOrAudio": "画像または音声を添付",
+    "attachImageOrAudio": "画像、音声、または動画を添付",
     "removeAttachment": "添付を削除する",
     "message": "メッセージ",
     "stopGeneration": "生成を停止",
@@ -86,12 +86,25 @@
     "modCmd": "CMD",
     "modCtrl": "Ctrl"
   },
+  "findInChat": {
+    "open": "チャット内を検索",
+    "placeholder": "チャット内を検索…",
+    "clear": "検索テキストをクリア",
+    "previous": "前の結果",
+    "next": "次の結果",
+    "close": "検索を閉じる",
+    "matchCount": "{{current}} / {{total}}",
+    "noMatches": "結果なし",
+    "loading": "検索中…",
+    "searchFailed": "このチャットを検索できませんでした"
+  },
   "quickMenu": {
     "noGuidedGenerations": "ガイド付き世代が設定されていません。",
+    "disableAllGuidedGenerations": "すべてのガイド付き生成を無効化",
     "manageInSettings": "設定で管理",
     "noQuickReplySets": "有効なクイック返信セットはありません。",
     "untitledReply": "無題の返信",
-    "clearOneShotPersona": "ワンショットペルソナをクリア",
+    "clearOneShotPersona": "チャットのペルソナをクリア",
     "noPersonas": "利用可能なペルソナはありません。",
     "manageChats": "チャットを管理",
     "manageConnections": "接続を管理",
@@ -107,6 +120,8 @@
     "restoreLastInput": "最後の入力を復元",
     "presetPrompts": "プリセットプロンプト",
     "presetPromptsDesc": "偽装トリガーされたブロックによる完全な組み立て",
+    "impersonationPreset": "なりすましプリセット",
+    "impersonationPresetDesc": "設定済みプリセット全体 + チャット履歴 + なりすまし指示",
     "oneLiner": "ワンライナー",
     "oneLinerDesc": "チャット履歴+なりすましナッジのみ",
     "comingSoon": "近日登場",
@@ -164,6 +179,7 @@
     "creatingChatCortex": "バックグラウンドでチャットを作成し、Memory Cortexを準備しています…",
     "failedCreateChat": "チャットを作成できませんでした",
     "failedStartNewChat": "新しいチャットを開始できませんでした",
+    "failedDeleteChat": "このチャットを削除できませんでした",
     "failedOpenChat": "開けませんでした",
     "characterImported": "「{{name}}」がインポートされました",
     "importFailed": "読み込めませんでした",
@@ -199,7 +215,8 @@
     "noMemoryRebuildNeeded": "このチャットにはメモリの再構築は必要ありませんでした。",
     "failedRecompileMemories": "メモリの再コンパイルに失敗しました",
     "chatDocuments": "チャットドキュメント",
-    "chatDocumentsNamed": "{{name}}チャット"
+    "chatDocumentsNamed": "{{name}}チャット",
+    "failedSaveChatPersona": "このチャットのペルソナを保存できませんでした"
   },
   "addGroupMember": {
     "title": "グループメンバー",
@@ -220,7 +237,8 @@
     "active": "有効",
     "ariaLabel": "投稿者のメモ",
     "placeholder": "AIの指示やコンテキストを書いてください...",
-    "depth": "奥行き",
+    "depth": "最新メッセージからの深度",
+    "depthHint": "0 = 最新メッセージの直後、1 = 直前。値が大きいほど、チャット履歴の古い位置にメモを挿入します。",
     "role": "役割",
     "roleAria": "役割"
   },
@@ -235,7 +253,7 @@
     "exitSelectionMode": "選択モード",
     "selectMessages": "メッセージ選択",
     "memory": "メモリ",
-    "memoryRebuildFailed": "チャットメモリの再構築に失敗しました。",
+    "memoryRebuildFailed": "Memory Cortex の再構築に失敗しました。",
     "switchedPersona": "ペルソナに切り替えました： {{name}}",
     "appliedLoadout": "適用ロードアウト： {{name}}",
     "cortexQueued": "実行のためにキュー追加",
@@ -247,10 +265,11 @@
     "cortexProcessingFailed": "処理に失敗しました。",
     "cortexJobsPending": ", {{count}}ジョブ保留中",
     "cortexChunks": "、{{current}}/{{total}}チャンク",
-    "cortexPreparingMemory": "長期チャットメモリの準備",
-    "cortexRebuildingMemory": "長期チャットメモリの再構築",
-    "backgroundMemoryFailed": "バックグラウンドメモリの処理に失敗しました。",
-    "cortexCombined": "長期チャットメモリ+ Cortex {{chunks}}の準備",
+    "cortexPreparingMemory": "Memory Cortex を準備中",
+    "cortexRebuildingMemory": "Memory Cortex を再構築中",
+    "backgroundMemoryFailed": "Memory Cortex の処理に失敗しました。",
+    "cortexCombined": "Memory Cortex を準備し、更新を処理中{{chunks}}",
+    "dismissMemoryNotice": "メモリ通知を閉じる",
     "spindleProcessingMessage": "メッセージを処理しています",
     "spindleProcessingContext": "生成コンテキストの準備",
     "spindleProcessingInterceptor": "プロンプトインターセプターを実行する",
@@ -325,12 +344,15 @@
     "copyCode": "コードをコピー",
     "copy": "コピー",
     "copied": "コピーしました !",
+    "readMore": "もっと見る",
+    "showLess": "折りたたむ",
     "youtubeVideo": "YouTube ビデオ"
   },
   "messageMeta": {
     "hidden": "非表示",
     "model": "モデル",
     "provider": "供給者",
+    "preset": "プリセット",
     "firstToken": "最初のトークン",
     "speed": "速度",
     "tokPerSec": "{{count}}トークン/秒"
@@ -349,7 +371,11 @@
     "next": "次のエピソードのスワイプ"
   },
   "portrait": {
-    "setChatBackground": "背景として設定"
+    "setChatBackground": "背景として設定",
+    "copyImageReference": "画像参照をコピー",
+    "imageReferenceCopied": "画像参照をコピーしました",
+    "imageReferenceCopyFailed": "画像参照をコピーできませんでした",
+    "galleryImage": "ギャラリー画像"
   },
   "attachments": {
     "removeImage": "画像を削除",
@@ -367,7 +393,9 @@
     "fork": {
       "title": "フォークチャット",
       "message": "このメッセージで新しいチャットブランチを作成しますか？この時点までのすべてのメッセージがコピーされます。",
-      "confirm": "フォーク"
+      "confirm": "フォーク",
+      "nameLabel": "チャット名（任意）",
+      "namePlaceholder": "空欄のままにすると自動で名前が付けられます"
     },
     "delete": {
       "title": "削除",
@@ -380,5 +408,11 @@
       "message": "これにより、このメッセージはチャットから完全に削除されます。",
       "confirm": "削除"
     }
+  },
+  "newChatConfirm": {
+    "title": "新しいチャットを開始",
+    "message": "新しいチャットを開始してもよろしいですか？",
+    "confirm": "新しいチャットを開始",
+    "deleteThisChat": "このチャットを削除"
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type SyntheticEvent } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
 import { useTranslation } from 'react-i18next'
@@ -7,7 +7,15 @@ import { useStore } from '@/store'
 import { Spinner } from './Spinner'
 import styles from './ConnectionLostOverlay.module.css'
 
-const RESUME_GRACE_MS = 7_000
+// A single close event is routine on mobile resume and during network handoff.
+// Give the transport time to enter its explicit recovery state before blocking
+// the whole application. Authentication/update failures remain immediate.
+const CONNECTION_FAILURE_GRACE_MS = 5_000
+
+function blockInteraction(event: SyntheticEvent) {
+  event.preventDefault()
+  event.stopPropagation()
+}
 
 export default function ConnectionLostOverlay() {
   const { t } = useTranslation('shared')
@@ -17,40 +25,82 @@ export default function ConnectionLostOverlay() {
   const wsRoundTripVerified = useStore((s) => s.wsRoundTripVerified)
   const wsHasEverConnected = useStore((s) => s.wsHasEverConnected)
   const wsUpdatePending = useStore((s) => s.wsUpdatePending)
+  const wsResumeRecovering = useStore((s) => s.wsResumeRecovering)
 
-  const [inResumeGrace, setInResumeGrace] = useState(false)
-  const overlayWasShowingAtHideRef = useRef(false)
+  const healthy = wsConnected && wsAuthSynced && wsRoundTripVerified
+  const connectionUnavailable =
+    isAuthenticated && wsHasEverConnected && !healthy
+  const [showConnectionFailure, setShowConnectionFailure] = useState(false)
+  const backdropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    let timer: ReturnType<typeof setTimeout> | null = null
+    if (!connectionUnavailable) {
+      setShowConnectionFailure(false)
+      return
+    }
 
-    const onVisChange = () => {
-      if (document.visibilityState === 'hidden') {
-        const state = useStore.getState()
-        const healthyNow = state.wsConnected && state.wsAuthSynced && state.wsRoundTripVerified
-        overlayWasShowingAtHideRef.current =
-          state.isAuthenticated && state.wsHasEverConnected && !healthyNow
-      } else if (document.visibilityState === 'visible') {
-        if (!overlayWasShowingAtHideRef.current) {
-          setInResumeGrace(true)
-          if (timer) clearTimeout(timer)
-          timer = setTimeout(() => setInResumeGrace(false), RESUME_GRACE_MS)
-        }
-        overlayWasShowingAtHideRef.current = false
+    // Resume recovery only suppresses the overlay before it appears. Once the
+    // user has been hard-stopped, keep it latched until all health checks pass;
+    // focusing/tapping the app can itself start resume recovery and must not
+    // make the overlay disappear during that attempt.
+    if (showConnectionFailure || wsResumeRecovering) return
+
+    const timer = window.setTimeout(
+      () => setShowConnectionFailure(true),
+      CONNECTION_FAILURE_GRACE_MS,
+    )
+    return () => window.clearTimeout(timer)
+  }, [connectionUnavailable, showConnectionFailure, wsResumeRecovering])
+
+  const visible =
+    isAuthenticated &&
+    (wsUpdatePending || showConnectionFailure)
+
+  useEffect(() => {
+    if (!visible) return
+
+    const overlay = backdropRef.current
+    if (!overlay) return
+
+    // The backdrop catches pointer input, while `inert` also blocks keyboard,
+    // focus, and any higher-z-index portal that was already mounted. Keep the
+    // desktop titlebar's root interactive so a disconnected/updating window
+    // can still be moved or closed, and inert the app surface inside it
+    // instead. Preserve pre-existing inert state so stacked modal cleanup
+    // remains correct.
+    const blockedSiblings = new Map<Element, string | null>()
+    const blockSibling = (element: Element) => {
+      if (element === overlay || blockedSiblings.has(element)) return
+      blockedSiblings.set(element, element.getAttribute('inert'))
+      element.setAttribute('inert', '')
+    }
+    const blockBodySiblings = () => {
+      const titlebar = document.querySelector('[data-component="DesktopPwaTitlebar"]')
+      const appRoot = document.querySelector('[data-app-root]')
+      if (appRoot) blockSibling(appRoot)
+
+      for (const element of document.body.children) {
+        if (titlebar && element.contains(titlebar)) continue
+        blockSibling(element)
       }
     }
 
-    document.addEventListener('visibilitychange', onVisChange)
-    return () => {
-      document.removeEventListener('visibilitychange', onVisChange)
-      if (timer) clearTimeout(timer)
-    }
-  }, [])
+    blockBodySiblings()
+    const observer = new window.MutationObserver(blockBodySiblings)
+    observer.observe(document.body, { childList: true })
 
-  const healthy = wsConnected && wsAuthSynced && wsRoundTripVerified
-  const visible =
-    isAuthenticated &&
-    (wsUpdatePending || (wsHasEverConnected && !healthy && !inResumeGrace))
+    const previouslyFocused = document.activeElement as HTMLElement | null
+    overlay.focus({ preventScroll: true })
+
+    return () => {
+      observer.disconnect()
+      for (const [element, previousInert] of blockedSiblings) {
+        if (previousInert === null) element.removeAttribute('inert')
+        else element.setAttribute('inert', previousInert)
+      }
+      if (previouslyFocused?.isConnected) previouslyFocused.focus({ preventScroll: true })
+    }
+  }, [visible])
 
   const title = wsUpdatePending
     ? t('connectionLost.updatingTitle')
@@ -72,6 +122,7 @@ export default function ConnectionLostOverlay() {
     <AnimatePresence>
       {visible && (
         <motion.div
+          ref={backdropRef}
           className={styles.backdrop}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -81,6 +132,11 @@ export default function ConnectionLostOverlay() {
           aria-modal="true"
           aria-labelledby="connection-lost-title"
           aria-describedby="connection-lost-message"
+          tabIndex={-1}
+          onPointerDown={blockInteraction}
+          onClick={blockInteraction}
+          onContextMenu={blockInteraction}
+          onKeyDown={blockInteraction}
         >
           <motion.div
             className={styles.card}

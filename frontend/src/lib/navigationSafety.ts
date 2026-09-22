@@ -26,17 +26,34 @@ export function isSafeBrowserNavigationTarget(rawUrl: unknown): rawUrl is string
   }
 }
 
+/** Allow the inert placeholder used to reserve an SSO popup during a user
+ * gesture without admitting other non-web schemes as navigation targets. */
+export function isSafeWindowOpenTarget(rawUrl: unknown): rawUrl is string {
+  return rawUrl === 'about:blank' || isSafeBrowserNavigationTarget(rawUrl)
+}
+
 export function getSafeInAppNavigationUrl(rawUrl: unknown, fallback: string = '/'): string {
   if (typeof rawUrl !== 'string') return fallback
 
   const trimmed = rawUrl.trim()
   if (!trimmed) return fallback
-  if (trimmed.startsWith('/') && !trimmed.startsWith('//')) return trimmed
+  if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return fallback
 
-  return fallback
+  // Lumiverse uses a browser router. Older built-in notifications and some
+  // extensions still use the former hash-router form (`/#/chat/:id`), so
+  // canonicalize it before passing it to router.navigate() or openWindow().
+  if (trimmed.startsWith('/#/')) return `/${trimmed.slice(3)}`
+
+  return trimmed
+
 }
 
 export function getSafeHttpsUrl(rawUrl: unknown): string | null {
+  const url = getSafeHttpOrHttpsUrl(rawUrl)
+  return url?.startsWith('https:') ? url : null
+}
+
+export function getSafeHttpOrHttpsUrl(rawUrl: unknown): string | null {
   if (typeof rawUrl !== 'string') return null
 
   const trimmed = rawUrl.trim()
@@ -44,7 +61,7 @@ export function getSafeHttpsUrl(rawUrl: unknown): string | null {
 
   try {
     const parsed = new URL(trimmed)
-    return parsed.protocol === 'https:' ? parsed.toString() : null
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.toString() : null
   } catch {
     return null
   }

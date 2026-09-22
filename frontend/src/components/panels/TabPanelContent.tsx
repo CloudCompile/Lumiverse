@@ -2,7 +2,8 @@ import { useRef, useEffect } from 'react'
 import { useStore } from '@/store'
 import { ensureRegistryRoot } from '@/lib/drawer-tab-registry'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
-import type { TabLocation } from '@/lib/spindle/tab-mobility-types'
+import type { SpindleTabLocation as TabLocation } from 'lumiverse-spindle-types'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 interface Props {
   tabId: string
@@ -20,6 +21,7 @@ interface Props {
 export default function TabPanelContent({ tabId, location }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const extensions = useStore((s) => s.extensions)
   const tabLocations = useStore((s) => s.tabLocations)
 
   useEffect(() => {
@@ -40,7 +42,8 @@ export default function TabPanelContent({ tabId, location }: Props) {
     // Built-in tabs have a persistent root lazily mounted on first view
     const registryRoot = ensureRegistryRoot(tabId)
     // Extension tabs store their root in the drawerTabs slice
-    const extTab = drawerTabs.find((t) => t.id === tabId)
+    const extTab = filterEnabledFrontendContributions(drawerTabs, extensions)
+      .find((entry) => entry.id === tabId)
     const root = registryRoot ?? extTab?.root
 
     if (root) {
@@ -54,7 +57,7 @@ export default function TabPanelContent({ tabId, location }: Props) {
       // panel doesn't linger visually.
       el.replaceChildren()
     }
-  }, [tabId, location, drawerTabs, tabLocations])
+  }, [tabId, location, drawerTabs, extensions, tabLocations])
 
   // Determine a display label for the error boundary
   const label = tabId

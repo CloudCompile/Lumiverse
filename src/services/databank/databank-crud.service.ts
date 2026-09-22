@@ -7,6 +7,7 @@ import { parsePagination, paginatedQuery } from "../pagination";
 import { eventBus } from "../../ws/bus";
 import { EventType } from "../../ws/events";
 import * as filesSvc from "../files.service";
+import { invalidateDatabankCache } from "./retrieval-cache.service";
 import {
   type Databank,
   type DatabankDocument,
@@ -110,6 +111,7 @@ export function updateDatabank(userId: string, id: string, input: UpdateDatabank
 
   const bank = getDatabank(userId, id);
   if (bank) {
+    invalidateDatabankCache(userId, id);
     eventBus.emit(EventType.DATABANK_CHANGED, { databankId: bank.id, databank: bank }, userId);
   }
   return bank;
@@ -133,6 +135,7 @@ export async function deleteDatabank(userId: string, id: string): Promise<boolea
   // CASCADE handles documents and chunks in SQLite
   const result = db.run("DELETE FROM databanks WHERE id = ? AND user_id = ?", [id, userId]);
   if (result.changes > 0) {
+    invalidateDatabankCache(userId, id);
     eventBus.emit(EventType.DATABANK_DELETED, { databankId: id }, userId);
     return true;
   }
@@ -192,7 +195,9 @@ export function createDocument(
     [id, databankId, userId, name, slug, filePath, mimeType, fileSize, contentHash, now, now],
   );
 
-  return getDocument(userId, id)!;
+  const document = getDocument(userId, id)!;
+  invalidateDatabankCache(userId, databankId);
+  return document;
 }
 
 export function listDocuments(
@@ -238,7 +243,9 @@ export function renameDocument(userId: string, id: string, newName: string): Dat
     "UPDATE databank_documents SET name = ?, slug = ?, updated_at = ? WHERE id = ? AND user_id = ?",
     [newName, slug, now, id, userId],
   );
-  return getDocument(userId, id);
+  const document = getDocument(userId, id);
+  if (document) invalidateDatabankCache(userId, document.databankId);
+  return document;
 }
 
 export function getDocument(userId: string, id: string): DatabankDocument | null {
@@ -326,6 +333,7 @@ export async function deleteDocument(userId: string, docId: string): Promise<boo
   // CASCADE handles chunks
   const result = db.run("DELETE FROM databank_documents WHERE id = ? AND user_id = ?", [docId, userId]);
   if (result.changes > 0) {
+    invalidateDatabankCache(userId, doc.databankId);
     eventBus.emit(EventType.DATABANK_DOCUMENT_STATUS, {
       documentId: docId,
       databankId: doc.databankId,
@@ -349,6 +357,7 @@ export function updateDocumentFile(
   fileSize: number,
   contentHash: string,
 ): void {
+  const document = getDocument(userId, docId);
   const now = Math.floor(Date.now() / 1000);
   getDb().run(
     `UPDATE databank_documents
@@ -356,6 +365,7 @@ export function updateDocumentFile(
      WHERE id = ? AND user_id = ?`,
     [filePath, mimeType, fileSize, contentHash, now, docId, userId],
   );
+  if (document) invalidateDatabankCache(userId, document.databankId);
 }
 
 export function updateDocumentStatus(
@@ -363,6 +373,9 @@ export function updateDocumentStatus(
   status: string,
   extra?: { totalChunks?: number; errorMessage?: string | null },
 ): void {
+  const document = getDb()
+    .query("SELECT user_id, databank_id FROM databank_documents WHERE id = ?")
+    .get(docId) as { user_id: string; databank_id: string } | null;
   const now = Math.floor(Date.now() / 1000);
   const sets = ["status = ?", "updated_at = ?"];
   const params: any[] = [status, now];
@@ -378,6 +391,7 @@ export function updateDocumentStatus(
 
   params.push(docId);
   getDb().run(`UPDATE databank_documents SET ${sets.join(", ")} WHERE id = ?`, params);
+  if (document) invalidateDatabankCache(document.user_id, document.databank_id);
 }
 
 // ─── Chunks ───────────────────────────────────────────────────

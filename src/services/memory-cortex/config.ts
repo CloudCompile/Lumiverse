@@ -43,14 +43,27 @@ export interface ConsolidationConfig {
   chunksPerConsolidation: number;
   /** Tier-1 consolidation count before arc-level fires */
   arcThreshold: number;
-  /** Use sidecar LLM for summaries (false = extractive) */
+  /** Use sidecar LLM for semantic summaries (false = retain source chunks) */
   useSidecar: boolean;
   /** Max tokens per generated summary */
   maxTokensPerSummary: number;
 }
 
+export interface CortexModelEndpoint {
+  connectionProfileId: string | null;
+  model: string | null;
+}
+
+export interface CortexModelFallbackPair {
+  primary: CortexModelEndpoint;
+  /** First extra hop. Null means no secondary is configured. Kept as the first of `fallbacks` for compat. */
+  secondary: CortexModelEndpoint | null;
+  /** Additional hops after `secondary`. Empty / omitted means only primary + optional secondary. */
+  fallbacks?: CortexModelEndpoint[];
+}
+
 export interface SidecarReliabilityConfig {
-  /** What to do when the sidecar fails after exhausting retries.
+  /** What to do when the sidecar fails on all configured connections.
    *  - "heuristic": persist heuristic output for this chunk (legacy behavior).
    *    Heuristic salience/entities/relations leak into the graph even though the
    *    user asked for sidecar-quality results.
@@ -58,10 +71,6 @@ export interface SidecarReliabilityConfig {
    *    warmup signature. The next cortex warmup re-processes it. Equivalent to
    *    the "AI Only" mode users have asked for. */
   fallback: "heuristic" | "skip";
-  /** Additional sidecar attempts after the first call (0 = no retry, legacy). */
-  maxRetries: number;
-  /** Base backoff in ms between sidecar attempts. Doubled per retry. */
-  retryDelayMs: number;
   /** When true and the sidecar succeeded, the sidecar judges heuristic entities
    *  and relationships extracted for this chunk: rejected heuristics are
    *  dropped, transformed ones are renamed to the sidecar's canonical form
@@ -119,6 +128,17 @@ export interface MemoryCortexConfig {
 
   /** Hierarchical memory compression */
   consolidation: ConsolidationConfig;
+
+  /**
+   * Per-chunk query / extraction sidecar: primary then secondary then extra
+   * fallbacks before sidecarReliability.fallback (heuristic | skip).
+   */
+  queryGeneration: CortexModelFallbackPair;
+  /**
+   * Consolidation / memory-summary sidecar: primary then secondary then extra
+   * fallbacks before sidecarReliability.fallback (heuristic | skip).
+   */
+  memorySummarization: CortexModelFallbackPair;
 
   /** Sidecar LLM connection for Tier 2 features */
   sidecar: {
@@ -248,6 +268,14 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   },
   salienceScoring: true,
   salienceScoringMode: "heuristic",
+  queryGeneration: {
+    primary: { connectionProfileId: null, model: null },
+    secondary: null,
+  },
+  memorySummarization: {
+    primary: { connectionProfileId: null, model: null },
+    secondary: null,
+  },
   sidecar: {
     connectionProfileId: null,
     model: null,
@@ -265,8 +293,6 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   sidecarTimeoutMs: 60000,
   sidecarReliability: {
     fallback: "heuristic",
-    maxRetries: 0,
-    retryDelayMs: 500,
     arbitratesHeuristics: false,
     gradesExistingRecords: false,
   },
@@ -338,7 +364,11 @@ function applyStandardPreset(config: MemoryCortexConfig): MemoryCortexConfig {
     entityExtractionMode: "heuristic",
     salienceScoring: true,
     salienceScoringMode: "heuristic",
-    consolidation: { ...DEFAULT_CONSOLIDATION_CONFIG, enabled: true },
+    consolidation: {
+      ...DEFAULT_CONSOLIDATION_CONFIG,
+      enabled: true,
+      useSidecar: !!config.sidecar.connectionProfileId,
+    },
     retrieval: {
       useFusedScoring: true,
       emotionalResonance: true,
@@ -382,6 +412,29 @@ export function getCortexConfig(userId: string): MemoryCortexConfig {
 }
 
 /**
+ * Whether Memory Cortex is available for an individual chat. A chat may opt
+ * out without changing the user's global Cortex configuration. Temporary
+ * chats are disposable connection tests, so they never retain or process
+ * Cortex data regardless of the user's global setting.
+ *
+ * Keep regular-chat overrides deliberately narrow: only an explicit `false`
+ * disables Cortex, so old chats and malformed/imported metadata continue to
+ * inherit the global setting.
+ */
+export function isCortexEnabledForChat(
+  config: Pick<MemoryCortexConfig, "enabled">,
+  metadata: unknown,
+): boolean {
+  if (!config.enabled) return false;
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return true;
+  const chatMetadata = metadata as Record<string, unknown>;
+  if (chatMetadata.temporary === true) return false;
+  const settings = chatMetadata.cortex_settings;
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return true;
+  return (settings as Record<string, unknown>).enabled !== false;
+}
+
+/**
  * Save cortex configuration. Merges with defaults for missing fields.
  */
 export function putCortexConfig(
@@ -389,7 +442,19 @@ export function putCortexConfig(
   update: Partial<MemoryCortexConfig>,
 ): MemoryCortexConfig {
   const current = getCortexConfig(userId);
-  const merged = normalizeCortexConfig({ ...current, ...update });
+  const next: Partial<MemoryCortexConfig> = { ...current, ...update };
+  // Legacy sidecar-only writes: rematerialize both primaries from sidecar
+  // and keep any already-configured secondaries.
+  if (update.sidecar && !update.queryGeneration && !update.memorySummarization) {
+    const migrated = migrateSidecarIntoEndpointPairs(
+      update.sidecar,
+      { secondary: current.queryGeneration.secondary, fallbacks: current.queryGeneration.fallbacks },
+      { secondary: current.memorySummarization.secondary, fallbacks: current.memorySummarization.fallbacks },
+    );
+    next.queryGeneration = migrated.queryGeneration;
+    next.memorySummarization = migrated.memorySummarization;
+  }
+  const merged = normalizeCortexConfig(next);
   settingsSvc.putSetting(userId, SETTINGS_KEY, merged);
   invalidateCortexConfigCache(userId);
   return merged;
@@ -426,13 +491,137 @@ export function applyCortexPreset(
   return config;
 }
 
+export function emptyCortexModelEndpoint(): CortexModelEndpoint {
+  return { connectionProfileId: null, model: null };
+}
+
+export function normalizeCortexModelEndpoint(
+  input: Partial<CortexModelEndpoint> | null | undefined,
+  fallback: CortexModelEndpoint = emptyCortexModelEndpoint(),
+): CortexModelEndpoint {
+  const connectionProfileId = typeof input?.connectionProfileId === "string" && input.connectionProfileId.trim()
+    ? input.connectionProfileId.trim()
+    : (input?.connectionProfileId === null
+      ? null
+      : fallback.connectionProfileId);
+  const model = typeof input?.model === "string" && input.model.trim()
+    ? input.model.trim()
+    : (input?.model === null ? null : fallback.model);
+  return { connectionProfileId, model };
+}
+
+/** Secondary first, then extra `fallbacks`, de-duplicated by connection id. */
+export function listCortexFallbackEndpoints(
+  pair: Partial<Pick<CortexModelFallbackPair, "secondary" | "fallbacks">> | null | undefined,
+): CortexModelEndpoint[] {
+  const extras: CortexModelEndpoint[] = [];
+  const seen = new Set<string>();
+  const push = (input: Partial<CortexModelEndpoint> | null | undefined) => {
+    const endpoint = normalizeCortexModelEndpoint(input, emptyCortexModelEndpoint());
+    if (!endpoint.connectionProfileId || seen.has(endpoint.connectionProfileId)) return;
+    seen.add(endpoint.connectionProfileId);
+    extras.push(endpoint);
+  };
+  push(pair?.secondary);
+  for (const extra of pair?.fallbacks ?? []) push(extra);
+  return extras;
+}
+
+export function normalizeCortexModelFallbackPair(
+  input: Partial<CortexModelFallbackPair> | null | undefined,
+  migratedPrimary: CortexModelEndpoint,
+): CortexModelFallbackPair {
+  const primary = normalizeCortexModelEndpoint(input?.primary, migratedPrimary);
+  const extras = listCortexFallbackEndpoints(input);
+  const fallbacks = extras.slice(1);
+  return fallbacks.length > 0
+    ? { primary, secondary: extras[0] ?? null, fallbacks }
+    : { primary, secondary: extras[0] ?? null };
+}
+
+/** Sidecar profile/model is the legacy primary; migrate into both pairs. */
+export function migrateSidecarIntoEndpointPairs(
+  sidecar: Pick<MemoryCortexConfig["sidecar"], "connectionProfileId" | "model">,
+  queryGeneration?: Partial<CortexModelFallbackPair> | null,
+  memorySummarization?: Partial<CortexModelFallbackPair> | null,
+): { queryGeneration: CortexModelFallbackPair; memorySummarization: CortexModelFallbackPair } {
+  const migratedPrimary = normalizeCortexModelEndpoint({
+    connectionProfileId: sidecar.connectionProfileId ?? null,
+    model: sidecar.model ?? null,
+  });
+  return {
+    queryGeneration: normalizeCortexModelFallbackPair(queryGeneration, migratedPrimary),
+    memorySummarization: normalizeCortexModelFallbackPair(memorySummarization, migratedPrimary),
+  };
+}
+
+function cloneCortexModelFallbackPair(pair: CortexModelFallbackPair): CortexModelFallbackPair {
+  const fallbacks = (pair.fallbacks ?? []).map((endpoint) => ({ ...endpoint }));
+  return {
+    primary: { ...pair.primary },
+    secondary: pair.secondary ? { ...pair.secondary } : null,
+    ...(fallbacks.length > 0 ? { fallbacks } : {}),
+  };
+}
+
+export function listCortexSidecarEndpoints(config: MemoryCortexConfig): {
+  queryGeneration: CortexModelFallbackPair;
+  memorySummarization: CortexModelFallbackPair;
+} {
+  return {
+    queryGeneration: cloneCortexModelFallbackPair(config.queryGeneration),
+    memorySummarization: cloneCortexModelFallbackPair(config.memorySummarization),
+  };
+}
+
+/** Lane 5 hook: patch primary/secondary pairs without touching the rest of the config. */
+export function updateCortexSidecarEndpoints(
+  userId: string,
+  patch: {
+    queryGeneration?: Partial<CortexModelFallbackPair>;
+    memorySummarization?: Partial<CortexModelFallbackPair>;
+  },
+): MemoryCortexConfig {
+  const current = getCortexConfig(userId);
+  return putCortexConfig(userId, {
+    queryGeneration: patch.queryGeneration
+      ? normalizeCortexModelFallbackPair(patch.queryGeneration, current.queryGeneration.primary)
+      : current.queryGeneration,
+    memorySummarization: patch.memorySummarization
+      ? normalizeCortexModelFallbackPair(patch.memorySummarization, current.memorySummarization.primary)
+      : current.memorySummarization,
+  });
+}
+
+function firstConfiguredConnectionId(
+  ...endpoints: Array<CortexModelEndpoint | null | undefined>
+): string | null {
+  for (const endpoint of endpoints) {
+    if (endpoint?.connectionProfileId) return endpoint.connectionProfileId;
+  }
+  return null;
+}
+
+export function getCortexSidecarConnectionId(config: MemoryCortexConfig): string | null {
+  return firstConfiguredConnectionId(
+    config.queryGeneration?.primary,
+    ...listCortexFallbackEndpoints(config.queryGeneration),
+    config.memorySummarization?.primary,
+    ...listCortexFallbackEndpoints(config.memorySummarization),
+    {
+      connectionProfileId: config.sidecar?.connectionProfileId ?? null,
+      model: config.sidecar?.model ?? null,
+    },
+  );
+}
+
 /**
  * True when any Cortex feature is configured to call the sidecar LLM.
  * A saved connection profile alone is not enough: users can keep the profile
  * selected while switching individual Cortex features back to heuristics.
  */
 export function shouldUseCortexSidecar(config: MemoryCortexConfig): boolean {
-  return !!config.sidecar.connectionProfileId && (
+  return !!getCortexSidecarConnectionId(config) && (
     config.entityExtractionMode === "sidecar" ||
     config.salienceScoringMode === "sidecar" ||
     (config.consolidation.enabled && config.consolidation.useSidecar)
@@ -441,7 +630,7 @@ export function shouldUseCortexSidecar(config: MemoryCortexConfig): boolean {
 
 /** True when per-chunk analysis should call the sidecar extractor. */
 export function shouldUseCortexSidecarForChunkAnalysis(config: MemoryCortexConfig): boolean {
-  return !!config.sidecar.connectionProfileId && (
+  return !!getCortexSidecarConnectionId(config) && (
     config.entityExtractionMode === "sidecar" ||
     config.salienceScoringMode === "sidecar"
   );
@@ -454,6 +643,30 @@ export function normalizeCortexConfig(
   input: Partial<MemoryCortexConfig>,
 ): MemoryCortexConfig {
   const defaults = DEFAULT_CORTEX_CONFIG;
+  const sidecar = {
+    connectionProfileId: input.sidecar?.connectionProfileId ?? defaults.sidecar.connectionProfileId,
+    model: input.sidecar?.model ?? defaults.sidecar.model,
+    temperature: input.sidecar?.temperature ?? defaults.sidecar.temperature,
+    topP: input.sidecar?.topP ?? defaults.sidecar.topP,
+    maxTokens: input.sidecar?.maxTokens ?? defaults.sidecar.maxTokens,
+    chunkBatchSize: input.sidecar?.chunkBatchSize ?? defaults.sidecar.chunkBatchSize,
+    rebuildConcurrency: input.sidecar?.rebuildConcurrency ?? defaults.sidecar.rebuildConcurrency,
+    requestsPerMinute: normalizeRequestsPerMinute(
+      input.sidecar?.requestsPerMinute,
+      defaults.sidecar.requestsPerMinute,
+    ),
+  };
+  const pairs = migrateSidecarIntoEndpointPairs(
+    sidecar,
+    input.queryGeneration,
+    input.memorySummarization,
+  );
+  // Keep the legacy sidecar primary in sync with query-generation primary so
+  // older readers still see the selected connection after a pair-only write.
+  if (pairs.queryGeneration.primary.connectionProfileId || pairs.queryGeneration.primary.model) {
+    sidecar.connectionProfileId = pairs.queryGeneration.primary.connectionProfileId;
+    sidecar.model = pairs.queryGeneration.primary.model;
+  }
 
   return {
     enabled: input.enabled ?? defaults.enabled,
@@ -467,19 +680,9 @@ export function normalizeCortexConfig(
     },
     salienceScoring: input.salienceScoring ?? defaults.salienceScoring,
     salienceScoringMode: input.salienceScoringMode ?? defaults.salienceScoringMode,
-    sidecar: {
-      connectionProfileId: input.sidecar?.connectionProfileId ?? defaults.sidecar.connectionProfileId,
-      model: input.sidecar?.model ?? defaults.sidecar.model,
-      temperature: input.sidecar?.temperature ?? defaults.sidecar.temperature,
-      topP: input.sidecar?.topP ?? defaults.sidecar.topP,
-      maxTokens: input.sidecar?.maxTokens ?? defaults.sidecar.maxTokens,
-      chunkBatchSize: input.sidecar?.chunkBatchSize ?? defaults.sidecar.chunkBatchSize,
-      rebuildConcurrency: input.sidecar?.rebuildConcurrency ?? defaults.sidecar.rebuildConcurrency,
-      requestsPerMinute: normalizeRequestsPerMinute(
-        input.sidecar?.requestsPerMinute,
-        defaults.sidecar.requestsPerMinute,
-      ),
-    },
+    queryGeneration: pairs.queryGeneration,
+    memorySummarization: pairs.memorySummarization,
+    sidecar,
     formatterMode: input.formatterMode ?? defaults.formatterMode,
     useChatMemoryFormatting: typeof input.useChatMemoryFormatting === "boolean"
       ? input.useChatMemoryFormatting
@@ -489,14 +692,6 @@ export function normalizeCortexConfig(
     sidecarTimeoutMs: input.sidecarTimeoutMs ?? defaults.sidecarTimeoutMs,
     sidecarReliability: {
       fallback: input.sidecarReliability?.fallback === "skip" ? "skip" : defaults.sidecarReliability.fallback,
-      maxRetries: normalizeNonNegativeInt(
-        input.sidecarReliability?.maxRetries,
-        defaults.sidecarReliability.maxRetries,
-      ),
-      retryDelayMs: normalizeNonNegativeInt(
-        input.sidecarReliability?.retryDelayMs,
-        defaults.sidecarReliability.retryDelayMs,
-      ),
       arbitratesHeuristics: input.sidecarReliability?.arbitratesHeuristics
         ?? defaults.sidecarReliability.arbitratesHeuristics,
       gradesExistingRecords: input.sidecarReliability?.gradesExistingRecords
@@ -555,11 +750,6 @@ export function normalizeCortexConfig(
 }
 
 function normalizeRequestsPerMinute(value: number | null | undefined, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.max(0, Math.floor(value));
-}
-
-function normalizeNonNegativeInt(value: number | null | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.floor(value));
 }

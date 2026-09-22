@@ -8,7 +8,8 @@ If a placement needs an isolated child document with inline scripts, create and 
 
 ## Drawer Tabs (free — no permission needed)
 
-Register a tab in the ViewportDrawer sidebar. Max 4 per extension, 8 global.
+Register a tab in the ViewportDrawer sidebar. Max 8 per extension, 64 global.
+Drawer tabs are free: registering or updating one does not require `ui_panels`, and revoking `ui_panels` does not remove it.
 
 Drawer tabs are managed by Lumiverse's central tab registry. When you register a tab, it automatically appears in the sidebar **and** the command palette (`Ctrl+K`). The metadata you provide controls how the tab looks and how users find it.
 
@@ -85,7 +86,7 @@ No extra code needed. The registry handles the wiring.
 
 ## Character Editor Tabs (requires `characters`)
 
-Register a tab inside the native character editor modal. Max 4 per extension, 8 global.
+Register a tab inside the native character editor modal. Max 8 per extension, 64 global.
 
 Character-editor tabs are scoped to whichever character card the user is currently editing. Your tab root persists like other Spindle placements, but it is only shown while the editor modal is open.
 
@@ -168,9 +169,99 @@ This helper exposes the current editor snapshot and a safe way to mutate the dra
 - `updateExtensions()` and `setExtensions()` write into the editor's draft, not straight to the database. Pass `{ immediate: true }` or call `flush()` when you want to commit right away.
 - If the editor is closed, the helper throws `CHARACTER_EDITOR_CLOSED` for mutation calls.
 
+## Preset Editor Tabs (requires `presets`)
+
+Register a tab inside the native Loom preset editor. Max 8 per extension, 64
+global. The helper exposes the latest in-memory draft so extension edits share
+the editor's serialized save queue instead of racing direct preset API writes.
+
+```ts
+const tab = ctx.ui.registerPresetEditorTab({
+  id: 'agent-mode',
+  title: 'Agent Mode',
+})
+
+const render = () => {
+  const { preset } = ctx.ui.presetEditor.getState()
+  tab.root.textContent = preset
+    ? JSON.stringify(preset.metadata.my_extension ?? {}, null, 2)
+    : 'Select a preset'
+}
+
+ctx.ui.presetEditor.onChange(render)
+render()
+
+ctx.ui.presetEditor.updatePreset((preset) => ({
+  ...preset,
+  metadata: {
+    ...preset.metadata,
+    my_extension: graph,
+  },
+}), { immediate: true })
+```
+
+`getState()` returns `{ open, presetId, activeTabId, preset }`. The `preset`
+draft contains `id`, `name`, `blocks`, `parameters`, `prompts`, `metadata`, and
+timestamps. Snapshots are structured clones. `updatePreset(mutator, options?)`
+atomically derives the next draft; changing its `id` is rejected. `flush()`
+persists and awaits all queued preset writes.
+
+Unknown preset metadata is preserved across native edits, duplication, and
+internal Loom export/import. Loom-owned fields remain authoritative if a
+passthrough metadata bag contains a colliding key.
+
+### Preset-editor toolbar items
+
+`ctx.ui.registerPresetEditorToolbarItem({ id, ariaLabel })` registers an
+extension-owned root above Loom's list/edit branch. Each extension can register
+up to four items; 32 items are available globally. The returned handle exposes `root`,
+`itemId`, `setVisible(visible)`, and `destroy()`. The host supplies placement
+only: extension code owns the toolbar's controls, labels, and accessibility
+semantics beneath its required `ariaLabel`.
+
+### `ctx.ui.presetEditor.extension`
+
+This additive helper is scoped to the calling extension's manifest identifier:
+
+The `extension` property is a read-only getter; each read acquires the current
+revocation-bound scoped helper.
+
+
+```ts
+const editor = ctx.ui.presetEditor.extension
+const state = editor.getState()
+
+editor.updateMetadata((current) => ({
+  ...(current && typeof current === 'object' ? current : {}),
+  mode: 'parallel',
+}), { immediate: true })
+
+editor.activateBuiltinTab('blocks')
+await editor.flush()
+```
+
+`getState()` and `onChange()` expose structured clones of the active preset id,
+tab, Main blocks, prompt-variable values, and the raw value at
+`metadata.<manifest identifier>`. `setMetadata()` accepts a JSON object;
+`updateMetadata()` receives that raw value and must return a JSON object. Both
+replace only the calling extension's top-level passthrough key. Manifest
+identifiers colliding with Loom-owned metadata keys, including `source` and
+`description`, are rejected rather than allowed to mutate Main-owned fields.
+`activateBuiltinTab('blocks')` activates the host's stable native preset-editor view. The visible tab label is the localized `Preset` translation; `blocks` is the API identifier, not a literal label.
+
+The helper is cooperative least-authority API design, **not** isolation against
+hostile same-origin extension code. It shares Loom's one per-preset serialized
+save coordinator with native edits, recovery, rename, duplicate, prompt-variable
+updates, and generation flushes; direct whole-preset writes are unnecessary.
+
+All toolbar, tab, and helper operations require `presets`. Revoking that
+permission immediately removes the extension's preset roots and subscriptions.
+Previously acquired scoped helpers stay revoked. After `presets` is regranted,
+read `ctx.ui.presetEditor.extension` again to acquire a fresh helper.
+
 ## Float Widgets (requires `ui_panels`)
 
-Create a small draggable widget overlaying the UI. Max 2 per extension, 8 global.
+Create a small draggable widget overlaying the UI. Max 4 per extension, 32 global.
 
 ```ts
 const widget = ctx.ui.createFloatWidget({
@@ -187,6 +278,9 @@ widget.root.innerHTML = '<button>Click</button>'
 
 // Move programmatically
 widget.moveTo(200, 200)
+
+// Update the placement bounds when the widget's own layout changes
+widget.setSize(320, 500)
 
 // Read current position
 const pos = widget.getPosition() // { x: number, y: number }
@@ -215,16 +309,138 @@ widget.destroy()
 | `tooltip` | `string` | — | Hover tooltip text |
 | `chromeless` | `boolean` | `false` | Strip the default container chrome (border, background, shadow, border-radius). The extension fully owns the visual presentation. |
 
-## Tab Mobility (requires `app_manipulation` or `ui_panels`)
+### Dynamic sizing and desktop pop-outs
 
-Move any built-in or extension drawer tab between the main drawer and any registered container. Built-in tabs (like `'profile'`, `'connections'`, etc.) are addressable by their stable id. Extension tabs are addressable by the id assigned at registration time.
+Use `widget.setSize(width, height)` whenever the extension changes the
+widget's intrinsic layout. This updates the normal browser placement state and
+is also how Lumiverse Desktop learns the requested bounds for a native pop-out
+window. Do not call desktop-only events or native APIs from an extension.
+
+```ts
+function setExpanded(expanded: boolean) {
+  root.dataset.expanded = String(expanded)
+  const size = expanded
+    ? { width: 320, height: 500 }
+    : { width: 128, height: 128 }
+
+  if (expanded) {
+    // Grow the native window at the same time as the visual expansion.
+    widget.setSize(size.width, size.height)
+  } else {
+    // Let the CSS collapse finish before shrinking a native pop-out.
+    window.setTimeout(() => widget.setSize(size.width, size.height), 420)
+  }
+}
+```
+
+The delay should match the widget's CSS width/height transition. Calling
+`setSize` too early on collapse makes a native window shrink around the
+content before its visual animation has finished. Clear any pending timer when
+the widget changes state again or the extension unloads.
+
+On mobile, Lumiverse honors the widget's requested dimensions when they fit.
+Oversized widgets are clamped to the viewport with 12 pixels of space on each
+edge, so extension interfaces remain usable without overflowing the screen.
+
+When users send a registered widget to a Lumiverse Desktop pop-out, the native
+host owns the window bounds but the extension still uses the same standard
+`setSize` call. Browser and PWA clients simply retain their existing CSS and
+placement behavior.
+
+Native pop-outs clamp requested content bounds to `24×24`–`1200×900` logical
+pixels for chromeless widgets. Widgets using the default native title chrome
+have a minimum content size of `160×100`. The title bar is added outside the
+requested content height.
+
+### Lightweight desktop widget entry
+
+Each native pop-out has its own WebView. An extension can keep that WebView
+small by declaring a dedicated widget entry that leaves out drawer tabs,
+page-level mounts, decorators, and other UI that the pop-out cannot display:
+
+```json
+{
+  "entry_frontend": "dist/frontend.js",
+  "entry_frontend_widget": "dist/widget.js"
+}
+```
+
+The widget module exports `setupWidget` instead of `setup`:
+
+```ts
+import type {
+  SpindleFrontendContext,
+  SpindleFrontendWidgetTarget,
+} from 'lumiverse-spindle-types'
+import { mountPlayerWidget } from './player-widget'
+
+export function setupWidget(
+  ctx: SpindleFrontendContext,
+  target: SpindleFrontendWidgetTarget,
+) {
+  // Reuse the widget implementation without starting the extension's
+  // page-only UI. Keep widgets in the same registration order as setup().
+  return mountPlayerWidget(ctx, {
+    initialWidth: target.width,
+    initialHeight: target.height,
+    chromeless: target.chromeless,
+  })
+}
+```
+
+`SpindleFrontendWidgetTarget` describes the pop-out requested by the host:
+
+| Field | Description |
+|---|---|
+| `index` | Zero-based position among the extension's visible floating widgets |
+| `title` | Host-provided native window title |
+| `width` | Initial widget content width in logical pixels |
+| `height` | Initial widget content height in logical pixels |
+| `chromeless` | Whether the widget requested a window without title chrome |
+
+The widget entry receives the normal `SpindleFrontendContext`, including event
+and backend RPC APIs, and may return the same sync or async cleanup function as
+`setup`. Continue to create the surface with `ctx.ui.createFloatWidget`; its
+root becomes the native window's interactive and draggable content.
+
+If an extension creates multiple floating widgets, `setupWidget` must register
+them in the same visible order as the main `setup` path so `target.index`
+resolves to the correct widget. It can use the target to avoid expensive work
+for unrelated widgets, provided that registration order remains stable.
+
+`entry_frontend_widget` is an opt-in optimization. Without it, Lumiverse loads
+`entry_frontend` and calls `setup(ctx)` in the pop-out, preserving compatibility
+with existing extensions. Once the field is declared, the referenced bundle
+must exist and export `setupWidget`; Lumiverse does not silently fall back when
+an explicitly configured widget bundle is invalid.
+
+For the best memory and startup results, extract the shared widget renderer
+into its own module and import it from both entries. Avoid importing the main
+frontend entry from `widget.ts`, because doing so can pull page-only code and
+module-level side effects back into the supposedly lightweight bundle.
+
+### Restoring a desktop pop-out
+
+Returning a widget to the page remounts its page-level root. Extensions with
+backend-backed live state should refresh that state when it returns. Lumiverse
+Desktop currently emits the private `spindle:desktop-widget-returned` browser
+event with `{ widgetId, extensionId }` for this purpose; scope a listener to
+your own manifest identifier, request fresh backend state, and remove the
+listener during teardown.
+
+This event is an implementation detail of Lumiverse Desktop, not part of the
+published Spindle API. Extensions must remain functional when it is absent.
+
+## Tab Mobility (requires one of `app_manipulation` or `ui_panels`, depending on the operation)
+
+Move a supported built-in or your own extension drawer tab between the main drawer and any registered container. Extension tabs are addressable by the id assigned at registration time. `requestTabLocation` accepts either `app_manipulation` or `ui_panels`; mounting a built-in tab's root requires `ui_panels`.
 
 ```ts
 // Move a tab to a registered container (by container id)
-ctx.ui.requestTabLocation('connections', { kind: 'container', containerId: 'canvas-secondary' })
+ctx.ui.requestTabLocation('profile', { kind: 'container', containerId: 'canvas-secondary' })
 
 // Move it back to the main drawer
-ctx.ui.requestTabLocation('connections', { kind: 'main-drawer' })
+ctx.ui.requestTabLocation('profile', { kind: 'main-drawer' })
 
 // Query current location
 const loc = ctx.ui.getTabLocation('profile')
@@ -251,9 +467,9 @@ ctx.ui.requestTabLocation(tabId, location): void
 
 ### Notes
 
-- Built-in tabs are addressable by their id (`'profile'`, `'connections'`, `'presets'`, etc.). Extension tabs use the id assigned at registration time.
+- Supported built-in ids include `'profile'`, `'presets'`, `'loom'`, `'characters'`, `'personas'`, `'branches'`, `'spindle'`, `'theme'`, and `'lorebook'`. Extension tabs use the id assigned at registration time; other extensions' tabs are not dispatchable.
 - When a tab is routed to a container id that has no matching registered entry, `ContainerTabContent` automatically resets the tab to `{ kind: 'main-drawer' }` so it remains visible.
-- `requestTabLocation` requires the `app_manipulation` permission; `getBuiltInTabRoot` requires the `ui_panels` permission; `getTabLocation` is a read-only query and is free.
+- `requestTabLocation` accepts either `app_manipulation` or `ui_panels`; `getBuiltInTabRoot` requires `ui_panels`; `getTabLocation` is a read-only query and is free.
 
 ### Method: `getBuiltInTabRoot`
 
@@ -281,7 +497,7 @@ Returns the header title for the built-in tab. Read-only.
 
 ## Dock Panels (requires `ui_panels`)
 
-Create an always-visible panel fixed to a screen edge. Max 1 per edge per extension, 2 per edge global.
+Create an always-visible panel fixed to a screen edge. Max 2 per edge per extension, 8 per edge global.
 
 ```ts
 const panel = ctx.ui.requestDockPanel({
@@ -292,6 +508,8 @@ const panel = ctx.ui.requestDockPanel({
   maxSize: 600,
   resizable: true,
   startCollapsed: false,
+  chromeless: false,     // opt in when the extension renders its own chrome
+  centerContent: false,  // center the extension root in the dock surface
 })
 
 // Render into the panel
@@ -312,9 +530,11 @@ panel.destroy()
 
 On mobile, left/right dock panels become full-width bottom sheets.
 
+`chromeless` removes the host header, background, border, shadow, and resize chrome. Use it only when the extension supplies its own close/navigation affordances. `centerContent` centers the extension root within the remaining panel area. Both options default to `false`, so existing dock panels are unaffected.
+
 ## App Mounts (requires `app_manipulation`)
 
-Mount an unrestricted portal into `document.body` that persists across route changes. Max 1 per extension, 4 global.
+Mount an unrestricted portal into `document.body` that persists across route changes. Max 2 per extension, 32 global.
 
 ```ts
 const mount = ctx.ui.mountApp({
@@ -335,7 +555,7 @@ mount.destroy()
 
 ## Input Bar Actions (free — no permission needed)
 
-Register action buttons inside the **Extras** popover on the chat input bar. Extension actions are visually grouped under a teal-badged header with the extension name. Max 4 per extension, 12 global.
+Register action buttons inside the **Extras** popover on the chat input bar. Extension actions are visually grouped under a teal-badged header with the extension name. Max 8 per extension, 64 global.
 
 ```ts
 const action = ctx.ui.registerInputBarAction({
@@ -646,15 +866,17 @@ resetBtn.addEventListener('click', async () => {
 
 | Placement | Per Extension | Global |
 |---|---|---|
-| Drawer Tab | 4 | 8 |
-| Character Editor Tab | 4 | 8 |
-| Float Widget | 2 | 8 |
-| Dock Panel | 1 per edge | 2 per edge |
-| App Mount | 1 | 4 |
-| Input Bar Action | 4 | 12 |
+| Drawer Tab | 8 | 64 |
+| Character Editor Tab | 8 | 64 |
+| Preset Editor Tab | 8 | 64 |
+| Preset Editor Toolbar Item | 4 | 32 |
+| Float Widget | 4 | 32 |
+| Dock Panel | 2 per edge | 8 per edge |
+| App Mount | 2 | 32 |
+| Input Bar Action | 8 | 64 |
 | Modal | 2 stacked | — |
 
-Exceeding limits throws an error. All placements are automatically cleaned up when an extension is disabled or removed.
+Exceeding limits throws an error. All placements are automatically cleaned up when an extension is disabled, removed, updated, or reloaded. A placement that requires a permission is also removed immediately when that permission is revoked; its stale handle remains closed.
 
 ## User Control
 

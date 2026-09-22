@@ -1,19 +1,24 @@
-import { useState, useCallback, useRef, useMemo, type ReactNode } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Check, ChevronRight, Pencil, Trash2, X } from 'lucide-react'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
+import { useFolders } from '@/hooks/useFolders'
 import { charactersApi } from '@/api/characters'
 import { worldBooksApi } from '@/api/world-books'
 import { toast } from '@/lib/toast'
 import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
+import { filesFromDesktopDrop, isSupportedCharacterDropPath } from '@/lib/desktop-file-drop'
+import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useStore } from '@/store'
 import CharacterToolbar from './character-browser/CharacterToolbar'
+import ChubExpressionBackfillBanner from './character-browser/ChubExpressionBackfillBanner'
 import TagFilter from './character-browser/TagFilter'
 import BatchBar from './character-browser/BatchBar'
 import FavoritesSlider from './character-browser/FavoritesSlider'
 import CharacterGrid from './character-browser/CharacterGrid'
 import CharacterList from './character-browser/CharacterList'
-import CharacterEditorPage from './character-browser/CharacterEditorPage'
 import ImportUrlModal from './character-browser/ImportUrlModal'
+import BulkTagsModal from './character-browser/BulkTagsModal'
 import DragDropOverlay from './character-browser/DragDropOverlay'
 import GroupChatsPanel from './character-browser/GroupChatsPanel'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -23,6 +28,7 @@ import ExpressionsImportModal from '@/components/modals/ExpressionsImportModal'
 import AlternateFieldsSummaryModal from '@/components/modals/AlternateFieldsSummaryModal'
 import Pagination from '@/components/shared/Pagination'
 import type { CharacterViewMode } from '@/types/store'
+import type { CharacterSummary } from '@/types/api'
 import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
 import styles from './CharacterBrowser.module.css'
 
@@ -73,6 +79,151 @@ export default function CharacterBrowser() {
   const openModal = useStore((s) => s.openModal)
   const favoritesBarCollapsed = useStore((s) => s.favoritesBarCollapsed)
   const setSetting = useStore((s) => s.setSetting)
+  const {
+    folders,
+    createFolder,
+    renameFolder: renameStoredFolder,
+    deleteFolder: deleteStoredFolder,
+  } = useFolders('characterFolders', browser.allCharacters)
+  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set())
+  const [initializedFolders, setInitializedFolders] = useState(false)
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
+  const [renamingValue, setRenamingValue] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
+  const [deletingFolder, setDeletingFolder] = useState<string | null>(null)
+  const [moveBusy, setMoveBusy] = useState(false)
+  const renameInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (initializedFolders || browser.groupedCharacters.length === 0) return
+    const named = browser.groupedCharacters.map((group) => group.folder).filter(Boolean)
+    if (named.length > 0) {
+      setCollapsedFolders(new Set(named))
+      setInitializedFolders(true)
+    }
+  }, [browser.groupedCharacters, initializedFolders])
+
+  useEffect(() => {
+    if (!renamingFolder) return
+    renameInputRef.current?.focus()
+    renameInputRef.current?.select()
+  }, [renamingFolder])
+
+  const toggleFolder = useCallback((folder: string) => {
+    setCollapsedFolders((previous) => {
+      const next = new Set(previous)
+      if (next.has(folder)) next.delete(folder)
+      else next.add(folder)
+      return next
+    })
+  }, [])
+
+  const handleRenameFolder = useCallback(async () => {
+    if (!renamingFolder) return
+    const oldName = renamingFolder.trim()
+    const newName = renamingValue.trim()
+    if (!newName) return
+    const normalizedNewName = newName.toLocaleLowerCase()
+    if (
+      normalizedNewName === 'uncategorized'
+      || normalizedNewName === t('characterBrowser.uncategorized').trim().toLocaleLowerCase()
+    ) return
+    if (oldName === newName) {
+      setRenamingFolder(null)
+      setRenamingValue('')
+      return
+    }
+
+    setRenameBusy(true)
+    try {
+      const result = await browser.renameFolder(oldName, newName)
+      renameStoredFolder(oldName, newName)
+      setCollapsedFolders((previous) => {
+        const next = new Set(previous)
+        const wasCollapsed = next.delete(oldName)
+        if (wasCollapsed) next.add(newName)
+        return next
+      })
+      setRenamingFolder(null)
+      setRenamingValue('')
+      toast.success(t('characterBrowser.renamedFolderSuccess', { name: newName, count: result.count }))
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || t('characterBrowser.renameFolderFailed'))
+    } finally {
+      setRenameBusy(false)
+    }
+  }, [browser, renameStoredFolder, renamingFolder, renamingValue, t])
+
+  const handleDeleteFolder = useCallback((folder: string) => {
+    const name = folder.trim()
+    if (!name || deletingFolder) return
+    openModal('confirm', {
+      title: t('characterBrowser.deleteFolderTitle'),
+      message: t('characterBrowser.deleteFolderMessage', { name }),
+      variant: 'danger',
+      confirmText: t('characterBrowser.delete'),
+      onConfirm: async () => {
+        setDeletingFolder(name)
+        try {
+          const result = await browser.deleteFolder(name)
+          deleteStoredFolder(name)
+          setCollapsedFolders((previous) => {
+            const next = new Set(previous)
+            next.delete(name)
+            return next
+          })
+          toast.success(t('characterBrowser.deletedFolderSuccess', { name, count: result.count }))
+        } catch (err: any) {
+          toast.error(err?.body?.error || err?.message || t('characterBrowser.deleteFolderFailed'))
+        } finally {
+          setDeletingFolder(null)
+        }
+      },
+    })
+  }, [browser, deleteStoredFolder, deletingFolder, openModal, t])
+
+  const handleMoveCharacters = useCallback(async (folder: string) => {
+    if (browser.batchSelected.length === 0) return false
+    setMoveBusy(true)
+    try {
+      const result = await browser.bulkUpdateFolder(browser.batchSelected, folder)
+      browser.clearBatchSelection()
+      toast.success(t('characterBrowser.movedCharactersSuccess', { count: result.count }))
+      return true
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || t('characterBrowser.moveCharactersFailed'))
+      return false
+    } finally {
+      setMoveBusy(false)
+    }
+  }, [browser, t])
+
+  const renderCharacterCards = useCallback((characters: CharacterSummary[]) => {
+    return browser.viewMode === 'grid' || browser.viewMode === 'single' ? (
+      <CharacterGrid
+        characters={characters}
+        favorites={browser.favorites}
+        batchMode={browser.batchMode}
+        batchSelected={browser.batchSelected}
+        singleColumn={browser.viewMode === 'single'}
+        onOpen={browser.openChat}
+        onEdit={setEditingCharacterId}
+        onToggleFavorite={browser.toggleFavorite}
+        onToggleBatch={browser.toggleBatchSelect}
+      />
+    ) : (
+      <CharacterList
+        characters={characters}
+        favorites={browser.favorites}
+        batchMode={browser.batchMode}
+        batchSelected={browser.batchSelected}
+        onOpen={browser.openChat}
+        onEdit={setEditingCharacterId}
+        onToggleFavorite={browser.toggleFavorite}
+        onToggleBatch={browser.toggleBatchSelect}
+      />
+    )
+  }, [browser, setEditingCharacterId])
 
   const handleToggleFavoritesCollapse = useCallback(() => {
     setSetting('favoritesBarCollapsed', !favoritesBarCollapsed)
@@ -84,13 +235,59 @@ export default function CharacterBrowser() {
     } catch (err) {
       console.error('[CharacterBrowser] Failed to create character:', err)
     }
-  }, [browser.createCharacter, setEditingCharacterId])
+  }, [browser, setEditingCharacterId])
 
   const [importUrlOpen, setImportUrlOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [bulkTagsOpen, setBulkTagsOpen] = useState(false)
   const [dragging, setDragging] = useState(false)
   const [tagLibraryImporting, setTagLibraryImporting] = useState(false)
   const dragCounterRef = useRef(0)
+  const importDroppedFiles = browser.importFiles
+
+  // Tauri owns OS file-drop events and reports paths instead of populating the
+  // browser DataTransfer. Read only those one-use native drop grants, convert
+  // them to File objects, and reuse the browser/PWA importer unchanged.
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window)) return
+    let disposed = false
+    let unlisten: (() => void) | undefined
+
+    void getCurrentWebview().onDragDropEvent(({ payload }) => {
+      if (payload.type === 'enter') {
+        setDragging(payload.paths.some(isSupportedCharacterDropPath))
+        return
+      }
+      if (payload.type === 'leave') {
+        setDragging(false)
+        return
+      }
+      if (payload.type !== 'drop') return
+
+      setDragging(false)
+      const supportedPaths = payload.paths.filter(isSupportedCharacterDropPath)
+      if (supportedPaths.length === 0) return
+      void filesFromDesktopDrop(supportedPaths)
+        .then((files) => {
+          if (!disposed && files.length > 0) void importDroppedFiles(files)
+        })
+        .catch((error) => {
+          if (disposed) return
+          console.error('[CharacterBrowser] Failed to read native dropped files:', error)
+          toast.error(t('characterBrowser.desktopDropReadFailed'))
+        })
+    }).then((stop) => {
+      if (disposed) stop()
+      else unlisten = stop
+    }).catch((error) => {
+      console.warn('[CharacterBrowser] Native file-drop listener unavailable:', error)
+    })
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [importDroppedFiles, t])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
@@ -125,7 +322,7 @@ export default function CharacterBrowser() {
         browser.importFiles(files)
       }
     },
-    [browser.importFiles]
+    [browser]
   )
 
   const handleBatchDelete = useCallback(() => {
@@ -151,7 +348,7 @@ export default function CharacterBrowser() {
   const handleConfirmDelete = useCallback(() => {
     browser.batchDelete()
     setConfirmDelete(false)
-  }, [browser.batchDelete])
+  }, [browser])
 
   const pagination: ReactNode = useMemo(
     () => (
@@ -183,6 +380,7 @@ export default function CharacterBrowser() {
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      <ChubExpressionBackfillBanner />
       <CharacterToolbar
         searchQuery={browser.searchQuery}
         onSearchChange={browser.setSearchQuery}
@@ -200,6 +398,7 @@ export default function CharacterBrowser() {
         onImportTagLibrary={handleImportTagLibrary}
         onImportUrl={() => setImportUrlOpen(true)}
         onCreateNew={handleCreateNew}
+        onCreateFolder={createFolder}
         importLoading={browser.importLoading}
         tagLibraryImporting={tagLibraryImporting}
         onGroupChat={() => openModal('groupChatCreator')}
@@ -220,6 +419,11 @@ export default function CharacterBrowser() {
           onSelectAll={() => browser.selectAllBatch(browser.characters.map((c) => c.id))}
           onClearSelection={browser.clearBatchSelection}
           onDelete={handleBatchDelete}
+          onTags={() => setBulkTagsOpen(true)}
+          folders={folders}
+          moveBusy={moveBusy}
+          onCreateFolder={createFolder}
+          onMove={handleMoveCharacters}
           onCancel={() => browser.setBatchMode(false)}
         />
       )}
@@ -285,29 +489,101 @@ export default function CharacterBrowser() {
             <div className={styles.emptyState}>
               {browser.searchQuery ? t('characterBrowser.noSearchResults') : t('characterBrowser.noCharactersYet')}
             </div>
-          ) : browser.viewMode === 'grid' || browser.viewMode === 'single' ? (
-            <CharacterGrid
-              characters={browser.characters}
-              favorites={browser.favorites}
-              batchMode={browser.batchMode}
-              batchSelected={browser.batchSelected}
-              singleColumn={browser.viewMode === 'single'}
-              onOpen={browser.openChat}
-              onEdit={setEditingCharacterId}
-              onToggleFavorite={browser.toggleFavorite}
-              onToggleBatch={browser.toggleBatchSelect}
-            />
           ) : (
-            <CharacterList
-              characters={browser.characters}
-              favorites={browser.favorites}
-              batchMode={browser.batchMode}
-              batchSelected={browser.batchSelected}
-              onOpen={browser.openChat}
-              onEdit={setEditingCharacterId}
-              onToggleFavorite={browser.toggleFavorite}
-              onToggleBatch={browser.toggleBatchSelect}
-            />
+            <div className={styles.folderGroups}>
+              {browser.groupedCharacters.map((group) => {
+                const folderKey = group.folder || '__uncategorized'
+                const isCollapsed = collapsedFolders.has(folderKey)
+                const isRenaming = !!group.folder && renamingFolder === group.folder
+
+                return (
+                  <div
+                    key={folderKey}
+                    className={`${styles.folderGroup} ${isCollapsed ? styles.folderGroupCollapsed : ''}`}
+                  >
+                    <div className={styles.folderHeaderRow}>
+                        {isRenaming ? (
+                          <div className={styles.folderRenameRow}>
+                            <input
+                              ref={renameInputRef}
+                              className={styles.folderRenameInput}
+                              value={renamingValue}
+                              onChange={(event) => setRenamingValue(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') void handleRenameFolder()
+                                if (event.key === 'Escape' && !renameBusy) {
+                                  setRenamingFolder(null)
+                                  setRenamingValue('')
+                                }
+                              }}
+                              disabled={renameBusy}
+                              placeholder={t('characterBrowser.folderName')}
+                            />
+                            <button
+                              type="button"
+                              className={styles.folderActionBtn}
+                              onClick={() => void handleRenameFolder()}
+                              disabled={
+                                renameBusy
+                                || !renamingValue.trim()
+                                || renamingValue.trim().toLocaleLowerCase() === 'uncategorized'
+                                || renamingValue.trim().toLocaleLowerCase() === t('characterBrowser.uncategorized').trim().toLocaleLowerCase()
+                              }
+                            >
+                              <Check size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.folderActionBtn}
+                              onClick={() => {
+                                setRenamingFolder(null)
+                                setRenamingValue('')
+                              }}
+                              disabled={renameBusy}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <button type="button" className={styles.folderHeader} onClick={() => toggleFolder(folderKey)}>
+                              <ChevronRight size={12} className={`${styles.folderChevron} ${!isCollapsed ? styles.folderChevronOpen : ''}`} />
+                              <span className={styles.folderName}>{group.folder || t('characterBrowser.uncategorized')}</span>
+                              <span className={styles.folderCount}>{group.characters.length}</span>
+                            </button>
+                            {group.folder && (
+                              <>
+                                <button
+                                  type="button"
+                                  className={styles.folderActionBtn}
+                                  onClick={() => {
+                                    setRenamingFolder(group.folder)
+                                    setRenamingValue(group.folder)
+                                  }}
+                                  disabled={deletingFolder === group.folder}
+                                  title={t('characterBrowser.renameFolder', { name: group.folder })}
+                                >
+                                  <Pencil size={12} />
+                                </button>
+                                <button
+                                  type="button"
+                                  className={`${styles.folderActionBtn} ${styles.folderDeleteBtn}`}
+                                  onClick={() => handleDeleteFolder(group.folder)}
+                                  disabled={deletingFolder === group.folder}
+                                  title={t('characterBrowser.deleteFolder', { name: group.folder })}
+                                >
+                                  <Trash2 size={12} />
+                                </button>
+                              </>
+                            )}
+                          </>
+                        )}
+                    </div>
+                    {!isCollapsed && renderCharacterCards(group.characters)}
+                  </div>
+                )
+              })}
+            </div>
           )}
 
           <div className={styles.paginationBar}>{pagination}</div>
@@ -332,6 +608,13 @@ export default function CharacterBrowser() {
         message={t('characterBrowser.deleteCharactersMessage', { count: browser.batchSelected.length })}
         variant="danger"
         confirmText={t('characterBrowser.delete')}
+      />
+      <BulkTagsModal
+        isOpen={bulkTagsOpen}
+        selectedIds={browser.batchSelected}
+        allTags={browser.allTags}
+        onClose={() => setBulkTagsOpen(false)}
+        onApplied={() => { setBulkTagsOpen(false); browser.refreshBrowser() }}
       />
 
       <ConfirmationModal
@@ -382,7 +665,6 @@ export default function CharacterBrowser() {
         onClose={browser.closeAltFieldsSummary}
       />
 
-      <CharacterEditorPage />
     </div>
   )
 }

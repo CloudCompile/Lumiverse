@@ -7,11 +7,11 @@ import { IconPlugConnected, IconStethoscope } from '@tabler/icons-react'
 import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { systemApi, type SystemInfo } from '@/api/system'
-import { pushApi } from '@/api/push'
 import { chatsApi } from '@/api/chats'
 import { BASE_URL } from '@/api/client'
 import { usePushSubscription } from '@/hooks/usePushSubscription'
 import { copyTextToClipboard } from '@/lib/clipboard'
+import { getPwaLifecycleDiagnostics } from '@/lib/pwaLifecycleDiagnostics'
 import styles from './Diagnostics.module.css'
 import clsx from 'clsx'
 
@@ -121,13 +121,13 @@ function buildMarkdown(
     lines.push(`- **${t('diagnostics.reportStatus')}:** ${t('diagnostics.reportUnreachable', { error: backendError })}`)
   } else if (backend) {
     lines.push(`- **${t('diagnostics.version')}:** ${backend.backend.version}`)
-    lines.push(`- **${t('diagnostics.branch')}:** ${backend.git.branch}`)
-    lines.push(`- **${t('diagnostics.commit')}:** ${backend.git.commit}`)
+    if (backend.git.branch) lines.push(`- **${t('diagnostics.branch')}:** ${backend.git.branch}`)
+    if (backend.git.commit) lines.push(`- **${t('diagnostics.commit')}:** ${backend.git.commit}`)
     lines.push(`- **${t('diagnostics.runtime')}:** ${backend.backend.runtime}`)
-    lines.push(`- **${t('diagnostics.os')}:** ${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`)
-    lines.push(`- **${t('diagnostics.host')}:** ${backend.os.hostname}`)
-    lines.push(`- **${t('diagnostics.cpu')}:** ${t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })}`)
-    lines.push(`- **${t('diagnostics.ram')}:** ${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`)
+    lines.push(`- **${t('diagnostics.os')}:** ${getPlatformLabel(backend.os.platform)}${backend.os.release ? ` ${backend.os.release}` : ''} (${backend.os.arch})`)
+    if (backend.os.hostname) lines.push(`- **${t('diagnostics.host')}:** ${backend.os.hostname}`)
+    if (backend.cpu.cores > 0) lines.push(`- **${t('diagnostics.cpu')}:** ${t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })}`)
+    if (backend.memory.total > 0) lines.push(`- **${t('diagnostics.ram')}:** ${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`)
     if (backend.disk) {
       lines.push(`- **${t('diagnostics.storage')}:** ${formatBytes(backend.disk.used)} / ${formatBytes(backend.disk.total)}`)
     }
@@ -156,6 +156,18 @@ function buildMarkdown(
     }
   } else {
     lines.push(`- ${t('diagnostics.reportNoExtensions')}`)
+  }
+
+  const lifecycle = getPwaLifecycleDiagnostics()
+  if (lifecycle.length > 0) {
+    lines.push('')
+    lines.push('### PWA lifecycle (local-only, most recent 32 events)')
+    for (const entry of lifecycle) {
+      const details = Object.entries(entry.data)
+        .map(([key, value]) => `${key}=${value === null ? 'null' : String(value)}`)
+        .join(', ')
+      lines.push(`- ${entry.at} ${entry.event} [${details}]`)
+    }
   }
 
   return lines.join('\n')
@@ -241,13 +253,16 @@ export default function Diagnostics() {
         ) : backend && (
           <div className={styles.grid}>
             <InfoRow label={t('diagnostics.version')} value={backend.backend.version} />
-            <InfoRow label={t('diagnostics.branch')} value={backend.git.branch} />
-            <InfoRow label={t('diagnostics.commit')} value={backend.git.commit} />
+            {/* Sensitive backend fields are redacted server-side for non-admin
+                sessions and arrive empty — hide those rows rather than show
+                blank labels or misleading "0 B" placeholders. */}
+            {backend.git.branch && <InfoRow label={t('diagnostics.branch')} value={backend.git.branch} />}
+            {backend.git.commit && <InfoRow label={t('diagnostics.commit')} value={backend.git.commit} />}
             <InfoRow label={t('diagnostics.runtime')} value={backend.backend.runtime} />
-            <InfoRow label={t('diagnostics.os')} value={`${getPlatformLabel(backend.os.platform)} ${backend.os.release} (${backend.os.arch})`} />
-            <InfoRow label={t('diagnostics.host')} value={backend.os.hostname} />
-            <InfoRow label={t('diagnostics.cpu')} value={t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })} />
-            <InfoRow label={t('diagnostics.ram')} value={`${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`} />
+            <InfoRow label={t('diagnostics.os')} value={`${getPlatformLabel(backend.os.platform)}${backend.os.release ? ` ${backend.os.release}` : ''} (${backend.os.arch})`} />
+            {backend.os.hostname && <InfoRow label={t('diagnostics.host')} value={backend.os.hostname} />}
+            {backend.cpu.cores > 0 && <InfoRow label={t('diagnostics.cpu')} value={t('diagnostics.cpuCores', { model: backend.cpu.model, count: backend.cpu.cores })} />}
+            {backend.memory.total > 0 && <InfoRow label={t('diagnostics.ram')} value={`${formatBytes(backend.memory.total - backend.memory.free)} / ${formatBytes(backend.memory.total)}`} />}
             {backend.disk && (
               <InfoRow label={t('diagnostics.storage')} value={`${formatBytes(backend.disk.used)} / ${formatBytes(backend.disk.total)}`} />
             )}
@@ -386,16 +401,19 @@ function PwaCapabilitiesSection() {
     unsupportedReason,
     registrationStatus,
     registrationReason,
+    registrationKind,
+    nativeTransportStatus,
+    testPush,
   } = usePushSubscription()
   const [countdown, setCountdown] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
 
-  const describeTestFailure = (reason?: 'no_subscriptions' | 'disabled' | 'event_disabled' | 'user_active') => {
+  const describeTestFailure = useCallback((reason?: 'no_subscriptions' | 'disabled' | 'event_disabled' | 'user_active') => {
     if (reason === 'disabled') return t('diagnostics.pushDisabled')
     if (reason === 'event_disabled') return t('diagnostics.pushEventDisabled')
     if (reason === 'user_active') return t('diagnostics.pushUserActive')
     return t('diagnostics.pushNoSubscriptions')
-  }
+  }, [t])
 
   const pushRegistrationLabel = (status: 'ready' | 'pending' | 'missing' | 'error') => {
     if (status === 'ready') return t('diagnostics.swReady')
@@ -422,7 +440,7 @@ function PwaCapabilitiesSection() {
     // Send the push after 10 seconds
     setTimeout(async () => {
       try {
-        const result = await pushApi.test()
+        const result = await testPush()
         if (!result.success) {
           addToast({ type: 'warning', message: describeTestFailure(result.reason) })
         }
@@ -432,7 +450,7 @@ function PwaCapabilitiesSection() {
         setSending(false)
       }
     }, 10_000)
-  }, [addToast, t])
+  }, [addToast, describeTestFailure, t, testPush])
 
   return (
     <div className={styles.section}>
@@ -469,6 +487,28 @@ function PwaCapabilitiesSection() {
           <span className={styles.infoLabel}>{t('diagnostics.swRegistrationState')}</span>
           <span className={styles.infoValue}>{pushRegistrationLabel(registrationStatus)}</span>
         </div>
+        {registrationKind === 'native' && (
+          <div className={styles.infoRow}>
+            <span className={styles.infoLabel}>
+              {t('diagnostics.nativeNotificationTransport', { defaultValue: 'Native Notification Transport' })}
+            </span>
+            <span className={styles.infoValue}>
+              {nativeTransportStatus
+                ? nativeTransportStatus.state.replaceAll('_', ' ')
+                : t('diagnostics.desktopUpdateRequired', { defaultValue: 'Desktop update required' })}
+            </span>
+          </div>
+        )}
+        {registrationKind === 'native' && nativeTransportStatus?.lastReceivedAt && (
+          <div className={styles.infoRow}>
+            <span className={styles.infoLabel}>
+              {t('diagnostics.nativeTransportLastContact', { defaultValue: 'Native Transport Last Contact' })}
+            </span>
+            <span className={styles.infoValue}>
+              {new Date(nativeTransportStatus.lastReceivedAt).toLocaleString()}
+            </span>
+          </div>
+        )}
         <div className={styles.infoRow}>
           <span className={styles.infoLabel}>{t('diagnostics.secureContext')}</span>
           <span className={styles.infoValue}>{window.isSecureContext ? t('diagnostics.yes') : t('diagnostics.no')}</span>

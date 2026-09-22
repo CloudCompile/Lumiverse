@@ -16,6 +16,7 @@ Open **Settings → Voice & Speech → Speech-to-Text** and choose a provider.
 |----------|----------|-------|
 | **Web Speech API** | Fast browser-native dictation | Availability depends on your browser. Chrome and Edge usually work best. The option is greyed out (with "Unavailable") when your browser doesn't support it. |
 | **STT Connection** | Whisper and OpenAI-compatible transcription models | Requires an STT connection with an API key and transcription model. |
+| **Spindle extension provider** | Extension-specific transcription services | Appears when an enabled extension registers an STT provider and its privileged provider permission has been approved. |
 
 For an STT connection:
 
@@ -27,6 +28,8 @@ For an STT connection:
 
 !!! tip "OpenAI-compatible endpoints"
     STT connections use OpenAI-compatible `/audio/transcriptions` APIs. Leave **API URL** empty for OpenAI, or enter your proxy/self-hosted endpoint if it implements that route.
+
+Extension-provided STT options may expose different models or requirements. See the extension's own instructions and [Extension-Provided AI Providers](../extensions/index.md#extension-provided-ai-providers).
 
 ---
 

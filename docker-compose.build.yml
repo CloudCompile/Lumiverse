@@ -24,19 +24,28 @@ services:
         FRONTEND_REFRESH: ${FRONTEND_REFRESH:-local-build}
     container_name: lumiverse
     ports:
-      - "7860:7860"
+      - "${PORT:-7860}:${PORT:-7860}"
     environment:
       # ── Required ──────────────────────────────────────────────────────
       - OWNER_PASSWORD=changeme123        # min 8 chars, change this!
 
       # ── Optional ──────────────────────────────────────────────────────
       - OWNER_USERNAME=admin
-      - PORT=7860
+      - PORT=${PORT:-7860}
 
       # CORS: true = accept any origin (default for Docker).
       # For production behind a reverse proxy, set to false and use TRUSTED_ORIGINS.
       - TRUST_ANY_ORIGIN=true
       # - TRUSTED_ORIGINS=https://lumiverse.example.com
+
+      # Optional direct TLS. Bind-mount the files read-only below. For several
+      # certificates, set only LUMIVERSE_TLS_CONFIG_FILE to a mounted manifest.
+      # - LUMIVERSE_TLS_CERT_FILE=/run/lumiverse-tls/fullchain.pem
+      # - LUMIVERSE_TLS_KEY_FILE=/run/lumiverse-tls/privkey.pem
+      # - LUMIVERSE_TLS_CONFIG_FILE=/run/lumiverse-tls/certificates.json
+
+      # Emergency theme recovery (suppresses saved CSS/overrides without deleting them)
+      # - LUMIVERSE_SAFE_THEME=true
 
       # Encryption: auto-generated and stored in the data volume.
       # Only set these if migrating from an existing install.
@@ -57,6 +66,8 @@ services:
       # - LUMIVERSE_FORCE_NEW_MIGRATION=false  # set true to re-run after a completed migration
     volumes:
       - lumiverse-data:/app/data
+      # Direct TLS certificate/manifest directory
+      # - ./certs:/run/lumiverse-tls:ro
       # SillyTavern migration: bind your ST folder read-only
       # - /path/to/SillyTavern:/app/data/SillyTavern:ro
     restart: unless-stopped

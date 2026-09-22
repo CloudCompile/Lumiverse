@@ -147,6 +147,9 @@ app.get("/status/:chatId", (c) => {
     completedMessageId: entry.completedMessageId,
     completedAt: entry.completedAt,
     error: entry.error,
+    errorCode: entry.errorCode,
+    errorMessage: entry.errorMessage,
+    connectionName: entry.connectionName,
   });
 });
 
@@ -189,6 +192,9 @@ app.post("/summarize", async (c) => {
   }
   if (!body.message_context || !Number.isFinite(body.message_context) || body.message_context < 1) {
     return c.json({ error: "message_context must be a positive integer" }, 400);
+  }
+  if (body.message_lag !== undefined && (!Number.isInteger(body.message_lag) || body.message_lag < 0)) {
+    return c.json({ error: "message_lag must be a non-negative integer" }, 400);
   }
 
   try {

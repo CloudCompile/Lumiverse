@@ -1,7 +1,7 @@
 export interface MessageAttachment {
-  type: "image" | "audio";
-  image_id: string;           // FK to images table (used for both image and audio)
-  mime_type: string;          // e.g. "image/png", "audio/wav"
+  type: "image" | "audio" | "video";
+  image_id: string;           // Polymorphic media ID retained for wire compatibility
+  mime_type: string;          // e.g. "image/png", "audio/wav", "video/mp4"
   original_filename: string;
   width?: number;             // images only
   height?: number;            // images only
@@ -33,6 +33,23 @@ export interface Message {
   parent_message_id: string | null;
   branch_id: string | null;
   created_at: number;
+}
+
+/** A persisted, currently-visible message that matched a chat find query. */
+export interface ChatMessageSearchMatch {
+  id: string;
+  index_in_chat: number;
+  /** Zero-based position in the persisted chat history. */
+  offset: number;
+}
+
+export interface ChatMessageSearchResult {
+  data: ChatMessageSearchMatch[];
+  /** Total matching messages, including any omitted by the response cap. */
+  total: number;
+  /** Total persisted messages in the chat at the time of the search. */
+  message_total: number;
+  truncated: boolean;
 }
 
 export interface CreateMessageInput {

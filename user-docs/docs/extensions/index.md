@@ -16,6 +16,7 @@ Lumiverse supports extensions through **Spindle**, an isolated extension runtime
 - Listen to events (messages, generation lifecycle, tool invocations, generation parameters)
 - Read and write persistent and ephemeral storage (with per-extension quotas)
 - Access the LLM generation pipeline (raw, batch, streaming, dry-run, observe)
+- Register embedding, text-to-speech, speech-to-text, and sidecar providers that appear in Lumiverse's native settings
 - Register **council tools** that show up in the Lumia Council
 - Register **command palette** entries scoped to global, chat, character, or landing contexts
 - Open **modal dialogs** (confirm, text input, custom) using Lumiverse's shared component library
@@ -111,9 +112,41 @@ These can read sensitive data, modify pipeline behavior, or reach outside the sa
 | `regex_scripts` | Read and write regex scripts |
 | `databanks` | Read and write databank documents |
 | `personas` | Read and write user personas |
+| `providers.embedding.register` | Register an embedding provider for the extension's installation scope |
+| `providers.tts.register` | Register a text-to-speech provider for the extension's installation scope |
+| `providers.stt.register` | Register a speech-to-text provider for the extension's installation scope |
+| `providers.sidecar.register` | Register a sidecar provider for the extension's installation scope |
 
 !!! tip "Why two tiers?"
     Auto-granted permissions cover surface area an extension needs just to *exist* (UI mounts, ephemeral storage, event tracking). Privileged permissions touch user data, the network, or the prompt pipeline — Lumiverse keeps them off by default so a misbehaving or compromised extension can't silently exfiltrate or rewrite content.
+
+## Extension-Provided AI Providers
+
+An extension can contribute providers to four native Lumiverse systems:
+
+| Provider Kind | Where It Appears |
+|---------------|------------------|
+| **Embedding** | **Settings → Embeddings** |
+| **Text-to-Speech** | **Settings → Voice & Speech** and TTS connection selectors |
+| **Speech-to-Text** | **Settings → Voice & Speech** and STT connection selectors |
+| **Sidecar** | Memory Cortex and other sidecar connection selectors |
+
+These providers follow their effective registration scope. A user-scoped provider is visible only to that user, while a system-scoped provider can be offered instance-wide. Each registration permission is privileged and must be explicitly approved after installation. Updating an older provider extension may therefore require granting its new `providers.*.register` permission before its provider appears again.
+
+### Broker URLs and Credentials
+
+Some provider extensions declare a **broker URL**: a fixed external HTTP endpoint that Lumiverse calls on the extension's behalf. Lumiverse can attach an extension-scoped credential at request time without exposing that secret to the extension worker.
+
+Owners control which destinations are permitted under **Settings → Operator Panel → Approved Broker Origins**:
+
+- Enter a complete origin such as `https://broker.example.com` or `https://broker.example.com:8443`.
+- The scheme, host, and port must match. URL paths are not entered in this list.
+- An empty list permits broker registration for any public HTTP or HTTPS origin.
+- Private, loopback, link-local, and metadata-network destinations remain blocked by Lumiverse's request protections.
+- Adding an origin only permits it. It does not install an extension, create a provider, or contact that service by itself.
+
+!!! warning "Prefer a narrow allowlist"
+    If you use broker-backed provider extensions, list only the origins you trust. An empty allowlist is intentionally permissive for compatibility.
 
 ---
 

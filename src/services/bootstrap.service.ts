@@ -25,6 +25,7 @@ import type { Persona } from "../types/persona";
 import type { RegexScript } from "../types/regex-script";
 import type { PaginatedResult } from "../types/pagination";
 import type { CouncilSettings, ExtensionInfo, ToolRegistration } from "lumiverse-spindle-types";
+import { collectAll } from "./pagination";
 
 // Side-effect imports mirror the per-endpoint routes: ensure the TTS and
 // image-gen provider registries are populated before we call their list
@@ -92,6 +93,7 @@ interface ProviderSummaryEntry {
 
 interface StartupSettings {
   favorites?: string[];
+  landingHiddenCharacterIds?: string[];
   filterTab?: "characters" | "favorites" | "groups";
   sortField?: "name" | "recent" | "created" | "shuffle";
   sortDirection?: "asc" | "desc";
@@ -100,8 +102,14 @@ interface StartupSettings {
   theme?: unknown;
   landingPageChatsDisplayed?: number;
   landingPageLayoutMode?: "cards" | "compact";
+  landingPageGalleryWidth?: "compact" | "expanded";
   wallpaper?: unknown;
   drawerSettings?: unknown;
+  spindleSettings?: unknown;
+  connectionsOrder?: Partial<Record<"llm" | "imageGen" | "stt" | "tts", string[]>>;
+  activeProfileId?: string | null;
+  toastPosition?: "top-right" | "top-left" | "bottom-right" | "bottom-left" | "top" | "bottom";
+  defaultImpersonationMode?: "prompts" | "preset" | "oneliner";
 }
 
 const LIST_LIMIT_CONNECTIONS = 100;
@@ -109,8 +117,9 @@ const LIST_LIMIT_PACKS_PERSONAS = 200;
 const LIST_LIMIT_REGEX = 1000;
 const LANDING_CHATS_DEFAULT_LIMIT = 12;
 const LANDING_CHATS_MAX_LIMIT = 100;
-const STARTUP_SETTINGS_KEYS = [
+export const STARTUP_SETTINGS_KEYS = [
   "favorites",
+  "landingHiddenCharacterIds",
   "filterTab",
   "sortField",
   "sortDirection",
@@ -119,49 +128,54 @@ const STARTUP_SETTINGS_KEYS = [
   "theme",
   "landingPageChatsDisplayed",
   "landingPageLayoutMode",
+  "landingPageGalleryWidth",
   "wallpaper",
   "drawerSettings",
+  "spindleSettings",
+  "connectionsOrder",
+  "activeProfileId",
+  "toastPosition",
+  "defaultImpersonationMode",
 ] as const;
 
 /**
- * Page connection lists to exhaustion: the client treats bootstrap's lists as
- * complete, so a truncated page silently hides connections.
+ * Validate and sanitize a raw `connectionsOrder` value from the settings store.
+ *
+ * - Drops keys that aren't valid connection types.
+ * - Drops non-array values.
+ * - Drops arrays that contain non-string elements.
+ *
+ * Returns the sanitized object (which may be empty) and whether anything was
+ * kept. When `Object.keys(sanitized).length === 0`, the caller should skip
+ * setting the field entirely.
  */
-const CONNECTIONS_PAGE = 200;
-function collectAll<T>(
-  fetchPage: (
-    pagination: { limit: number; offset: number },
-  ) => PaginatedResult<T>,
-): PaginatedResult<T> {
-  const data: T[] = [];
-  let offset = 0;
-  for (;;) {
-    let page: PaginatedResult<T>;
-    try {
-      page = fetchPage({ limit: CONNECTIONS_PAGE, offset });
-    } catch (err) {
-      // Rethrow a first-page failure for the caller's `safe()` fallback; once
-      // pages are in hand, keep them rather than discarding.
-      if (data.length === 0) throw err;
-      console.warn(
-        `[bootstrap] connection pagination failed at offset ${offset}; returning ${data.length} already collected`,
-        err,
-      );
-      break;
+export function sanitizeConnectionsOrder(
+  raw: unknown,
+): Partial<Record<"llm" | "imageGen" | "stt" | "tts", string[]>> {
+  const sanitized: Partial<Record<"llm" | "imageGen" | "stt" | "tts", string[]>> = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return sanitized;
+  for (const key of ["llm", "imageGen", "stt", "tts"] as const) {
+    const value = (raw as Record<string, unknown>)[key];
+    if (Array.isArray(value) && value.every((id) => typeof id === "string")) {
+      sanitized[key] = value;
     }
-    data.push(...page.data);
-    offset += page.data.length;
-    if (page.data.length === 0 || offset >= page.total) break;
   }
-  return { data, total: data.length, limit: data.length, offset: 0 };
+  return sanitized;
 }
 
-function getStartupSettings(userId: string): StartupSettings {
+export function getStartupSettings(userId: string): StartupSettings {
   const rows = settingsSvc.getSettingsByKeys(userId, [...STARTUP_SETTINGS_KEYS]);
   const startupSettings: StartupSettings = {};
 
   const favorites = rows.get("favorites");
   if (Array.isArray(favorites)) startupSettings.favorites = favorites;
+
+  const landingHiddenCharacterIds = rows.get("landingHiddenCharacterIds");
+  if (Array.isArray(landingHiddenCharacterIds)) {
+    startupSettings.landingHiddenCharacterIds = landingHiddenCharacterIds.filter(
+      (id): id is string => typeof id === "string" && id.length > 0,
+    );
+  }
 
   const filterTab = rows.get("filterTab");
   if (filterTab === "characters" || filterTab === "favorites" || filterTab === "groups") {
@@ -204,6 +218,11 @@ function getStartupSettings(userId: string): StartupSettings {
     startupSettings.landingPageLayoutMode = landingPageLayoutMode;
   }
 
+  const landingPageGalleryWidth = rows.get("landingPageGalleryWidth");
+  if (landingPageGalleryWidth === "compact" || landingPageGalleryWidth === "expanded") {
+    startupSettings.landingPageGalleryWidth = landingPageGalleryWidth;
+  }
+
   if (rows.has("wallpaper")) {
     startupSettings.wallpaper = rows.get("wallpaper");
   }
@@ -212,19 +231,77 @@ function getStartupSettings(userId: string): StartupSettings {
     startupSettings.drawerSettings = rows.get("drawerSettings");
   }
 
+  const spindleSettings = rows.get("spindleSettings");
+  if (
+    spindleSettings
+    && typeof spindleSettings === "object"
+    && !Array.isArray(spindleSettings)
+  ) {
+    startupSettings.spindleSettings = spindleSettings;
+  }
+
+  const connectionsOrder = sanitizeConnectionsOrder(rows.get("connectionsOrder"));
+  if (Object.keys(connectionsOrder).length > 0) {
+    startupSettings.connectionsOrder = connectionsOrder;
+  }
+
+  if (rows.has("activeProfileId")) {
+    const activeProfileId = rows.get("activeProfileId");
+    if (typeof activeProfileId === "string" && activeProfileId.length > 0) {
+      startupSettings.activeProfileId = activeProfileId;
+    } else if (activeProfileId === null) {
+      startupSettings.activeProfileId = null;
+    }
+  }
+
+  // Toast placement must be known before the first toast can paint; any other
+  // stored value is dropped so the frontend default stays authoritative.
+  const toastPosition = rows.get("toastPosition");
+  if (
+    toastPosition === "top-right"
+    || toastPosition === "top-left"
+    || toastPosition === "bottom-right"
+    || toastPosition === "bottom-left"
+    || toastPosition === "top"
+    || toastPosition === "bottom"
+  ) {
+    startupSettings.toastPosition = toastPosition;
+  }
+
+  const defaultImpersonationMode = rows.get("defaultImpersonationMode");
+  if (
+    defaultImpersonationMode === "prompts"
+    || defaultImpersonationMode === "preset"
+    || defaultImpersonationMode === "oneliner"
+  ) {
+    startupSettings.defaultImpersonationMode = defaultImpersonationMode;
+  }
+
   return startupSettings;
 }
 
 /** First recent-chats page for the landing view, sized by the user's setting. */
 function getLandingRecentChats(userId: string): PaginatedResult<GroupedRecentChat> {
-  const stored = settingsSvc
-    .getSettingsByKeys(userId, ["landingPageChatsDisplayed"])
-    .get("landingPageChatsDisplayed");
+  const settings = settingsSvc.getSettingsByKeys(userId, [
+    "landingPageChatsDisplayed",
+    "favorites",
+    "landingHiddenCharacterIds",
+  ]);
+  const stored = settings.get("landingPageChatsDisplayed");
   const limit =
     typeof stored === "number" && Number.isFinite(stored)
       ? Math.min(Math.max(Math.floor(stored), 1), LANDING_CHATS_MAX_LIMIT)
       : LANDING_CHATS_DEFAULT_LIMIT;
-  return chatsSvc.listRecentChatsGrouped(userId, { limit, offset: 0 });
+  const favorites = settings.get("favorites");
+  const hidden = settings.get("landingHiddenCharacterIds");
+  return chatsSvc.listRecentChatsGrouped(userId, { limit, offset: 0 }, {
+    favoriteCharacterIds: Array.isArray(favorites)
+      ? favorites.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
+    hiddenCharacterIds: Array.isArray(hidden)
+      ? hidden.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [],
+  });
 }
 
 export function buildLandingBootstrapPayload(
@@ -268,16 +345,16 @@ function listLlmProviders(): ProviderListEntry[] {
   }));
 }
 
-function listTtsProviders(): ProviderSummaryEntry[] {
-  return getTtsProviderList().map((p) => ({
+function listTtsProviders(userId: string): ProviderSummaryEntry[] {
+  return getTtsProviderList(userId).map((p) => ({
     id: p.name,
     name: p.displayName,
     capabilities: p.capabilities,
   }));
 }
 
-function listSttProviders(): ProviderSummaryEntry[] {
-  return sttConnectionsSvc.listProviders().map((p) => ({
+function listSttProviders(userId: string): ProviderSummaryEntry[] {
+  return sttConnectionsSvc.listProviders(userId).map((p) => ({
     id: p.id,
     name: p.name,
     capabilities: p.capabilities,
@@ -338,7 +415,6 @@ export async function buildBootstrapPayload(
   };
 
   const pagLargeMisc = { limit: LIST_LIMIT_PACKS_PERSONAS, offset: 0 };
-  const pagLargeRegex = { limit: LIST_LIMIT_REGEX, offset: 0 };
 
   const emptyPage = <T>(limit: number): PaginatedResult<T> => ({
     data: [],
@@ -355,14 +431,14 @@ export async function buildBootstrapPayload(
   const llmConnections = safeSync("llm.connections", () => collectAll((p) => connectionsSvc.listConnections(userId, p)), emptyPage<ConnectionProfile>(LIST_LIMIT_CONNECTIONS));
   const llmProviders = safeSync("llm.providers", () => listLlmProviders(), [] as ProviderListEntry[]);
   const sttConnections = safeSync("stt.connections", () => collectAll((p) => sttConnectionsSvc.listConnections(userId, p)), emptyPage<SttConnectionProfile>(LIST_LIMIT_CONNECTIONS));
-  const sttProviders = safeSync("stt.providers", () => listSttProviders(), [] as ProviderSummaryEntry[]);
+  const sttProviders = safeSync("stt.providers", () => listSttProviders(userId), [] as ProviderSummaryEntry[]);
   const ttsConnections = safeSync("tts.connections", () => collectAll((p) => ttsConnectionsSvc.listConnections(userId, p)), emptyPage<TtsConnectionProfile>(LIST_LIMIT_CONNECTIONS));
-  const ttsProviders = safeSync("tts.providers", () => listTtsProviders(), [] as ProviderSummaryEntry[]);
+  const ttsProviders = safeSync("tts.providers", () => listTtsProviders(userId), [] as ProviderSummaryEntry[]);
   const imageGenConnections = safeSync("imageGen.connections", () => collectAll((p) => imageGenConnectionsSvc.listConnections(userId, p)), emptyPage<ImageGenConnectionProfile>(LIST_LIMIT_CONNECTIONS));
   const imageGenProviders = safeSync("imageGen.providers", () => listImageGenProviders(), [] as ProviderSummaryEntry[]);
   const packs = safeSync("packs", () => packsSvc.listPacks(userId, pagLargeMisc), emptyPage<Pack>(LIST_LIMIT_PACKS_PERSONAS));
   const personas = safeSync("personas", () => personasSvc.listPersonas(userId, pagLargeMisc), emptyPage<Persona>(LIST_LIMIT_PACKS_PERSONAS));
-  const regexScripts = safeSync("regexScripts", () => regexSvc.listRegexScripts(userId, pagLargeRegex), emptyPage<RegexScript>(LIST_LIMIT_REGEX));
+  const regexScripts = safeSync("regexScripts", () => collectAll((p) => regexSvc.listRegexScripts(userId, p), LIST_LIMIT_REGEX), emptyPage<RegexScript>(LIST_LIMIT_REGEX));
   const councilSettings = safeSync("council.settings", () => councilSvc.getCouncilSettings(userId), {} as CouncilSettings);
 
   const councilTools = await safeAsync("council.tools", () => councilSvc.getAvailableTools(userId), [] as RuntimeCouncilToolDefinition[]);

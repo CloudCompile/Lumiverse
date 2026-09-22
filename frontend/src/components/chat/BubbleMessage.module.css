@@ -5,6 +5,7 @@
      1 these resolve to the unmodified glass colors, so the look is unchanged. */
   --lcs-bubble-bg: color-mix(in srgb, var(--lcs-glass-bg) calc(var(--lcs-bubble-opacity, 1) * 100%), transparent);
   --lcs-bubble-bg-hover: color-mix(in srgb, var(--lcs-glass-bg-hover, rgba(24, 22, 36, 0.65)) calc(var(--lcs-bubble-opacity, 1) * 100%), transparent);
+  --long-message-fade-color: var(--lcs-bubble-bg);
   display: flex;
   flex-shrink: 0;
   gap: 10px;
@@ -23,6 +24,16 @@
     background var(--lcs-transition-fast),
     border-color var(--lcs-transition-fast),
     box-shadow 0.15s ease;
+}
+
+/* The normal card is paint-contained and clipped to keep its glass treatment
+   cheap. Authored HTML islands and inline-card spacing shells need visual
+   overflow for box/text shadows and transformed corners, so relax both clips
+   only for cards containing either one. */
+.card:has([data-lumiverse-html-island]),
+.card:has([data-lumiverse-inline-html-card]) {
+  overflow: visible;
+  contain: layout style;
 }
 
 /* Hide accent bars */
@@ -90,14 +101,14 @@
   backdrop-filter: blur(var(--lcs-glass-strong-blur, 12px)) saturate(1.2);
 }
 
-:global([data-component='ChatView'][data-streaming]) .card {
+.card.streaming {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   box-shadow: 0 0 0 0.5px var(--lcs-glass-border) !important;
 }
 
-:global([data-component='ChatView'][data-streaming]) .avatarBg,
-:global([data-component='ChatView'][data-streaming]) .avatarBgScrim {
+.streaming .avatarBg,
+.streaming .avatarBgScrim {
   display: none !important;
 }
 
@@ -370,6 +381,15 @@
   align-self: flex-end;
 }
 
+/* The right-aligned user badge should remain a single line. The left-aligned
+   option retains the general wrapping behavior for backwards compatibility. */
+.user:not(.userLeft) .metaPill {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  max-width: none;
+  white-space: nowrap;
+}
+
 .userLeft.user .metaPill {
   align-self: flex-start;
 }
@@ -603,6 +623,12 @@
     max-width: 100%;
   }
 
+  /* Actions occupy their own strip above the card at this breakpoint, so the
+     desktop reservation would only squeeze the right-side metadata. */
+  .user:not(.userLeft) .headerLeft {
+    max-width: 100%;
+  }
+
   .content {
     padding: 10px 12px 14px;
   }
@@ -717,12 +743,11 @@
 }
 
 /* ── Scroll-time CSS suppression ──
-   While the user is actively scrolling, strip the most expensive raster
-   operations from every card (blur, heavy shadow, dissolving avatar mask).
-   We intentionally keep the static background fill/tint gradients intact;
-   stripping them via `background: var(--lcs-bubble-bg)` made the card color
-   visibly shift during scroll, which users noticed. The remaining properties
-   still save the costly per-card raster layers. */
+   While the user is actively scrolling, strip the most expensive card effects
+   (blur, heavy shadow) and freeze hover-driven art opacity changes.
+   We intentionally keep the bubble background art mounted: removing it made
+   the user-facing "show art in bubble backgrounds" setting look broken
+   because the image visibly blinked on and off while scrolling. */
 :global([data-scrolling]) .card {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
@@ -730,7 +755,7 @@
   transition: none !important;
 }
 
-:global([data-scrolling]) .avatarBg,
-:global([data-scrolling]) .avatarBgScrim {
-  display: none !important;
+:global([data-scrolling]) .avatarBgImg {
+  opacity: 0.28 !important;
+  transition: none !important;
 }

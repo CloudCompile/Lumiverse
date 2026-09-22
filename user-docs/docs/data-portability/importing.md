@@ -86,7 +86,7 @@ A few things to verify:
 |-----|-------|
 | Maximum compressed archive size | 5 GB |
 | Maximum decompressed size during import | 20 GB |
-| Maximum NDJSON row size | 4 MB |
+| Maximum NDJSON record size | 64 MiB |
 | Maximum entries in the archive | 500 000 |
 
 These caps protect against zip bombs and malformed archives. Real archives, including 1.9 GB galleries with vectors, comfortably fit.

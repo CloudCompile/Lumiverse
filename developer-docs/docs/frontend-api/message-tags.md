@@ -2,6 +2,29 @@
 
 Extensions can intercept custom XML-like tags embedded in chat messages. This lets you build inline interactive elements — for example, a `<spotify-search query="...">` tag that triggers a search when rendered.
 
+## Declare the backend capability
+
+If the extension has a backend entry, declare its use of message-tag
+interception during backend startup:
+
+```ts
+const releaseTagCapability = spindle.frontendCapabilities.declare(
+  'message_tag_interceptor'
+)
+```
+
+The host includes this runtime declaration in frontend bootstrap state. Chat
+content then remains in its initial hidden state until the extension frontend
+attaches at least one tag interceptor (or the bounded host fallback expires),
+preventing raw tag payloads from flashing during cold chat load. The returned
+function retracts the declaration; worker shutdown also clears it
+automatically.
+
+This declaration does not define a tag or replace the frontend registration.
+The frontend remains authoritative for `tagName`, `attrs`,
+`removeFromMessage`, and the handler, so those options can still come from
+per-user settings.
+
 ## `ctx.messages.registerTagInterceptor(options, handler)`
 
 Register a handler that fires whenever a matching tag appears in a rendered message. Returns an unsubscribe function.

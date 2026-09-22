@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, test } from 'bun:test'
-import { didMobileQueueHoldReachThreshold, getMobileQueueHoldPreviewState } from './mobileQueueHold'
+import { didMobileQueueHoldReachThreshold, getMobileQueueHoldPreviewState, shouldQueueMobileHold } from './mobileQueueHold'
 
 describe('didMobileQueueHoldReachThreshold', () => {
   test('does not treat a quick tap as a hold when the event timestamps are close together', () => {
@@ -75,5 +75,25 @@ describe('getMobileQueueHoldPreviewState', () => {
       revealAfterMs: 180,
       thresholdMs: 900,
     })).toBe('idle')
+  })
+})
+
+describe('shouldQueueMobileHold', () => {
+  test('honors the armed release state when Android event timestamps cannot be compared', () => {
+    expect(shouldQueueMobileHold({
+      isArmed: true,
+      holdStartedAt: 1_000,
+      releasedAt: 500,
+      thresholdMs: 900,
+    })).toBe(true)
+  })
+
+  test('uses the release timestamp when the hold has not armed yet', () => {
+    expect(shouldQueueMobileHold({
+      isArmed: false,
+      holdStartedAt: 1_000,
+      releasedAt: 1_950,
+      thresholdMs: 900,
+    })).toBe(true)
   })
 })

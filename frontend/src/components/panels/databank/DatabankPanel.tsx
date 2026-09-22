@@ -9,8 +9,13 @@ import { chatsApi } from '@/api/chats'
 import NumericInput from '@/components/shared/NumericInput'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import { Toggle } from '@/components/shared/Toggle'
 import type { Databank, DatabankDocument } from '@/api/databank'
 import type { DatabankSettings } from '@/types/databank-settings'
+import {
+  getContextDatabankBindings,
+  isAutomaticallyActiveForContext,
+} from './databankActivation'
 import styles from './DatabankPanel.module.css'
 
 type Scope = 'global' | 'character' | 'chat'
@@ -74,6 +79,8 @@ export default function DatabankPanel() {
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const banksRequestRef = useRef(0)
+  const docsRequestRef = useRef(0)
 
   // ── Document editor ──
   const [editingDocId, setEditingDocId] = useState<string | null>(null)
@@ -97,6 +104,7 @@ export default function DatabankPanel() {
   const [databankSettingsSaving, setDatabankSettingsSaving] = useState(false)
   const [databankSettingsStatus, setDatabankSettingsStatus] = useState<string | null>(null)
   const [reprocessingAll, setReprocessingAll] = useState(false)
+  const [bankEnabledSaving, setBankEnabledSaving] = useState(false)
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const databankSettingsLoadedRef = useRef(false)
   const databankSettingsDirtyRef = useRef(false)
@@ -196,6 +204,7 @@ export default function DatabankPanel() {
 
   // ── Load banks on mount and scope change ──
   const loadBanks = useCallback(async () => {
+    const requestId = ++banksRequestRef.current
     try {
       const params: Record<string, string> = { scope: databankScopeFilter }
       if (databankScopeFilter === 'character' && activeCharacterId) {
@@ -205,29 +214,49 @@ export default function DatabankPanel() {
         params.scope_id = activeChatId
       }
       const result = await databankApi.list(params)
-      setDatabanks(result.data)
+      if (requestId === banksRequestRef.current) setDatabanks(result.data)
     } catch {
-      setDatabanks([])
+      if (requestId === banksRequestRef.current) setDatabanks([])
     }
   }, [databankScopeFilter, activeCharacterId, activeChatId, setDatabanks])
 
-  useEffect(() => { loadBanks() }, [loadBanks])
+  useEffect(() => {
+    void loadBanks()
+    return () => { banksRequestRef.current += 1 }
+  }, [loadBanks])
+
+  // A selected bank belongs to the scope/context in which it was chosen. Clear
+  // it before rendering a different scope so stale documents and actions from
+  // the previous bank cannot appear under an empty selector.
+  useEffect(() => {
+    docsRequestRef.current += 1
+    setSelectedDatabankId(null)
+    setDatabankDocuments([])
+    setEditingDocId(null)
+    setEditingContent('')
+    setEditingName('')
+    setEditingDirty(false)
+  }, [databankScopeFilter, activeCharacterId, activeChatId, setSelectedDatabankId, setDatabankDocuments])
 
   // ── Load documents when bank selection changes ──
   const loadDocs = useCallback(async () => {
+    const requestId = ++docsRequestRef.current
     if (!selectedDatabankId) {
       setDatabankDocuments([])
       return
     }
     try {
       const result = await databankApi.listDocuments(selectedDatabankId, { limit: 1000 })
-      setDatabankDocuments(result.data)
+      if (requestId === docsRequestRef.current) setDatabankDocuments(result.data)
     } catch {
-      setDatabankDocuments([])
+      if (requestId === docsRequestRef.current) setDatabankDocuments([])
     }
   }, [selectedDatabankId, setDatabankDocuments])
 
-  useEffect(() => { loadDocs() }, [loadDocs])
+  useEffect(() => {
+    void loadDocs()
+    return () => { docsRequestRef.current += 1 }
+  }, [loadDocs])
 
   // ── Poll for document status updates ──
   useEffect(() => {
@@ -280,14 +309,30 @@ export default function DatabankPanel() {
     }
   }, [selectedDatabankId, removeDatabank, setSelectedDatabankId])
 
-  // ── Update bank name/description ──
+  // ── Update bank details ──
   const handleBankUpdate = useCallback(async (field: 'name' | 'description', value: string) => {
     if (!selectedDatabankId) return
     try {
-      await databankApi.update(selectedDatabankId, { [field]: value })
-      updateBankStore(selectedDatabankId, { [field]: value })
+      const updated = await databankApi.update(selectedDatabankId, { [field]: value })
+      updateBankStore(selectedDatabankId, { [field]: updated[field] })
+      setAllBanks((current) => current.map((bank) => bank.id === updated.id ? updated : bank))
     } catch { /* ignore */ }
   }, [selectedDatabankId, updateBankStore])
+
+  const handleBankEnabledChange = useCallback(async (enabled: boolean) => {
+    if (!selectedDatabankId) return
+    setError(null)
+    setBankEnabledSaving(true)
+    try {
+      const updated = await databankApi.update(selectedDatabankId, { enabled })
+      updateBankStore(selectedDatabankId, { enabled: updated.enabled })
+      setAllBanks((current) => current.map((bank) => bank.id === updated.id ? updated : bank))
+    } catch (e: any) {
+      setError(e?.body?.error || e?.message || t('databankPanel.enabledUpdateFailed'))
+    } finally {
+      setBankEnabledSaving(false)
+    }
+  }, [selectedDatabankId, updateBankStore, t])
 
   const handleDatabankSettingsUpdate = useCallback((patch: Partial<DatabankSettings>) => {
     databankSettingsDirtyRef.current = true
@@ -498,8 +543,18 @@ export default function DatabankPanel() {
     : databankDocuments
   const reprocessableDocs = databankDocuments.filter((doc) => doc.status !== 'pending' && doc.status !== 'processing')
 
-  const activeCharBanks = allBanks.filter((b) => charDatabankIds.includes(b.id))
-  const activeChatBanks = allBanks.filter((b) => chatDatabankIds.includes(b.id))
+  const characterBindings = getContextDatabankBindings(
+    allBanks,
+    'character',
+    activeCharacterId,
+    charDatabankIds,
+  )
+  const chatBindings = getContextDatabankBindings(
+    allBanks,
+    'chat',
+    activeChatId,
+    chatDatabankIds,
+  )
 
   // ── Document editor view ──
   if (editingDocId) {
@@ -596,36 +651,53 @@ export default function DatabankPanel() {
                 <div className={styles.attachPickerEmpty}>{t('databankPanel.noDatabanksAvailable')}</div>
               ) : (
                 allBanks.map((b) => {
-                  const isActive = charDatabankIds.includes(b.id)
+                  const isAttached = charDatabankIds.includes(b.id)
+                  const isAutomatic = isAutomaticallyActiveForContext(b, 'character', activeCharacterId)
+                  const isActive = b.enabled && (isAttached || isAutomatic)
                   return (
                     <button
                       key={b.id}
                       type="button"
                       className={`${styles.attachPickerItem} ${isActive ? styles.attachPickerItemActive : ''}`}
                       onClick={() => toggleCharBank(b.id)}
+                      disabled={isAutomatic}
+                      title={isAutomatic ? t('databankPanel.automaticScopeHint') : undefined}
                     >
                       <span className={styles.attachCheck}>{isActive ? <Check size={11} /> : null}</span>
                       <span className={styles.attachPickerName}>{b.name}</span>
-                      <span className={styles.attachPickerScope}>{scopeLabel(b.scope, t)}</span>
+                      <span className={styles.attachPickerScope}>
+                        {!b.enabled
+                          ? t('databankPanel.disabled')
+                          : isAutomatic
+                            ? t('databankPanel.automatic')
+                            : scopeLabel(b.scope, t)}
+                      </span>
                     </button>
                   )
                 })
               )}
             </div>
           )}
-          {activeCharBanks.length > 0 && (
+          {characterBindings.length > 0 && (
             <div className={styles.attachPills}>
-              {activeCharBanks.map((b) => (
-                <span key={b.id} className={styles.attachPill}>
-                  <span>{b.name}</span>
-                  <button type="button" className={styles.attachPillRemove} onClick={() => toggleCharBank(b.id)}>
-                    <X size={10} />
-                  </button>
+              {characterBindings.map(({ bank, automatic }) => (
+                <span key={bank.id} className={`${styles.attachPill} ${!bank.enabled ? styles.attachPillDisabled : ''}`}>
+                  <span>{bank.name}</span>
+                  <span className={styles.attachPillState}>
+                    {bank.enabled
+                      ? automatic ? t('databankPanel.automatic') : t('databankPanel.attached')
+                      : t('databankPanel.disabled')}
+                  </span>
+                  {!automatic && (
+                    <button type="button" className={styles.attachPillRemove} onClick={() => toggleCharBank(bank.id)}>
+                      <X size={10} />
+                    </button>
+                  )}
                 </span>
               ))}
             </div>
           )}
-          {activeCharBanks.length === 0 && !charPickerOpen && (
+          {characterBindings.length === 0 && !charPickerOpen && (
             <span className={styles.attachHint}>{t('databankPanel.noCharacterAttached')}</span>
           )}
         </div>
@@ -653,36 +725,53 @@ export default function DatabankPanel() {
                 <div className={styles.attachPickerEmpty}>{t('databankPanel.noDatabanksAvailable')}</div>
               ) : (
                 allBanks.map((b) => {
-                  const isActive = chatDatabankIds.includes(b.id)
+                  const isAttached = chatDatabankIds.includes(b.id)
+                  const isAutomatic = isAutomaticallyActiveForContext(b, 'chat', activeChatId)
+                  const isActive = b.enabled && (isAttached || isAutomatic)
                   return (
                     <button
                       key={b.id}
                       type="button"
                       className={`${styles.attachPickerItem} ${isActive ? styles.attachPickerItemActive : ''}`}
                       onClick={() => toggleChatBank(b.id)}
+                      disabled={isAutomatic}
+                      title={isAutomatic ? t('databankPanel.automaticScopeHint') : undefined}
                     >
                       <span className={styles.attachCheck}>{isActive ? <Check size={11} /> : null}</span>
                       <span className={styles.attachPickerName}>{b.name}</span>
-                      <span className={styles.attachPickerScope}>{scopeLabel(b.scope, t)}</span>
+                      <span className={styles.attachPickerScope}>
+                        {!b.enabled
+                          ? t('databankPanel.disabled')
+                          : isAutomatic
+                            ? t('databankPanel.automatic')
+                            : scopeLabel(b.scope, t)}
+                      </span>
                     </button>
                   )
                 })
               )}
             </div>
           )}
-          {activeChatBanks.length > 0 && (
+          {chatBindings.length > 0 && (
             <div className={styles.attachPills}>
-              {activeChatBanks.map((b) => (
-                <span key={b.id} className={styles.attachPill}>
-                  <span>{b.name}</span>
-                  <button type="button" className={styles.attachPillRemove} onClick={() => toggleChatBank(b.id)}>
-                    <X size={10} />
-                  </button>
+              {chatBindings.map(({ bank, automatic }) => (
+                <span key={bank.id} className={`${styles.attachPill} ${!bank.enabled ? styles.attachPillDisabled : ''}`}>
+                  <span>{bank.name}</span>
+                  <span className={styles.attachPillState}>
+                    {bank.enabled
+                      ? automatic ? t('databankPanel.automatic') : t('databankPanel.attached')
+                      : t('databankPanel.disabled')}
+                  </span>
+                  {!automatic && (
+                    <button type="button" className={styles.attachPillRemove} onClick={() => toggleChatBank(bank.id)}>
+                      <X size={10} />
+                    </button>
+                  )}
                 </span>
               ))}
             </div>
           )}
-          {activeChatBanks.length === 0 && !chatPickerOpen && (
+          {chatBindings.length === 0 && !chatPickerOpen && (
             <span className={styles.attachHint}>{t('databankPanel.noChatAttached')}</span>
           )}
         </div>
@@ -876,7 +965,19 @@ export default function DatabankPanel() {
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <span className={styles.scopeBadge}>{scopeLabel(selectedBank.scope, t)}</span>
+            <div className={styles.enableToggle}>
+              <Toggle.Switch
+                checked={selectedBank.enabled}
+                onChange={handleBankEnabledChange}
+                size="sm"
+                disabled={bankEnabledSaving}
+                aria-label={t('databankPanel.enabled')}
+                title={t('databankPanel.enabledHint')}
+              />
+              <span>{selectedBank.enabled ? t('databankPanel.enabled') : t('databankPanel.disabled')}</span>
+            </div>
           </div>
+          <div className={styles.settingsHint}>{t('databankPanel.enabledHint')}</div>
         </div>
       )}
 

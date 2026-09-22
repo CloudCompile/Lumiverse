@@ -27,6 +27,7 @@ export interface MacroInterceptorCtx {
   readonly commit: boolean;
   readonly phase: MacroInterceptorPhase;
   readonly sourceHint?: string;
+  readonly sourceOwner?: { readonly extensionIdentifier: string };
   readonly userId?: string;
 }
 
@@ -47,12 +48,12 @@ export interface MacroInterceptorRunResult {
 
 export interface MacroInterceptor {
   extensionId: string;
+  extensionIdentifier?: string;
+  handlesOwnedSources?: boolean;
   userId?: string | null;
   priority: number;
   handler: (ctx: MacroInterceptorCtx) => Promise<MacroInterceptorResult>;
 }
-
-const INTERCEPTOR_TIMEOUT_MS = 10_000;
 
 class MacroInterceptorChain {
   private handlers: MacroInterceptor[] = [];
@@ -71,6 +72,27 @@ class MacroInterceptorChain {
     this.handlers = this.handlers.filter((h) => h.extensionId !== extensionId);
   }
 
+  ownsMessageSource(extensions: Record<string, any>, userId: string | undefined): boolean {
+    return this.handlers.some((h) => h.handlesOwnedSources && h.extensionIdentifier
+      && (!h.userId || h.userId === userId)
+      && extensions[h.extensionIdentifier]?.display_owner === true);
+  }
+
+  async runOwned(ctx: MacroInterceptorCtx): Promise<MacroInterceptorRunResult | undefined> {
+    const handler = this.handlers.find((h) => h.handlesOwnedSources
+      && h.extensionIdentifier === ctx.sourceOwner?.extensionIdentifier
+      && (!h.userId || h.userId === ctx.userId));
+    if (!handler) return undefined;
+    const result = await handler.handler(ctx);
+    if (typeof result === "string") {
+      return { text: result, touchedVars: [], volatile: false, opaque: true };
+    }
+    if (!result || typeof result.text !== "string") {
+      throw new OwnedMacroResultError(handler.extensionIdentifier!);
+    }
+    return { text: result.text, touchedVars: result.touchedVars ?? [], volatile: result.volatile === true, opaque: false };
+  }
+
   async run(ctx: MacroInterceptorCtx): Promise<MacroInterceptorRunResult> {
     let template = ctx.template;
     const touchedVars = new Set<string>();
@@ -80,20 +102,7 @@ class MacroInterceptorChain {
     for (const handler of this.handlers) {
       if (handler.userId && handler.userId !== ctx.userId) continue;
       try {
-        const next = await Promise.race([
-          handler.handler({ ...ctx, template }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Macro interceptor from ${handler.extensionId} timed out (${INTERCEPTOR_TIMEOUT_MS / 1000}s)`
-                  )
-                ),
-              INTERCEPTOR_TIMEOUT_MS
-            )
-          ),
-        ]);
+        const next = await handler.handler({ ...ctx, template });
         if (typeof next === "string") {
           if (next !== template) {
             template = next;
@@ -112,9 +121,11 @@ class MacroInterceptorChain {
         }
       } catch (err) {
         console.error(
-          `[Spindle] Macro interceptor error from ${handler.extensionId}:`,
-          err
+          `[Spindle] Macro interceptor error from ${handler.extensionId}: ${err instanceof Error ? err.message : String(err)}`
         );
+        if (err instanceof Error && err.stack) {
+          console.error(err.stack);
+        }
       }
     }
 
@@ -123,6 +134,13 @@ class MacroInterceptorChain {
 
   get count(): number {
     return this.handlers.length;
+  }
+}
+
+export class OwnedMacroResultError extends Error {
+  constructor(identifier: string) {
+    super(`Macro source owner ${identifier} returned no result`);
+    this.name = "OwnedMacroResultError";
   }
 }
 

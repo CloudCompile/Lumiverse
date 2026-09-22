@@ -1,6 +1,8 @@
+import { describeGenerationStop } from "../generation-stop";
+import { incompleteStream, readProviderSse, throwIfProviderError } from "../provider-sse";
 import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
-import { cancelStreamAndCloseConnection, fetchWithPreflightAbort, readJsonWithAbort, readWithAbort, yieldToEventLoop } from "../stream-utils";
+import { fetchWithPreflightAbort, readJsonWithAbort } from "../stream-utils";
 import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
 import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
@@ -112,6 +114,15 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     return url;
   }
 
+  /** Resolve the request URL separately from model/auth endpoints so providers
+   * can route opt-in chat features without changing their stable API base. */
+  protected chatCompletionsUrl(
+    apiUrl: string,
+    _request: GenerationRequest,
+  ): string {
+    return `${this.baseUrl(apiUrl)}/chat/completions`;
+  }
+
   /** Override to add provider-specific headers (e.g. OpenRouter's HTTP-Referer). */
   protected extraHeaders(_apiKey: string): Record<string, string> {
     return {};
@@ -136,22 +147,30 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     apiUrl: string,
     request: GenerationRequest
   ): Promise<GenerationResponse> {
-    const url = `${this.baseUrl(apiUrl)}/chat/completions`;
+    const url = this.chatCompletionsUrl(apiUrl, request);
     const body = this.buildBody(request, false);
 
     const res = await fetchWithPreflightAbort(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, GENERATE_OPERATION, res);
 
     const data = (await readJsonWithAbort<any>(res, request.signal)) as any;
+    throwIfProviderError(data, this.displayName, GENERATE_OPERATION);
     const choice = data.choices?.[0];
+    if (!choice) throw incompleteStream(this.displayName);
+    const refusal = choice.message?.refusal;
+    const stopDetails = refusal
+      ? { type: "refusal", explanation: refusal }
+      : choice.native_finish_reason ? { type: "finish_reason", category: choice.native_finish_reason } : undefined;
+    const finishReason = choice.finish_reason || "stop";
+    const failed = describeGenerationStop(finishReason, stopDetails);
 
     const rawToolCalls = choice?.message?.tool_calls;
-    const toolCalls: ToolCallResult[] | undefined = Array.isArray(rawToolCalls) && rawToolCalls.length > 0
+    const toolCalls: ToolCallResult[] | undefined = !failed && Array.isArray(rawToolCalls) && rawToolCalls.length > 0
       ? rawToolCalls.map((tc: any) => ({
           name: tc.function?.name || tc.name || "",
           args: typeof tc.function?.arguments === "string" ? JSON.parse(tc.function.arguments) : (tc.function?.arguments ?? {}),
@@ -160,7 +179,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       : undefined;
 
     const normalized = this.splitMirroredReasoning(
-      choice?.message?.content,
+      choice?.message?.content || refusal,
       choice?.message?.reasoning || choice?.message?.reasoning_content,
     );
 
@@ -176,7 +195,8 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     return {
       content: normalized.content,
       reasoning: normalized.reasoning,
-      finish_reason: toolCalls ? "tool_calls" : (choice?.finish_reason || "stop"),
+      finish_reason: toolCalls && ["stop", "tool_calls", "function_call"].includes(finishReason) ? "tool_calls" : finishReason,
+      ...(stopDetails ? { stop_details: stopDetails } : {}),
       tool_calls: toolCalls,
       reasoning_details: reasoningDetails,
       usage: data.usage
@@ -200,124 +220,80 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     apiUrl: string,
     request: GenerationRequest
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const url = `${this.baseUrl(apiUrl)}/chat/completions`;
+    const url = this.chatCompletionsUrl(apiUrl, request);
     const body = this.buildBody(request, true);
 
     const res = await fetchWithPreflightAbort(url, {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, STREAM_OPERATION, res);
 
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    // Inline counter instead of createCooperativeYielder: the yielder is an
-    // async fn, so calling it allocates a promise (and an await hop) on every
-    // SSE line even when it doesn't yield. The sync modulo check keeps the
-    // 63/64 non-yielding lines allocation-free.
-    let lineCount = 0;
-    // Auto-detect reasoning field: modern APIs use `reasoning`, legacy uses
-    // `reasoning_content`. Lock to whichever key appears first so we don't
-    // check both on every chunk.
     let reasoningKey: "reasoning" | "reasoning_content" | null = null;
-
-    // Tool call accumulation — OpenAI streams tool_calls as delta chunks
     const toolCallBuffer: { id: string; name: string; argsJson: string }[] = [];
-    // OpenRouter reasoning_details accumulation (streamed as deltas).
     const reasoningDetails = new ReasoningDetailsAccumulator();
+    let finishReason: string | undefined;
+    let nativeReason: string | undefined;
+    let refusal = "";
+    let finalUsage: StreamChunk["usage"];
 
-    let streamDoneNaturally = false;
-    try {
-    while (true) {
-      const { done, value } = await readWithAbort(reader, request.signal);
-      if (done) { streamDoneNaturally = !request.signal?.aborted; break; }
+    for await (const parsed of readProviderSse(res, this.displayName, request.signal)) {
+      throwIfProviderError(parsed, this.displayName, STREAM_OPERATION);
+      const choice = parsed.choices?.[0];
+      const delta = choice?.delta;
+      if (choice?.finish_reason && !describeGenerationStop(finishReason)) finishReason = choice.finish_reason;
+      if (choice?.native_finish_reason) nativeReason = choice.native_finish_reason;
+      if (typeof delta?.refusal === "string") refusal += delta.refusal;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (++lineCount % 64 === 0) await yieldToEventLoop(request.signal);
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
-        const data = trimmed.slice(6);
-        if (data === "[DONE]") return;
-
-        try {
-          const parsed = JSON.parse(data);
-          const delta = parsed.choices?.[0]?.delta;
-          const finishReason = parsed.choices?.[0]?.finish_reason;
-
-          // Accumulate tool call deltas
-          for (const tc of (delta?.tool_calls ?? [])) {
-            const idx = tc.index ?? toolCallBuffer.length;
-            if (!toolCallBuffer[idx]) toolCallBuffer[idx] = { id: tc.id ?? "", name: "", argsJson: "" };
-            if (tc.id && !toolCallBuffer[idx].id) toolCallBuffer[idx].id = tc.id;
-            if (tc.function?.name) toolCallBuffer[idx].name += tc.function.name;
-            if (tc.function?.arguments) toolCallBuffer[idx].argsJson += tc.function.arguments;
-          }
-
-          // Accumulate OpenRouter reasoning_details deltas
-          reasoningDetails.push(delta?.reasoning_details);
-
-          // Resolve reasoning from the detected key, or auto-detect on first occurrence
-          let reasoning: string | undefined;
-          if (reasoningKey) {
-            reasoning = delta?.[reasoningKey];
-          } else if (delta?.reasoning !== undefined) {
-            reasoningKey = "reasoning";
-            reasoning = delta.reasoning;
-          } else if (delta?.reasoning_content !== undefined) {
-            reasoningKey = "reasoning_content";
-            reasoning = delta.reasoning_content;
-          }
-          const normalized = this.splitMirroredReasoning(delta?.content, reasoning);
-          const content = normalized.content;
-          reasoning = normalized.reasoning;
-
-          // Usage data arrives in the final chunk when stream_options.include_usage is true
-          const usage = parsed.usage
-            ? {
-                prompt_tokens: parsed.usage.prompt_tokens || 0,
-                completion_tokens: parsed.usage.completion_tokens || 0,
-                total_tokens: parsed.usage.total_tokens || 0,
-                provider_raw: { ...parsed.usage },
-              }
-            : undefined;
-
-          if (finishReason) {
-            // Emit accumulated tool calls on the finish chunk
-            const toolCalls: ToolCallResult[] | undefined = toolCallBuffer.length > 0
-              ? toolCallBuffer.map(tc => ({ name: tc.name, args: JSON.parse(tc.argsJson || "{}"), call_id: tc.id || crypto.randomUUID() }))
-              : undefined;
-            yield {
-              token: content || "",
-              reasoning,
-              finish_reason: toolCalls ? "tool_calls" : finishReason,
-              tool_calls: toolCalls,
-              reasoning_details: reasoningDetails.finalize(),
-              usage,
-            };
-          } else if (reasoning || content) {
-            yield {
-              token: content || "",
-              reasoning,
-              usage,
-            };
-          } else if (usage) {
-            yield { token: "", usage };
-          }
-        } catch {
-          // Skip malformed SSE lines
-        }
+      for (const tc of (delta?.tool_calls ?? [])) {
+        const idx = tc.index ?? toolCallBuffer.length;
+        if (!toolCallBuffer[idx]) toolCallBuffer[idx] = { id: tc.id ?? "", name: "", argsJson: "" };
+        if (tc.id && !toolCallBuffer[idx].id) toolCallBuffer[idx].id = tc.id;
+        if (tc.function?.name) toolCallBuffer[idx].name += tc.function.name;
+        if (tc.function?.arguments) toolCallBuffer[idx].argsJson += tc.function.arguments;
       }
+      reasoningDetails.push(delta?.reasoning_details);
+      if (!reasoningKey) {
+        if (delta?.reasoning !== undefined) reasoningKey = "reasoning";
+        else if (delta?.reasoning_content !== undefined) reasoningKey = "reasoning_content";
+      }
+      const normalized = this.splitMirroredReasoning(
+        delta?.content || delta?.refusal, reasoningKey ? delta?.[reasoningKey] : undefined,
+      );
+      const usage = parsed.usage ? {
+        prompt_tokens: parsed.usage.prompt_tokens || 0,
+        completion_tokens: parsed.usage.completion_tokens || 0,
+        total_tokens: parsed.usage.total_tokens || 0,
+        provider_raw: { ...parsed.usage },
+      } : undefined;
+      if (usage) finalUsage = usage;
+      if (normalized.content || normalized.reasoning || usage) yield {
+        token: normalized.content, reasoning: normalized.reasoning, usage,
+      };
     }
-    } finally {
-      if (!streamDoneNaturally) await cancelStreamAndCloseConnection(reader, res);
-    }
+    if (request.signal?.aborted) return;
+    // Compatible endpoints may omit [DONE], but must still report a finish
+    // reason. Wait through the usage-only chunk before emitting completion.
+    if (!finishReason) throw incompleteStream(this.displayName);
+    const stopDetails = refusal
+      ? { type: "refusal", explanation: refusal }
+      : nativeReason ? { type: "finish_reason", category: nativeReason } : undefined;
+    const failed = describeGenerationStop(finishReason, stopDetails);
+    // Truncated tool arguments are not executable. Preserve the provider's
+    // failure instead of throwing a JSON parse error or reporting tool_calls.
+    const toolCalls = !failed && toolCallBuffer.length > 0
+      ? toolCallBuffer.filter(Boolean).map(tc => ({
+          name: tc.name, args: JSON.parse(tc.argsJson || "{}"), call_id: tc.id || crypto.randomUUID(),
+        }))
+      : undefined;
+    yield {
+      token: "",
+      finish_reason: toolCalls && ["stop", "tool_calls", "function_call"].includes(finishReason) ? "tool_calls" : finishReason,
+      ...(stopDetails ? { stop_details: stopDetails } : {}),
+      tool_calls: toolCalls, reasoning_details: reasoningDetails.finalize(), usage: finalUsage,
+    };
   }
 
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {
@@ -375,7 +351,13 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
   // message, tool_result parts become separate role:tool messages.
   protected flattenForChat(m: LlmMessage): any[] {
     if (typeof m.content === "string") {
-      return [{ role: m.role, content: m.content }];
+      return [
+        {
+          role: m.role,
+          content: m.content,
+          ...this.assistantReasoningCarrier(m),
+        },
+      ];
     }
     const parts = m.content as LlmMessagePart[];
     const toolUses = parts.filter((p): p is Extract<LlmMessagePart, { type: "tool_use" }> => p.type === "tool_use");
@@ -419,7 +401,11 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
             : {}),
       });
     } else if (nonTool.length > 0) {
-      out.push({ role: m.role, content: this.formatContent({ ...m, content: nonTool }) });
+      out.push({
+        role: m.role,
+        content: this.formatContent({ ...m, content: nonTool }),
+        ...this.assistantReasoningCarrier(m),
+      });
     }
 
     for (const tr of toolResults) {
@@ -431,6 +417,31 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     }
 
     return out;
+  }
+
+  /**
+   * Reasoning payloads belong to the assistant turn that produced them. This
+   * is also used for ordinary prompt history (not only inline tool turns), so
+   * retained native reasoning is sent back in its original provider field.
+   */
+  private assistantReasoningCarrier(m: LlmMessage): Record<string, unknown> {
+    if (m.role !== "assistant") return {};
+    if (m.reasoning_details?.length) {
+      return { reasoning_details: m.reasoning_details };
+    }
+    return m.reasoning_content && this.replayReasoningContentOnPlainAssistant(m)
+      ? { reasoning_content: m.reasoning_content }
+      : {};
+  }
+
+  /**
+   * Most OpenAI-compatible relays retain native reasoning on ordinary history
+   * turns. Providers whose APIs only accept `reasoning_content` on tool-call
+   * continuations override this hook; the explicit tool-call branch above is
+   * intentionally unaffected.
+   */
+  protected replayReasoningContentOnPlainAssistant(_message: LlmMessage): boolean {
+    return true;
   }
 
   /** Keys that are internal to Lumiverse and should never be sent to any provider API. */

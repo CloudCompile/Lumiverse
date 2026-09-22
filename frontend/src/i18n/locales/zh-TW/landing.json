@@ -1,6 +1,10 @@
 {
   "groupChat": "群聊",
   "active": "進行中",
+  "galleryWidth": {
+    "compact": "使用緊湊畫廊寬度",
+    "expanded": "將畫廊擴展至全寬"
+  },
   "account": "賬戶",
   "subtitle": {
     "chooseGroupThreads": "從群組話題中選擇",

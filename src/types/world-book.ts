@@ -15,6 +15,8 @@ export interface WorldBookEntry {
   world_book_id: string;
   uid: string;
   outlet_name: string | null;
+  wi_marker: string | null;
+  wi_marker_side: "before" | "after" | null;
   key: string[];
   keysecondary: string[];
   content: string;
@@ -31,6 +33,8 @@ export interface WorldBookEntry {
   group_weight: number;
   probability: number;
   scan_depth: number | null;
+  /** Exclude the synthetic character greeting from this entry's lexical activation scan. */
+  exclude_greeting: boolean;
   case_sensitive: boolean;
   match_whole_words: boolean;
   automation_id: string | null;
@@ -48,6 +52,7 @@ export interface WorldBookEntry {
   vector_index_status: WorldBookVectorIndexStatus;
   vector_indexed_at: number | null;
   vector_index_error: string | null;
+  revision: number;
   extensions: Record<string, any>;
   created_at: number;
   updated_at: number;
@@ -97,6 +102,17 @@ export interface WorldBookDiagnostics {
   };
   vector_summary: WorldBookVectorSummary;
   query_preview: string;
+  query_scope: {
+    configured_scan_depth: number | null;
+    visible_messages_available: number;
+    vector_messages_selected: number;
+    max_tokens: number;
+    token_truncated: boolean;
+  };
+  lexical_query_previews: Array<{
+    kind: "anchors" | "mixed" | "topical";
+    text: string;
+  }>;
   eligible_entries: number;
   retrieval: {
     top_k: number;
@@ -138,6 +154,7 @@ export interface WorldBookDiagnostics {
       commentExact: number;
       commentPartial: number;
       focusBoost: number;
+      supportingContextBoost: number;
       priority: number;
       broadPenalty: number;
       focusMissPenalty: number;
@@ -179,6 +196,7 @@ export interface WorldBookDiagnostics {
       commentExact: number;
       commentPartial: number;
       focusBoost: number;
+      supportingContextBoost: number;
       priority: number;
       broadPenalty: number;
       focusMissPenalty: number;
@@ -239,6 +257,8 @@ export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
 export interface CreateWorldBookEntryInput {
   outlet_name?: string | null;
+  wi_marker?: string | null;
+  wi_marker_side?: "before" | "after" | null;
   key?: string[];
   keysecondary?: string[];
   content?: string;
@@ -255,6 +275,8 @@ export interface CreateWorldBookEntryInput {
   group_weight?: number;
   probability?: number;
   scan_depth?: number;
+  /** Exclude the synthetic character greeting from this entry's lexical activation scan. */
+  exclude_greeting?: boolean;
   case_sensitive?: boolean;
   match_whole_words?: boolean;
   automation_id?: string;
@@ -272,47 +294,85 @@ export interface CreateWorldBookEntryInput {
   extensions?: Record<string, any>;
 }
 
-export type UpdateWorldBookEntryInput = CreateWorldBookEntryInput;
+export type UpdateWorldBookEntryInput = CreateWorldBookEntryInput & {
+  expected_revision?: number;
+};
 
 export interface DuplicateWorldBookEntryInput {
   target_book_id?: string | null;
+  expected_revision?: number;
 }
 
 export interface ReorderWorldBookEntriesInput {
   ordered_ids: string[];
+  expected_revisions?: Record<string, number>;
 }
 
-export interface WorldBookEntryBulkDeleteInput {
+interface WorldBookEntryBulkBaseInput {
+  entry_ids: string[];
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkDeleteInput extends WorldBookEntryBulkBaseInput {
   action: "delete";
-  entry_ids: string[];
 }
 
-export interface WorldBookEntryBulkMoveInput {
+export interface WorldBookEntryBulkMoveInput extends WorldBookEntryBulkBaseInput {
   action: "move";
-  entry_ids: string[];
   target_book_id: string;
 }
 
-export interface WorldBookEntryBulkRenumberInput {
+export interface WorldBookEntryBulkRenumberInput extends WorldBookEntryBulkBaseInput {
   action: "renumber";
-  entry_ids: string[];
   start?: number | null;
   step?: number;
   direction?: "asc" | "desc";
 }
 
-export interface WorldBookEntryBulkAddKeywordInput {
+export interface WorldBookEntryBulkAddKeywordInput extends WorldBookEntryBulkBaseInput {
   action: "add_keyword";
-  entry_ids: string[];
   keyword: string;
   target?: "primary" | "secondary";
 }
 
-export interface WorldBookEntryBulkSetPositionInput {
+export interface WorldBookEntryBulkSetPositionInput extends WorldBookEntryBulkBaseInput {
   action: "set_position";
-  entry_ids: string[];
   position: number;
   depth?: number;
+}
+
+export interface WorldBookEntryBulkSetActivationInput extends WorldBookEntryBulkBaseInput {
+  action: "set_activation";
+  activation: "trigger" | "constant" | "vector";
+}
+
+export interface WorldBookEntryBulkSetTriggerInput extends WorldBookEntryBulkBaseInput {
+  action: "set_trigger";
+}
+
+export interface WorldBookEntryBulkSetPriorityInput extends WorldBookEntryBulkBaseInput {
+  action: "set_priority";
+  priority: number;
+}
+
+export interface WorldBookEntryBulkSetDepthInput extends WorldBookEntryBulkBaseInput {
+  action: "set_depth";
+  depth: number;
+}
+
+export interface WorldBookEntryBulkSetEnabledInput extends WorldBookEntryBulkBaseInput {
+  action: "set_enabled";
+  enabled: boolean;
+}
+
+export interface WorldBookEntryBulkSetFieldsInput extends WorldBookEntryBulkBaseInput {
+  action: "set_fields";
+  fields: Partial<CreateWorldBookEntryInput>;
+}
+
+export interface WorldBookEntryBulkCopyInput extends WorldBookEntryBulkBaseInput {
+  action: "copy";
+  target_book_id: string;
 }
 
 export type WorldBookEntryBulkActionInput =
@@ -320,12 +380,30 @@ export type WorldBookEntryBulkActionInput =
   | WorldBookEntryBulkMoveInput
   | WorldBookEntryBulkRenumberInput
   | WorldBookEntryBulkAddKeywordInput
-  | WorldBookEntryBulkSetPositionInput;
+  | WorldBookEntryBulkSetPositionInput
+  | WorldBookEntryBulkSetActivationInput
+  | WorldBookEntryBulkSetTriggerInput
+  | WorldBookEntryBulkSetPriorityInput
+  | WorldBookEntryBulkSetDepthInput
+  | WorldBookEntryBulkSetEnabledInput
+  | WorldBookEntryBulkSetFieldsInput
+  | WorldBookEntryBulkCopyInput;
 
 export interface WorldBookEntryBulkActionResult {
   action: WorldBookEntryBulkActionInput["action"];
   affected: number;
   target_book_id?: string;
+}
+
+export interface WorldBookEntryConflict {
+  id: string;
+  current: WorldBookEntry | null;
+}
+
+export interface WorldBookEntryConflictPayload {
+  error: "world_book_entry_conflict";
+  code: "WORLD_BOOK_ENTRY_CONFLICT";
+  conflicts: WorldBookEntryConflict[];
 }
 
 // --- World Info Assembly Cache ---
@@ -339,4 +417,5 @@ export interface WorldInfoCache {
   emBefore: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 5
   emAfter: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;        // position 6
   atMarker: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string }>;       // position 7
+  pinnedMarkers: Array<{ content: string; role: "system" | "user" | "assistant"; entryLabel: string; marker: string; side: "before" | "after" }>;
 }

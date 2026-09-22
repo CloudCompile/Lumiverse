@@ -23,10 +23,11 @@ import * as poolSvc from "../src/services/generation-pool.service";
 const USER_ID = "stop-test-user";
 const enc = new TextEncoder();
 
-interface RequestState { cancelled: boolean; sent: number }
+interface RequestState { cancelled: boolean; paused: boolean; sent: number; model: string }
 const requests: RequestState[] = [];
 let server: ReturnType<typeof Bun.serve>;
 let connectionId: string;
+let chatConnectionId: string;
 let presetId: string;
 
 async function waitFor(cond: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -44,16 +45,23 @@ beforeAll(async () => {
   server = Bun.serve({
     port: 0,
     idleTimeout: 0,
-    fetch(req) {
+    async fetch(req) {
       if (!new URL(req.url).pathname.endsWith("/chat/completions")) {
         return new Response(JSON.stringify({ data: [] }), { status: 200 });
       }
-      const state: RequestState = { cancelled: false, sent: 0 };
+      const body = await req.json().catch(() => ({})) as { model?: unknown };
+      const state: RequestState = {
+        cancelled: false,
+        paused: false,
+        sent: 0,
+        model: typeof body.model === "string" ? body.model : "",
+      };
       requests.push(state);
       let timer: ReturnType<typeof setInterval> | null = null;
       const stream = new ReadableStream({
         start(controller) {
           timer = setInterval(() => {
+            if (state.paused) return;
             state.sent++;
             const chunk = { choices: [{ delta: { content: `tok${state.sent} ` }, finish_reason: null }] };
             try {
@@ -77,17 +85,6 @@ beforeAll(async () => {
   const db = getDb();
   db.run("PRAGMA foreign_keys = OFF");
   db.run(await Bun.file(join(import.meta.dir, "..", "src", "db", "baseline.sql")).text());
-  // Baseline is a 001-065 snapshot; apply later migrations on top (skipping
-  // any change the baseline already absorbed).
-  const migrationsDir = join(import.meta.dir, "..", "src", "db", "migrations");
-  const post065 = readdirSync(migrationsDir)
-    .filter((f) => f.endsWith(".sql") && parseInt(f.slice(0, 3), 10) > 65)
-    .sort();
-  for (const file of post065) {
-    try {
-      db.run(await Bun.file(join(migrationsDir, file)).text());
-    } catch { /* baseline already includes this change */ }
-  }
 
   presetId = presetsSvc.createPreset(USER_ID, {
     name: "stop-test-preset",
@@ -100,6 +97,12 @@ beforeAll(async () => {
     api_url: `http://localhost:${server.port}/v1`,
     model: "mock-model",
     is_default: true,
+  } as any)).id;
+  chatConnectionId = (await connectionsSvc.createConnection(USER_ID, {
+    name: "chat-bound-mock",
+    provider: "custom",
+    api_url: `http://localhost:${server.port}/v1`,
+    model: "chat-profile-model",
   } as any)).id;
 });
 
@@ -130,6 +133,56 @@ async function startStreamingGeneration(): Promise<{ chatId: string; generationI
 }
 
 describe("stop generation", () => {
+  test("chat settings override the requested connection profile and its default model", async () => {
+    const requestIndex = requests.length;
+    const chat = chatsSvc.createChat(USER_ID, {
+      character_id: null,
+      name: "Chat-bound Connection Test",
+      metadata: { temporary: true, connection_profile_id: chatConnectionId },
+    });
+    chatsSvc.createMessage(chat.id, { is_user: true, name: "User", content: "Go." }, USER_ID);
+
+    const { generationId } = await genSvc.startGeneration({
+      userId: USER_ID,
+      chat_id: chat.id,
+      connection_id: connectionId,
+      preset_id: presetId,
+      generation_type: "normal",
+    } as any);
+
+    expect(poolSvc.getPoolForChat(USER_ID, chat.id)?.model).toBe("chat-profile-model");
+    expect(await waitFor(() => requests[requestIndex]?.sent >= 1, 5000)).toBe(true);
+    expect(requests[requestIndex].model).toBe("chat-profile-model");
+    expect(genSvc.stopGeneration(USER_ID, generationId)).toBe(true);
+  });
+
+  test("chat settings can override the bound connection's model", async () => {
+    const requestIndex = requests.length;
+    const chat = chatsSvc.createChat(USER_ID, {
+      character_id: null,
+      name: "Chat-bound Model Test",
+      metadata: {
+        temporary: true,
+        connection_profile_id: chatConnectionId,
+        connection_model: "chat-model-override",
+      },
+    });
+    chatsSvc.createMessage(chat.id, { is_user: true, name: "User", content: "Go." }, USER_ID);
+
+    const { generationId } = await genSvc.startGeneration({
+      userId: USER_ID,
+      chat_id: chat.id,
+      connection_id: connectionId,
+      preset_id: presetId,
+      generation_type: "normal",
+    } as any);
+
+    expect(poolSvc.getPoolForChat(USER_ID, chat.id)?.model).toBe("chat-model-override");
+    expect(await waitFor(() => requests[requestIndex]?.sent >= 1, 5000)).toBe(true);
+    expect(requests[requestIndex].model).toBe("chat-model-override");
+    expect(genSvc.stopGeneration(USER_ID, generationId)).toBe(true);
+  });
+
   test("stopGeneration aborts the stream and the upstream server sees the disconnect", async () => {
     const { chatId, generationId, state } = await startStreamingGeneration();
 
@@ -156,5 +209,43 @@ describe("stop generation", () => {
 
   test("stopChatGenerations reports false when nothing is running", () => {
     expect(genSvc.stopChatGenerations(USER_ID, "idle-chat")).toBe(false);
+  });
+
+  test("generation sweep allows streams that keep receiving tokens beyond ten minutes", async () => {
+    const { generationId, state } = await startStreamingGeneration();
+    const realNow = Date.now;
+    const currentTime = realNow();
+    let mockNow = currentTime + 10 * 60 * 1000 + 1;
+    Date.now = () => mockNow;
+
+    try {
+      // A token received after the request has crossed the former hard cap
+      // refreshes the inactivity deadline instead of terminating the stream.
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      genSvc.sweepInactiveGenerations();
+      expect(state.cancelled).toBe(false);
+    } finally {
+      Date.now = realNow;
+      genSvc.stopGeneration(USER_ID, generationId);
+      await waitFor(() => state.cancelled, 2000);
+    }
+  });
+
+  test("generation sweep aborts a stream that stops producing tokens", async () => {
+    const { generationId, state } = await startStreamingGeneration();
+    state.paused = true;
+    // Let an already-scheduled interval tick observe the pause.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    const realNow = Date.now;
+    Date.now = () => realNow() + 10 * 60 * 1000 + 1;
+    try {
+      genSvc.sweepInactiveGenerations();
+    } finally {
+      Date.now = realNow;
+    }
+
+    expect(await waitFor(() => state.cancelled, 2000)).toBe(true);
+    expect(genSvc.stopGeneration(USER_ID, generationId)).toBe(false);
   });
 });

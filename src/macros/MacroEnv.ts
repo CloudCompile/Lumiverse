@@ -1,3 +1,4 @@
+import { macroInterceptorChain } from "../spindle/macro-interceptor";
 import type { Character } from "../types/character";
 import { getEffectiveCharacterName } from "../types/character";
 import type { Persona } from "../types/persona";
@@ -5,10 +6,17 @@ import type { Chat } from "../types/chat";
 import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import type { GenerationType } from "../llm/types";
-import type { MacroEnv, MacroHandler, MacroDefinition } from "./types";
+import type {
+  MacroEnv,
+  MacroHandler,
+  MacroDefinition,
+  PromptBlockMacroContext,
+} from "./types";
 
 export interface BuildEnvContext {
   character: Character;
+  /** Raw target/focused character card for group chats. Used by focused-member macros even when the main character card is merged. */
+  focusedCharacter?: Character;
   persona: Persona | null;
   chat: Chat;
   messages: Message[];
@@ -24,29 +32,37 @@ export interface BuildEnvContext {
   groupNotMutedNames?: string[];
   /** The target character ID for group chats (the character whose turn it is). */
   targetCharacterId?: string;
-  /** Pre-resolved name of the target/focused character. Falls back to character.name if targetCharacterId is set. */
+  /** Pre-resolved name of the target/focused character. Falls back to focusedCharacter/character when omitted. */
   targetCharacterName?: string;
   /** Optional abort signal — threaded onto MacroEnv so the evaluator can cancel between iterations. */
   signal?: AbortSignal;
   /** Content of the regenerate/swipe target before the new swipe was staged. */
   rejectedSwipe?: string;
+  /** Exact input-bar draft snapshot captured when this generation started. */
+  userInput?: string;
 }
 
 export function resolvePersonaPronouns(persona: Persona | null): {
   subjective: string;
   objective: string;
   possessive: string;
+  reflexive: string;
+  possessiveStandalone: string;
 } {
   return {
     subjective: persona?.subjective_pronoun?.trim() || "they",
     objective: persona?.objective_pronoun?.trim() || "them",
     possessive: persona?.possessive_pronoun?.trim() || "their",
+    reflexive: persona?.reflexive_pronoun?.trim() || "themselves",
+    possessiveStandalone: persona?.possessive_pronoun_standalone?.trim() || "theirs",
   };
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
   const { character, persona, chat, messages, generationType, connection } = ctx;
+  const focusedCharacter = ctx.focusedCharacter ?? character;
   const personaPronouns = resolvePersonaPronouns(persona);
+  const personaAddonOutlets = buildPersonaAddonOutlets(persona);
 
   const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   const lastUserMsg = findLast(messages, (m) => m.is_user);
@@ -54,7 +70,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
 
   const isGroup = !!chat.metadata?.group && Array.isArray(chat.metadata?.character_ids);
   const allGroupNames = ctx.groupCharacterNames;
-  const focusedName = isGroup ? (ctx.targetCharacterName || character.name) : "";
+  const focusedName = isGroup ? (ctx.targetCharacterName || getEffectiveCharacterName(focusedCharacter)) : "";
   const groupLastSpeaker = isGroup
     ? (findLast(messages, (m) => !m.is_user)?.name || "")
     : "";
@@ -95,6 +111,8 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       personaSubjectivePronoun: personaPronouns.subjective,
       personaObjectivePronoun: personaPronouns.objective,
       personaPossessivePronoun: personaPronouns.possessive,
+      personaReflexivePronoun: personaPronouns.reflexive,
+      personaPossessivePronounStandalone: personaPronouns.possessiveStandalone,
       mesExamples: character.mes_example || "",
       mesExamplesRaw: character.mes_example || "",
       systemPrompt: character.system_prompt || "",
@@ -104,6 +122,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       version: (character.extensions?.version as string) || "",
       creator: character.creator || "",
       firstMessage: resolveChatGreeting(character, chat, messages),
+      alternateGreetings: [...(character.alternate_greetings || [])],
     },
     chat: {
       id: chat.id,
@@ -117,6 +136,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
       lastSwipeId: lastMsg?.swipes ? lastMsg.swipes.length - 1 : 0,
       currentSwipeId: lastMsg?.swipe_id ?? 0,
       rejectedSwipe: ctx.rejectedSwipe ?? "",
+      greetingIndex: resolveChatGreetingIndex(character, chat, messages),
     },
     system: {
       model: connection?.model || "",
@@ -137,13 +157,45 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
       characterId: character.id,
+      preserveMessageSource: macroInterceptorChain.ownsMessageSource(character.extensions, ctx.userId ?? (chat as any).user_id),
+      groupFocusedCharacter: buildFocusedCharacterMacroState(focusedCharacter, chat, messages),
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
       chatCreatedAt: (chat as any).created_at as number | undefined,
       characterTags: Array.isArray((character as any).tags) ? (character as any).tags : [],
-      lastMessageTime: lastMsg && typeof lastMsg.send_date === "number"
-        ? lastMsg.send_date * 1000
+      // Idle duration is relative to the most recent character/assistant
+      // message. A newly sent user message must not reset it to zero before
+      // the preset is assembled.
+      lastMessageTime: lastCharMsg && typeof lastCharMsg.send_date === "number"
+        ? lastCharMsg.send_date * 1000
         : undefined,
+      userInput: ctx.userInput ?? "",
+      // Persona outlets are intentionally separate from Lorebook outlets.
+      // `{{persona_outlet::name}}` reads this map; `{{outlet::name}}` reads
+      // worldInfoOutlets, which is populated only by world-info activation.
+      personaAddonOutlets,
     },
+  };
+}
+
+function buildFocusedCharacterMacroState(
+  character: Character,
+  chat: Chat,
+  messages: Message[],
+): Record<string, string> {
+  return {
+    id: character.id,
+    name: getEffectiveCharacterName(character),
+    description: character.description || "",
+    personality: character.personality || "",
+    scenario: character.scenario || "",
+    mesExamples: character.mes_example || "",
+    systemPrompt: character.system_prompt || "",
+    postHistoryInstructions: character.post_history_instructions || "",
+    depthPrompt: (character.extensions?.depth_prompt as string) || "",
+    creatorNotes: character.creator_notes || "",
+    version: (character.extensions?.version as string) || "",
+    creator: character.creator || "",
+    firstMessage: resolveChatGreeting(character, chat, messages),
   };
 }
 
@@ -160,6 +212,7 @@ export function cloneEnv(env: MacroEnv): MacroEnv {
       chat: new Map(env.variables.chat),
     },
     ...(env._chatVarsDirty ? { _chatVarsDirty: true } : {}),
+    ...(env.promptBlock ? { promptBlock: { ...env.promptBlock } } : {}),
     dynamicMacros: { ...env.dynamicMacros },
     _dynamicMacrosLower: env._dynamicMacrosLower
       ? new Map(env._dynamicMacrosLower)
@@ -167,6 +220,51 @@ export function cloneEnv(env: MacroEnv): MacroEnv {
     signal: env.signal,
     extra: { ...env.extra },
   };
+}
+
+/**
+ * Run work with the supplied preset block as the read-only macro context.
+ * The previous context is always restored so later assembly phases cannot
+ * accidentally inherit placement from an earlier block.
+ */
+export async function withPromptBlockContext<T>(
+  env: MacroEnv,
+  block: PromptBlockMacroContext,
+  work: () => T | Promise<T>,
+): Promise<T> {
+  const previous = env.promptBlock;
+  env.promptBlock = { ...block };
+
+  // Prompt-variable values are stored by block, but the legacy macro surface
+  // ({{var::name}}, {{getvar::name}}, and {{.name}}) reads the flat local map.
+  // Temporarily overlay this block's own resolved bucket so a later block with
+  // a same-named variable cannot shadow the value while this block renders.
+  // Writes made by {{setvar::...}} during the block still update the overlay
+  // normally; the previous assembly scope is restored afterward.
+  const byBlock = env.extra.promptVariablesByBlock as
+    | Record<string, Record<string, string | number>>
+    | undefined;
+  const blockValues = block.id ? byBlock?.[block.id] : undefined;
+  const saved = new Map<string, { existed: boolean; value?: string }>();
+  if (blockValues) {
+    for (const [name, value] of Object.entries(blockValues)) {
+      saved.set(name, {
+        existed: env.variables.local.has(name),
+        value: env.variables.local.get(name),
+      });
+      env.variables.local.set(name, String(value));
+    }
+  }
+
+  try {
+    return await work();
+  } finally {
+    for (const [name, prior] of saved) {
+      if (prior.existed) env.variables.local.set(name, prior.value ?? "");
+      else env.variables.local.delete(name);
+    }
+    env.promptBlock = previous;
+  }
 }
 
 function resolveChatGreeting(character: Character, chat: Chat, messages: Message[]): string {
@@ -189,6 +287,29 @@ function resolveChatGreeting(character: Character, chat: Chat, messages: Message
   if (openingMessage && !openingMessage.is_user) return openingMessage.content;
 
   return character.first_mes || "";
+}
+
+function resolveChatGreetingIndex(
+  character: Character,
+  chat: Chat,
+  messages: Message[],
+): number {
+  const metadataIndex = chat.metadata?.activeGreetingIndex;
+  if (Number.isInteger(metadataIndex) && metadataIndex >= 0) {
+    return metadataIndex;
+  }
+
+  const taggedGreeting = chat.metadata?.group
+    ? messages.find((message) =>
+        !message.is_user
+        && message.extra?.greeting === true
+        && message.extra?.greeting_character_id === character.id,
+      )
+    : messages.find((message) =>
+        !message.is_user && message.extra?.greeting === true,
+      );
+  const storedIndex = taggedGreeting?.extra?.greeting_index;
+  return Number.isInteger(storedIndex) && storedIndex >= 0 ? storedIndex : 0;
 }
 
 export function mergeDynamicMacros(
@@ -244,7 +365,8 @@ function buildPersonaWithAddons(persona: Persona | null): string {
   const personaAddons = persona.metadata?.addons;
   const enabledPersonaContent = Array.isArray(personaAddons)
     ? personaAddons
-        .filter((a: any) => a.enabled && a.content)
+        .filter((a: any) => a.enabled && a.content && !getAddonOutletName(a))
+        .slice()
         .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
         .map((a: any) => a.content.trim())
         .filter(Boolean)
@@ -254,6 +376,7 @@ function buildPersonaWithAddons(persona: Persona | null): string {
   const globalAddons = persona.metadata?._resolvedGlobalAddons;
   const enabledGlobalContent = Array.isArray(globalAddons)
     ? globalAddons
+        .slice()
         .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
         .map((a: any) => ((a.content as string) || "").trim())
         .filter(Boolean)
@@ -262,6 +385,38 @@ function buildPersonaWithAddons(persona: Persona | null): string {
   const allContent = [...enabledPersonaContent, ...enabledGlobalContent];
   if (allContent.length === 0) return base;
   return base ? `${base}\n${allContent.join("\n")}` : allContent.join("\n");
+}
+
+/**
+ * Persona add-ons can opt out of the normal `{{persona}}` append-only flow
+ * and instead publish their content through the separate `persona_outlet`
+ * macro namespace. The name is normalized for case-insensitive lookup.
+ */
+function buildPersonaAddonOutlets(persona: Persona | null): Record<string, string> {
+  const addons = persona?.metadata?.addons;
+  if (!Array.isArray(addons)) return {};
+
+  const outlets = new Map<string, string>();
+  for (const addon of addons
+    .filter((value: any) => value?.enabled && typeof value.content === "string")
+    .slice()
+    .sort((a: any, b: any) => (a.sort_order ?? 0) - (b.sort_order ?? 0))) {
+    const outletName = getAddonOutletName(addon);
+    const content = addon.content.trim();
+    if (!outletName || !content) continue;
+
+    const existing = outlets.get(outletName);
+    outlets.set(outletName, existing ? `${existing}\n\n${content}` : content);
+  }
+
+  return Object.fromEntries(outlets);
+}
+
+function getAddonOutletName(addon: any): string | null {
+  const value = addon?.outlet_name ?? addon?.outletName;
+  if (typeof value !== "string") return null;
+  const name = value.trim().toLowerCase();
+  return name || null;
 }
 
 function findLast(messages: Message[], predicate: (m: Message) => boolean): Message | null {

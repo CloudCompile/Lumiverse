@@ -29,6 +29,13 @@ Guides are managed in **Settings > Guided Gen** and toggled on/off from the inpu
     - **Content** — The prompt text (supports macros)
     - **Position** — Where it's injected (see below)
     - **Mode** — Persistent or one-shot
+    - **Automatic activation** — Optionally activate it for one connection profile, chat, or character
+
+## Automatic Activation
+
+A guide can activate automatically when you use a selected connection profile, open a selected chat, or generate with a selected character. Choose the scope and target while editing the guide. The guide's normal switch remains available for activating it globally in every context.
+
+An automatically activated guide is marked **AUTO** in the chat guide menu. Change or remove its rule in **Settings > Guided Gen**. For a one-shot guide, the automatic rule is consumed along with the guide after its matching generation.
 
 ---
 

@@ -1,7 +1,52 @@
 export type RegexPlacement = 'user_input' | 'ai_output' | 'world_info' | 'reasoning' | 'memory'
 export type RegexScope = 'global' | 'character' | 'chat'
 export type RegexTarget = 'prompt' | 'response' | 'display'
-export type RegexMacroMode = 'none' | 'raw' | 'escaped' | 'after'
+export type RegexMacroMode = 'none' | 'find' | 'raw' | 'escaped' | 'after'
+export type RegexActionType = 'send' | 'append' | 'effects'
+
+export interface RegexPromptActivation {
+  source: 'user_input' | 'ai_output'
+  lifetime: 'latest' | 'chat'
+  mappings: RegexPromptActivationMapping[]
+}
+
+export interface RegexPromptActivationMapping {
+  capture: string
+  /** Exact value or any of a list; strings remain literal for backward compatibility. */
+  value: string | string[]
+  block_ids: string[]
+  enabled: boolean
+}
+
+export interface RegexActionSetStateEffect {
+  type: 'set_state'
+  key: string
+  value: string
+}
+
+export interface RegexActionDraftEffect {
+  type: 'draft'
+  content: string
+  mode: 'replace' | 'append'
+}
+
+export interface RegexActionForkEffect {
+  type: 'fork'
+}
+
+export type RegexActionEffect = RegexActionSetStateEffect | RegexActionDraftEffect | RegexActionForkEffect
+
+export interface RegexAction {
+  id: string
+  type: RegexActionType
+  multi_select: boolean
+  cost: string
+  limit: string
+  title: string
+  subtitle: string
+  content: string
+  effects?: RegexActionEffect[]
+}
 
 export interface RegexPerformanceMetadata {
   slow: boolean
@@ -11,6 +56,7 @@ export interface RegexPerformanceMetadata {
   detected_at: number
   source: 'prompt_backend' | 'response_backend' | 'display_backend' | 'display_client'
   version: number
+  engine_version?: number
 }
 
 export interface RegexScript {
@@ -20,6 +66,7 @@ export interface RegexScript {
   script_id: string
   find_regex: string
   replace_string: string
+  actions: RegexAction[]
   flags: string
   placement: RegexPlacement[]
   scope: RegexScope
@@ -36,6 +83,7 @@ export interface RegexScript {
   folder: string
   pack_id?: string | null
   preset_id?: string | null
+  owner_extension_identifier?: string | null
   metadata: Record<string, any>
   created_at: number
   updated_at: number
@@ -46,6 +94,7 @@ export interface CreateRegexScriptInput {
   find_regex: string
   script_id?: string
   replace_string?: string
+  actions?: RegexAction[]
   flags?: string
   placement?: RegexPlacement[]
   scope?: RegexScope

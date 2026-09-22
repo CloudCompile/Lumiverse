@@ -1,13 +1,29 @@
-import { join } from "path";
-import { sendToServer, stopServer, startServer, restartServer } from "./server-manager.js";
+import { join, resolve } from "path";
+import {
+  sendToServer,
+  stopServer,
+  startServer,
+  restartServer,
+  getServerState,
+  getServerPid,
+  getStartedAt,
+} from "./server-manager.js";
 import {
   checkForUpdates,
   applyUpdate,
   switchBranch,
   ensureDependencies,
+  ensureFrontendDependencies,
   rebuildFrontend,
+  runWithServerStopped,
+  assertUpdateCanHardSync,
+  assertBranchCanHardSync,
+  evaluateDesktopShell,
+  rebuildDesktopShell,
 } from "./git-ops.js";
-import { writeTrustAnyOrigin } from "./env-config.js";
+import { inspectDesktopToolchain } from "../desktop-toolchain.js";
+import { readEnvConfig, writeTrustAnyOrigin } from "./env-config.js";
+import { getCurrentBranch } from "./lib/git.js";
 import {
   PROJECT_ROOT,
   AVAILABLE_BRANCHES,
@@ -37,22 +53,64 @@ export function setLastUpdateState(state: typeof lastUpdateState): void {
   lastUpdateState = state;
 }
 
+/**
+ * Response sink override, keyed by request id. Requests that arrive over
+ * child IPC reply through the server (sendToServer). Requests that arrive
+ * from another transport — e.g. the headless stdio bridge used by the
+ * desktop tray app — register a sink here so responses and progress
+ * events return to their origin instead of the server child (which may
+ * not even be running).
+ */
+type ResponseSink = (message: any) => void;
+const externalSinks = new Map<string, ResponseSink>();
+// Sinks stay registered after the response because long operations keep
+// emitting progress events under the same id. Cap the map so ids from a
+// long-lived supervisor session can't accumulate without bound.
+const MAX_EXTERNAL_SINKS = 100;
+
+function registerExternalSink(id: string, sink: ResponseSink): void {
+  if (externalSinks.size >= MAX_EXTERNAL_SINKS) {
+    const oldest = externalSinks.keys().next().value;
+    if (oldest !== undefined) externalSinks.delete(oldest);
+  }
+  externalSinks.set(id, sink);
+}
+
+function deliver(id: string, message: any): void {
+  const sink = externalSinks.get(id);
+  if (sink) {
+    sink(message);
+    return;
+  }
+  sendToServer(message);
+}
+
 function respond(id: string, success: boolean, data?: any, error?: string): void {
-  sendToServer({ type: "response", id, payload: { success, data, error } });
+  deliver(id, { type: "response", id, payload: { success, data, error } });
 }
 
 function progress(id: string, operation: string, message: string): void {
-  sendToServer({ type: "progress", id, payload: { operation, message } });
+  deliver(id, { type: "progress", id, payload: { operation, message } });
+}
+
+function readRunnerVersion(): string {
+  try {
+    const pkg = require(resolve(import.meta.dir, "../../package.json"));
+    return pkg.version || "unknown";
+  } catch {
+    return "unknown";
+  }
 }
 
 function waitForResponseFlush(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, RESPONSE_FLUSH_DELAY_MS));
 }
 
-export async function handleIPCMessage(msg: any): Promise<void> {
+export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<void> {
   if (!msg?.type || !msg.id) return;
 
   const { type, id, payload } = msg;
+  if (sink) registerExternalSink(id, sink);
 
   switch (type) {
     case "status": {
@@ -61,6 +119,50 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         commitsBehind: lastUpdateState.commitsBehind,
         latestUpdateMessage: lastUpdateState.latestMessage,
       });
+      break;
+    }
+
+    case "desktop-shell-status": {
+      // The tray reports the revision it was compiled from; only the checkout
+      // can say whether that predates its desktop sources.
+      respond(id, true, evaluateDesktopShell(payload?.builtSha ?? null));
+      break;
+    }
+
+    case "rebuild-desktop": {
+      if (operationInProgress) {
+        respond(id, false, undefined, `Operation '${operationInProgress}' already in progress`);
+        break;
+      }
+
+      // Refuse before compiling rather than after. A missing linker surfaces
+      // as a Rust error several minutes in, which is a poor way to learn a
+      // prerequisite is absent.
+      const toolchain = await inspectDesktopToolchain();
+      if (!toolchain.ready) {
+        const missing = toolchain.checks
+          .filter((check) => check.status === "missing")
+          .map((check) => check.label)
+          .join(", ");
+        respond(id, false, undefined, `Missing desktop build prerequisites: ${missing}`);
+        break;
+      }
+
+      operationInProgress = "rebuild-desktop";
+      try {
+        // Unlike apply-update this answers on completion instead of acking
+        // early. Nothing here stops the server, so no in-flight request dies
+        // waiting, and the caller wants the bundle path the build produced.
+        const bundlePath = await rebuildDesktopShell((message) =>
+          progress(id, "rebuild-desktop", message),
+        );
+        respond(id, true, { bundlePath });
+      } catch (err) {
+        console.error("[runner] Desktop rebuild failed:", err);
+        respond(id, false, undefined, err instanceof Error ? err.message : "Desktop rebuild failed");
+      } finally {
+        operationInProgress = null;
+      }
       break;
     }
 
@@ -78,6 +180,12 @@ export async function handleIPCMessage(msg: any): Promise<void> {
     case "apply-update": {
       if (operationInProgress) {
         respond(id, false, undefined, `Operation '${operationInProgress}' already in progress`);
+        break;
+      }
+      try {
+        assertUpdateCanHardSync();
+      } catch (err) {
+        respond(id, false, undefined, err instanceof Error ? err.message : "Update preflight failed");
         break;
       }
       operationInProgress = "update";
@@ -118,6 +226,12 @@ export async function handleIPCMessage(msg: any): Promise<void> {
       // request hanging the full 5-minute timeout with no user feedback.
       if (!AVAILABLE_BRANCHES.includes(target)) {
         respond(id, false, undefined, `Invalid branch: ${target}. Available: ${AVAILABLE_BRANCHES.join(", ")}`);
+        break;
+      }
+      try {
+        assertBranchCanHardSync(target);
+      } catch (err) {
+        respond(id, false, undefined, err instanceof Error ? err.message : "Branch switch preflight failed");
         break;
       }
       operationInProgress = "branch-switch";
@@ -238,22 +352,70 @@ export async function handleIPCMessage(msg: any): Promise<void> {
         await waitForResponseFlush();
         const frontendDir = join(PROJECT_ROOT, "frontend");
 
-        progress(id, "rebuild", "Stopping server for dependency checks and frontend rebuild...");
-        await stopServer();
+        progress(id, "rebuild", "Stopping server for frontend rebuild...");
+        await runWithServerStopped(
+          "Frontend rebuild",
+          () => stopServer(),
+          () => { startServer(isDev); return Promise.resolve(); },
+          async () => {
+            progress(id, "rebuild", "Installing frontend dependencies...");
+            await ensureFrontendDependencies(frontendDir);
 
-        progress(id, "rebuild", "Installing backend and frontend dependencies...");
-        await ensureDependencies(frontendDir);
-
-        progress(id, "rebuild", "Waiting for Vite build to finish...");
-        await rebuildFrontend(frontendDir);
-
-        startServer(isDev);
+            await rebuildFrontend(frontendDir, (message) => progress(id, "rebuild", message));
+          },
+        );
       } catch (err) {
         console.error("[runner] Frontend rebuild failed:", err);
-        console.error("[runner] Server remains stopped because the rebuild did not complete successfully.");
+        console.error("[runner] Server restarted with the previous validated frontend bundle.");
       } finally {
         operationInProgress = null;
       }
+      break;
+    }
+
+    case "start-server": {
+      if (operationInProgress) {
+        respond(id, false, undefined, `Operation '${operationInProgress}' already in progress`);
+        break;
+      }
+      const state = getServerState();
+      if (state === "running" || state === "starting") {
+        respond(id, true, { state });
+        break;
+      }
+      try {
+        startServer(isDev);
+        respond(id, true, { state: getServerState() });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        respond(id, false, undefined, message);
+      }
+      break;
+    }
+
+    case "stop-server": {
+      if (operationInProgress) {
+        respond(id, false, undefined, `Operation '${operationInProgress}' already in progress`);
+        break;
+      }
+      await stopServer();
+      respond(id, true, { state: getServerState() });
+      break;
+    }
+
+    case "full-status": {
+      const envConfig = readEnvConfig();
+      respond(id, true, {
+        state: getServerState(),
+        pid: getServerPid(),
+        startedAt: getStartedAt(),
+        port: envConfig.port,
+        branch: getCurrentBranch() || "unknown",
+        version: readRunnerVersion(),
+        updateAvailable: lastUpdateState.available,
+        commitsBehind: lastUpdateState.commitsBehind,
+        latestUpdateMessage: lastUpdateState.latestMessage,
+      });
       break;
     }
 

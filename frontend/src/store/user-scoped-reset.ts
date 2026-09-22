@@ -1,7 +1,10 @@
 import type { AppStore } from '@/types/store'
 import { clearChatHeadsPersistence } from './slices/chat-heads'
-
+import { resetSettingsPersistence } from './slices/settings'
+import { setPresetSaveCoordinatorScope } from '@/lib/loom/preset-save-coordinator'
+import { clearLandingPageSnapshot } from '@/lib/landingPageSnapshot'
 type StoreApi = {
+  getState: () => AppStore
   setState: (partial: Partial<AppStore>) => void
 }
 
@@ -22,6 +25,9 @@ export function registerUserScopedResetStore(api: StoreApi, initial: AppStore): 
 }
 
 export function resetUserScopedStoreState(): void {
+  resetSettingsPersistence()
+  setPresetSaveCoordinatorScope(null)
+  clearLandingPageSnapshot()
   if (!storeApi || !initialState) return
 
   const patch: Partial<AppStore> = {}
@@ -34,6 +40,7 @@ export function resetUserScopedStoreState(): void {
 
   clearChatHeadsPersistence()
   patch.chatHeads = []
+  patch.imageGenProfilesVersion = storeApi.getState().imageGenProfilesVersion + 1
 
   storeApi.setState(patch)
 }

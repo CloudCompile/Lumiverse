@@ -39,6 +39,7 @@ nav = [
     { "Shared RPC Pool" = "backend-api/shared-rpc-pool.md" },
     { "Ephemeral Storage" = "backend-api/ephemeral-storage.md" },
     { "Variables" = "backend-api/variables.md" },
+    { "Runtime State" = "backend-api/runtime-state.md" },
     { "Tokens" = "backend-api/tokens.md" },
     { "Characters" = "backend-api/characters.md" },
     { "Chats" = "backend-api/chats.md" },

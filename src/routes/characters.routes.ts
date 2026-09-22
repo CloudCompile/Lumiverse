@@ -9,16 +9,42 @@ import * as tagLibrarySvc from "../services/tag-library-import.service";
 import * as wbSvc from "../services/world-books.service";
 import * as regexSvc from "../services/regex-scripts.service";
 import * as gallerySvc from "../services/character-gallery.service";
+import {
+  extractChubExpressionAssets,
+  fetchChubGalleryUrls,
+  fetchChubJson,
+  readChubFullPath,
+  type ChubExpressionAsset,
+} from "../services/chub-api.service";
+import * as exprSvc from "../services/expressions.service";
+import { markChubExpressionsChecked, queueChubExpressionImport } from "../services/chub-expression-import.service";
+import * as settingsSvc from "../services/settings.service";
+import { fetchBotBooruGalleryUrls } from "../services/botbooru-api.service";
 import { parsePagination } from "../services/pagination";
 import { safeFetch, SSRFError, validateHost } from "../utils/safe-fetch";
-import { rewriteBotBooruUrl } from "../utils/botbooru";
+import { parseBotBooruId, rewriteBotBooruUrl } from "../utils/botbooru";
 import { createAvatarResolverResponse } from "../utils/avatar-cache";
 import { buildSlug } from "../lumihub/manifest";
 import { applyCharxModulesAndAssets, autoImportEmbeddedWorldbook } from "../services/charx-import.service";
+import { importCharacterFile } from "../services/character-import.service";
+import {
+  characterImportJobs,
+  CharacterImportJobError,
+} from "../services/character-import-jobs.service";
 import { mapWithConcurrency } from "../utils/concurrency";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
+import type { Character, CharacterLibraryScope, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
 
 const app = new Hono();
 const PERSPECTIVE_LAYERS = new Set<svc.PerspectiveLayerKind>(["background", "framing", "subject"]);
+function parseLibraryScope(raw: unknown): CharacterLibraryScope | null {
+  try { return svc.normalizeCharacterLibraryScope(raw); } catch { return null; }
+}
+function isInvalidLibraryScopeError(err: unknown): boolean {
+  return err instanceof svc.InvalidCharacterLibraryScopeError || (typeof err === "object" && err !== null && (err as any).code === "INVALID_CHARACTER_LIBRARY_SCOPE");
+}
+function respondInvalidLibraryScope(c: any) { return c.json({ error: "invalid_scope" }, 400); }
 
 // ─── Import error response helper ────────────────────────────────────────
 
@@ -27,10 +53,19 @@ function respondImportError(c: any, err: any, fallbackMessage: string) {
   // Generic 400s from the old code swallowed this — which is how a 500 MB
   // decompression-cap hit looked like "no backend error" to operators.
   console.error("[character import] failed:", err);
+  if (isInvalidLibraryScopeError(err)) return respondInvalidLibraryScope(c);
   if (err instanceof cardSvc.CharacterImportError) {
     return c.json({ error: err.message, code: err.code }, err.status);
   }
   return c.json({ error: err?.message || fallbackMessage }, 400);
+}
+
+function respondImportJobError(c: any, err: unknown) {
+  if (err instanceof CharacterImportJobError) {
+    return c.json({ error: err.message, code: err.code }, err.status as any);
+  }
+  console.error("[character import job] failed:", err);
+  return c.json({ error: err instanceof Error ? err.message : "Character import job failed" }, 500);
 }
 
 // Bind any card-embedded regex scripts (Lumiverse bundle or SillyTavern) to a
@@ -43,6 +78,52 @@ function importCardRegexBestEffort(userId: string, characterId: string, extensio
   } catch (err) {
     console.error("[character import] regex import failed:", err);
   }
+}
+
+// These values refer to locally-owned entities rather than portable card data.
+// Replacing a JSON/PNG card must not detach or delete the user's avatar,
+// expression assets, world book links, or selected TTS voice.
+const LOCAL_CHARACTER_EXTENSION_KEYS = new Set([
+  "expressions",
+  "expression_groups",
+  "alternate_fields",
+  "alternate_avatars",
+  "world_book_id",
+  "world_book_ids",
+  "avatar_crop_image_id",
+  "original_image_id",
+  "risu_asset_map",
+  "gallery_reference_sequence",
+  "gallery_reference_names",
+  "landing_perspective_layers",
+  "ttsVoice",
+]);
+
+function buildCardReplacementInput(existing: Character, card: CreateCharacterInput): UpdateCharacterInput {
+  const preservedExtensions = Object.fromEntries(
+    Object.entries(existing.extensions ?? {}).filter(([key]) =>
+      LOCAL_CHARACTER_EXTENSION_KEYS.has(key) || key.startsWith("_lumiverse_")
+    )
+  );
+
+  return {
+    // Deliberately omit `name`: this endpoint only replaces card contents.
+    description: card.description ?? "",
+    personality: card.personality ?? "",
+    scenario: card.scenario ?? "",
+    first_mes: card.first_mes ?? "",
+    mes_example: card.mes_example ?? "",
+    creator: card.creator ?? "",
+    creator_notes: card.creator_notes ?? "",
+    system_prompt: card.system_prompt ?? "",
+    post_history_instructions: card.post_history_instructions ?? "",
+    tags: card.tags ?? [],
+    alternate_greetings: card.alternate_greetings ?? [],
+    extensions: {
+      ...(card.extensions ?? {}),
+      ...preservedExtensions,
+    },
+  };
 }
 
 // ─── Portable LoRA surfacing ──────────────────────────────────────────────
@@ -115,22 +196,6 @@ function parseJannyUrl(url: string): string | null {
 
 // ─── Chub.ai character fetcher ────────────────────────────────────────────
 
-const CHUB_API_BASES = ["https://gateway.chub.ai/api", "https://api.chub.ai/api"];
-
-async function fetchChubJson(path: string): Promise<Record<string, any>> {
-  let lastStatus = 0;
-  for (const base of CHUB_API_BASES) {
-    const res = await safeFetch(`${base}/${path}`, {
-      timeoutMs: 15_000,
-      maxBytes: 100 * 1024 * 1024,
-      headers: { "Accept": "application/json", "User-Agent": "Lumiverse" },
-    });
-    if (res.ok) return await res.json() as Record<string, any>;
-    lastStatus = res.status;
-  }
-  throw new Error(`Chub API returned ${lastStatus || "no response"}`);
-}
-
 async function fetchChubLorebookDefinition(idOrPath: string | number): Promise<Record<string, any> | null> {
   try {
     const raw = String(idOrPath).replace(/^lorebooks\//, "");
@@ -173,18 +238,6 @@ async function buildChubCharacterBook(def: Record<string, any>, data: Record<str
   };
 }
 
-async function fetchChubGalleryUrls(projectId: unknown): Promise<string[]> {
-  if (!projectId) return [];
-  try {
-    const data = await fetchChubJson(`gallery/project/${projectId}`);
-    return (Array.isArray(data.nodes) ? data.nodes : [])
-      .map((n: any) => typeof n?.primary_image_path === "string" ? n.primary_image_path : null)
-      .filter((url: string | null): url is string => !!url);
-  } catch {
-    return [];
-  }
-}
-
 async function importGalleryFromUrls(userId: string, characterId: string, urls: string[]): Promise<void> {
   const downloaded = await mapWithConcurrency(urls, 6, async (url): Promise<File | null> => {
     try {
@@ -193,7 +246,7 @@ async function importGalleryFromUrls(userId: string, characterId: string, urls: 
       const buf = await res.arrayBuffer();
       const contentType = res.headers.get("content-type") || "image/webp";
       const ext = contentType.includes("png") ? "png" : contentType.includes("jpeg") || contentType.includes("jpg") ? "jpg" : "webp";
-      return new File([buf], `chub_gallery_${crypto.randomUUID()}.${ext}`, { type: contentType });
+      return new File([buf], `remote_gallery_${crypto.randomUUID()}.${ext}`, { type: contentType });
     } catch {
       return null;
     }
@@ -210,7 +263,42 @@ async function importGalleryFromUrls(userId: string, characterId: string, urls: 
   }
 }
 
-async function fetchChubCharacter(chubPath: string, userId: string) {
+/**
+ * Opt out of pulling expression packs during a Chub import.
+ *
+ * Defaults to on: a pack is part of what the card advertises, and gallery
+ * images already import unconditionally, so this matches existing behaviour
+ * rather than introducing a new prompt. The key is read here so the preference
+ * is honoured the moment a UI toggle exists.
+ */
+const CHUB_IMPORT_EXPRESSIONS_KEY = "importChubExpressions";
+
+function chubExpressionImportEnabled(userId: string): boolean {
+  try {
+    const setting = settingsSvc.getSetting(userId, CHUB_IMPORT_EXPRESSIONS_KEY);
+    return setting?.value === false ? false : true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Download a Chub expression pack and register it as the character's
+ * expressions, keyed by the pack's own labels.
+ *
+ * Mirrors importGalleryFromUrls, but the label is the whole point: these
+ * images previously had no route into the expressions surface at all, and any
+ * that reached the gallery arrived as unidentifiable files.
+ */
+async function importChubExpressions(
+  userId: string,
+  characterId: string,
+  assets: ChubExpressionAsset[],
+): Promise<void> {
+  await queueChubExpressionImport(userId, characterId, assets);
+}
+
+async function fetchChubCharacter(chubPath: string, userId: string, libraryScope: CharacterLibraryScope) {
   const data = await fetchChubJson(`characters/${chubPath}?full=true`);
   const node = data?.node;
   if (!node) throw new Error("Invalid Chub API response: missing node");
@@ -254,7 +342,7 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
   }
 
   const cardInput = cardSvc.parseCardJson(card);
-  const character = svc.createCharacter(userId, cardInput);
+  const character = svc.createCharacter(userId, { ...cardInput, library_scope: libraryScope });
   importCardRegexBestEffort(userId, character.id, cardInput.extensions);
 
   // Fetch avatar image
@@ -301,12 +389,25 @@ async function fetchChubCharacter(chubPath: string, userId: string) {
     await importGalleryFromUrls(userId, character.id, galleryUrls);
   }
 
+  // Best-effort, like the gallery above: a card that imported successfully
+  // must not be rolled back because its expression images were unreachable.
+  if (chubExpressionImportEnabled(userId)) {
+    const expressionAssets = extractChubExpressionAssets(node);
+    if (expressionAssets.length > 0) {
+      try {
+        await importChubExpressions(userId, character.id, expressionAssets);
+      } catch (err) {
+        console.warn("[character import] Chub expression import failed:", err);
+      }
+    }
+  }
+
   return svc.getCharacter(userId, character.id)!;
 }
 
 // ─── JannyAI character fetcher ────────────────────────────────────────────
 
-async function fetchJannyCharacter(uuid: string, userId: string) {
+async function fetchJannyCharacter(uuid: string, userId: string, libraryScope: CharacterLibraryScope) {
   // safeFetch is GET-only; JannyAI requires POST — validate host then POST directly
   await validateHost("api.jannyai.com");
   const downloadRes = await fetch("https://api.jannyai.com/api/v1/download", {
@@ -344,7 +445,7 @@ async function fetchJannyCharacter(uuid: string, userId: string) {
   const file = new File([buf], `${uuid}.png`, { type: "image/png" });
 
   const cardInput = cardSvc.normalizeJannyCharacterInput(await cardSvc.extractCardFromPng(file));
-  const character = svc.createCharacter(userId, cardInput);
+  const character = svc.createCharacter(userId, { ...cardInput, library_scope: libraryScope });
 
   // Use the PNG as avatar
   const image = await images.uploadImage(userId, file);
@@ -380,7 +481,7 @@ function sniffCardContainer(buf: ArrayBuffer): "png" | "zip" | null {
   return null;
 }
 
-async function fetchGenericCharacter(url: string, userId: string) {
+async function fetchGenericCharacter(url: string, userId: string, libraryScope: CharacterLibraryScope) {
   const res = await safeFetch(url, { timeoutMs: 15_000, maxBytes: 100 * 1024 * 1024 });
   if (!res.ok) throw new Error(`Failed to fetch URL: ${res.status}`);
 
@@ -391,7 +492,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
   if (sniffed === "png" || contentType.includes("image/png") || url.toLowerCase().endsWith(".png")) {
     const file = new File([buf], "import.png", { type: "image/png" });
     const cardInput = await cardSvc.extractCardFromPng(file);
-    const character = svc.createCharacter(userId, cardInput);
+    const character = svc.createCharacter(userId, { ...cardInput, library_scope: libraryScope });
 
     const image = await images.uploadImage(userId, file);
     svc.setCharacterImage(userId, character.id, image.id);
@@ -404,7 +505,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
   if (sniffed === "zip" || contentType.includes("application/zip") || url.toLowerCase().endsWith(".charx")) {
     const file = new File([buf], "import.charx", { type: "application/zip" });
     const charxResult = await cardSvc.extractCardFromCharx(file);
-    const character = svc.createCharacter(userId, charxResult.card);
+    const character = svc.createCharacter(userId, { ...charxResult.card, library_scope: libraryScope });
     await applyCharxModulesAndAssets(userId, character, charxResult);
     return svc.getCharacter(userId, character.id)!;
   }
@@ -419,7 +520,7 @@ async function fetchGenericCharacter(url: string, userId: string) {
   }
 
   const cardInput = cardSvc.parseCardJson(json);
-  const character = svc.createCharacter(userId, cardInput);
+  const character = svc.createCharacter(userId, { ...cardInput, library_scope: libraryScope });
   autoImportEmbeddedWorldbook(userId, character.id);
   return svc.getCharacter(userId, character.id)!;
 }
@@ -441,6 +542,9 @@ app.get("/", (c) => {
 // ─── Lightweight summary endpoint for character browser ───────────────────
 app.get("/summary", (c) => {
   const userId = c.get("userId");
+  const rawScope = c.req.query("scope");
+  const scope = rawScope === undefined ? undefined : parseLibraryScope(rawScope);
+  if (rawScope !== undefined && !scope) return c.json({ error: "scope must be either 'mine' or 'shared'" }, 400);
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
   const search = c.req.query("search") || undefined;
   const rawTags = c.req.query("tags");
@@ -454,6 +558,7 @@ app.get("/summary", (c) => {
   const seed = rawSeed ? parseInt(rawSeed, 10) : undefined;
   const rawFavorites = c.req.query("favorite_ids");
   const favoriteIds = rawFavorites ? rawFavorites.split(",").filter(Boolean) : undefined;
+  const chatId = c.req.query("chat_id") || undefined;
 
   return c.json(
     svc.listCharacterSummaries(userId, pagination, {
@@ -465,6 +570,8 @@ app.get("/summary", (c) => {
       favoriteIds,
       filterMode,
       seed: isNaN(seed as number) ? undefined : seed,
+      chatId,
+      ...(scope ? { scope } : {}),
     })
   );
 });
@@ -475,12 +582,76 @@ app.get("/tags", (c) => {
   return c.json(svc.listCharacterTags(userId));
 });
 
+// ─── Bulk tag update (batch-select bar) ───────────────────────────────────
+app.post("/bulk-tags", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  try {
+    const result = svc.bulkUpdateCharacterTags(userId, {
+      ids: Array.isArray(body?.ids) ? body.ids : [],
+      operation: body?.operation,
+      tags: Array.isArray(body?.tags) ? body.tags : [],
+    });
+    return c.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to update tags";
+    return c.json({ error: message }, 400);
+  }
+});
+
+app.post("/folders/rename", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ old_name?: string; new_name?: string }>();
+  const oldName = body.old_name?.trim() || "";
+  const newName = body.new_name?.trim() || "";
+  if (!oldName) return c.json({ error: "old_name is required" }, 400);
+  if (!newName) return c.json({ error: "new_name is required" }, 400);
+
+  const updated = svc.renameCharacterFolder(userId, oldName, newName);
+  if (updated.length === 0) return c.json({ error: "Folder not found" }, 404);
+  return c.json({ updated, count: updated.length });
+});
+
+app.post("/folders/delete", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ name?: string }>();
+  const name = body.name?.trim() || "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const updated = svc.deleteCharacterFolder(userId, name);
+  return c.json({ updated, count: updated.length });
+});
+
+app.post("/bulk-update", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json<{ ids?: unknown; folder?: unknown }>();
+  if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > 1000) {
+    return c.json({ error: "ids must be a non-empty array with at most 1000 items" }, 400);
+  }
+  const ids = body.ids.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (ids.length === 0) return c.json({ error: "ids must contain character ids" }, 400);
+  if (typeof body.folder !== "string") return c.json({ error: "folder must be a string" }, 400);
+
+  const updated = svc.bulkUpdateCharacterFolders(userId, ids, body.folder);
+  return c.json({ updated, count: updated.length });
+});
+
+app.post("/batch-delete", async (c) => {
+  const userId = c.get("userId");
+  const body: { ids?: unknown } = await c.req.json<{ ids?: unknown }>().catch(() => ({}));
+  if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > 1000) {
+    return c.json({ error: "ids must be a non-empty array with at most 1000 items" }, 400);
+  }
+  const ids = body.ids.filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (ids.length === 0) return c.json({ error: "ids must contain character ids" }, 400);
+  return c.json(await svc.batchDeleteCharacters(userId, ids));
+});
+
 app.post("/", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.name) return c.json({ error: "name is required" }, 400);
-  const character = svc.createCharacter(userId, body);
-  return c.json(character, 201);
+  try { return c.json(svc.createCharacter(userId, body), 201); } catch (err) { if (isInvalidLibraryScopeError(err)) return respondInvalidLibraryScope(c); throw err; }
 });
 
 // --- Static routes MUST come before /:id to avoid shadowing ---
@@ -488,6 +659,8 @@ app.post("/", async (c) => {
 app.post("/import-url", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
+  const libraryScope = body?.library_scope === undefined ? undefined : parseLibraryScope(body.library_scope);
+  if (body?.library_scope !== undefined && !libraryScope) return c.json({ error: "library_scope must be either 'mine' or 'shared'" }, 400);
   const url = body.url;
   if (!url || typeof url !== "string") return c.json({ error: "url is required" }, 400);
 
@@ -497,33 +670,178 @@ app.post("/import-url", async (c) => {
     // Check for Chub.ai URL
     const chubPath = parseChubUrl(url);
     if (chubPath) {
-      character = await fetchChubCharacter(chubPath, userId);
+      character = await fetchChubCharacter(chubPath, userId, libraryScope || "mine");
       return c.json({ character, ...loraSurface(character) }, 201);
     }
 
     // Check for JannyAI URL
     const jannyId = parseJannyUrl(url);
     if (jannyId) {
-      character = await fetchJannyCharacter(jannyId, userId);
+      character = await fetchJannyCharacter(jannyId, userId, libraryScope || "mine");
       return c.json({ character, ...loraSurface(character) }, 201);
     }
 
     // Check for BotBooru URL → rewrite to the PNG download, which embeds a
     // SillyTavern-compatible card *and* an avatar, then reuse the generic importer.
+    const botBooruId = parseBotBooruId(url);
     const botBooruPngUrl = rewriteBotBooruUrl(url, "png");
-    if (botBooruPngUrl) {
-      character = await fetchGenericCharacter(botBooruPngUrl, userId);
+    if (botBooruId && botBooruPngUrl) {
+      character = await fetchGenericCharacter(botBooruPngUrl, userId, libraryScope || "mine");
+      try {
+        const galleryUrls = await fetchBotBooruGalleryUrls(botBooruId);
+        if (galleryUrls.length > 0) {
+          await importGalleryFromUrls(userId, character.id, galleryUrls);
+        }
+      } catch (err) {
+        console.warn("[character import] BotBooru gallery import failed:", err);
+      }
       return c.json({ character, ...loraSurface(character) }, 201);
     }
 
     // Generic URL (direct PNG or JSON link)
-    character = await fetchGenericCharacter(url, userId);
+    character = await fetchGenericCharacter(url, userId, libraryScope || "mine");
     return c.json({ character, ...loraSurface(character) }, 201);
   } catch (err: any) {
+    if (isInvalidLibraryScopeError(err)) return respondInvalidLibraryScope(c);
     if (err instanceof SSRFError) {
       return c.json({ error: err.message }, 400);
     }
     return c.json({ error: err.message || "Failed to import from URL" }, 400);
+  }
+});
+
+// Replace only the portable card data on an existing character. This is kept
+// separate from /import so a JSON/PNG upload cannot accidentally create a new
+// character or replace its name/avatar.
+app.post("/:id/replace-card", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const existing = svc.getCharacter(userId, characterId);
+  if (!existing) return c.json({ error: "Not found" }, 404);
+
+  try {
+    const formData = await c.req.formData();
+    const file = formData.get("file");
+    if (!(file instanceof File) || file.size === 0) {
+      return c.json({ error: "Character card file is required" }, 400);
+    }
+
+    const format = await cardSvc.detectCharacterImportFormat(file);
+    let cardInput: CreateCharacterInput;
+    if (format === "png") {
+      cardInput = await cardSvc.extractCardFromPng(file);
+    } else if (format === "json") {
+      let json: unknown;
+      try {
+        json = JSON.parse(await file.text());
+      } catch {
+        return c.json({ error: "Invalid JSON in uploaded file" }, 400);
+      }
+      cardInput = cardSvc.parseCardJson(json);
+    } else {
+      return c.json({ error: "Only JSON and PNG character cards can replace card data" }, 400);
+    }
+
+    const updated = svc.updateCharacter(userId, characterId, buildCardReplacementInput(existing, cardInput));
+    // The character was checked above, but preserve the normal 404 contract
+    // should it be deleted between parsing and the update.
+    if (!updated) return c.json({ error: "Not found" }, 404);
+    return c.json(updated);
+  } catch (err: any) {
+    return respondImportError(c, err, "Failed to replace character card data");
+  }
+});
+
+// ─── Chub expression backfill ─────────────────────────────────────────────
+// Registered above `/:id`: Hono matches in order, and `/:id` would otherwise
+// capture "chub-expression-candidates" as a character id.
+
+/** Labels already mapped for this character, so a backfill can skip them. */
+function existingExpressionLabels(userId: string, characterId: string): Set<string> {
+  const config = exprSvc.getExpressionConfig(userId, characterId);
+  return new Set(Object.keys(config?.mappings ?? {}));
+}
+
+async function chubExpressionAssetsFor(slug: string): Promise<ChubExpressionAsset[]> {
+  const data = await fetchChubJson(`characters/${slug}?full=true`);
+  const node = data?.node;
+  if (!node) throw new Error("Invalid Chub API response: missing node");
+  return extractChubExpressionAssets(node);
+}
+
+/**
+ * Which cards could gain expressions, without downloading anything.
+ *
+ * Only reports cards that trace back to Chub and have no expressions yet, so
+ * the count is what a backfill would actually change rather than how many
+ * Chub cards exist.
+ */
+app.get("/chub-expression-candidates", (c) => {
+  const userId = c.get("userId");
+  const candidates = svc
+    .listCharacterExtensions(userId)
+    .filter((row) => readChubFullPath(row.extensions) !== null)
+    .filter((row) => !row.extensions?._lumiverse_chub_expressions_checked)
+    .filter((row) => existingExpressionLabels(userId, row.id).size === 0)
+    .map((row) => ({ id: row.id, name: row.name }));
+  return c.json({ candidates, count: candidates.length });
+});
+
+/**
+ * Pull this character's expression pack from the source it was imported from.
+ *
+ * Expressions only: the card's own fields are never re-read, so local edits
+ * survive a backfill. Labels already mapped are skipped rather than replaced,
+ * so hand-assigned expressions are never clobbered.
+ */
+app.post("/:id/chub-expressions", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("id");
+  const character = svc.getCharacter(userId, characterId);
+  if (!character) return c.json({ error: "Not found" }, 404);
+
+  const slug = readChubFullPath(character.extensions);
+  if (!slug) return c.json({ error: "This character was not imported from Chub" }, 400);
+
+  try {
+    let available: ChubExpressionAsset[];
+    try {
+      available = await chubExpressionAssetsFor(slug);
+    } catch (err: any) {
+      // A card whose source has been removed or renamed is a normal outcome,
+      // not a failure to report as an error. Treat it as "nothing to fetch" so
+      // the caller can say so plainly, and stamp it so it stops being offered.
+      if (typeof err?.message === "string" && err.message.includes("404")) {
+        markChubExpressionsChecked(userId, characterId);
+        return c.json({ imported: 0, skipped: 0, available: 0, sourceMissing: true });
+      }
+      throw err;
+    }
+
+    if (available.length === 0) {
+      markChubExpressionsChecked(userId, characterId);
+      return c.json({ imported: 0, skipped: 0, available: 0 });
+    }
+
+    const existing = existingExpressionLabels(userId, characterId);
+    const missing = available.filter((asset) => !existing.has(asset.label));
+    if (missing.length === 0) {
+      markChubExpressionsChecked(userId, characterId);
+      return c.json({ imported: 0, skipped: available.length, available: available.length });
+    }
+
+    await importChubExpressions(userId, characterId, missing);
+    const after = existingExpressionLabels(userId, characterId);
+    const imported = missing.filter((asset) => after.has(asset.label)).length;
+    markChubExpressionsChecked(userId, characterId);
+    return c.json({
+      imported,
+      skipped: available.length - missing.length,
+      available: available.length,
+    });
+  } catch (err: any) {
+    if (err instanceof SSRFError) return c.json({ error: err.message }, 400);
+    return c.json({ error: err.message || "Failed to fetch expressions from Chub" }, 502);
   }
 });
 
@@ -534,12 +852,20 @@ app.get("/:id", (c) => {
   return c.json(char);
 });
 
+app.get("/:id/homepage-preview", (c) => {
+  const preview = svc.getCharacterPreview(c.get("userId"), c.req.param("id"));
+  if (!preview) return c.json({ error: "Not found" }, 404);
+  return c.json(preview);
+});
+
 app.put("/:id", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
-  const char = svc.updateCharacter(userId, c.req.param("id"), body);
-  if (!char) return c.json({ error: "Not found" }, 404);
-  return c.json(char);
+  try {
+    const char = svc.updateCharacter(userId, c.req.param("id"), body);
+    if (!char) return c.json({ error: "Not found" }, 404);
+    return c.json(char);
+  } catch (err) { if (isInvalidLibraryScopeError(err)) return respondInvalidLibraryScope(c); throw err; }
 });
 
 app.delete("/:id", (c) => {
@@ -663,16 +989,51 @@ app.get("/:id/export", async (c) => {
   }
 
   if (format === "charx") {
-    const buf = await exportSvc.exportAsCharx(userId, id);
-    if (!buf) return c.json({ error: "Not found" }, 404);
-    const character = svc.getCharacter(userId, id);
-    const name = exportSvc.sanitizeFilename(character?.name || "character");
-    return new Response(new Uint8Array(buf), {
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${name}.charx"`,
-      },
-    });
+    const requestedExportId = c.req.query("export_id");
+    const exportId = requestedExportId && requestedExportId.length <= 128 ? requestedExportId : undefined;
+    const emitProgress = (payload: Record<string, unknown>) => {
+      try {
+        eventBus.emit(EventType.CHARACTER_EXPORT_PROGRESS, { characterId: id, exportId, ...payload }, userId);
+      } catch {
+        // A download must not fail because the caller has no live WebSocket.
+      }
+    };
+
+    emitProgress({ phase: "preparing" });
+    try {
+      const buf = await exportSvc.exportAsCharx(userId, id, {
+        onProgress(progress) {
+          // A card can contain hundreds of gallery images. Send enough updates
+          // to feel live without flooding every connected client.
+          if (
+            progress.phase === "collecting_assets" &&
+            progress.completed !== 0 &&
+            progress.completed !== progress.total &&
+            progress.completed % 4 !== 0
+          ) {
+            return;
+          }
+          emitProgress(progress);
+        },
+      });
+      if (!buf) {
+        emitProgress({ phase: "failed", error: "Character not found" });
+        return c.json({ error: "Not found" }, 404);
+      }
+      const character = svc.getCharacter(userId, id);
+      const name = exportSvc.sanitizeFilename(character?.name || "character");
+      return new Response(new Uint8Array(buf), {
+        headers: {
+          "Content-Type": "application/zip",
+          "Content-Disposition": `attachment; filename="${name}.charx"`,
+          "Content-Length": String(buf.byteLength),
+          "Cache-Control": "no-store",
+        },
+      });
+    } catch (err: any) {
+      emitProgress({ phase: "failed", error: err?.message || "Failed to export CHARX" });
+      throw err;
+    }
   }
 
   return c.json({ error: "Invalid format. Must be one of: json, png, charx" }, 400);
@@ -769,6 +1130,72 @@ app.delete("/:id/perspective-layers/:layer", (c) => {
   return c.json(updated);
 });
 
+app.post("/import-jobs", async (c) => {
+  const userId = c.get("userId");
+  try {
+    const body = await c.req.json<{ total?: unknown; skip_duplicates?: unknown }>().catch(() => null);
+    if (!body) return c.json({ error: "Invalid JSON request body", code: "invalid_request" }, 400);
+    const total = Number(body?.total);
+    return c.json(characterImportJobs.create(userId, total, body?.skip_duplicates === true), 201);
+  } catch (err) {
+    return respondImportJobError(c, err);
+  }
+});
+
+app.put("/import-jobs/:jobId/files/:index", async (c) => {
+  const userId = c.get("userId");
+  const requestBody = c.req.raw.body;
+  if (!requestBody) return c.json({ error: "Request body is empty", code: "empty_file" }, 400);
+
+  const contentType = c.req.header("content-type") || "application/octet-stream";
+  if (contentType.toLowerCase().startsWith("multipart/form-data")) {
+    return c.json({
+      error: "Multipart uploads are not supported for character import jobs; send the file as the raw request body",
+      code: "multipart_not_supported",
+    }, 415);
+  }
+
+  const contentLengthHeader = c.req.header("content-length");
+  const declaredSize = contentLengthHeader == null ? null : Number(contentLengthHeader);
+  const filename = c.req.query("filename") || "character-card";
+  try {
+    const snapshot = await characterImportJobs.upload(
+      userId,
+      c.req.param("jobId"),
+      Number(c.req.param("index")),
+      filename,
+      contentType,
+      requestBody,
+      declaredSize,
+    );
+    return c.json(snapshot, 201);
+  } catch (err) {
+    return respondImportJobError(c, err);
+  }
+});
+
+app.post("/import-jobs/:jobId/start", (c) => {
+  try {
+    return c.json(characterImportJobs.start(c.get("userId"), c.req.param("jobId")), 202);
+  } catch (err) {
+    return respondImportJobError(c, err);
+  }
+});
+
+app.get("/import-jobs/:jobId/status", (c) => {
+  const snapshot = characterImportJobs.get(c.get("userId"), c.req.param("jobId"));
+  if (!snapshot) return c.json({ error: "Character import job not found", code: "job_not_found" }, 404);
+  return c.json(snapshot);
+});
+
+app.post("/import-jobs/:jobId/cancel", (c) => {
+  try {
+    return c.json(characterImportJobs.cancel(c.get("userId"), c.req.param("jobId")));
+  } catch (err) {
+    return respondImportJobError(c, err);
+  }
+});
+
 app.post("/import-bulk", async (c) => {
   const userId = c.get("userId");
 
@@ -780,97 +1207,12 @@ app.post("/import-bulk", async (c) => {
 
     const skipDuplicates = formData.get("skip_duplicates") === "true";
 
-    const results: Array<{
-      filename: string;
-      success: boolean;
-      character?: any;
-      lorebook?: { name: string; entryCount: number };
-      lumiverse_lora?: characterLoraSvc.PortableLoraReference;
-      error?: string;
-      skipped?: boolean;
-    }> = [];
+    const results: Awaited<ReturnType<typeof importCharacterFile>>[] = [];
 
     for (const file of files) {
       const filename = file.name || "unknown";
       try {
-        let cardInput;
-        let pngAvatar: File | null = null;
-        let charxResult: cardSvc.CharxResult | null = null;
-
-        const detectedFormat = await cardSvc.detectCharacterImportFormat(file);
-
-        if (detectedFormat === "png") {
-          cardInput = await cardSvc.extractCardFromPng(file);
-          pngAvatar = file;
-        } else if (detectedFormat === "charx" || detectedFormat === "jpeg_polyglot") {
-          charxResult = await cardSvc.extractCardFromCharx(file);
-          cardInput = charxResult.card;
-        } else if (detectedFormat === "jpeg") {
-          // Plain JPEG with no embedded data — skip
-          results.push({ filename, success: false, error: "JPEG file does not contain embedded character card data" });
-          continue;
-        } else {
-          const text = await file.text();
-          const json = JSON.parse(text);
-          cardInput = cardSvc.parseCardJson(json);
-        }
-
-        // Deduplication check
-        if (skipDuplicates) {
-          const hasRealFilename = filename && filename !== "unknown" && filename !== "";
-          const existingByFile = hasRealFilename
-            ? svc.findCharacterBySourceFilename(userId, filename)
-            : null;
-
-          if (existingByFile) {
-            results.push({ filename, success: true, skipped: true, character: existingByFile });
-            continue;
-          }
-
-          // No filename match — fall back to name-based check only when filename is absent
-          if (!hasRealFilename && svc.characterExistsByName(userId, cardInput.name)) {
-            const existing = svc.findCharactersByName(userId, cardInput.name);
-            results.push({ filename, success: true, skipped: true, character: existing[0] });
-            continue;
-          }
-        }
-
-        const character = svc.createCharacter(userId, cardInput);
-
-        // Store source filename so re-imports can deduplicate by file identity
-        if (filename && filename !== "unknown" && filename !== "") {
-          svc.setCharacterSourceFilename(userId, character.id, filename);
-        }
-
-        if (charxResult) {
-          // Full CHARX processing (lumiverse_modules, gallery, inline assets,
-          // RisuAI module/expressions) shared with single & URL import so the
-          // bulk path keeps parity with the exporter.
-          await applyCharxModulesAndAssets(userId, character, charxResult);
-        } else {
-          if (pngAvatar) {
-            const image = await images.uploadImage(userId, pngAvatar);
-            svc.setCharacterImage(userId, character.id, image.id);
-            svc.setCharacterAvatar(userId, character.id, image.filename);
-          }
-          importCardRegexBestEffort(userId, character.id, cardInput.extensions);
-          autoImportEmbeddedWorldbook(userId, character.id);
-        }
-
-        const imported = svc.getCharacter(userId, character.id)!;
-
-        // Check for embedded lorebook
-        let lorebook: { name: string; entryCount: number } | undefined;
-        const charBook = imported.extensions?.character_book;
-        const entryCount = wbSvc.countImportedWorldBookEntries(charBook?.entries);
-        if (entryCount > 0) {
-          lorebook = {
-            name: charBook.name || `${imported.name}'s Lorebook`,
-            entryCount,
-          };
-        }
-
-        results.push({ filename, success: true, character: imported, lorebook, ...loraSurface(imported) });
+        results.push(await importCharacterFile(userId, file, { skipDuplicates, emitEvent: false }));
       } catch (err: any) {
         results.push({
           filename,
@@ -883,6 +1225,13 @@ app.post("/import-bulk", async (c) => {
     const imported = results.filter((r) => r.success && !r.skipped && r.character).length;
     const skipped = results.filter((r) => r.skipped).length;
     const failed = results.filter((r) => !r.success).length;
+
+    if (imported > 0) {
+      eventBus.emit(EventType.CHARACTER_LIBRARY_CHANGED, {
+        reason: "legacy_bulk_import",
+        imported,
+      }, userId);
+    }
 
     return c.json({ results, summary: { total: files.length, imported, skipped, failed } }, 201);
   } catch (err: any) {
@@ -916,13 +1265,16 @@ app.post("/import", async (c) => {
       const formData = await c.req.formData();
       const file = formData.get("file") as File | null;
       if (!file) return c.json({ error: "file is required" }, 400);
+      const rawScope = formData.get("library_scope");
+      const libraryScope = rawScope === null ? undefined : parseLibraryScope(rawScope);
+      if (rawScope !== null && !libraryScope) return c.json({ error: "library_scope must be either 'mine' or 'shared'" }, 400);
 
       const detectedFormat = await cardSvc.detectCharacterImportFormat(file);
 
       if (detectedFormat === "png") {
         // PNG card — extract embedded JSON + use as avatar
         const cardInput = await cardSvc.extractCardFromPng(file);
-        const character = svc.createCharacter(userId, cardInput);
+        const character = svc.createCharacter(userId, { ...cardInput, ...(libraryScope ? { library_scope: libraryScope } : {}) });
         const image = await images.uploadImage(userId, file);
         svc.setCharacterImage(userId, character.id, image.id);
         svc.setCharacterAvatar(userId, character.id, image.filename);
@@ -936,7 +1288,7 @@ app.post("/import", async (c) => {
         // shared with bulk & URL import so all paths stay in parity (see
         // applyCharxModulesAndAssets).
         const charxResult = await cardSvc.extractCardFromCharx(file);
-        const character = svc.createCharacter(userId, charxResult.card);
+        const character = svc.createCharacter(userId, { ...charxResult.card, ...(libraryScope ? { library_scope: libraryScope } : {}) });
         const { lumiverseModulesSummary } = await applyCharxModulesAndAssets(userId, character, charxResult, {
           signal: c.req.raw.signal,
           emitGalleryProgress: true,
@@ -959,7 +1311,7 @@ app.post("/import", async (c) => {
           return c.json({ error: "Invalid JSON in uploaded file" }, 400);
         }
         const cardInput = cardSvc.parseCardJson(json);
-        const character = svc.createCharacter(userId, cardInput);
+        const character = svc.createCharacter(userId, { ...cardInput, ...(libraryScope ? { library_scope: libraryScope } : {}) });
         importCardRegexBestEffort(userId, character.id, cardInput.extensions);
         autoImportEmbeddedWorldbook(userId, character.id);
         const imported = svc.getCharacter(userId, character.id)!;
@@ -968,9 +1320,12 @@ app.post("/import", async (c) => {
     } else {
       // Raw JSON body — support both card-spec wrapper and flat input
       const body = await c.req.json();
+      const rawScope = body?.library_scope;
+      const libraryScope = rawScope === undefined ? undefined : parseLibraryScope(rawScope);
+      if (rawScope !== undefined && !libraryScope) return c.json({ error: "library_scope must be either 'mine' or 'shared'" }, 400);
       const input = (body.spec && body.data) ? cardSvc.parseCardJson(body) : body;
       if (!input.name) return c.json({ error: "name is required" }, 400);
-      const character = svc.createCharacter(userId, input);
+      const character = svc.createCharacter(userId, { ...input, ...(libraryScope ? { library_scope: libraryScope } : {}) });
       importCardRegexBestEffort(userId, character.id, input.extensions);
       autoImportEmbeddedWorldbook(userId, character.id);
       const imported = svc.getCharacter(userId, character.id)!;

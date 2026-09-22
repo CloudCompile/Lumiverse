@@ -159,6 +159,89 @@
   outline: none;
 }
 
+.entrySearchInput::-webkit-search-cancel-button {
+  display: none;
+}
+
+.entrySearchCount {
+  flex-shrink: 0;
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.entrySearchClear {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.entrySearchClear:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.entryTypeFilters {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.entryTypeFilters::-webkit-scrollbar {
+  display: none;
+}
+
+.entryTypeFilter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 9px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 999px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+}
+
+.entryTypeFilter b {
+  color: var(--lumiverse-text-dim);
+  font-size: calc(9.5px * var(--lumiverse-font-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.entryTypeFilter:hover,
+.entryTypeFilterActive {
+  border-color: var(--lumiverse-primary);
+  color: var(--lumiverse-text);
+}
+
+.entryTypeFilterActive {
+  background: var(--lumiverse-primary-015);
+  box-shadow: inset 0 0 0 1px var(--lumiverse-primary);
+}
+
+.entryTypeFilter_constant {
+  color: var(--lumiverse-warning, #f5a623);
+}
+
+.entryTypeFilter_vector {
+  color: var(--lumiverse-success, #4ade80);
+}
+
 .listOptionsToggle {
   display: inline-flex;
   align-items: center;
@@ -509,6 +592,52 @@
   white-space: nowrap;
 }
 
+.retainedEntryLabel {
+  width: fit-content;
+  color: var(--lumiverse-primary);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.entrySearchContext {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  line-height: 1.4;
+}
+
+.entrySearchContext b {
+  flex: 0 0 auto;
+  color: var(--lumiverse-text-muted);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.entrySearchContext > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entrySearchMark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--lumiverse-primary) 32%, transparent);
+  color: inherit;
+}
+
+.entrySearchMarkFuzzy {
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+}
+
 .entryMeta {
   display: flex;
   align-items: center;
@@ -560,6 +689,36 @@
 }
 
 .orderBadge svg {
+  flex-shrink: 0;
+}
+
+.tokenCell {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.tokenCell:hover:not(:disabled),
+.tokenCell:focus-visible {
+  background: var(--lumiverse-fill-medium, var(--lumiverse-fill-strong));
+  color: var(--lumiverse-text-muted);
+  outline: none;
+}
+
+.tokenCell:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.tokenCell svg {
   flex-shrink: 0;
 }
 
@@ -618,6 +777,28 @@
   color: var(--lumiverse-text-dim);
   font-size: calc(13px * var(--lumiverse-font-scale, 1));
   font-style: italic;
+}
+
+.emptyStateActions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.emptyStateActions button {
+  padding: 5px 9px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 7px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text);
+  cursor: pointer;
+  font: inherit;
+  font-style: normal;
+}
+
+.emptyStateActions button:hover {
+  border-color: var(--lumiverse-primary);
 }
 
 .dialogBody {

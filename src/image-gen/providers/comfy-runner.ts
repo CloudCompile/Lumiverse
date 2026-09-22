@@ -1,4 +1,4 @@
-import { openWebSocket } from "./ws-helpers"
+import { createWebSocketReceiveBackpressure, openWebSocket } from "./ws-helpers"
 import { parseProviderErrorBody, readBoundedText } from "../../utils/provider-errors"
 
 export interface ComfyRunnerOptions {
@@ -245,11 +245,14 @@ async function* wsEventStream(
   signal?: AbortSignal,
 ): AsyncGenerator<WsEvent, void, unknown> {
   const queue: WsEvent[] = []
+  const receiveBackpressure = createWebSocketReceiveBackpressure(ws)
   let resolve: (() => void) | null = null
   let done = false
 
   const enqueue = (event: WsEvent) => {
+    if (done) return
     queue.push(event)
+    receiveBackpressure.enqueued(queue.length)
     if (resolve) {
       resolve()
       resolve = null
@@ -302,16 +305,22 @@ async function* wsEventStream(
     }
   })
 
-  while (!done) {
-    if (queue.length === 0) {
-      await new Promise<void>((r) => { resolve = r })
-    }
-    while (queue.length > 0) {
-      const event = queue.shift()!
-      yield event
-      if (event.type === "complete" || event.type === "error") {
-        return
+  try {
+    while (!done) {
+      if (queue.length === 0) {
+        await new Promise<void>((r) => { resolve = r })
+      }
+      while (queue.length > 0) {
+        const event = queue.shift()!
+        receiveBackpressure.dequeued(queue.length)
+        yield event
+        if (event.type === "complete" || event.type === "error") {
+          return
+        }
       }
     }
+  } finally {
+    done = true
+    receiveBackpressure.release()
   }
 }

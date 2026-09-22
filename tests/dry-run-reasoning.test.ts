@@ -128,6 +128,7 @@ describe("dry-run reasoning display messages", () => {
           { type: "text", text: "Look at this" },
           { type: "image", data: "aaa", mime_type: "image/png" },
           { type: "audio", data: "bbb", mime_type: "audio/mpeg" },
+          { type: "video", data: "ccc", mime_type: "video/mp4" },
         ],
       },
     ] as unknown as LlmMessage[];
@@ -136,9 +137,11 @@ describe("dry-run reasoning display messages", () => {
 
     expect(display.content).toContain("[image: image/png]");
     expect(display.content).toContain("[audio: audio/mpeg]");
+    expect(display.content).toContain("[video: video/mp4]");
     expect(display.contentParts).toEqual([
       { type: "image", count: 1 },
       { type: "audio", count: 1 },
+      { type: "video", count: 1 },
     ]);
   });
 

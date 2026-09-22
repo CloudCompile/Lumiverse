@@ -8,6 +8,7 @@ import { ModalShell } from '@/components/shared/ModalShell'
 import { Spinner } from '@/components/shared/Spinner'
 import { Button } from '@/components/shared/FormComponents'
 import { packsApi } from '@/api/packs'
+import { useStore } from '@/store'
 import { transformLucidPack, normalizePackJson } from '@/utils/pack-transform'
 import LazyImage from '@/components/shared/LazyImage'
 import type { PackWithItems } from '@/types/api'
@@ -39,6 +40,7 @@ interface Props {
 
 export default function ImportPackModal({ onImport, onClose }: Props) {
   const { t } = useTranslation('panels')
+  const loadAvailableTools = useStore((s) => s.loadAvailableTools)
   const [activeImportTab, setActiveImportTab] = useState<ImportTab>('file')
 
   // File / URL state
@@ -146,8 +148,11 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
     setImportResult({ imported, failed })
 
     // Call after loop completes so modal stays open during the full batch
-    if (lastImportedPack) onImport(lastImportedPack)
-  }, [selectedPacks, importing, onImport])
+    if (lastImportedPack) {
+      void loadAvailableTools()
+      onImport(lastImportedPack)
+    }
+  }, [selectedPacks, importing, onImport, t, loadAvailableTools])
 
   // File import — unwrap { pack: {...} } wrapper if present (extension export format)
   const handleFile = useCallback(async (file: File) => {
@@ -158,12 +163,13 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
       const raw = JSON.parse(text)
       const payload = normalizePackJson(raw)
       const pack = await packsApi.importJson(payload)
+      void loadAvailableTools()
       onImport(pack)
     } catch (e: any) {
       setFileError(e.message || t('packBrowser.importModal.importFileFailed'))
       setFileLoading(false)
     }
-  }, [onImport, t])
+  }, [onImport, t, loadAvailableTools])
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -179,12 +185,13 @@ export default function ImportPackModal({ onImport, onClose }: Props) {
     setUrlLoading(true)
     try {
       const pack = await packsApi.importUrl(url.trim())
+      void loadAvailableTools()
       onImport(pack)
     } catch (e: any) {
       setUrlError(e.message || t('packBrowser.importModal.importFromUrlFailed'))
       setUrlLoading(false)
     }
-  }, [url, onImport, t])
+  }, [url, onImport, t, loadAvailableTools])
 
   return (
     <ModalShell isOpen onClose={onClose} maxWidth={640} maxHeight="90vh" zIndex={10001} className={clsx(styles.modal, styles.modalLarge)}>

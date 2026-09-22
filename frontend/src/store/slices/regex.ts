@@ -4,13 +4,26 @@ import { regexApi } from '@/api/regex'
 import type { RegexScript, CreateRegexScriptInput, UpdateRegexScriptInput } from '@/types/regex'
 import { enqueuePresetRegexOperation } from '@/lib/presetRegexQueue'
 
+// The server caps list responses at 1000 rows, so the slice pages to
+// exhaustion. This list drives both the regex panel and the client-side
+// display pipeline — a truncated page would silently hide scripts (module
+// regexes imported from cards stop applying once a user crosses 1000 total).
+const REGEX_LIST_PAGE_SIZE = 1000
+
 export const createRegexSlice: StateCreator<RegexSlice> = (set, get) => ({
   regexScripts: [],
   regexEditingId: null,
 
-  loadRegexScripts: async () => {
-    const res = await regexApi.list({ limit: 1000 })
-    set({ regexScripts: res.data })
+  loadRegexScripts: async (shouldApply = () => true) => {
+    const scripts: RegexScript[] = []
+    let offset = 0
+    for (;;) {
+      const page = await regexApi.list({ limit: REGEX_LIST_PAGE_SIZE, offset })
+      scripts.push(...page.data)
+      offset += page.data.length
+      if (page.data.length === 0 || offset >= page.total) break
+    }
+    if (shouldApply()) set({ regexScripts: scripts })
   },
 
   /** Pure setter for hydrating from pre-fetched data (bootstrap payload). */
@@ -102,6 +115,27 @@ export const createRegexSlice: StateCreator<RegexSlice> = (set, get) => ({
     set((s) => ({
       regexScripts: s.regexScripts.map((r) => (r.id === id ? updated : r)),
     }))
+  },
+
+  toggleSelectedRegexScripts: async (ids: string[], disabled: boolean) => {
+    if (ids.length === 0) return { changedIds: [], skippedIds: [] }
+    const activePresetId = (get() as any).activeLoomPresetId ?? null
+    const result = await enqueuePresetRegexOperation(() => regexApi.toggleSelected(ids, disabled, activePresetId))
+    const changed = new Set(result.changedIds)
+    set((s) => ({
+      regexScripts: s.regexScripts.map((r) => (changed.has(r.id) ? { ...r, disabled } : r)),
+    }))
+    return result
+  },
+
+  toggleRegexFolder: async (folder: string, disabled: boolean) => {
+    const activePresetId = (get() as any).activeLoomPresetId ?? null
+    const result = await enqueuePresetRegexOperation(() => regexApi.toggleFolder(folder, disabled, activePresetId))
+    const changed = new Set(result.changedIds)
+    set((s) => ({
+      regexScripts: s.regexScripts.map((r) => (changed.has(r.id) ? { ...r, disabled } : r)),
+    }))
+    return result
   },
 
   setRegexEditingId: (id: string | null) => set({ regexEditingId: id }),

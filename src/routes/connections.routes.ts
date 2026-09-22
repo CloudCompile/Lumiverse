@@ -1,13 +1,19 @@
 import { Hono } from "hono";
 import * as svc from "../services/connections.service";
 import { parsePagination } from "../services/pagination";
+import { withReadableApiKeyStatus, withReadableApiKeyStatuses } from "../services/connection-secret-status";
 
 const app = new Hono();
 
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listConnections(userId, pagination));
+  const result = await withReadableApiKeyStatuses(
+    userId,
+    svc.listConnections(userId, pagination),
+    svc.connectionSecretKey,
+  );
+  return c.json(result);
 });
 
 app.post("/", async (c) => {
@@ -26,11 +32,11 @@ app.post("/models/preview", async (c) => {
   return c.json(result);
 });
 
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const userId = c.get("userId");
   const conn = svc.getConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.connectionSecretKey));
 });
 
 app.put("/:id", async (c) => {
@@ -38,7 +44,7 @@ app.put("/:id", async (c) => {
   const body = await c.req.json();
   const conn = await svc.updateConnection(userId, c.req.param("id"), body);
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.connectionSecretKey));
 });
 
 app.delete("/:id", async (c) => {
@@ -94,7 +100,7 @@ app.post("/:id/duplicate", async (c) => {
   const userId = c.get("userId");
   const conn = await svc.duplicateConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn, 201);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.connectionSecretKey), 201);
 });
 
 app.post("/pollinations/auth-url", async (c) => {
@@ -115,7 +121,7 @@ app.post("/pollinations/auth-url", async (c) => {
     return c.json({ error: "redirect_url must use http or https" }, 400);
   }
 
-  const auth_url = svc.buildPollinationsAuthorizeUrl(userId, {
+  const auth_url = await svc.buildPollinationsAuthorizeUrl(userId, {
     redirect_url: redirectUrl,
     models: body?.models ? String(body.models) : undefined,
     budget: typeof body?.budget === "number" ? body.budget : undefined,

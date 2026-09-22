@@ -33,6 +33,16 @@ Solutions to common issues you might encounter.
 
 ## Generation Issues
 
+### Inspect the provider request
+
+Open **Settings → Account** and enable **Recent generation requests**. Lumiverse keeps your last 20 outgoing generation attempts, including requests that fail. Chat requests do not automatically retry provider failures; retry manually when you are ready. Expand a row to see the finalized provider request and response, its source, the time it was sent, and the HTTP status. Use **Copy JSON** or **Copy response** to copy each displayed body. Streaming responses are combined into one JSON body after the response ends, including text, tool calls, usage, and provider error details. Interrupted responses are marked as partial.
+
+Tracking starts disabled and belongs to your account. Other users, including admins and operators, cannot access your history through the app. API keys and credential fields are redacted from both bodies before records are retained. Failed attempts include the provider error payload when received; connection failures show the transport error.
+
+Chat completions, Loom rebuilds, Memory Cortex extraction and summaries, embeddings, and image generation do not automatically resend failed provider requests. Configured fallback connections remain available, with one attempt per connection. Council retains its existing sidecar retry behavior. Interrupted Edit-and-Send dispatches preserve saved output or finish as failed; they are not replayed automatically after a restart.
+
+Records stay in server memory and are cleared when tracking is disabled or the server restarts. **Clear** removes existing records while keeping tracking enabled. The oldest record is discarded when a new request exceeds the 20-entry limit. Each body has an 8 MiB retention limit. Oversized or unsafe bodies are marked unavailable. Error bodies may be partial when the provider reader reaches its existing size limit; tracking does not continue reading an abandoned response.
+
 ### AI responses are empty or cut off
 
 - Check your **max tokens** setting — it might be too low
@@ -83,6 +93,8 @@ Solutions to common issues you might encounter.
 
 ### App feels slow
 
+- In the desktop app, set **Rendering** to **Efficiency** in the Theme panel. This disables both the native window blur and in-page glass blur.
+- On Wayland, try disabling **Blur background** under **Use translucent desktop background**. Blur intensity is chosen by the compositor, so selecting a lower intensity in Lumiverse does not reduce the Linux rendering cost.
 - Disable **glass effects** in the Theme panel (backdrop-filter can be GPU-intensive)
 - Reduce the number of messages loaded per page
 - Close unused panels

@@ -20,16 +20,34 @@ import {
   statSync,
   copyFileSync,
   cpSync,
+  realpathSync,
+  writeFileSync,
 } from "fs";
 import { join, resolve, dirname, sep } from "path";
 import { getUserExtensionPath } from "../auth/provision";
-import { spawnAsync } from "./spawn-async";
+import { spawnAsync, type SpawnAsyncResult } from "./spawn-async";
 import { normalizeSpindleHttpsUrl } from "./url-safety";
 import { bunCmd } from "../utils/bun-cmd";
+import {
+  assertOwnGitRepositoryPath,
+  resetGitRepositoryToRemoteHead,
+} from "./git-repository";
+import { deriveEffectiveScope } from "./provider-registry";
 
 export type InstallScope = "operator" | "user";
+type WidgetFrontendManifest = SpindleManifest & {
+  entry_frontend_widget?: string;
+};
+export interface ExtensionUpdateCandidate {
+  id: string;
+  identifier: string;
+  name: string;
+  version: string;
+  branch: string | null;
+}
+
 function isManagedPermission(permission: string): permission is SpindlePermission {
-  return isValidPermission(permission);
+  return isValidPermission(permission) || permission === "mcp_servers" || permission === "mcp_servers.create";
 }
 
 type BackendSafetyCheck = {
@@ -67,6 +85,12 @@ const DANGEROUS_MODULE_LABELS = new Map<string, string>([
 
 const DANGEROUS_BUN_PROPERTIES = new Set(["file", "write", "spawn", "spawnSync", "serve", "connect", "listen"]);
 const DANGEROUS_PROCESS_PROPERTIES = new Set(["env", "exit", "kill", "chdir", "dlopen"]);
+const WINDOWS_SPINDLE_ASYNC_BUN_OVERRIDE = "LUMIVERSE_FORCE_SPINDLE_ASYNC_BUN";
+const warnedWindowsSpindleBunFallback = new Set<string>();
+const backendSafetyScanCache = new Map<string, {
+  signature: string;
+  blocked: string[];
+}>();
 
 const DANGEROUS_BACKEND_CHECKS: BackendSafetyCheck[] = [
   {
@@ -601,10 +625,20 @@ async function assertSafeBackendBundle(
 ): Promise<void> {
   if (!(await Bun.file(backendPath).exists())) return;
 
-  const blocked = detectDangerousBackendCapabilities(
-    await Bun.file(backendPath).text(),
-    declared,
-  );
+  const stat = statSync(backendPath);
+  const declaredKey = [...declared].sort().join(",");
+  const signature = `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${declaredKey}`;
+  const cached = backendSafetyScanCache.get(backendPath);
+  let blocked: string[];
+  if (cached?.signature === signature) {
+    blocked = cached.blocked;
+  } else {
+    blocked = detectDangerousBackendCapabilities(
+      await Bun.file(backendPath).text(),
+      declared,
+    );
+    backendSafetyScanCache.set(backendPath, { signature, blocked });
+  }
   if (blocked.length === 0) return;
 
   throw new Error(
@@ -824,6 +858,7 @@ export const PRIVILEGED_PERMISSIONS = new Set([
   "world_books",
   "presets",
   "regex_scripts",
+  "regex_scripts_unrestricted",
   "databanks",
   "personas",
   "push_notification",
@@ -831,6 +866,12 @@ export const PRIVILEGED_PERMISSIONS = new Set([
   "images",
   "web_search",
   "unsafe_eval",
+  "providers.embedding.register",
+  "providers.tts.register",
+  "providers.stt.register",
+  "providers.sidecar.register",
+  "mcp_servers",
+  "mcp_servers.create",
 ]);
 
 function grantRequestedPermissionsByDefault(
@@ -1050,23 +1091,91 @@ export function bunInstallCmd(): string[] {
   ];
 }
 
+/**
+ * Bun-on-Bun subprocesses that pipe stdout/stderr have been prone to host-process
+ * assertion failures on Windows during long-running extension installs/builds.
+ * Fall back to spawnSync there so the admin action may block briefly, but the
+ * server stays alive. Allow an escape hatch for users who want to try newer Bun
+ * builds without the fallback.
+ */
+export function shouldUseWindowsSpindleBunSyncFallback(
+  platform: string = process.platform,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  if (platform !== "win32") return false;
+  return env[WINDOWS_SPINDLE_ASYNC_BUN_OVERRIDE] !== "1";
+}
+
+function warnWindowsSpindleBunSyncFallback(context: string): void {
+  if (!shouldUseWindowsSpindleBunSyncFallback() || warnedWindowsSpindleBunFallback.has(context)) {
+    return;
+  }
+  warnedWindowsSpindleBunFallback.add(context);
+  console.warn(
+    `[Spindle] ${context} is using a synchronous Bun subprocess fallback on Windows to avoid known Bun.spawn pipe crashes. Set ${WINDOWS_SPINDLE_ASYNC_BUN_OVERRIDE}=1 to re-enable the async path.`,
+  );
+}
+
+async function runSpindleBunSubprocess(
+  cmd: string[],
+  opts: { cwd: string; context: string },
+): Promise<SpawnAsyncResult> {
+  if (!shouldUseWindowsSpindleBunSyncFallback()) {
+    return spawnAsync(cmd, { cwd: opts.cwd });
+  }
+
+  warnWindowsSpindleBunSyncFallback(opts.context);
+  const proc = Bun.spawnSync({
+    cmd,
+    cwd: opts.cwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  return {
+    exitCode: proc.exitCode ?? -1,
+    stdout: proc.stdout.toString(),
+    stderr: proc.stderr.toString(),
+    timedOut: false,
+  };
+}
+
+function formatCommandFailure(
+  result: Pick<SpawnAsyncResult, "exitCode" | "stdout" | "stderr">,
+  label: string,
+): string {
+  const stderr = result.stderr.trim();
+  if (stderr) return stderr;
+  const stdout = result.stdout.trim();
+  if (stdout) return stdout;
+  return `${label} exited with code ${result.exitCode}`;
+}
+
 // ─── Build ───────────────────────────────────────────────────────────────
 
 export async function buildExtension(identifier: string): Promise<void> {
   const repo = repoDir(identifier);
-  const manifest = await readManifest(identifier);
+  const manifest = await readManifest(identifier) as WidgetFrontendManifest;
 
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
+  const widgetFrontendEntry = manifest.entry_frontend_widget;
   const backendOut = resolveWithin(repo, backendEntry, "entry_backend");
   const frontendOut = resolveWithin(repo, frontendEntry, "entry_frontend");
+  const widgetFrontendOut = widgetFrontendEntry
+    ? resolveWithin(repo, widgetFrontendEntry, "entry_frontend_widget")
+    : null;
 
   // Always install dependencies first if package.json exists
   const pkgJson = join(repo, "package.json");
   if (existsSync(pkgJson)) {
-    const install = await spawnAsync(bunInstallCmd(), { cwd: repo });
+    const install = await runSpindleBunSubprocess(bunInstallCmd(), {
+      cwd: repo,
+      context: `dependency install for ${identifier}`,
+    });
     if (install.exitCode !== 0) {
-      throw new Error(`Dependency install failed: ${install.stderr}`);
+      throw new Error(`Dependency install failed: ${formatCommandFailure(install, "bun install")}`);
     }
   }
 
@@ -1093,28 +1202,62 @@ export async function buildExtension(identifier: string): Promise<void> {
   // Determine what needs building
   const backendSrc = join(srcDir, "backend.ts");
   const frontendSrc = join(srcDir, "frontend.ts");
+  const widgetFrontendSrc = join(srcDir, "widget.ts");
   const needsBackendBuild = existsSync(backendSrc) && !existsSync(backendOut);
   const needsFrontendBuild = existsSync(frontendSrc) && !existsSync(frontendOut);
+  const needsWidgetFrontendBuild = !!widgetFrontendEntry
+    && !!widgetFrontendOut
+    && existsSync(widgetFrontendSrc)
+    && !existsSync(widgetFrontendOut);
 
   // Build backend entry if source exists
   if (needsBackendBuild) {
-    const proc = await spawnAsync(
+    const proc = await runSpindleBunSubprocess(
       bunCmd("build", "src/backend.ts", "--outfile", backendEntry, "--target", "bun"),
-      { cwd: repo }
+      {
+        cwd: repo,
+        context: `backend build for ${identifier}`,
+      }
     );
     if (proc.exitCode !== 0) {
-      throw new Error(`Backend build failed: ${proc.stderr}`);
+      throw new Error(`Backend build failed: ${formatCommandFailure(proc, "bun build")}`);
     }
   }
 
   // Build frontend entry if source exists
   if (needsFrontendBuild) {
-    const proc = await spawnAsync(
+    const proc = await runSpindleBunSubprocess(
       bunCmd("build", "src/frontend.ts", "--outfile", frontendEntry, "--target", "browser"),
-      { cwd: repo }
+      {
+        cwd: repo,
+        context: `frontend build for ${identifier}`,
+      }
     );
     if (proc.exitCode !== 0) {
-      throw new Error(`Frontend build failed: ${proc.stderr}`);
+      throw new Error(`Frontend build failed: ${formatCommandFailure(proc, "bun build")}`);
+    }
+  }
+
+  // Widget entries are deliberately separate so desktop pop-outs can avoid
+  // evaluating an extension's settings panels, drawer tabs, and other page UI.
+  if (needsWidgetFrontendBuild) {
+    const proc = await runSpindleBunSubprocess(
+      bunCmd(
+        "build",
+        "src/widget.ts",
+        "--outfile",
+        widgetFrontendEntry!,
+        "--target",
+        "browser",
+        "--minify",
+      ),
+      {
+        cwd: repo,
+        context: `widget frontend build for ${identifier}`,
+      }
+    );
+    if (proc.exitCode !== 0) {
+      throw new Error(`Widget frontend build failed: ${formatCommandFailure(proc, "bun build")}`);
     }
   }
 
@@ -1161,11 +1304,6 @@ export async function install(
 
   const baseDir = extensionsDir();
   mkdirSync(baseDir, { recursive: true });
-  const installScope: InstallScope = options?.installScope === "user" ? "user" : "operator";
-  const installedByUserId =
-    options?.installedByUserId && options.installedByUserId.trim()
-      ? options.installedByUserId.trim()
-      : null;
   const branch = options?.branch && options.branch.trim() ? options.branch.trim() : null;
 
   // Clone to a temp dir first so we can read the manifest
@@ -1182,6 +1320,47 @@ export async function install(
     rmSync(tempDir, { recursive: true, force: true });
     throw new Error(`git clone failed: ${cloneProc.stderr.toString()}`);
   }
+  return installCheckout(tempDir, { ...options, branch, github: githubUrl });
+}
+
+export async function installFromFiles(
+  files: ReadonlyMap<string, Uint8Array>,
+  metadata: Record<string, unknown>,
+): Promise<ExtensionInfo> {
+  return installCheckout(writeCheckout(files), { metadata });
+}
+
+function writeCheckout(files: ReadonlyMap<string, Uint8Array>): string {
+  const checkout = join(extensionsDir(), `_temp_${Date.now()}`);
+  try {
+    for (const [path, data] of files) {
+      const target = resolveWithin(checkout, path, "archive path");
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, data);
+    }
+  } catch (err) {
+    rmSync(checkout, { recursive: true, force: true });
+    throw err;
+  }
+  return checkout;
+}
+
+async function installCheckout(
+  tempDir: string,
+  options: {
+    installScope?: InstallScope;
+    installedByUserId?: string | null;
+    branch?: string | null;
+    github?: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<ExtensionInfo> {
+  const installScope: InstallScope = options.installScope === "user" ? "user" : "operator";
+  const installedByUserId =
+    options.installedByUserId && options.installedByUserId.trim()
+      ? options.installedByUserId.trim()
+      : null;
+  const branch = options.branch ?? null;
 
   // Read manifest from cloned repo
   const manifestPath = join(tempDir, "spindle.json");
@@ -1205,7 +1384,7 @@ export async function install(
       `Invalid identifier "${manifest.identifier}". Must match /^[a-z][a-z0-9_]*$/`
     );
   }
-  manifest.github = normalizeSpindleHttpsUrl(manifest.github || githubUrl, "github", {
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github || options.github, "github", {
     required: true,
   });
   manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
@@ -1247,7 +1426,7 @@ export async function install(
       id, identifier, name, version, author, description, github, homepage,
       permissions, enabled, metadata, install_scope, installed_by_user_id, branch
     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
     [
       id,
       manifest.identifier,
@@ -1258,6 +1437,7 @@ export async function install(
       manifest.github,
       manifest.homepage || "",
       JSON.stringify(manifest.permissions || []),
+      JSON.stringify(options.metadata ?? {}),
       installScope,
       installedByUserId,
       branch,
@@ -1269,6 +1449,76 @@ export async function install(
 
 // ─── Update ──────────────────────────────────────────────────────────────
 
+const LOCAL_GIT_COMMAND_TIMEOUT_MS = 15_000;
+const GIT_FETCH_TIMEOUT_MS = 30_000;
+
+function spawnFailureReason(
+  proc: SpawnAsyncResult,
+  timeoutMs: number
+): string {
+  if (proc.timedOut) {
+    return `timed out after ${timeoutMs / 1000}s`;
+  }
+  return proc.stderr.trim() || proc.stdout.trim() || `exit code ${proc.exitCode}`;
+}
+
+async function runGitStep(
+  repo: string,
+  cmd: string[],
+  label: string,
+  options: { timeoutMs: number; ignoreStdout?: boolean }
+): Promise<void> {
+  const proc = await spawnAsync(cmd, {
+    cwd: repo,
+    timeoutMs: options.timeoutMs,
+    ignoreStdout: options.ignoreStdout,
+  });
+  if (proc.exitCode === 0) return;
+
+  throw new Error(
+    `${label} failed: ${spawnFailureReason(proc, options.timeoutMs)}`
+  );
+}
+
+function canonicalRealpath(path: string): string {
+  return realpathSync.native(path);
+}
+
+function pathIdentity(path: string): string {
+  const normalized = resolve(path);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/** Verify the extension directory is its own Git root before mutations. */
+export async function assertOwnedExtensionGitRoot(repo: string): Promise<string> {
+  let canonicalRepo: string;
+  try {
+    canonicalRepo = canonicalRealpath(repo);
+  } catch (error) {
+    throw new Error(`Git root confinement failed for ${repo}: unable to resolve the repository path (${String(error)})`);
+  }
+  const proc = Bun.spawnSync({ cmd: ["git", "rev-parse", "--show-toplevel"], cwd: canonicalRepo, stdout: "pipe", stderr: "pipe" });
+  const stdout = proc.stdout?.toString() ?? "";
+  const stderr = proc.stderr?.toString() ?? "";
+  if (proc.exitCode !== 0) {
+    throw new Error(`Git root confinement failed for ${repo}: git rev-parse --show-toplevel failed: ${stderr.trim() || stdout.trim() || `exit code ${proc.exitCode}`}`);
+  }
+  const roots = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (roots.length !== 1) {
+    throw new Error(`Git root confinement failed for ${repo}: git rev-parse --show-toplevel returned empty or multiple roots`);
+  }
+  let canonicalGitRoot: string;
+  try {
+    canonicalGitRoot = canonicalRealpath(roots[0]);
+  } catch (error) {
+    throw new Error(`Git root confinement failed for ${repo}: unable to resolve Git root ${roots[0]} (${String(error)})`);
+  }
+  if (pathIdentity(canonicalRepo) !== pathIdentity(canonicalGitRoot)) {
+    throw new Error(`Git root confinement failed for ${repo}: deployed repo ${canonicalRepo} does not equal Git root ${canonicalGitRoot}`);
+  }
+  return canonicalRepo;
+}
+
 export async function update(identifier: string): Promise<ExtensionInfo> {
   const repo = repoDir(identifier);
   if (!existsSync(repo)) {
@@ -1277,38 +1527,24 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
 
   // Read manifest up-front so we can honor `dev_mode` before touching the
   // working tree. Extensions with `dev_mode: true` keep their local repo
-  // contents intact — we skip the git checkout/clean/pull and just rebuild
+  // contents intact — we skip the remote reset and just rebuild
   // + relaunch from whatever the developer has on disk.
   const initialManifest = await readManifest(identifier);
   const devMode = (initialManifest as { dev_mode?: boolean }).dev_mode === true;
 
   if (!devMode) {
-    // Clean build artifacts and installed dependencies so git pull succeeds.
-    // We don't read stdout for these — ignore it to reduce pipe overhead.
-    await spawnAsync(["git", "checkout", "."], { cwd: repo, ignoreStdout: true });
-    await spawnAsync(["git", "clean", "-fd"], { cwd: repo, ignoreStdout: true });
-
-    const pullProc = await spawnAsync(["git", "pull"], {
-      cwd: repo,
-      timeoutMs: 60_000,
-    });
-    if (pullProc.exitCode !== 0) {
-      throw new Error(`git pull failed: ${pullProc.stderr}`);
-    }
+    await assertOwnedExtensionGitRoot(repo);
+    // Fetch the checked-out branch first so a remote failure leaves the local
+    // checkout untouched.
+    await resetGitRepositoryToRemoteHead(
+      repo,
+      `Extension "${identifier}"`
+    );
   }
 
-  // Re-read manifest — in non-dev mode the pull may have modified it; in
+  // Re-read manifest — in non-dev mode the remote reset may have modified it; in
   // dev mode we already have the current version.
   const manifest = devMode ? initialManifest : await readManifest(identifier);
-
-  const db = getDb();
-  const existing = db
-    .query("SELECT permissions FROM extensions WHERE identifier = ?")
-    .get(identifier) as { permissions: string } | null;
-  const existingPermissions = existing
-    ? (JSON.parse(existing.permissions || "[]") as string[])
-    : [];
-  const existingPermissionSet = new Set(existingPermissions);
 
   // Rebuild — only delete dist/ if it was locally built (not tracked in git).
   // Repos that ship pre-built dist/ should have those files preserved.
@@ -1327,6 +1563,37 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
       }
     }
   }
+  return finishUpdate(identifier, manifest);
+}
+
+export async function replaceFromFiles(
+  identifier: string,
+  files: ReadonlyMap<string, Uint8Array>,
+): Promise<ExtensionInfo> {
+  const checkout = writeCheckout(files);
+  try {
+    const manifest = await readManifestFromPath(join(checkout, "spindle.json"));
+    if (manifest.identifier !== identifier) {
+      throw new Error(`The delivered extension is "${manifest.identifier}", not "${identifier}"`);
+    }
+  } catch (err) {
+    rmSync(checkout, { recursive: true, force: true });
+    throw err;
+  }
+  rmSync(repoDir(identifier), { recursive: true, force: true });
+  moveSync(checkout, repoDir(identifier));
+  return finishUpdate(identifier, await readManifest(identifier));
+}
+
+async function finishUpdate(identifier: string, manifest: SpindleManifest): Promise<ExtensionInfo> {
+  const db = getDb();
+  const existing = db
+    .query("SELECT permissions FROM extensions WHERE identifier = ?")
+    .get(identifier) as { permissions: string } | null;
+  const existingPermissions = existing
+    ? (JSON.parse(existing.permissions || "[]") as string[])
+    : [];
+
   await buildExtension(identifier);
   applyStorageSeeds(identifier, manifest);
 
@@ -1403,21 +1670,95 @@ export function disable(identifier: string): void {
   if (result.changes === 0) throw new Error(`Extension not found: ${identifier}`);
 }
 
+export function setMetadataEntry(identifier: string, key: string, value: unknown): void {
+  getDb().run(
+    "UPDATE extensions SET metadata = json_set(COALESCE(metadata, '{}'), ?, json(?)) WHERE identifier = ?",
+    [`$.${key}`, JSON.stringify(value), identifier],
+  );
+}
+
 // ─── Permissions ─────────────────────────────────────────────────────────
+
+type ExtensionGrantTarget = {
+  id: string;
+  scope: string;
+};
+
+function extensionGrantsHaveScopeColumn(): boolean {
+  try {
+    return (getDb().query("PRAGMA table_info('extension_grants')").all() as Array<{ name: string }>)
+      .some((column) => column.name === "scope");
+  } catch {
+    return false;
+  }
+}
+
+function hostDerivedGrantScope(ext: {
+  install_scope?: string | null;
+  installed_by_user_id?: string | null;
+}): string {
+  const installScope =
+    ext.install_scope === "user" || ext.install_scope === "operator" || ext.install_scope === "system"
+      ? ext.install_scope
+      : "system";
+  try {
+    return deriveEffectiveScope({
+      installScope,
+      installedByUserId: ext.installed_by_user_id,
+      authenticatedSubject: ext.installed_by_user_id,
+    });
+  } catch {
+    return "system";
+  }
+}
+
+function loadExtensionGrantTarget(identifier: string): ExtensionGrantTarget | null {
+  const db = getDb();
+  try {
+    const ext = db
+      .query("SELECT id, install_scope, installed_by_user_id FROM extensions WHERE identifier = ?")
+      .get(identifier) as {
+        id: string;
+        install_scope?: string | null;
+        installed_by_user_id?: string | null;
+      } | null;
+    if (!ext) return null;
+    return { id: ext.id, scope: hostDerivedGrantScope(ext) };
+  } catch {
+    const ext = db
+      .query("SELECT id FROM extensions WHERE identifier = ?")
+      .get(identifier) as { id: string } | null;
+    if (!ext) return null;
+    return { id: ext.id, scope: "system" };
+  }
+}
+
+function resolveGrantScope(target: ExtensionGrantTarget, scope?: string): string {
+  const requested = typeof scope === "string" ? scope.trim() : "";
+  return requested || target.scope;
+}
 
 export function grantPermission(
   identifier: string,
-  permission: string
+  permission: string,
+  scope?: string,
 ): void {
   if (!isManagedPermission(permission)) {
     throw new Error(`Invalid permission: ${permission}`);
   }
 
-  const db = getDb();
-  const ext = db
-    .query("SELECT id FROM extensions WHERE identifier = ?")
-    .get(identifier) as { id: string } | null;
+  const ext = loadExtensionGrantTarget(identifier);
   if (!ext) throw new Error(`Extension not found: ${identifier}`);
+
+  const db = getDb();
+  const grantScope = resolveGrantScope(ext, scope);
+  if (extensionGrantsHaveScopeColumn()) {
+    db.run(
+      `INSERT OR IGNORE INTO extension_grants (id, extension_id, permission, scope) VALUES (?, ?, ?, ?)`,
+      [crypto.randomUUID(), ext.id, permission, grantScope],
+    );
+    return;
+  }
 
   db.run(
     `INSERT OR IGNORE INTO extension_grants (id, extension_id, permission) VALUES (?, ?, ?)`,
@@ -1427,13 +1768,21 @@ export function grantPermission(
 
 export function revokePermission(
   identifier: string,
-  permission: string
+  permission: string,
+  scope?: string,
 ): void {
-  const db = getDb();
-  const ext = db
-    .query("SELECT id FROM extensions WHERE identifier = ?")
-    .get(identifier) as { id: string } | null;
+  const ext = loadExtensionGrantTarget(identifier);
   if (!ext) throw new Error(`Extension not found: ${identifier}`);
+
+  const db = getDb();
+  const grantScope = resolveGrantScope(ext, scope);
+  if (extensionGrantsHaveScopeColumn()) {
+    db.run(
+      "DELETE FROM extension_grants WHERE extension_id = ? AND permission = ? AND scope = ?",
+      [ext.id, permission, grantScope],
+    );
+    return;
+  }
 
   db.run(
     "DELETE FROM extension_grants WHERE extension_id = ? AND permission = ?",
@@ -1441,25 +1790,32 @@ export function revokePermission(
   );
 }
 
-export function getGrantedPermissions(identifier: string): SpindlePermission[] {
-  const db = getDb();
-  const ext = db
-    .query("SELECT id FROM extensions WHERE identifier = ?")
-    .get(identifier) as { id: string } | null;
+export function getGrantedPermissions(
+  identifier: string,
+  scope?: string,
+): SpindlePermission[] {
+  const ext = loadExtensionGrantTarget(identifier);
   if (!ext) return [];
 
-  const rows = db
-    .query("SELECT permission FROM extension_grants WHERE extension_id = ?")
-    .all(ext.id) as { permission: string }[];
+  const db = getDb();
+  const grantScope = resolveGrantScope(ext, scope);
+  const rows = extensionGrantsHaveScopeColumn()
+    ? db
+        .query("SELECT permission FROM extension_grants WHERE extension_id = ? AND scope = ?")
+        .all(ext.id, grantScope) as { permission: string }[]
+    : db
+        .query("SELECT permission FROM extension_grants WHERE extension_id = ?")
+        .all(ext.id) as { permission: string }[];
 
   return rows.map((r) => r.permission as SpindlePermission);
 }
 
 export function hasPermission(
   identifier: string,
-  permission: SpindlePermission
+  permission: SpindlePermission,
+  scope?: string,
 ): boolean {
-  return getGrantedPermissions(identifier).includes(permission);
+  return getGrantedPermissions(identifier, scope).includes(permission);
 }
 
 // ─── Queries ─────────────────────────────────────────────────────────────
@@ -1468,6 +1824,26 @@ export async function list(): Promise<ExtensionInfo[]> {
   const db = getDb();
   const rows = db.query("SELECT * FROM extensions ORDER BY installed_at DESC").all() as any[];
   return Promise.all(rows.map(rowToExtensionInfo));
+}
+
+/** Lightweight rows for the periodic remote-HEAD monitor. */
+export function listExtensionUpdateCandidates(): ExtensionUpdateCandidate[] {
+  const db = getDb();
+  const rows = db
+    .query(
+      `SELECT id, identifier, name, version, branch
+       FROM extensions
+       WHERE enabled = 1
+       ORDER BY installed_at DESC`
+    )
+    .all() as Array<{
+      id: string;
+      identifier: string;
+      name: string;
+      version: string;
+      branch: string | null;
+    }>;
+  return rows.map((row) => ({ ...row, branch: row.branch || null }));
 }
 
 export async function listForUser(userId: string, role: string | null | undefined): Promise<ExtensionInfo[]> {
@@ -1527,6 +1903,27 @@ export function canManageExtension(
   );
 }
 
+/** Lightweight ID-only variant used by frequent cached-status polling. */
+export function getManageableExtensionIdsForUser(
+  userId: string,
+  role: string | null | undefined
+): string[] {
+  const db = getDb();
+  if (role === "owner" || role === "admin") {
+    return (db.query("SELECT id FROM extensions").all() as Array<{ id: string }>)
+      .map((row) => row.id);
+  }
+
+  return (
+    db
+      .query(
+        `SELECT id FROM extensions
+         WHERE install_scope = 'user' AND installed_by_user_id = ?`
+      )
+      .all(userId) as Array<{ id: string }>
+  ).map((row) => row.id);
+}
+
 export async function getExtensionByIdentifier(
   identifier: string
 ): Promise<ExtensionInfo | null> {
@@ -1557,12 +1954,29 @@ export function getEnabledExtensionIdentifiers(): string[] {
   return rows.map((r) => r.identifier);
 }
 
-export async function getFrontendBundlePath(identifier: string): Promise<string | null> {
-  const manifest = await readManifest(identifier);
+async function getFrontendBundlePathFromManifest(
+  identifier: string,
+  manifest: SpindleManifest,
+): Promise<string | null> {
   const entry = manifest.entry_frontend || "dist/frontend.js";
   const repo = repoDir(identifier);
   const bundlePath = resolveWithin(repo, entry, "entry_frontend");
   return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
+}
+
+async function getWidgetFrontendBundlePathFromManifest(
+  identifier: string,
+  manifest: SpindleManifest,
+): Promise<string | null> {
+  const entry = (manifest as WidgetFrontendManifest).entry_frontend_widget;
+  if (!entry) return null;
+  const repo = repoDir(identifier);
+  const bundlePath = resolveWithin(repo, entry, "entry_frontend_widget");
+  return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
+}
+
+export async function getFrontendBundlePath(identifier: string): Promise<string | null> {
+  return getFrontendBundlePathFromManifest(identifier, await readManifest(identifier));
 }
 
 export async function getFrontendBundleCacheKey(identifier: string): Promise<string | null> {
@@ -1577,14 +1991,41 @@ export async function getFrontendBundleCacheKey(identifier: string): Promise<str
   }
 }
 
-export async function getBackendEntryPath(identifier: string): Promise<string | null> {
-  const manifest = await readManifest(identifier);
+export async function getWidgetFrontendBundlePath(identifier: string): Promise<string | null> {
+  return getWidgetFrontendBundlePathFromManifest(identifier, await readManifest(identifier));
+}
+
+export async function getWidgetFrontendBundleCacheKey(identifier: string): Promise<string | null> {
+  const bundlePath = await getWidgetFrontendBundlePath(identifier);
+  if (!bundlePath) return null;
+
+  try {
+    const stat = statSync(bundlePath);
+    return `${stat.size}-${Math.floor(stat.mtimeMs)}`;
+  } catch {
+    return null;
+  }
+}
+
+async function getBackendEntryPathFromManifest(
+  identifier: string,
+  manifest: SpindleManifest,
+  options: { verifySafety: boolean },
+): Promise<string | null> {
   const entry = manifest.entry_backend || "dist/backend.js";
   const repo = repoDir(identifier);
   const entryPath = resolveWithin(repo, entry, "entry_backend");
   if (!(await Bun.file(entryPath).exists())) return null;
-  await assertSafeBackendBundle(identifier, entryPath, declaredCapabilitiesFromManifest(manifest));
+  if (options.verifySafety) {
+    await assertSafeBackendBundle(identifier, entryPath, declaredCapabilitiesFromManifest(manifest));
+  }
   return entryPath;
+}
+
+export async function getBackendEntryPath(identifier: string): Promise<string | null> {
+  return getBackendEntryPathFromManifest(identifier, await readManifest(identifier), {
+    verifySafety: true,
+  });
 }
 
 export function getStoragePath(identifier: string): string {
@@ -1735,6 +2176,7 @@ export function getBranches(identifier: string): { current: string | null; branc
   if (!existsSync(repo)) {
     throw new Error(`Extension repo not found: ${identifier}`);
   }
+  assertOwnGitRepositoryPath(repo, `Extension "${identifier}"`);
 
   // Get current branch
   const headProc = Bun.spawnSync({
@@ -1772,51 +2214,45 @@ export async function switchBranch(
   if (!existsSync(repo)) {
     throw new Error(`Extension repo not found: ${identifier}`);
   }
-
-  const runGitStep = async (
-    cmd: string[],
-    label: string,
-    options: { timeoutMs?: number; ignoreStdout?: boolean } = {}
-  ): Promise<void> => {
-    const proc = await spawnAsync(cmd, {
-      cwd: repo,
-      timeoutMs: options.timeoutMs,
-      ignoreStdout: options.ignoreStdout,
-    });
-    if (proc.exitCode === 0) return;
-
-    const reason = proc.timedOut
-      ? `timed out after ${(options.timeoutMs ?? 0) / 1000}s`
-      : proc.stderr.trim() || proc.stdout.trim() || "unknown error";
-    throw new Error(`${label} failed: ${reason}`);
-  };
+  const initialManifest = await readManifest(identifier);
+  if ((initialManifest as { dev_mode?: boolean }).dev_mode === true) {
+    throw new Error(`Cannot switch branches for dev_mode extension: ${identifier}`);
+  }
+  await assertOwnedExtensionGitRoot(repo);
 
   // Clean working tree
-  await runGitStep(["git", "checkout", "."], "git checkout .", {
+  await runGitStep(repo, ["git", "checkout", "."], "git checkout .", {
     ignoreStdout: true,
-    timeoutMs: 15_000,
+    timeoutMs: LOCAL_GIT_COMMAND_TIMEOUT_MS,
   });
-  await runGitStep(["git", "clean", "-fd"], "git clean -fd", {
+  await runGitStep(repo, ["git", "clean", "-fd"], "git clean -fd", {
     ignoreStdout: true,
-    timeoutMs: 15_000,
+    timeoutMs: LOCAL_GIT_COMMAND_TIMEOUT_MS,
   });
 
   // Widen the fetch refspec — shallow/single-branch clones only track one branch
   await runGitStep(
+    repo,
     ["git", "config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
     "git config remote.origin.fetch",
-    { timeoutMs: 15_000 }
+    { timeoutMs: LOCAL_GIT_COMMAND_TIMEOUT_MS }
   );
 
   // Fetch the target branch (--depth=1 to keep it shallow)
-  await runGitStep(["git", "fetch", "--depth", "1", "origin", branch], `git fetch ${branch}`, {
-    timeoutMs: 30_000,
-  });
+  await runGitStep(
+    repo,
+    ["git", "fetch", "--depth", "1", "origin", branch],
+    `git fetch ${branch}`,
+    { timeoutMs: GIT_FETCH_TIMEOUT_MS }
+  );
 
   // Checkout the branch
-  await runGitStep(["git", "checkout", "-B", branch, `origin/${branch}`], `git checkout ${branch}`, {
-    timeoutMs: 30_000,
-  });
+  await runGitStep(
+    repo,
+    ["git", "checkout", "-B", branch, `origin/${branch}`],
+    `git checkout ${branch}`,
+    { timeoutMs: LOCAL_GIT_COMMAND_TIMEOUT_MS }
+  );
 
   // Re-read manifest
   const manifest = await readManifest(identifier);
@@ -1886,8 +2322,13 @@ async function rowToExtensionInfo(row: any): Promise<ExtensionInfo> {
   let hasFrontend = false;
   let hasBackend = false;
   try {
-    hasFrontend = (await getFrontendBundlePath(identifier)) !== null;
-    hasBackend = (await getBackendEntryPath(identifier)) !== null;
+    const manifest = await readManifest(identifier);
+    hasFrontend = (await getFrontendBundlePathFromManifest(identifier, manifest)) !== null;
+    // Listing reports bundle presence only. The worker execution path still
+    // calls getBackendEntryPath(), which performs the fail-closed safety scan.
+    hasBackend = (await getBackendEntryPathFromManifest(identifier, manifest, {
+      verifySafety: false,
+    })) !== null;
   } catch {
     // Extension files may not exist
   }

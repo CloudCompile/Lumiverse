@@ -9,6 +9,9 @@
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+  /* Matches the empty state's row, which its parent centres. Keeps the
+     toolbar balanced when it wraps to a second line. */
+  justify-content: center;
   margin-bottom: 16px;
 }
 

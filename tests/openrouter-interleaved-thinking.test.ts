@@ -84,6 +84,20 @@ describe("OpenRouter replays reasoning_details on the assistant message", () => 
     expect(flat[0].tool_calls).toHaveLength(1);
   });
 
+  test("flattenForChat keeps reasoning_details on a plain assistant history message", () => {
+    const msg: LlmMessage = {
+      role: "assistant",
+      content: "Visible reply",
+      reasoning_details: details,
+    };
+    const flat = provider.flatten(msg);
+    expect(flat[0]).toEqual({
+      role: "assistant",
+      content: "Visible reply",
+      reasoning_details: details,
+    });
+  });
+
   test("reasoning_details takes precedence over reasoning_content when both present", () => {
     const msg: LlmMessage = {
       role: "assistant",

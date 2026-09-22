@@ -130,6 +130,21 @@ function contrastFor(color: string): string {
   return `hsl(${Math.round(h * 360)}, ${contrastS}%, ${contrastL}%)`
 }
 
+/**
+ * Turn the active accent into a near-black, hue-preserving control surface.
+ * This stays deliberately dark in both modes while still following each
+ * mode's resolved palette (including custom primary overrides).
+ */
+function deepAccentSurface(color: string, strength: number): string {
+  const parsed = parseColorToRgb(color)
+  if (!parsed) return 'rgb(12 12 14)'
+  return rgb(
+    Math.round(parsed[0] * strength),
+    Math.round(parsed[1] * strength),
+    Math.round(parsed[2] * strength),
+  )
+}
+
 /** Parse a hex color (#rrggbb or #rgb) to [r, g, b] (0-255). */
 function hexToRgb(hex: string): [number, number, number] | null {
   const m = hex.replace('#', '')
@@ -197,6 +212,9 @@ export function generateThemeVariables(
   vars['--lumiverse-primary-050'] = hsla(h, s, pL, 0.5)
   // Contrast color for icons/text ON a --lumiverse-primary background
   vars['--lumiverse-primary-contrast'] = contrastFor(vars['--lumiverse-primary'])
+  vars['--lumiverse-primary-deep'] = deepAccentSurface(vars['--lumiverse-primary'], 0.18)
+  vars['--lumiverse-primary-deep-hover'] = deepAccentSurface(vars['--lumiverse-primary'], 0.26)
+  vars['--lumiverse-primary-deep-contrast'] = contrastFor(vars['--lumiverse-primary-deep'])
 
   // ── Secondary (neutral gray) ──
   vars['--lumiverse-secondary'] = rgba(128, 128, 128, 0.15)
@@ -402,6 +420,9 @@ export function generateThemeVariables(
       vars['--lumiverse-primary-020'] = hexRgba(primary, 0.2)
       vars['--lumiverse-primary-050'] = hexRgba(primary, 0.5)
       vars['--lumiverse-primary-contrast'] = contrastFor(primary)
+      vars['--lumiverse-primary-deep'] = deepAccentSurface(primary, 0.18)
+      vars['--lumiverse-primary-deep-hover'] = deepAccentSurface(primary, 0.26)
+      vars['--lumiverse-primary-deep-contrast'] = contrastFor(vars['--lumiverse-primary-deep'])
       vars['--lumiverse-prose-dialogue'] = ensureReadable(adjustHex(primary, isDark ? 0.1 : -0.08), isDark)
     }
     if (bc.secondary) {
@@ -415,6 +436,13 @@ export function generateThemeVariables(
       vars['--lumiverse-bg-elevated'] = adjustHex(bg, 0.04)
       vars['--lumiverse-bg-hover'] = adjustHex(bg, 0.06)
       vars['--lumiverse-bg-deep'] = adjustHex(bg, -0.05)
+    }
+    // Some dynamic themes use a comfortably visible tinted surface for the
+    // app but need a separately controlled near-black root surface. This is
+    // particularly important for desktop PWAs, whose native titlebar backing
+    // cannot reliably follow a later palette update.
+    if (bc.backgroundDeep) {
+      vars['--lumiverse-bg-deep'] = constrainSurface(bc.backgroundDeep, isDark)
     }
     if (bc.text) {
       const text = ensureReadable(bc.text, isDark)
@@ -452,6 +480,21 @@ export function generateThemeVariables(
       vars['--lumiverse-prose-italic'] = ensureReadable(bc.thoughts, isDark)
     }
   }
+
+  // ── Semantic material aliases ──
+  // Keep the newer component-facing material vocabulary tied to the canonical
+  // low-level ladder after all mode and base-color overrides have resolved.
+  // These are emitted as concrete runtime values so public theme consumers
+  // (including Spindle's variable catalog) can reason about them directly.
+  vars['--lumiverse-surface'] = vars['--lumiverse-bg']
+  vars['--lumiverse-surface-raised'] = vars['--lumiverse-bg-elevated']
+  vars['--lumiverse-surface-hover'] = vars['--lumiverse-bg-hover']
+  vars['--lumiverse-surface-muted'] = vars['--lumiverse-fill-subtle']
+  vars['--lumiverse-input-bg'] = vars['--lumiverse-fill']
+  vars['--lumiverse-border-subtle'] = vars['--lumiverse-border-light']
+  vars['--lumiverse-primary-soft'] = vars['--lumiverse-primary-015']
+  vars['--lumiverse-text-primary'] = vars['--lumiverse-text']
+  vars['--lumiverse-text-secondary'] = vars['--lumiverse-text-muted']
 
   return vars
 }

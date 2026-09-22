@@ -2,7 +2,7 @@
 export type SummaryMode = 'disabled' | 'auto' | 'manual'
 
 /** Which connection profile to use for generation. */
-export type SummaryApiSource = 'active' | 'dedicated' | 'sidecar'
+export type SummaryApiSource = 'active' | 'dedicated'
 
 export interface SummarizationSettings {
   mode: SummaryMode
@@ -13,12 +13,16 @@ export interface SummarizationSettings {
   autoInterval: number
   /** Messages to include in auto context. */
   autoMessageContext: number
+  /** Newest messages excluded from auto summaries so they remain safe to swipe/edit. */
+  autoMessageLag: number
   /** Messages to include when triggered manually. */
   manualMessageContext: number
   /** Whether to limit the number of messages included in generation context. */
   messageLimitEnabled: boolean
   /** Maximum number of recent messages to include when messageLimit is enabled. */
   messageLimitCount: number
+  /** Warn when the protected context tail is within this many tokens of its budget. 0 disables warnings. */
+  contextAnchorWarningThresholdTokens: number
   /** Custom system prompt template. When null/empty, backend default is used. */
   systemPromptOverride: string | null
   /** Custom user prompt template. When null/empty, backend default is used. */
@@ -31,13 +35,15 @@ export const DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS = 120_000
 
 export const DEFAULT_SUMMARIZATION_SETTINGS: SummarizationSettings = {
   mode: 'disabled',
-  apiSource: 'sidecar',
+  apiSource: 'active',
   dedicatedConnectionId: null,
   autoInterval: 10,
   autoMessageContext: 10,
+  autoMessageLag: 0,
   manualMessageContext: 10,
   messageLimitEnabled: false,
   messageLimitCount: 50,
+  contextAnchorWarningThresholdTokens: 0,
   systemPromptOverride: null,
   userPromptOverride: null,
   requestTimeoutMs: DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS,
@@ -48,6 +54,7 @@ export const LOOM_SUMMARY_KEY = 'loom_summary'
 export const LOOM_LAST_SUMMARIZED_KEY = 'loom_last_summarized_at'
 
 export interface LastSummarizedInfo {
+  /** Eligible prefix length covered by the last summary (excludes any lagged tail). */
   messageCount: number
   timestamp: number
 }

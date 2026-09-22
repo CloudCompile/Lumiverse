@@ -1,10 +1,13 @@
 import { getDb } from "../db/connection";
+import { REQUEST_HISTORY_SETTING, requestHistoryStore } from "./request-history-store";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import {
   worldBookVectorDesiredStatusSql,
+  worldBookVectorSettingsFingerprint,
 } from "./world-book-vector-state";
 import { WORLD_BOOK_VECTOR_SETTINGS_KEY } from "./world-book-vector-constants";
+import { normalizeWorldBookVectorSettings } from "./world-book-vector-settings-model";
 
 export interface Setting {
   key: string;
@@ -14,6 +17,10 @@ export interface Setting {
 
 const MAX_SETTING_KEY_LENGTH = 200;
 const MAX_SETTING_VALUE_BYTES = 2 * 1024 * 1024; // 2 MB serialized JSON
+// Theme packs embed their assets as base64 in savedThemes. A fully supported
+// 250 MiB theme archive expands to about 333 MiB when represented as JSON, so
+// this leaves room for the manifest and saved-theme metadata.
+export const MAX_SAVED_THEMES_VALUE_BYTES = 350 * 1024 * 1024;
 const SETTING_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
 
 export class InvalidSettingError extends Error {
@@ -28,6 +35,18 @@ function markWorldBookVectorStatesStaleForSettingsChange(userId: string): void {
          vector_index_error = NULL
      WHERE world_book_id IN (SELECT id FROM world_books WHERE user_id = ?)`
   ).run(userId);
+}
+
+function worldBookVectorIndexSettingsChanged(existingJson: string | undefined, nextValue: unknown): boolean {
+  try {
+    const previous = normalizeWorldBookVectorSettings(existingJson === undefined ? null : JSON.parse(existingJson));
+    const next = normalizeWorldBookVectorSettings(nextValue);
+    return worldBookVectorSettingsFingerprint(previous) !== worldBookVectorSettingsFingerprint(next);
+  } catch {
+    // A malformed legacy value should be treated conservatively so the next
+    // valid save cannot leave vectors built with unknown chunking settings.
+    return true;
+  }
 }
 
 function assertValidKey(key: unknown): asserts key is string {
@@ -52,9 +71,12 @@ function serializeValueOrThrow(key: string, value: unknown): string {
   } catch (err: any) {
     throw new InvalidSettingError(`Setting "${key}" value is not JSON-serializable: ${err?.message || "unknown"}`);
   }
-  if (json.length > MAX_SETTING_VALUE_BYTES) {
+  const maxBytes = key === "savedThemes"
+    ? MAX_SAVED_THEMES_VALUE_BYTES
+    : MAX_SETTING_VALUE_BYTES;
+  if (json.length > maxBytes) {
     throw new InvalidSettingError(
-      `Setting "${key}" exceeds ${MAX_SETTING_VALUE_BYTES} bytes serialized`,
+      `Setting "${key}" exceeds ${maxBytes} bytes serialized`,
     );
   }
   return json;
@@ -71,6 +93,38 @@ export function getSetting(userId: string, key: string): Setting | null {
   return { ...row, value: JSON.parse(row.value) };
 }
 
+export function getSettingAcrossUsers(key: string): Array<{ user_id: string; value: any }> {
+  const rows = getDb().query("SELECT user_id, value FROM settings WHERE key = ?").all(key) as any[];
+  return rows.map((r) => ({ user_id: r.user_id, value: JSON.parse(r.value) }));
+}
+
+/**
+ * The `editAndSendAlwaysUseActiveConnection` Productivity setting, read from the
+ * persisted per-user `quickToolbarSettings` blob.
+ *
+ * Lives here rather than in `generate.service` because BOTH ends of the
+ * Edit-and-Send flow need the identical answer and must not be able to drift:
+ * `chats.service.editAndSend` reads it once at COMMIT time to record the
+ * resolved connection on the outbox row, and `generate.service` reads it on the
+ * legacy path for rows committed before that column existed. A duplicated
+ * predicate is exactly how the two would diverge.
+ *
+ * Strict `=== true`: an absent row, an absent key, `null`, `undefined`, a
+ * non-object or array value, an explicit `false`, and the coercible `"true"` /
+ * `0` all mean OFF. No truthiness coercion anywhere, so an explicit `false`
+ * cannot be flipped. Frontend defaults are deliberately NOT merged server-side
+ * (`DEFAULT_QUICK_TOOLBAR_SETTINGS` is a frontend module) — a default merge is
+ * the one way a wrong value could be reintroduced. Only the CANONICAL
+ * `quickToolbarSettings` row is read; the namespaced compatibility mirror
+ * `spindle:lumiverse_suite:quick_toolbar:quickToolbarSettings` is never
+ * authoritative.
+ */
+export function readEditAndSendAlwaysUseActiveConnection(userId: string): boolean {
+  const value = getSetting(userId, "quickToolbarSettings")?.value;
+  return !!value && typeof value === "object" && !Array.isArray(value)
+    && (value as Record<string, unknown>).editAndSendAlwaysUseActiveConnection === true;
+}
+
 export function getSettingsByKeys(userId: string, keys: string[]): Map<string, any> {
   if (keys.length === 0) return new Map();
   const placeholders = keys.map(() => "?").join(", ");
@@ -84,7 +138,12 @@ export function getSettingsByKeys(userId: string, keys: string[]): Map<string, a
   return result;
 }
 
-export function putSetting(userId: string, key: string, value: any): Setting {
+export function putSetting(
+  userId: string,
+  key: string,
+  value: any,
+  options: { suppressBroadcast?: boolean } = {},
+): Setting {
   assertValidKey(key);
   const json = serializeValueOrThrow(key, value);
   const now = Math.floor(Date.now() / 1000);
@@ -99,13 +158,16 @@ export function putSetting(userId: string, key: string, value: any): Setting {
     )
     .run(key, json, userId, now);
 
-  if (key === WORLD_BOOK_VECTOR_SETTINGS_KEY && existingRow?.value !== json) {
+  if (key === WORLD_BOOK_VECTOR_SETTINGS_KEY && worldBookVectorIndexSettingsChanged(existingRow?.value, value)) {
     markWorldBookVectorStatesStaleForSettingsChange(userId);
   }
 
   const setting = { key, value, updated_at: now };
-  eventBus.emit(EventType.SETTINGS_UPDATED, { key, value }, userId);
-  if (key === "activeChatId") {
+  if (key === REQUEST_HISTORY_SETTING && value !== true) requestHistoryStore.clear(userId);
+  if (!options.suppressBroadcast) {
+    eventBus.emit(EventType.SETTINGS_UPDATED, { key, value }, userId);
+  }
+  if (!options.suppressBroadcast && key === "activeChatId") {
     eventBus.emit(EventType.CHAT_SWITCHED, { chatId: typeof value === "string" ? value : null }, userId);
   }
   return setting;
@@ -156,8 +218,13 @@ export function putMany(userId: string, settings: Record<string, any>): Setting[
   });
   transaction();
 
+  if (prepared.some((entry) => entry.key === REQUEST_HISTORY_SETTING && entry.value !== true)) {
+    requestHistoryStore.clear(userId);
+  }
+
   const worldBookVectorSettingsChanged = prepared.some(
-    (entry) => entry.key === WORLD_BOOK_VECTOR_SETTINGS_KEY && existingValues?.get(entry.key) !== entry.json,
+    (entry) => entry.key === WORLD_BOOK_VECTOR_SETTINGS_KEY
+      && worldBookVectorIndexSettingsChanged(existingValues?.get(entry.key), entry.value),
   );
   if (worldBookVectorSettingsChanged) {
     markWorldBookVectorStatesStaleForSettingsChange(userId);
@@ -172,6 +239,7 @@ export function putMany(userId: string, settings: Record<string, any>): Setting[
 }
 
 export function deleteSetting(userId: string, key: string): boolean {
+  if (key === REQUEST_HISTORY_SETTING) requestHistoryStore.clear(userId);
   const result = getDb().query("DELETE FROM settings WHERE key = ? AND user_id = ?").run(key, userId);
   return result.changes > 0;
 }

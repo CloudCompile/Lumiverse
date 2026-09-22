@@ -46,7 +46,11 @@
     "searchFolders": "Cerca cartelle...",
     "none": "Nessuno",
     "folderNamePlaceholder": "Nome della cartella...",
-    "createNew": "Crea una nuova cartella..."
+    "createNew": "Crea una nuova cartella...",
+    "renameFolder": "Rinomina {{name}}",
+    "deleteFolder": "Elimina {{name}}",
+    "confirmRename": "Conferma rinomina",
+    "cancelRename": "Annulla rinomina"
   },
   "imageLightbox": {
     "loadFailed": "Caricamento immagine fallito"
@@ -81,6 +85,8 @@
     "expandEditor": "Espandi l'editor",
     "hideMacros": "Nascondi le macro",
     "insertMacro": "Inserisci una macro",
+    "previewMarkdown": "Anteprima Markdown",
+    "editMarkdown": "Modifica Markdown",
     "searchMacros": "Cerca macro..."
   },
   "spindle": {

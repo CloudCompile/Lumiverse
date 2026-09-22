@@ -1,5 +1,7 @@
 export interface ExpressionConfig {
   enabled: boolean
+  /** Local message-avatar preference; legacy characters default to false. */
+  useAsAvatar?: boolean
   defaultExpression: string
   mappings: Record<string, string> // label → image_id
 }
@@ -54,4 +56,11 @@ export interface ExpressionChangedPayload {
   characterId: string
   label: string
   imageId: string
+  expressionGroup?: string
+}
+
+export interface MultiCharacterExpressionsChangedPayload {
+  chatId: string
+  characterId: string
+  expressions: Record<string, { label: string; imageId: string }>
 }

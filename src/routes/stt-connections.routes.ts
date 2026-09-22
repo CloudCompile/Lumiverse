@@ -1,11 +1,13 @@
 import { Hono } from "hono";
 import * as svc from "../services/stt-connections.service";
 import { parsePagination } from "../services/pagination";
+import { withReadableApiKeyStatus, withReadableApiKeyStatuses } from "../services/connection-secret-status";
 
 const app = new Hono();
 
 app.get("/providers", (c) => {
-  return c.json({ providers: svc.listProviders() });
+  const userId = c.get("userId");
+  return c.json({ providers: svc.listProviders(userId) });
 });
 
 app.post("/models/preview", async (c) => {
@@ -15,10 +17,15 @@ app.post("/models/preview", async (c) => {
   return c.json(result);
 });
 
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listConnections(userId, pagination));
+  const result = await withReadableApiKeyStatuses(
+    userId,
+    svc.listConnections(userId, pagination),
+    svc.sttConnectionSecretKey,
+  );
+  return c.json(result);
 });
 
 app.post("/", async (c) => {
@@ -31,11 +38,11 @@ app.post("/", async (c) => {
   return c.json(conn, 201);
 });
 
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const userId = c.get("userId");
   const conn = svc.getConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.sttConnectionSecretKey));
 });
 
 app.put("/:id", async (c) => {
@@ -43,7 +50,7 @@ app.put("/:id", async (c) => {
   const body = await c.req.json();
   const conn = await svc.updateConnection(userId, c.req.param("id"), body);
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.sttConnectionSecretKey));
 });
 
 app.delete("/:id", async (c) => {
@@ -88,7 +95,7 @@ app.post("/:id/duplicate", async (c) => {
   const userId = c.get("userId");
   const conn = await svc.duplicateConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn, 201);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.sttConnectionSecretKey), 201);
 });
 
 export { app as sttConnectionsRoutes };

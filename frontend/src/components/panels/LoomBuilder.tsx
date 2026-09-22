@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useDeferredValue, type ReactNode, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
+import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 
 import {
   DndContext,
@@ -46,7 +47,6 @@ import {
   Braces,
   RotateCcw,
   Wifi,
-  Code2,
   AlertTriangle,
   MessageSquare,
   Bot,
@@ -58,15 +58,24 @@ import {
   Link,
   Unlink,
   Shield,
+  Archive,
+  CircleHelp,
+  Square,
+  CheckSquare,
 } from 'lucide-react'
 import clsx from 'clsx'
 import ExpandedTextEditor, { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { ModalShell } from '@/components/shared/ModalShell'
+import { GuideViewer } from '@/components/shared/GuideViewer'
 import { RangeSlider } from '@/components/shared/RangeSlider'
 import { resolveMacros as resolveMacrosApi } from '@/api/macros'
 import { useLoomBuilder } from '@/hooks/useLoomBuilder'
+import { presetsApi, type StashedPromptBlock } from '@/api/presets'
+import { imagesApi } from '@/api/images'
 import { usePresetProfiles } from '@/hooks/usePresetProfiles'
-import { computeGroups, createBlock, createMarkerBlock } from '@/lib/loom/service'
+import { getEffectivePromptVariableValues } from '@/hooks/preset-profile-prompt-variables'
+import { computeGroups, createBlock, createMarkerBlock, getRemotePresetOrigin, isProtectedSealedSource, resolvePromptBlockPlacements } from '@/lib/loom/service'
+import { sanitizeCharacterTagTrigger, splitCharacterTagTriggerInput } from '@/lib/loom/characterTagTrigger'
 import {
   PROMPT_TEMPLATES,
   PROVIDER_DISPLAY_NAMES,
@@ -76,7 +85,7 @@ import {
   DEFAULT_COMPLETION_SETTINGS,
   DEFAULT_ADVANCED_SETTINGS,
 } from '@/lib/loom/constants'
-import type { PromptBlock, PromptVariableDef, PromptVariableValues, LoomConnectionProfile, SamplerParam, MacroGroup, CategoryGroup, LoomPreset } from '@/lib/loom/types'
+import type { PromptBlock, PromptBlockPlacement, PromptBlockPlacementBinding, PromptVariableDef, PromptVariableValues, LoomConnectionProfile, SamplerParam, MacroGroup, CategoryGroup, LoomPreset } from '@/lib/loom/types'
 import { useLoomOptionLabels } from '@/lib/i18n/loomOptionLabels'
 import { PromptVariablesModal } from '@/components/shared/PromptVariablesModal'
 import { VariablesEditor } from './PromptVariablesEditor'
@@ -86,9 +95,17 @@ import { useStore as __contextMeterStore } from '@/store'
 import { groupBreakdownEntries as __groupBreakdownEntries } from '@/lib/prompt-breakdown'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import { Toggle } from '@/components/shared/Toggle'
+import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
+import { PromptStashModal } from './PromptStashModal'
 import { Button } from '@/components/shared/FormComponents'
 import { toast } from '@/lib/toast'
+import { useLongPress } from '@/hooks/useLongPress'
 import { markLoomRuntimeProfileContext } from '@/lib/loom/runtimeProfile'
+import { importPresetFiles } from '@/lib/loom/preset-import-batch'
+import SpindlePresetEditorTabContent from '@/components/spindle/SpindlePresetEditorTabContent'
+import SpindlePresetEditorToolbarItem from '@/components/spindle/SpindlePresetEditorToolbarItem'
+import { applyPresetEditorDraft, toPresetEditorDraft } from '@/lib/spindle/preset-editor-adapter'
+import { setPresetEditorController, syncPresetEditorState } from '@/lib/spindle/preset-editor-helper'
 import s from './LoomBuilder.module.css'
 
 function useLb() {
@@ -158,6 +175,19 @@ function suggestedSealedBlockKey(block: PromptBlock, name: string) {
   return fromTitle || sanitizeSealedBlockKey(block.id).toLowerCase() || block.id.toLowerCase()
 }
 
+function reportLoomCallbackFailure(error: unknown): void {
+  console.error('[Spindle] Loom onChange callback failed', error)
+}
+
+function observeLoomCallbackResult(result: unknown): void {
+  if (result === null || (typeof result !== 'object' && typeof result !== 'function')) return
+  try {
+    void Promise.resolve(result).catch(reportLoomCallbackFailure)
+  } catch (error) {
+    reportLoomCallbackFailure(error)
+  }
+}
+
 function inferGroupAtIndex(blocks: PromptBlock[], index: number) {
   const target = blocks[index]
   if (!target || target.marker === 'category') return null
@@ -222,12 +252,14 @@ interface SortableCategoryItemProps {
   onEdit: (block: PromptBlock) => void
   onDelete: (id: string) => void
   onToggle: (id: string) => void
+  /** Blanket enable/disable of the category and all of its children. */
+  onToggleChildren: (id: string) => void
   childCount: number
   dragDisabled?: boolean
 }
 
 function SortableCategoryItem({
-  block, isCollapsed, onToggleCollapse, onEdit, onDelete, onToggle, childCount, dragDisabled = false,
+  block, isCollapsed, onToggleCollapse, onEdit, onDelete, onToggle, onToggleChildren, childCount, dragDisabled = false,
 }: SortableCategoryItemProps) {
   const { t } = useLb()
   const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
@@ -268,6 +300,9 @@ function SortableCategoryItem({
       <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? t('category.disable') : t('category.enable')}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
       </Button>
+      <Button size="icon-sm" variant="ghost" onClick={() => onToggleChildren(block.id)} title={block.enabled ? t('category.disableAll') : t('category.enableAll')}>
+        <Layers size={14} />
+      </Button>
       <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title={t('category.rename')}>
         <Edit2 size={14} />
       </Button>
@@ -284,14 +319,16 @@ function SortableCategoryItem({
 
 interface SortableBlockItemProps {
   block: PromptBlock
+  effectiveRole?: PromptBlock['role']
   onEdit: (block: PromptBlock) => void
   onDelete: (id: string) => void
   onToggle: (id: string) => void
+  onStash?: (block: PromptBlock) => void
   indented: boolean
   dragDisabled?: boolean
 }
 
-function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDisabled = false }: SortableBlockItemProps) {
+function SortableBlockItem({ block, effectiveRole, onEdit, onDelete, onToggle, onStash, indented, dragDisabled = false }: SortableBlockItemProps) {
   const { t } = useLb()
   const { t: tc } = useTranslation('common')
   const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: block.id, disabled: dragDisabled })
@@ -299,6 +336,7 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
   const isMarker = block.marker && block.marker !== 'category'
   const isDisabled = !block.enabled
   const preview = block.content ? block.content.substring(0, 50) + (block.content.length > 50 ? '...' : '') : ''
+  const displayedRole = effectiveRole ?? block.role
 
   return (
     <div
@@ -320,30 +358,36 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
             {isMarker && <Hash size={12} className={s.blockNameIcon} />}
             {block.isLocked && <Lock size={10} className={clsx(s.blockNameIcon, s.blockNameIconMuted)} />}
             {block.sealed === true && <Shield size={10} className={clsx(s.blockNameIcon, s.blockNameIconSealed)} />}
+            {block.stashId && <Archive size={10} className={clsx(s.blockNameIcon, s.blockNameIconMuted)} />}
             <span className={s.blockNameText}>{block.name}</span>
-          </span>
-          <span className={s.blockMetaRow}>
-            {!isMarker && (
-              <span className={clsx(s.badge, ROLE_BADGES[block.role] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[block.role] || block.role}</span>
-            )}
-            {isMarker && (
-              <span className={clsx(s.badge, s.badgeMarker)}>{t('block.marker')}</span>
-            )}
-            {block.injectionTrigger?.length > 0 && (
-              <span className={s.triggerBadgeList}>
-                {block.injectionTrigger.map(t => {
-                  const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
-                  return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
-                })}
-              </span>
-            )}
           </span>
         </div>
         {preview && !isMarker && <span className={s.blockPreview}>{preview}</span>}
       </div>
+      <span className={s.blockMetaRow}>
+        {!isMarker && (
+          <span className={clsx(s.badge, ROLE_BADGES[displayedRole] || s.badgeSystem)}>{ROLE_DISPLAY_LABELS[displayedRole] || displayedRole}</span>
+        )}
+        {isMarker && (
+          <span className={clsx(s.badge, s.badgeMarker)}>{t('block.marker')}</span>
+        )}
+        {block.injectionTrigger?.length > 0 && (
+          <span className={s.triggerBadgeList}>
+            {block.injectionTrigger.map(t => {
+              const meta = INJECTION_TRIGGER_TYPES.find(tt => tt.value === t)
+              return meta ? <span key={t} className={s.triggerBadge}>{meta.shortLabel}</span> : null
+            })}
+          </span>
+        )}
+      </span>
       <Button size="icon-sm" variant="ghost" onClick={() => onToggle(block.id)} title={block.enabled ? t('block.disable') : t('block.enable')}>
         {block.enabled ? <Eye size={14} /> : <EyeOff size={14} />}
       </Button>
+      {!isMarker && !block.stashId && onStash && (
+        <Button size="icon-sm" variant="ghost" onClick={() => onStash(block)} title={t('actions.addToStash')}>
+          <Archive size={14} />
+        </Button>
+      )}
       <Button size="icon-sm" variant="ghost" onClick={() => onEdit(block)} title={tc('actions.edit')}>
         <Edit2 size={14} />
       </Button>
@@ -360,22 +404,214 @@ function SortableBlockItem({ block, onEdit, onDelete, onToggle, indented, dragDi
 // BLOCK EDITOR
 // ============================================================================
 
+interface TrustedMacroPreviewControlsProps {
+  blockId: string
+  blocks: PromptBlock[]
+  promptVariables: PromptVariableValues
+  content: string
+  role: PromptBlock['role']
+  position: PromptBlock['position']
+  depth: number
+  variables: PromptVariableDef[]
+  placementBinding?: PromptBlockPlacementBinding
+}
+
+function TrustedMacroPreviewControls({
+  blockId,
+  blocks,
+  promptVariables,
+  content,
+  role,
+  position,
+  depth,
+  variables,
+  placementBinding,
+}: TrustedMacroPreviewControlsProps) {
+  const { t } = useLb()
+  const [showPreview, setShowPreview] = useState(false)
+  const [previewText, setPreviewText] = useState('')
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const [previewDiagnostics, setPreviewDiagnostics] = useState<{ level: string; message: string }[]>([])
+  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // A preview can be superseded while its macro request is in flight. Track
+  // the request version so a late response never replaces newer context.
+  const previewRequestVersionRef = useRef(0)
+  const activeChatId = __contextMeterStore((state) => state.activeChatId)
+  const activeCharacterId = __contextMeterStore((state) => state.activeCharacterId)
+  const activeGroupCharacterId = __contextMeterStore((state) => state.activeGroupCharacterId)
+  const activePersonaId = __contextMeterStore((state) => state.activePersonaId)
+  const activeProfileId = __contextMeterStore((state) => state.activeProfileId)
+
+  useEffect(() => {
+    const requestVersion = ++previewRequestVersionRef.current
+    if (!showPreview || !content.trim()) {
+      setPreviewText('')
+      setPreviewDiagnostics([])
+      setPreviewLoading(false)
+      return
+    }
+    clearTimeout(previewTimerRef.current)
+    previewTimerRef.current = setTimeout(() => {
+      setPreviewLoading(true)
+      const isAppend = role === 'user_append' || role === 'assistant_append'
+      const previewBlocks = blocks.map((candidate) =>
+        candidate.id === blockId
+          ? { ...candidate, content, role, position, depth, variables, placementBinding, enabled: true }
+          : candidate,
+      )
+      resolveMacrosApi({
+        template: content,
+        trim: !isAppend,
+        prompt_blocks: previewBlocks,
+        prompt_block_id: blockId,
+        prompt_variables: promptVariables,
+        ...(activeChatId ? { chat_id: activeChatId } : {}),
+        ...(activePersonaId ? { persona_id: activePersonaId } : {}),
+        ...(activeProfileId ? { connection_id: activeProfileId } : {}),
+        ...(activeGroupCharacterId || activeCharacterId
+          ? { character_id: activeGroupCharacterId ?? activeCharacterId ?? undefined }
+          : {}),
+      })
+        .then((response) => {
+          if (previewRequestVersionRef.current !== requestVersion) return
+          setPreviewText(response.text)
+          setPreviewDiagnostics(response.diagnostics)
+        })
+        .catch(() => {
+          if (previewRequestVersionRef.current !== requestVersion) return
+          setPreviewText(t('blockEditor.previewUnavailable'))
+          setPreviewDiagnostics([])
+        })
+        .finally(() => {
+          if (previewRequestVersionRef.current === requestVersion) {
+            setPreviewLoading(false)
+          }
+        })
+    }, 500)
+    return () => {
+      clearTimeout(previewTimerRef.current)
+    }
+  }, [
+    activeCharacterId,
+    activeChatId,
+    activeGroupCharacterId,
+    activePersonaId,
+    activeProfileId,
+    blockId,
+    blocks,
+    content,
+    depth,
+    position,
+    promptVariables,
+    role,
+    t,
+    variables,
+    placementBinding,
+    showPreview,
+  ])
+
+  return (
+    <>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
+        <button
+          className={clsx(s.btn, s.btnSmall, showPreview && s.btnPrimary)}
+          onClick={() => setShowPreview(!showPreview)}
+          type="button"
+        >
+          <Eye size={12} /> {showPreview ? t('blockEditor.hidePreview') : t('blockEditor.preview')}
+        </button>
+        {showPreview && previewLoading && (
+          <span style={{ fontSize: 'calc(10px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)' }}>
+            {t('blockEditor.resolving')}
+          </span>
+        )}
+      </div>
+      {showPreview && (
+        <div className={s.previewPanel}>
+          {previewDiagnostics.length > 0 && (
+            <div className={s.previewDiagnostics}>
+              {previewDiagnostics.map((diagnostic, index) => (
+                <div key={index} className={diagnostic.level === 'error' ? s.previewDiagError : s.previewDiagWarn}>
+                  <AlertTriangle size={10} /> {diagnostic.message}
+                </div>
+              ))}
+            </div>
+          )}
+          <pre className={s.previewContent}>
+            {previewLoading
+              ? t('blockEditor.resolving')
+              : (previewText === '' && content ? t('blockEditor.emptyOutput') : previewText || t('blockEditor.noPreview'))}
+          </pre>
+        </div>
+      )}
+    </>
+  )
+}
+
 interface BlockEditorProps {
   block: PromptBlock
   blocks: PromptBlock[]
   promptVariables: PromptVariableValues
-  onSave: (updates: Partial<PromptBlock>) => void
+  onSave: (updates: Partial<PromptBlock>) => boolean | void
   onBack: () => void
+  onDraftChange?: (updates: Partial<PromptBlock>) => void
+  validationError?: string | null
   availableMacros: MacroGroup[]
   refreshMacros?: () => void
   compact: boolean
+  trustedHostFeatures?: boolean
+  /** Preset-level move: relocates a variable def (and its value bucket) to
+   * another block. Returns false when the move was rejected. */
+  onMoveVariable?: (sourceBlockId: string, variable: PromptVariableDef, targetBlockId: string) => boolean
 }
 
-function BlockEditor({ block, blocks, promptVariables, onSave, onBack, availableMacros, refreshMacros, compact }: BlockEditorProps) {
+function cleanPlacementBinding(
+  binding: PromptBlockPlacementBinding | undefined,
+  variables: PromptVariableDef[],
+  fallback: PromptBlockPlacement,
+): PromptBlockPlacementBinding | undefined {
+  if (!binding) return undefined
+  const selector = variables.find(
+    (variable): variable is Extract<PromptVariableDef, { type: 'select' }> => (
+      variable.id === binding.variableId && variable.type === 'select'
+    ),
+  )
+  if (!selector || selector.options.length === 0) return undefined
+  const validRoles = new Set<PromptBlockPlacement['role']>(['system', 'user', 'assistant', 'user_append', 'assistant_append'])
+  const validPositions = new Set<PromptBlockPlacement['position']>(['pre_history', 'post_history', 'in_history'])
+  const options: PromptBlockPlacementBinding['options'] = {}
+  for (const option of selector.options) {
+    const raw = binding.options[option.id]
+    const placement = raw
+      && validRoles.has(raw.role)
+      && validPositions.has(raw.position)
+      && Number.isFinite(raw.depth)
+      && raw.depth >= 0
+      ? { role: raw.role, position: raw.position, depth: Math.floor(raw.depth) }
+      : { ...fallback }
+    options[option.id] = placement
+  }
+  return { variableId: selector.id, options }
+}
+
+export function BlockEditor({
+  block,
+  blocks,
+  promptVariables,
+  onSave,
+  onBack,
+  onDraftChange,
+  validationError,
+  availableMacros,
+  refreshMacros,
+  compact,
+  trustedHostFeatures = false,
+  onMoveVariable,
+}: BlockEditorProps) {
   const { t } = useLb()
   const { t: tc } = useTranslation('common')
   const { injectionTriggerTypes, injectionTriggerLabel } = useLoomOptionLabels()
-  const isInstalledLumiHubSealed = block.sealedSource === 'lumihub'
+  const isInstalledRemoteSealed = trustedHostFeatures && isProtectedSealedSource(block.sealedSource)
   const [name, setName] = useState(block.name)
   const [role, setRole] = useState<PromptBlock['role']>(block.role || 'system')
   const [content, setContent] = useState(block.content || '')
@@ -386,59 +622,17 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
   const [sealed, setSealed] = useState(block.sealed === true)
   const [sealedKey, setSealedKey] = useState(typeof block.sealedKey === 'string' ? block.sealedKey : '')
   const [injectionTrigger, setInjectionTrigger] = useState<string[]>(block.injectionTrigger || [])
+  const [characterTagTrigger, setCharacterTagTrigger] = useState<string[]>(sanitizeCharacterTagTrigger(block.characterTagTrigger))
+  const [characterTagDraft, setCharacterTagDraft] = useState('')
   const [categoryMode, setCategoryMode] = useState<PromptBlock['categoryMode']>(block.categoryMode ?? null)
   const [variables, setVariables] = useState<PromptVariableDef[]>(
     Array.isArray(block.variables) ? block.variables : [],
   )
+  const [placementBinding, setPlacementBinding] = useState<PromptBlockPlacementBinding | undefined>(block.placementBinding)
   const [showMacros, setShowMacros] = useState(false)
   const [macroSearch, setMacroSearch] = useState('')
-  const [showPreview, setShowPreview] = useState(false)
-  const [previewText, setPreviewText] = useState('')
-  const [previewLoading, setPreviewLoading] = useState(false)
-  const [previewDiagnostics, setPreviewDiagnostics] = useState<{ level: string; message: string }[]>([])
   const [showExpandedEditor, setShowExpandedEditor] = useState(false)
-  const previewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const activeChatId = __contextMeterStore((s) => s.activeChatId)
-
-  // Debounced macro preview resolution
-  useEffect(() => {
-    if (!showPreview || !content.trim()) {
-      setPreviewText('')
-      setPreviewDiagnostics([])
-      return
-    }
-    if (previewTimerRef.current) clearTimeout(previewTimerRef.current)
-    previewTimerRef.current = setTimeout(() => {
-      setPreviewLoading(true)
-      // Trim the preview to match the dry run: the assembly strips
-      // leading/trailing whitespace from each resolved block, except append
-      // roles, where it preserves whitespace for inter-append spacing.
-      const isAppend = role === 'user_append' || role === 'assistant_append'
-      const previewBlocks = blocks.map((b) =>
-        b.id === block.id
-          ? { ...b, content, role, position, depth, variables, enabled: true }
-          : b,
-      )
-      resolveMacrosApi({
-        template: content,
-        trim: !isAppend,
-        prompt_blocks: previewBlocks,
-        prompt_variables: promptVariables,
-        ...(activeChatId ? { chat_id: activeChatId } : {}),
-      })
-        .then((res) => {
-          setPreviewText(res.text)
-          setPreviewDiagnostics(res.diagnostics)
-        })
-        .catch(() => {
-          setPreviewText(t('blockEditor.previewUnavailable'))
-          setPreviewDiagnostics([])
-        })
-        .finally(() => setPreviewLoading(false))
-    }, 500)
-    return () => { if (previewTimerRef.current) clearTimeout(previewTimerRef.current) }
-  }, [content, showPreview, activeChatId, role, blocks, block.id, position, depth, variables, promptVariables])
 
   const handlePositionChange = (newPosition: string) => {
     const pos = newPosition as PromptBlock['position']
@@ -448,30 +642,97 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
     else if (pos === 'pre_history' && role === 'assistant') setRole('system')
   }
 
-  const handleSave = () => {
+  const buildDraftUpdates = useCallback((): Partial<PromptBlock> => {
     const isAppend = role === 'user_append' || role === 'assistant_append'
-    const cleanedVariables = variables.filter((v) => v && v.name?.trim().length > 0)
-    const cleanSealedKey = sanitizeSealedBlockKey(sealedKey || block.sealedKey || block.id)
-    const shouldSeal = isInstalledLumiHubSealed || (sealed && !!cleanSealedKey)
-    onSave({
-      name, role, content,
+    const cleanedVariables = variables.filter((variable) => variable && variable.name?.trim().length > 0)
+    const cleanedCharacterTagTrigger = sanitizeCharacterTagTrigger(characterTagTrigger)
+    const fallbackPlacement: PromptBlockPlacement = {
+      role,
       position: isAppend ? 'pre_history' : position,
       depth: (position === 'in_history' || isAppend) ? depth : 0,
-      isLocked, injectionTrigger,
-      sealed: shouldSeal ? true : undefined,
-      sealedKey: shouldSeal ? cleanSealedKey : undefined,
-      sealedSource: isInstalledLumiHubSealed ? block.sealedSource : undefined,
-      sealedOriginPresetId: isInstalledLumiHubSealed ? block.sealedOriginPresetId : undefined,
-      sealedOriginVersion: isInstalledLumiHubSealed ? block.sealedOriginVersion : undefined,
-      sealedSha256: isInstalledLumiHubSealed ? block.sealedSha256 : undefined,
+    }
+    const trustedUpdates: Partial<PromptBlock> = {}
+    if (trustedHostFeatures) {
+      const cleanSealedKey = sanitizeSealedBlockKey(sealedKey || block.sealedKey || block.id)
+      const shouldSeal = isInstalledRemoteSealed || (sealed && !!cleanSealedKey)
+      trustedUpdates.sealed = shouldSeal ? true : undefined
+      trustedUpdates.sealedKey = shouldSeal ? cleanSealedKey : undefined
+      trustedUpdates.sealedSource = isInstalledRemoteSealed ? block.sealedSource : undefined
+      trustedUpdates.sealedOriginPresetId = isInstalledRemoteSealed ? block.sealedOriginPresetId : undefined
+      trustedUpdates.sealedOriginVersion = isInstalledRemoteSealed ? block.sealedOriginVersion : undefined
+      trustedUpdates.sealedSha256 = isInstalledRemoteSealed ? block.sealedSha256 : undefined
+    }
+    return {
+      name,
+      role,
+      content,
+      position: isAppend ? 'pre_history' : position,
+      depth: (position === 'in_history' || isAppend) ? depth : 0,
+      isLocked,
+      injectionTrigger,
+      characterTagTrigger: cleanedCharacterTagTrigger.length > 0 ? cleanedCharacterTagTrigger : undefined,
+      ...trustedUpdates,
       categoryMode: block.marker === 'category' ? categoryMode : null,
       variables: cleanedVariables.length ? cleanedVariables : undefined,
-    })
+      placementBinding: cleanPlacementBinding(placementBinding, cleanedVariables, fallbackPlacement),
+    }
+  }, [
+    block.id,
+    block.marker,
+    block.sealedKey,
+    block.sealedOriginPresetId,
+    block.sealedOriginVersion,
+    block.sealedSha256,
+    block.sealedSource,
+    categoryMode,
+    characterTagTrigger,
+    content,
+    depth,
+    injectionTrigger,
+    isInstalledRemoteSealed,
+    isLocked,
+    name,
+    placementBinding,
+    position,
+    role,
+    sealed,
+    sealedKey,
+    trustedHostFeatures,
+    variables,
+  ])
+  const onDraftChangeRef = useRef(onDraftChange)
+  const draftEffectPrimedRef = useRef(false)
+
+  useEffect(() => {
+    onDraftChangeRef.current = onDraftChange
+  }, [onDraftChange])
+
+  useEffect(() => {
+    if (!draftEffectPrimedRef.current) {
+      draftEffectPrimedRef.current = true
+      return
+    }
+    onDraftChangeRef.current?.(buildDraftUpdates())
+  }, [buildDraftUpdates])
+
+  const handleSave = () => {
+    onSave(buildDraftUpdates())
   }
 
   const toggleTrigger = (value: string) => {
     setInjectionTrigger(prev => prev.includes(value) ? prev.filter(v => v !== value) : [...prev, value])
   }
+
+  const commitCharacterTagDraft = useCallback(() => {
+    const parsed = splitCharacterTagTriggerInput(characterTagDraft)
+    if (parsed.length === 0) return
+    setCharacterTagTrigger((prev) => sanitizeCharacterTagTrigger([...prev, ...parsed]))
+    setCharacterTagDraft('')
+  }, [characterTagDraft])
+
+  const removeCharacterTagTrigger = useCallback((value: string) => {
+    setCharacterTagTrigger((prev) => prev.filter((tag) => tag !== value))
+  }, [])
 
   const insertMacroInto = useCallback((syntax: string, taRef: React.RefObject<HTMLTextAreaElement | null>) => {
     const ta = taRef.current
@@ -517,6 +778,7 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
       )}
       <div className={s.scrollArea}>
         <div className={s.form}>
+          {validationError && <div role="alert" className={s.jsonError}>{validationError}</div>}
           <div className={s.formGroup}>
             <label className={s.label}>{t('blockEditor.name')}</label>
             <input className={s.input} value={name} onChange={e => setName(e.target.value)} placeholder={t('blockEditor.namePlaceholder')} />
@@ -590,25 +852,18 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
               </div>
             )}
             <textarea ref={textareaRef} className={s.textarea} value={content} onChange={e => setContent(e.target.value)} placeholder={t('blockEditor.contentPlaceholder')} />
-            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '4px' }}>
-              <button className={clsx(s.btn, s.btnSmall, showPreview && s.btnPrimary)} onClick={() => setShowPreview(!showPreview)} type="button">
-                <Eye size={12} /> {showPreview ? t('blockEditor.hidePreview') : t('blockEditor.preview')}
-              </button>
-              {showPreview && previewLoading && <span style={{ fontSize: 'calc(10px * var(--lumiverse-font-scale, 1))', color: 'var(--lumiverse-text-dim)' }}>{t('blockEditor.resolving')}</span>}
-            </div>
-            {showPreview && (
-              <div className={s.previewPanel}>
-                {previewDiagnostics.length > 0 && (
-                  <div className={s.previewDiagnostics}>
-                    {previewDiagnostics.map((d, i) => (
-                      <div key={i} className={d.level === 'error' ? s.previewDiagError : s.previewDiagWarn}>
-                        <AlertTriangle size={10} /> {d.message}
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <pre className={s.previewContent}>{previewLoading ? t('blockEditor.resolving') : (previewText === '' && content ? t('blockEditor.emptyOutput') : previewText || t('blockEditor.noPreview'))}</pre>
-              </div>
+            {trustedHostFeatures && (
+              <TrustedMacroPreviewControls
+                blockId={block.id}
+                blocks={blocks}
+                promptVariables={promptVariables}
+                content={content}
+                role={role}
+                position={position}
+                depth={depth}
+                variables={variables}
+                placementBinding={placementBinding}
+              />
             )}
           </div>
 
@@ -616,7 +871,7 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
             <Toggle.Checkbox checked={isLocked} onChange={setIsLocked} label={<><Lock size={14} /> {t('blockEditor.lockBlock')}</>} />
           </div>
 
-          {!block.marker && (
+          {trustedHostFeatures && !block.marker && (
             <div className={clsx(s.sealedBlockPanel, sealed && s.sealedBlockPanelActive)}>
               <button
                 className={s.sealedBlockReveal}
@@ -636,7 +891,7 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
               </button>
               {sealControlsOpen && (
                 <div className={s.sealedBlockBody}>
-                  <p className={s.sealedBlockText}>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledHint' : 'blockEditor.sealedBlockHint')}</p>
+                  <p className={s.sealedBlockText}>{t(isInstalledRemoteSealed ? 'blockEditor.sealedBlockInstalledHint' : 'blockEditor.sealedBlockHint')}</p>
                   <div className={s.formGroup}>
                     <label className={s.label}>{t('blockEditor.sealedBlockKey')}</label>
                     <input
@@ -645,18 +900,18 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
                       onChange={e => setSealedKey(filterSealedBlockKeyInput(e.target.value))}
                       placeholder={t('blockEditor.sealedBlockKeyPlaceholder')}
                       spellCheck={false}
-                      disabled={isInstalledLumiHubSealed}
+                      disabled={isInstalledRemoteSealed}
                     />
                     <span className={s.settingsHint}>{t('blockEditor.sealedBlockKeyHint')}</span>
                   </div>
                   <label className={clsx(s.sealedBlockArmRow, !sealedKey.trim() && s.sealedBlockArmRowDisabled)}>
                     <input
                       type="checkbox"
-                      checked={(isInstalledLumiHubSealed || sealed) && !!sealedKey.trim()}
-                      disabled={isInstalledLumiHubSealed || !sealedKey.trim()}
+                      checked={(isInstalledRemoteSealed || sealed) && !!sealedKey.trim()}
+                      disabled={isInstalledRemoteSealed || !sealedKey.trim()}
                       onChange={e => setSealed(e.target.checked)}
                     />
-                    <span>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledEnable' : 'blockEditor.sealedBlockEnable')}</span>
+                    <span>{t(isInstalledRemoteSealed ? 'blockEditor.sealedBlockInstalledEnable' : 'blockEditor.sealedBlockEnable')}</span>
                   </label>
                 </div>
               )}
@@ -698,7 +953,90 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
             </span>
           </div>
 
-          <VariablesEditor variables={variables} onChange={setVariables} />
+          <div className={s.formGroup}>
+            <label className={s.label}>{t('blockEditor.characterTagTrigger')}</label>
+            <div className={s.tagTriggerField}>
+              {characterTagTrigger.map((tag) => (
+                <span key={tag} className={s.tagTriggerChip}>
+                  {tag}
+                  <button
+                    type="button"
+                    className={s.tagTriggerChipRemove}
+                    onClick={() => removeCharacterTagTrigger(tag)}
+                    title={tc('actions.delete')}
+                  >
+                    <X size={10} />
+                  </button>
+                </span>
+              ))}
+              <div className={s.tagTriggerDraftRow}>
+                <input
+                  className={s.tagTriggerDraftInput}
+                  value={characterTagDraft}
+                  onChange={(e) => setCharacterTagDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ',') {
+                      e.preventDefault()
+                      commitCharacterTagDraft()
+                    }
+                  }}
+                  placeholder={t('blockEditor.characterTagTriggerPlaceholder')}
+                />
+                <button
+                  type="button"
+                  className={s.tagTriggerDraftAdd}
+                  onClick={commitCharacterTagDraft}
+                  disabled={!characterTagDraft.trim()}
+                >
+                  <Plus size={12} />
+                </button>
+              </div>
+            </div>
+            <span className={s.settingsHint}>
+              {characterTagTrigger.length === 0
+                ? t('blockEditor.characterTagTriggerNone')
+                : t('blockEditor.characterTagTriggerActive', { list: characterTagTrigger.join(', ') })}
+            </span>
+            <span className={s.settingsHint}>{t('blockEditor.characterTagTriggerHint')}</span>
+          </div>
+
+          <VariablesEditor
+            variables={variables}
+            onChange={setVariables}
+            placementBinding={placementBinding}
+            fallbackPlacement={{ role, position, depth }}
+            onPlacementBindingChange={setPlacementBinding}
+            moveTargets={blocks
+              .filter((candidate) => candidate.id !== block.id)
+              .map((candidate) => {
+                const isCategory = candidate.marker === 'category'
+                const category = isCategory
+                  ? candidate
+                  : candidate.group
+                    ? blocks.find((entry) => entry.id === candidate.group && entry.marker === 'category')
+                    : undefined
+                return {
+                  id: candidate.id,
+                  name: candidate.name || candidate.id,
+                  categoryId: category?.id ?? null,
+                  categoryName: category?.name || null,
+                  isCategory,
+                  variableNames: (candidate.variables ?? [])
+                    .map((variable) => variable.name?.trim() ?? '')
+                    .filter(Boolean),
+                }
+              })}
+            onMoveToBlock={onMoveVariable ? (variableId, targetBlockId) => {
+              const moving = variables.find((variable) => variable.id === variableId)
+              if (!moving) return
+              // Move the in-editor version of the def (it may carry unsaved
+              // edits) and drop it from the local list so a later Save of
+              // this block doesn't resurrect it.
+              if (onMoveVariable(block.id, moving, targetBlockId)) {
+                setVariables((current) => current.filter((variable) => variable.id !== variableId))
+              }
+            } : undefined}
+          />
         </div>
       </div>
       {showExpandedEditor && (
@@ -710,8 +1048,177 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
           placeholder={t('blockEditor.contentPlaceholder')}
           macros={availableMacros}
           onRefreshMacros={refreshMacros}
+          sourceRef={textareaRef}
         />
       )}
+    </div>
+  )
+}
+
+export interface ControlledLoomBlockEditorProps {
+  blocks: PromptBlock[]
+  promptVariables: PromptVariableValues
+  onChange: (blocks: PromptBlock[]) => boolean | void | Promise<unknown>
+  onDraftChange?: (blockId: string, updates: Partial<PromptBlock> | null) => void
+  selectedBlockId?: string | null
+  onSelectedBlockChange?: (blockId: string | null) => void
+  availableMacros: MacroGroup[]
+  refreshMacros?: () => void
+  readOnly?: boolean
+  compact?: boolean
+  trustedHostFeatures?: boolean
+}
+
+/**
+ * Controlled Loom block editor surface used by host integrations such as
+ * Spindle. It deliberately reuses the same BlockEditor as the preset editor,
+ * while leaving persistence and ownership of the block array to the caller.
+ */
+export function ControlledLoomBlockEditor({
+  blocks,
+  promptVariables,
+  onChange,
+  onDraftChange,
+  selectedBlockId,
+  onSelectedBlockChange,
+  availableMacros,
+  refreshMacros,
+  readOnly = false,
+  compact = true,
+  trustedHostFeatures = false,
+}: ControlledLoomBlockEditorProps) {
+  const { t } = useLb()
+  const { t: tc } = useTranslation('common')
+  const [internalEditingBlockId, setInternalEditingBlockId] = useState<string | null>(null)
+  const [validationError, setValidationError] = useState<string | null>(null)
+  const selectionControlled = selectedBlockId !== undefined
+  const editingBlockId = selectionControlled ? selectedBlockId ?? null : internalEditingBlockId
+  const editingBlock = editingBlockId
+    ? blocks.find((block) => block.id === editingBlockId) ?? null
+    : null
+  const selectBlock = useCallback((blockId: string | null) => {
+    if (!selectionControlled) setInternalEditingBlockId(blockId)
+    onSelectedBlockChange?.(blockId)
+  }, [onSelectedBlockChange, selectionControlled])
+  const previousEditingBlockIdRef = useRef(editingBlockId)
+  const explicitlyClearedDraftBlockIdRef = useRef<string | null>(null)
+  const effectiveRoles = useMemo(() => new Map(
+    resolvePromptBlockPlacements(blocks, promptVariables)
+      .map((block) => [block.id, block.role] as const),
+  ), [blocks, promptVariables])
+
+  useEffect(() => {
+    const previousEditingBlockId = previousEditingBlockIdRef.current
+    if (previousEditingBlockId !== editingBlockId) {
+      if (previousEditingBlockId !== null) {
+        if (explicitlyClearedDraftBlockIdRef.current === previousEditingBlockId) {
+          explicitlyClearedDraftBlockIdRef.current = null
+        } else {
+          onDraftChange?.(previousEditingBlockId, null)
+        }
+      }
+      previousEditingBlockIdRef.current = editingBlockId
+    }
+  }, [editingBlockId, onDraftChange])
+
+  useEffect(() => {
+    if (!editingBlockId || blocks.some((block) => block.id === editingBlockId)) return
+    setValidationError(null)
+    if (explicitlyClearedDraftBlockIdRef.current !== editingBlockId) {
+      explicitlyClearedDraftBlockIdRef.current = editingBlockId
+      onDraftChange?.(editingBlockId, null)
+    }
+    selectBlock(null)
+  }, [blocks, editingBlockId, onDraftChange, selectBlock])
+
+  if (editingBlock && !readOnly) {
+    return (
+      <BlockEditor
+        key={JSON.stringify(editingBlock)}
+        block={editingBlock}
+        blocks={blocks}
+        promptVariables={promptVariables}
+        validationError={validationError}
+        onSave={(updates) => {
+          const nextBlocks = blocks.map((block) => (
+            block.id === editingBlock.id ? { ...block, ...updates } : block
+          ))
+          const callbackBlocks = structuredClone(nextBlocks)
+          let callbackResult: unknown = undefined
+          try {
+            callbackResult = onChange(callbackBlocks) as unknown
+          } catch (error) {
+            reportLoomCallbackFailure(error)
+          }
+          observeLoomCallbackResult(callbackResult)
+          if (callbackResult === false) {
+            setValidationError(t('blockEditor.validationFailed'))
+            return
+          }
+          setValidationError(null)
+          explicitlyClearedDraftBlockIdRef.current = editingBlock.id
+          onDraftChange?.(editingBlock.id, null)
+          selectBlock(null)
+        }}
+        onBack={() => {
+          setValidationError(null)
+          selectBlock(null)
+        }}
+        onDraftChange={(updates) => {
+          explicitlyClearedDraftBlockIdRef.current = null
+          onDraftChange?.(editingBlock.id, updates)
+        }}
+        availableMacros={availableMacros}
+        refreshMacros={refreshMacros}
+        compact={compact}
+        trustedHostFeatures={trustedHostFeatures}
+      />
+    )
+  }
+
+  return (
+    <div className={clsx(s.layout, compact && s.layoutCompact)}>
+      <div className={s.toolbar}>
+        <span className={s.title}>{t('preset.blocks', { count: blocks.length })}</span>
+      </div>
+      <div className={s.scrollArea}>
+        <div className={s.blockList}>
+          {blocks.length === 0 ? (
+            <div className={s.empty}>{t('empty.noBlocksTitle')}</div>
+          ) : blocks.map((block) => (
+            <div key={block.id} className={clsx(s.item, !block.enabled && s.itemDisabled)}>
+              <div className={s.blockContent}>
+                <div className={s.blockNameRow}>
+                  <span className={s.blockName}>{block.name}</span>
+                </div>
+                {block.content && (
+                  <span className={s.blockPreview}>
+                    {block.content.slice(0, 100)}{block.content.length > 100 ? '…' : ''}
+                  </span>
+                )}
+              </div>
+              <span className={s.blockMetaRow}>
+                <span className={clsx(s.badge, ROLE_BADGES[effectiveRoles.get(block.id) ?? block.role] || s.badgeSystem)}>
+                  {ROLE_DISPLAY_LABELS[effectiveRoles.get(block.id) ?? block.role] || effectiveRoles.get(block.id) || block.role}
+                </span>
+              </span>
+              {!readOnly && (
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setValidationError(null)
+                    selectBlock(block.id)
+                  }}
+                  title={tc('actions.edit')}
+                >
+                  <Edit2 size={14} />
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
@@ -721,28 +1228,57 @@ function BlockEditor({ block, blocks, promptVariables, onSave, onBack, available
 // ============================================================================
 
 interface PresetSelectorProps {
-  registry: Record<string, { name: string; blockCount: number }>
+  registry: Record<string, { name: string; blockCount: number; coverUrl?: string | null; updatedAt?: number }>
   activePresetId: string | null
   activePresetName: string | null
   onSelect: (id: string | null) => void
   onCreate: (name: string) => void
-  onRename: (name: string) => void
-  onDuplicate: () => void
-  onDelete: () => void
+  onRename: (id: string, name: string) => void
+  onDuplicate: (id: string, name: string) => void
+  onDelete: (id: string) => void
+  onBulkDelete: (ids: string[]) => Promise<string[]>
+  onBulkExport: (ids: string[]) => Promise<number>
   onImport: (type: string) => void
-  onExport: () => void
+  onExport: (id: string) => void
   onExportLegacy: () => void
 }
 
-function PresetSelector({ registry, activePresetId, activePresetName, onSelect, onCreate, onRename, onDuplicate, onDelete, onImport, onExport, onExportLegacy }: PresetSelectorProps) {
+function PresetSelector({ registry, activePresetId, activePresetName, onSelect, onCreate, onRename, onDuplicate, onDelete, onBulkDelete, onBulkExport, onImport, onExport, onExportLegacy }: PresetSelectorProps) {
   const { t } = useLb()
   const { t: tc } = useTranslation('common')
   const [showMenu, setShowMenu] = useState(false)
+  const [showManager, setShowManager] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [showRename, setShowRename] = useState(false)
   const [newName, setNewName] = useState('')
   const [renameName, setRenameName] = useState('')
+  const [renamePresetId, setRenamePresetId] = useState<string | null>(null)
+  const [cardContextMenu, setCardContextMenu] = useState<{ presetId: string; position: ContextMenuPos } | null>(null)
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedPresetIds, setSelectedPresetIds] = useState<Set<string>>(new Set())
+  const [bulkDeleteIds, setBulkDeleteIds] = useState<string[] | null>(null)
+  const [bulkActionPending, setBulkActionPending] = useState(false)
   const registryEntries = Object.entries(registry)
+  const allSelected = registryEntries.length > 0 && registryEntries.every(([id]) => selectedPresetIds.has(id))
+  const contextPresetIdRef = useRef<string | null>(null)
+  const selectionAnchorIdRef = useRef<string | null>(null)
+  const cardLongPress = useLongPress({
+    onLongPress: (position) => {
+      const presetId = contextPresetIdRef.current
+      if (presetId && registry[presetId]) setCardContextMenu({ presetId, position })
+    },
+  })
+
+  useEffect(() => {
+    const registryIds = new Set(Object.keys(registry))
+    if (selectionAnchorIdRef.current && !registryIds.has(selectionAnchorIdRef.current)) {
+      selectionAnchorIdRef.current = null
+    }
+    setSelectedPresetIds((current) => {
+      const next = new Set([...current].filter((id) => registryIds.has(id)))
+      return next.size === current.size ? current : next
+    })
+  }, [registry])
 
   const handleCreate = () => {
     if (!newName.trim()) return
@@ -752,15 +1288,151 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
   }
 
   const handleRename = () => {
-    if (!renameName.trim()) return
-    onRename(renameName.trim())
+    if (!renamePresetId || !renameName.trim()) return
+    onRename(renamePresetId, renameName.trim())
     setRenameName('')
+    setRenamePresetId(null)
     setShowRename(false)
   }
 
+  const openRename = (id: string, name: string) => {
+    setRenamePresetId(id)
+    setRenameName(name)
+    setShowRename(true)
+    setShowMenu(false)
+  }
+
+  const togglePresetSelection = (id: string) => {
+    setSelectedPresetIds((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const handlePresetSelection = (id: string, selectRange = false) => {
+    const anchorId = selectionAnchorIdRef.current
+    if (selectRange && anchorId) {
+      const anchorIndex = registryEntries.findIndex(([presetId]) => presetId === anchorId)
+      const targetIndex = registryEntries.findIndex(([presetId]) => presetId === id)
+      if (anchorIndex >= 0 && targetIndex >= 0) {
+        const start = Math.min(anchorIndex, targetIndex)
+        const end = Math.max(anchorIndex, targetIndex)
+        setSelectedPresetIds((current) => {
+          const next = new Set(current)
+          for (let index = start; index <= end; index += 1) {
+            next.add(registryEntries[index][0])
+          }
+          return next
+        })
+        return
+      }
+    }
+
+    selectionAnchorIdRef.current = id
+    togglePresetSelection(id)
+  }
+
+  const handleToggleSelectMode = () => {
+    setSelectMode((current) => {
+      if (current) {
+        setSelectedPresetIds(new Set())
+        selectionAnchorIdRef.current = null
+      }
+      return !current
+    })
+    setCardContextMenu(null)
+  }
+
+  const closeManager = () => {
+    setShowManager(false)
+    setCardContextMenu(null)
+    setSelectMode(false)
+    setSelectedPresetIds(new Set())
+    selectionAnchorIdRef.current = null
+  }
+
+  const handleBulkExport = async () => {
+    const ids = [...selectedPresetIds]
+    if (ids.length === 0 || bulkActionPending) return
+    setBulkActionPending(true)
+    try {
+      const count = await onBulkExport(ids)
+      toast.success(t('toast.bulkExportStarted', { count }))
+    } catch (error: any) {
+      toast.error(error?.body?.error || error?.message || t('toast.bulkExportFailed'))
+    } finally {
+      setBulkActionPending(false)
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    if (!bulkDeleteIds?.length || bulkActionPending) return
+    setBulkActionPending(true)
+    try {
+      const deleted = await onBulkDelete(bulkDeleteIds)
+      const deletedSet = new Set(deleted)
+      setSelectedPresetIds((current) => new Set([...current].filter((id) => !deletedSet.has(id))))
+      setBulkDeleteIds(null)
+      toast.success(t('toast.bulkDeleted', { count: deleted.length }))
+    } catch (error: any) {
+      toast.error(error?.body?.error || error?.message || t('toast.bulkDeleteFailed'))
+    } finally {
+      setBulkActionPending(false)
+    }
+  }
+
+  const contextPresetId = cardContextMenu?.presetId ?? null
+  const contextPreset = contextPresetId ? registry[contextPresetId] : null
+  const cardContextMenuItems: ContextMenuEntry[] = []
+  if (contextPresetId && contextPreset) {
+    const isActive = contextPresetId === activePresetId
+    cardContextMenuItems.push({
+      key: 'use',
+      label: isActive ? t('preset.currentPreset') : t('preset.usePreset'),
+      icon: <Check size={14} />,
+      active: isActive,
+      onClick: () => { onSelect(contextPresetId); setCardContextMenu(null) },
+    })
+    cardContextMenuItems.push(
+      {
+        key: 'rename',
+        label: t('preset.rename'),
+        icon: <Edit2 size={14} />,
+        onClick: () => { openRename(contextPresetId, contextPreset.name); setCardContextMenu(null) },
+      },
+      {
+        key: 'duplicate',
+        label: t('preset.duplicate'),
+        icon: <Copy size={14} />,
+        onClick: () => { onDuplicate(contextPresetId, contextPreset.name); setCardContextMenu(null) },
+      },
+      {
+        key: 'export',
+        label: t('preset.exportLoomJson'),
+        icon: <Download size={14} />,
+        onClick: () => { onExport(contextPresetId); setCardContextMenu(null) },
+      },
+      { key: 'delete-divider', type: 'divider' },
+      {
+        key: 'delete',
+        label: tc('actions.delete'),
+        icon: <Trash2 size={14} />,
+        danger: true,
+        onClick: () => { onDelete(contextPresetId); setCardContextMenu(null) },
+      },
+    )
+  }
+
+  const getPresetIdFromTarget = (target: EventTarget | null) => {
+    if (!(target instanceof Element)) return null
+    return target.closest<HTMLElement>('[data-preset-id]')?.dataset.presetId ?? null
+  }
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, minWidth: 0 }}>
-      <select className={s.select} style={{ flex: 1, minWidth: 0 }} value={activePresetId || ''} onChange={e => onSelect(e.target.value || null)}>
+    <div className={s.presetSelector}>
+      <select className={clsx(s.select, s.presetSelect)} value={activePresetId || ''} onChange={e => onSelect(e.target.value || null)}>
         <option value="">{t('preset.selectPlaceholder')}</option>
         {registryEntries.map(([id, entry]) => (
           <option key={id} value={id}>{t('preset.blocksCount', { name: entry.name, count: entry.blockCount })}</option>
@@ -773,15 +1445,16 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
         </Button>
         {showMenu && (
           <div className={s.dropdownMenu} style={{ top: '100%', right: 0, minWidth: '160px' }}>
+            <MenuButton icon={<Layers size={14} />} label={t('preset.manage')} onClick={() => { setShowManager(true); setShowMenu(false) }} />
             <MenuButton icon={<Plus size={14} />} label={t('preset.newPreset')} onClick={() => { setShowCreate(true); setShowMenu(false) }} />
             {activePresetId && (
               <>
-                <MenuButton icon={<Edit2 size={14} />} label={t('preset.rename')} onClick={() => { setRenameName(activePresetName || ''); setShowRename(true); setShowMenu(false) }} />
-                <MenuButton icon={<Copy size={14} />} label={t('preset.duplicate')} onClick={() => { onDuplicate(); setShowMenu(false) }} />
-                <MenuButton icon={<Download size={14} />} label={t('preset.exportLoomJson')} onClick={() => { onExport(); setShowMenu(false) }} />
+                <MenuButton icon={<Edit2 size={14} />} label={t('preset.rename')} onClick={() => openRename(activePresetId, activePresetName || '')} />
+                <MenuButton icon={<Copy size={14} />} label={t('preset.duplicate')} onClick={() => { onDuplicate(activePresetId, activePresetName || registry[activePresetId]?.name || 'Preset'); setShowMenu(false) }} />
+                <MenuButton icon={<Download size={14} />} label={t('preset.exportLoomJson')} onClick={() => { onExport(activePresetId); setShowMenu(false) }} />
                 <MenuButton icon={<Download size={14} />} label={t('preset.exportLegacy')} onClick={() => { onExportLegacy(); setShowMenu(false) }} />
                 <hr className={s.menuDivider} />
-                <MenuButton icon={<Trash2 size={14} />} label={tc('actions.delete')} danger onClick={() => { onDelete(); setShowMenu(false) }} />
+                <MenuButton icon={<Trash2 size={14} />} label={tc('actions.delete')} danger onClick={() => { onDelete(activePresetId); setShowMenu(false) }} />
               </>
             )}
             <hr className={s.menuDivider} />
@@ -790,6 +1463,205 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
           </div>
         )}
       </div>
+
+      <ModalShell
+        isOpen={showManager}
+        onClose={closeManager}
+        maxWidth="min(920px, 94vw)"
+        maxHeight="min(780px, 90vh)"
+        className={s.presetManagerModal}
+      >
+        <div className={s.presetManagerHeader}>
+          <div>
+            <h2 className={s.presetManagerTitle}>{t('preset.managerTitle')}</h2>
+            <p className={s.presetManagerSubtitle}>{t('preset.managerSubtitle', { count: registryEntries.length })}</p>
+          </div>
+          <button type="button" className={s.presetManagerClose} onClick={closeManager} aria-label={tc('actions.close')}>
+            <X size={18} />
+          </button>
+        </div>
+        <div className={clsx(s.presetManagerToolbar, selectMode && s.presetManagerToolbarSelecting)}>
+          <div className={s.presetManagerToolbarPrimary}>
+            <button type="button" className={s.presetManagerPrimaryAction} onClick={() => setShowCreate(true)}>
+              <Plus size={15} /> {t('preset.newPreset')}
+            </button>
+            <button type="button" className={s.presetManagerAction} onClick={() => onImport('json')}>
+              <Upload size={15} /> {t('preset.importLoomJson')}
+            </button>
+            <button type="button" className={s.presetManagerAction} onClick={() => onImport('st')}>
+              <Upload size={15} /> {t('preset.importLegacy')}
+            </button>
+          </div>
+          <div className={s.presetManagerBulkActions}>
+            <button
+              type="button"
+              className={clsx(s.presetManagerAction, selectMode && s.presetManagerSelectModeActive)}
+              onClick={handleToggleSelectMode}
+              aria-pressed={selectMode}
+              title={selectMode ? t('preset.exitSelectMode') : t('preset.selectMode')}
+            >
+              {selectMode ? <CheckSquare size={15} /> : <Square size={15} />}
+              {selectMode ? t('preset.doneSelecting') : t('preset.selectMode')}
+            </button>
+            {selectMode && (
+              <>
+                <button
+                  type="button"
+                  className={s.presetManagerSelectAll}
+                  onClick={() => {
+                    selectionAnchorIdRef.current = null
+                    setSelectedPresetIds(allSelected ? new Set() : new Set(registryEntries.map(([id]) => id)))
+                  }}
+                  disabled={registryEntries.length === 0}
+                >
+                  {allSelected ? <CheckSquare size={15} /> : <Square size={15} />}
+                  <span>{allSelected ? t('preset.deselectAll') : t('preset.selectAll')}</span>
+                </button>
+                <span className={s.presetManagerSelectedCount}>{t('preset.selected', { count: selectedPresetIds.size })}</span>
+                {selectedPresetIds.size > 0 && (
+                  <>
+                    <button type="button" className={s.presetManagerAction} onClick={() => { void handleBulkExport() }} disabled={bulkActionPending}>
+                      <Download size={15} /> {t('preset.exportSelected')}
+                    </button>
+                    <button type="button" className={s.presetManagerDangerAction} onClick={() => setBulkDeleteIds([...selectedPresetIds])} disabled={bulkActionPending}>
+                      <Trash2 size={15} /> {t('preset.deleteSelected')}
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+        <div
+          className={s.presetManagerGrid}
+          onTouchStart={(event) => {
+            if (selectMode) return
+            contextPresetIdRef.current = getPresetIdFromTarget(event.target)
+            if (contextPresetIdRef.current) cardLongPress.onTouchStart(event)
+          }}
+          onTouchMove={(event) => {
+            if (!selectMode) cardLongPress.onTouchMove(event)
+          }}
+          onTouchEnd={(event) => {
+            if (!selectMode) cardLongPress.onTouchEnd(event)
+            contextPresetIdRef.current = null
+          }}
+          onTouchCancel={() => {
+            if (!selectMode) cardLongPress.onTouchCancel()
+            contextPresetIdRef.current = null
+          }}
+          onContextMenu={(event) => {
+            contextPresetIdRef.current = getPresetIdFromTarget(event.target)
+            if (selectMode && contextPresetIdRef.current) {
+              event.preventDefault()
+              return
+            }
+            if (contextPresetIdRef.current) cardLongPress.onContextMenu(event)
+          }}
+        >
+          {registryEntries.map(([id, entry]) => {
+            const isActive = id === activePresetId
+            return (
+              <article
+                key={id}
+                data-preset-id={id}
+                role="button"
+                tabIndex={0}
+                aria-pressed={selectMode ? selectedPresetIds.has(id) : isActive}
+                className={clsx(
+                  s.presetManagerCard,
+                  isActive && s.presetManagerCardActive,
+                  selectedPresetIds.has(id) && s.presetManagerCardSelected,
+                )}
+                onClick={(event) => {
+                  const target = event.target
+                  if (target instanceof Element && target.closest('input, label')) return
+                  if (selectMode) handlePresetSelection(id, event.shiftKey)
+                  else onSelect(id)
+                }}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) return
+                  if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
+                    event.preventDefault()
+                    if (selectMode) return
+                    const rect = event.currentTarget.getBoundingClientRect()
+                    setCardContextMenu({ presetId: id, position: { x: rect.left + 24, y: rect.top + 24 } })
+                    return
+                  }
+                  if (event.key !== 'Enter' && event.key !== ' ') return
+                  event.preventDefault()
+                  if (selectMode) handlePresetSelection(id, event.shiftKey)
+                  else onSelect(id)
+                }}
+              >
+                <div className={clsx(s.presetManagerMedia, selectMode && s.presetManagerMediaSelectable)}>
+                  <Layers size={32} className={s.presetManagerCoverFallback} />
+                  {entry.coverUrl && (
+                    <img
+                      key={entry.coverUrl}
+                      src={imagesApi.displayUrl(entry.coverUrl)}
+                      alt=""
+                      className={s.presetManagerCoverImage}
+                      referrerPolicy="no-referrer"
+                      onLoad={(event) => { event.currentTarget.style.display = '' }}
+                      onError={(event) => {
+                        const fallback = imagesApi.directDisplayFallback(entry.coverUrl!)
+                        if (fallback && event.currentTarget.dataset.directFallback !== fallback) {
+                          event.currentTarget.dataset.directFallback = fallback
+                          event.currentTarget.src = fallback
+                          return
+                        }
+                        event.currentTarget.style.display = 'none'
+                      }}
+                    />
+                  )}
+                  {isActive && <span className={s.presetManagerActiveBadge}>{t('preset.active')}</span>}
+                  {selectMode && (
+                    <label className={s.presetManagerCardSelect} onContextMenu={(event) => event.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedPresetIds.has(id)}
+                        onChange={(event) => handlePresetSelection(id, (event.nativeEvent as MouseEvent).shiftKey)}
+                        aria-label={t('preset.selectForBulk', { name: entry.name })}
+                      />
+                      <span><Check size={13} /></span>
+                    </label>
+                  )}
+                </div>
+                <div className={s.presetManagerCardBody}>
+                  <div className={s.presetManagerCardTitleRow}>
+                    <span className={s.presetManagerCardName} title={entry.name}>
+                      {entry.name}
+                    </span>
+                  </div>
+                  <span className={s.presetManagerCardMeta}>{t('preset.blocks', { count: entry.blockCount })}</span>
+                </div>
+              </article>
+            )
+          })}
+          {registryEntries.length === 0 && (
+            <div className={s.presetManagerEmpty}>{t('preset.managerEmpty')}</div>
+          )}
+        </div>
+      </ModalShell>
+
+      <ContextMenu
+        position={cardContextMenu?.position ?? null}
+        items={cardContextMenuItems}
+        onClose={() => setCardContextMenu(null)}
+      />
+
+      <ConfirmationModal
+        isOpen={!!bulkDeleteIds}
+        zIndex={10005}
+        title={t('confirm.bulkDeletePresetTitle')}
+        message={t('confirm.bulkDeletePresetMessage', { count: bulkDeleteIds?.length ?? 0 })}
+        variant="danger"
+        confirmText={t('preset.deleteSelected')}
+        loading={bulkActionPending}
+        onConfirm={() => { void handleBulkDelete() }}
+        onCancel={() => { if (!bulkActionPending) setBulkDeleteIds(null) }}
+      />
 
       <ModalShell isOpen={showCreate} onClose={() => setShowCreate(false)} maxWidth="clamp(320px, 90vw, min(420px, var(--lumiverse-content-max-width, 420px)))" className={s.presetNameModal}>
         <div className={s.presetNameHeader}>
@@ -805,7 +1677,7 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
         </div>
       </ModalShell>
 
-      <ModalShell isOpen={showRename} onClose={() => setShowRename(false)} maxWidth="clamp(320px, 90vw, min(420px, var(--lumiverse-content-max-width, 420px)))" className={s.presetNameModal}>
+      <ModalShell isOpen={showRename} onClose={() => { setShowRename(false); setRenamePresetId(null) }} maxWidth="clamp(320px, 90vw, min(420px, var(--lumiverse-content-max-width, 420px)))" className={s.presetNameModal} zIndex={10003}>
         <div className={s.presetNameHeader}>
           <Edit2 size={16} />
           <h3 className={s.presetNameTitle}>{t('preset.renameTitle')}</h3>
@@ -825,16 +1697,38 @@ function PresetSelector({ registry, activePresetId, activePresetName, onSelect, 
 function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
   const { t } = useLb()
   const coverUrl = preset.coverUrl?.trim()
-  if (!coverUrl) return null
-
+  const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
   const description = preset.description?.trim()
+  const origin = getRemotePresetOrigin(preset)
+  const visibleCoverUrl = coverUrl && failedCoverUrl !== coverUrl ? coverUrl : null
+  if (!visibleCoverUrl && !origin && !preset.presetVersion) return null
 
   return (
-    <section className={s.presetCoverHeader} aria-label={t('preset.coverAria', { name: preset.name })}>
-      <img className={s.presetCoverImage} src={coverUrl} alt="" aria-hidden="true" />
+    <section className={s.presetCoverHeader} aria-label={visibleCoverUrl ? t('preset.coverAria', { name: preset.name }) : undefined}>
+      {visibleCoverUrl && (
+        <img
+          key={visibleCoverUrl}
+          className={s.presetCoverImage}
+          src={imagesApi.displayUrl(visibleCoverUrl)}
+          alt=""
+          aria-hidden="true"
+          referrerPolicy="no-referrer"
+          onLoad={(event) => { event.currentTarget.style.display = '' }}
+          onError={(event) => {
+            const fallback = imagesApi.directDisplayFallback(visibleCoverUrl)
+            if (fallback && event.currentTarget.dataset.directFallback !== fallback) {
+              event.currentTarget.dataset.directFallback = fallback
+              event.currentTarget.src = fallback
+              return
+            }
+            setFailedCoverUrl(visibleCoverUrl)
+          }}
+        />
+      )}
       <div className={s.presetCoverContent}>
         <div className={s.presetCoverBadgeRow}>
-          <span className={s.presetCoverBadge}>{t('preset.lumihubBadge')}</span>
+          {origin === 'lumihub' && <span className={s.presetCoverBadge}>{t('preset.lumihubBadge')}</span>}
+          {origin === 'illarin' && <span className={s.presetCoverBadge}>{t('preset.illarinBadge')}</span>}
           {preset.presetVersion && (
             <span className={s.presetCoverBadge}>{t('preset.version', { version: preset.presetVersion })}</span>
           )}
@@ -999,29 +1893,17 @@ function SamplerSlider({ param, value, onChange }: SamplerSliderProps) {
 
 interface GenerationSettingsProps {
   samplerOverrides: any
-  customBody: any
   connectionProfile: LoomConnectionProfile | null
   samplerParams: SamplerParam[]
   onSaveSamplers: (overrides: any) => void
-  onSaveCustomBody: (body: any) => void
   onRefreshProfile: () => void
 }
 
-function GenerationSettings({ samplerOverrides, customBody, connectionProfile, samplerParams, onSaveSamplers, onSaveCustomBody, onRefreshProfile }: GenerationSettingsProps) {
+function GenerationSettings({ samplerOverrides, connectionProfile, samplerParams, onSaveSamplers, onRefreshProfile }: GenerationSettingsProps) {
   const { t } = useLb()
   const [isExpanded, setIsExpanded] = useState(false)
-  const [jsonError, setJsonError] = useState<string | null>(null)
-  const [localJson, setLocalJson] = useState(customBody?.rawJson || '{}')
-
-  const prevJsonRef = useRef(customBody?.rawJson)
-  if (customBody?.rawJson !== prevJsonRef.current) {
-    prevJsonRef.current = customBody?.rawJson
-    setLocalJson(customBody?.rawJson || '{}')
-    setJsonError(null)
-  }
 
   const overrides = samplerOverrides || {}
-  const body = customBody || {}
   const supported = connectionProfile?.supportedParams || new Set<string>()
 
   const visibleParams = samplerParams.filter(p => supported.has(p.key))
@@ -1036,20 +1918,7 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
 
   const handleResetSamplers = () => onSaveSamplers({ ...DEFAULT_SAMPLER_OVERRIDES })
 
-  const handleToggleCustomBody = () => onSaveCustomBody({ ...body, enabled: !body.enabled })
-
-  const handleJsonChange = (raw: string) => {
-    setLocalJson(raw)
-    try {
-      JSON.parse(raw)
-      setJsonError(null)
-      onSaveCustomBody({ ...body, rawJson: raw })
-    } catch (e: any) {
-      setJsonError(e.message)
-    }
-  }
-
-  const isActive = overrides.enabled || body.enabled
+  const isActive = overrides.enabled
 
   return (
     <div className={s.accordionSection}>
@@ -1060,7 +1929,6 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
         <Settings2 size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
         <span className={s.accordionTitle}>{t('settings.samplers')}</span>
         {activeCount > 0 && <span className={s.accordionBadge}>{activeCount}</span>}
-        {body.enabled && <Code2 size={10} style={{ color: 'var(--lumiverse-primary)', flexShrink: 0 }} />}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
@@ -1087,22 +1955,6 @@ function GenerationSettings({ samplerOverrides, customBody, connectionProfile, s
               label={t('settings.streamResponse')}
               hint={t('settings.streamHint')}
             />
-          </div>
-          <hr className={s.menuDivider} style={{ margin: '4px 0 4px' }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '2px 0 4px' }}>
-            <span className={s.samplerLabel}>{t('settings.customBody')}</span>
-            <Toggle.Checkbox checked={!!body.enabled} onChange={handleToggleCustomBody} label={t('settings.enabled')} />
-          </div>
-          <div style={body.enabled ? {} : { opacity: 0.35, pointerEvents: 'none' as const }}>
-            <textarea
-              className={s.customBodyTextarea}
-              value={localJson}
-              onChange={e => handleJsonChange(e.target.value)}
-              placeholder={'{\n  "thinking": { "type": "enabled" }\n}'}
-              spellCheck={false}
-            />
-            {jsonError && <div className={s.jsonError}><AlertTriangle size={10} /> {jsonError}</div>}
-            <div className={s.settingsHint} style={{ marginTop: '3px' }}>{t('settings.customBodyHint')}</div>
           </div>
         </div>
       )}
@@ -1182,12 +2034,17 @@ function PromptBehaviorSettings({ promptBehavior, onSave }: { promptBehavior: an
 // ============================================================================
 
 function CompletionSettingsPanel({ completionSettings, onSave }: { completionSettings: any; onSave: (updates: Record<string, any>) => void }) {
+  // The compiler's hook-name heuristic falsely flags the `useSystemPrompt`
+  // boolean setting as a Hook reference. Suppress only this component.
+  /* eslint-disable react-compiler/react-compiler */
   const { t } = useLb()
   const { continuePostfixOptions } = useLoomOptionLabels()
   const [isExpanded, setIsExpanded] = useState(false)
   const settings = completionSettings || {}
   const defaults = DEFAULT_COMPLETION_SETTINGS
+  const systemPromptKey = 'useSystemPrompt'
   const visibleKeys = Object.keys(defaults).filter(key => key !== 'namesBehavior')
+  const systemPromptEnabled = !!(settings[systemPromptKey] ?? defaults[systemPromptKey])
 
   const activeCount = visibleKeys.filter(key => {
     const current = settings[key] ?? defaults[key as keyof typeof defaults]
@@ -1212,6 +2069,11 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
             <span className={s.settingsHint}>{t('settings.assistantPrefillHint')}</span>
           </div>
           <div className={s.settingsField}>
+            <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.reasoningPrefill')}</span>
+            <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.reasoningPrefill ?? defaults.reasoningPrefill} onChange={e => handleChange('reasoningPrefill', e.target.value)} placeholder={t('settings.reasoningPrefillPlaceholder')} spellCheck={false} />
+            <span className={s.settingsHint}>{t('settings.reasoningPrefillHint')}</span>
+          </div>
+          <div className={s.settingsField}>
             <span className={clsx(s.settingsFieldLabel, s.settingsFieldLabelDefault)}>{t('settings.impersonationPrefill')}</span>
             <textarea className={s.settingsTextarea} style={{ minHeight: '40px' }} value={settings.assistantImpersonation ?? defaults.assistantImpersonation} onChange={e => handleChange('assistantImpersonation', e.target.value)} placeholder={t('settings.impersonationPrefillPlaceholder')} spellCheck={false} />
             <span className={s.settingsHint}>{t('settings.impersonationPrefillHint')}</span>
@@ -1230,7 +2092,7 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
           </div>
           <hr className={s.menuDivider} />
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
-            <Toggle.Checkbox checked={!!(settings.useSystemPrompt ?? defaults.useSystemPrompt)} onChange={v => handleChange('useSystemPrompt', v)} label={t('settings.useSystemPrompt')} />
+            <Toggle.Checkbox checked={systemPromptEnabled} onChange={v => handleChange('useSystemPrompt', v)} label={t('settings.useSystemPrompt')} />
             <Toggle.Checkbox checked={!!(settings.enableWebSearch ?? defaults.enableWebSearch)} onChange={v => handleChange('enableWebSearch', v)} label={t('settings.enableWebSearch')} />
             <Toggle.Checkbox checked={!!(settings.sendInlineMedia ?? defaults.sendInlineMedia)} onChange={v => handleChange('sendInlineMedia', v)} label={t('settings.sendInlineMedia')} />
             <Toggle.Checkbox checked={!!(settings.enableFunctionCalling ?? defaults.enableFunctionCalling)} onChange={v => handleChange('enableFunctionCalling', v)} label={t('settings.enableFunctionCalling')} />
@@ -1240,6 +2102,7 @@ function CompletionSettingsPanel({ completionSettings, onSave }: { completionSet
       )}
     </div>
   )
+  /* eslint-enable react-compiler/react-compiler */
 }
 
 // ============================================================================
@@ -1269,9 +2132,10 @@ function AdvancedSettingsPanel({
   const seed = settings.seed ?? defaults.seed
   const stopStrings: string[] = settings.customStopStrings ?? defaults.customStopStrings
   const collapseMessages: boolean = settings.collapseMessages ?? defaults.collapseMessages
+  const trimIncompleteWords: boolean = settings.trimIncompleteWords ?? defaults.trimIncompleteWords
   const namesBehavior = completion.namesBehavior ?? completionDefaults.namesBehavior
 
-  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages || namesBehavior !== completionDefaults.namesBehavior
+  const isActive = seed >= 0 || stopStrings.length > 0 || collapseMessages || trimIncompleteWords || namesBehavior !== completionDefaults.namesBehavior
 
   const handleSeedChange = (value: string) => {
     const num = parseInt(value)
@@ -1294,7 +2158,7 @@ function AdvancedSettingsPanel({
       <div className={clsx(s.accordionHeader, isActive && s.accordionHeaderActive)} onClick={() => setIsExpanded(!isExpanded)}>
         <Wrench size={12} style={{ color: isActive ? 'var(--lumiverse-primary)' : 'var(--lumiverse-text-dim)', flexShrink: 0 }} />
         <span className={s.accordionTitle}>{t('settings.advanced')}</span>
-        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0) + (namesBehavior !== completionDefaults.namesBehavior ? 1 : 0)}</span>}
+        {isActive && <span className={s.accordionBadge}>{(seed >= 0 ? 1 : 0) + (stopStrings.length > 0 ? 1 : 0) + (collapseMessages ? 1 : 0) + (trimIncompleteWords ? 1 : 0) + (namesBehavior !== completionDefaults.namesBehavior ? 1 : 0)}</span>}
         {isExpanded ? <ChevronDown size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} /> : <ChevronRight size={11} style={{ color: 'var(--lumiverse-text-dim)', flexShrink: 0 }} />}
       </div>
       {isExpanded && (
@@ -1338,6 +2202,9 @@ function AdvancedSettingsPanel({
           </div>
           <div className={s.settingsField}>
             <Toggle.Checkbox checked={collapseMessages} onChange={v => onSave({ collapseMessages: v })} label={t('settings.collapseMessages')} hint={t('settings.collapseHint')} />
+          </div>
+          <div className={s.settingsField}>
+            <Toggle.Checkbox checked={trimIncompleteWords} onChange={v => onSave({ trimIncompleteWords: v })} label={t('settings.trimIncompleteWords')} hint={t('settings.trimIncompleteWordsHint')} />
           </div>
         </div>
       )}
@@ -1416,7 +2283,7 @@ interface LoomBuilderProps {
   compact?: boolean
 }
 
-export default function LoomBuilder({
+function LoomBuilderNative({
  compact = true }: LoomBuilderProps) {
   const { t: lb } = useLb()
   const { t: tc } = useTranslation('common')
@@ -1435,40 +2302,80 @@ export default function LoomBuilder({
     selectPreset,
     saveBlocks,
     deletePreset,
+    bulkDeletePresets,
+    bulkExportPresets,
     duplicatePreset,
     renamePreset,
     addBlock,
     removeBlock,
     updateBlock,
     toggleBlock,
+    toggleCategoryChildren,
+    movePromptVariable,
     saveSamplerOverrides,
-    saveCustomBody,
     savePromptBehavior,
     saveCompletionSettings,
     saveAdvancedSettings,
-    savePromptVariableValues,
+    savePromptVariableValues: savePresetPromptVariableValues,
+    applyRuntimeBlockProfile,
+    updatePresetDraft,
+    flushPresetDraft,
     importFromFile,
     importFromST,
     exportInternal,
     exportLegacy,
   } = useLoomBuilder()
 
-  const presetProfiles = usePresetProfiles(activePresetId, activePreset?.blocks)
+  const presetProfiles = usePresetProfiles(activePresetId, activePreset?.blocks, activePreset?.promptVariables)
+  const {
+    activeBinding,
+    activeSource,
+    activeSourceId,
+    activeChatId,
+    activePersonaId,
+    activeCharacterId,
+    activeProfileId,
+    captureDefaults: captureProfileDefaults,
+    defaults,
+    isResolved,
+    resolvedPresetId,
+    saveActivePromptVariableValues,
+    selectResolvedPreset,
+  } = presetProfiles
+  const effectivePromptVariableValues = useMemo(() => getEffectivePromptVariableValues(
+    activePreset?.id,
+    activePreset?.promptVariables ?? {},
+    activeBinding,
+  ), [activePreset?.id, activePreset?.promptVariables, activeBinding])
+  const promptVariableScopeKey = `${activeSource}:${activeSourceId ?? 'none'}:${activePreset?.id ?? 'none'}`
+  const savePromptVariableValues = useCallback(async (values: PromptVariableValues) => {
+    // Do not make an already-open modal fail merely because a background
+    // profile read has not settled yet. In that case the user is editing the
+    // preset currently shown in Loom, so persist its base values.
+    if (!isResolved || resolvedPresetId !== activePreset?.id) {
+      await savePresetPromptVariableValues(values)
+      return
+    }
+    const savedToProfile = await saveActivePromptVariableValues(values)
+    if (!savedToProfile) await savePresetPromptVariableValues(values)
+  }, [activePreset?.id, isResolved, resolvedPresetId, saveActivePromptVariableValues, savePresetPromptVariableValues])
+  const presetEditorTabs = __contextMeterStore((state) => state.presetEditorTabs)
+  const presetEditorToolbarItems = __contextMeterStore((state) => state.presetEditorToolbarItems)
   const addToast = __contextMeterStore((s) => s.addToast)
   const activePresetRef = useRef(activePreset)
   const suppressNextProfileApplyRef = useRef<string | null>(null)
 
   const getProfileContextKey = useCallback(() => (
-    `${activePresetRef.current?.id ?? 'none'}:${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeProfileId ?? 'none'}`
-  ), [presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId])
+    `${activePresetRef.current?.id ?? 'none'}:${activeChatId ?? 'none'}:${activePersonaId ?? 'none'}:${activeCharacterId ?? 'none'}:${activeProfileId ?? 'none'}`
+  ), [activeChatId, activePersonaId, activeCharacterId, activeProfileId])
 
   const captureDefaults = useCallback(() => {
     suppressNextProfileApplyRef.current = getProfileContextKey()
-    void presetProfiles.captureDefaults()
-  }, [getProfileContextKey, presetProfiles])
+    void captureProfileDefaults()
+  }, [captureProfileDefaults, getProfileContextKey])
 
   const reapplyDefaults = useCallback(() => {
-    const binding = presetProfiles.defaults
+    const binding = defaults
     if (!binding || !activePreset?.blocks?.length) return
 
     const updatedBlocks = activePreset.blocks.map(b =>
@@ -1477,90 +2384,182 @@ export default function LoomBuilder({
 
     const changed = updatedBlocks.some((b, i) => b.enabled !== activePreset.blocks[i].enabled)
     if (changed) {
-      saveBlocks(updatedBlocks)
+      applyRuntimeBlockProfile(activePreset.id, binding.block_states, binding.prompt_variables)
       addToast({ type: 'success', message: lb('profiles.reapplied') })
     } else {
       addToast({ type: 'info', message: lb('profiles.alreadyDefault') })
     }
-  }, [presetProfiles.defaults, activePreset, saveBlocks, addToast])
+  }, [defaults, activePreset, applyRuntimeBlockProfile, addToast, lb])
 
-  // Apply the resolved preset profile binding to the active preset's blocks
-  // whenever the chat/character context changes and the hook confirms its
-  // binding state is fresh for that new context (isResolved). Keying off
-  // activeChatId + activeCharacterId — not just the binding reference —
-  // guarantees the effect re-runs on every chat switch, even when two
-  // characters happen to share structurally-identical block states.
-  //
-  // activePreset is read through a ref so user-driven block toggles (which
-  // mutate activePreset) don't re-fire this effect and fight the toggle by
-  // re-applying the binding.
-  const lastProfileContextRef = useRef<string | null>(null)
+  // Profile block states are a runtime overlay. They must never be written
+  // into the shared preset merely because the active chat/persona/connection
+  // changed; doing so lets an unrelated preset save capture the wrong scope.
+  const lastProfileApplicationRef = useRef<string | null>(null)
   activePresetRef.current = activePreset
 
   useEffect(() => {
-    if (!presetProfiles.isResolved) return
+    if (!isResolved) return
 
-    const contextKey = `${activePresetRef.current?.id ?? 'none'}:${presetProfiles.activeChatId ?? 'none'}:${presetProfiles.activeCharacterId ?? 'none'}:${presetProfiles.activeProfileId ?? 'none'}`
-    const contextChanged = lastProfileContextRef.current !== contextKey
+    const contextKey = `${activePresetRef.current?.id ?? 'none'}:${activeChatId ?? 'none'}:${activePersonaId ?? 'none'}:${activeCharacterId ?? 'none'}:${activeProfileId ?? 'none'}`
+    const binding = activeBinding
+    const blockStateKey = binding
+      ? JSON.stringify(Object.entries(binding.block_states).sort(([a], [b]) => a.localeCompare(b)))
+      : 'none'
+    const promptVariableKey = binding?.prompt_variables
+      ? JSON.stringify(binding.prompt_variables)
+      : 'none'
+    const applicationKey = `${contextKey}:${activeSource}:${binding?.preset_id ?? 'none'}:${blockStateKey}:${promptVariableKey}`
+    const applicationChanged = lastProfileApplicationRef.current !== applicationKey
 
     if (
-      presetProfiles.resolvedPresetId
-      && presetProfiles.resolvedPresetId !== activePresetRef.current?.id
-      && (contextChanged || !activePresetRef.current?.id)
+      resolvedPresetId
+      && resolvedPresetId !== activePresetRef.current?.id
+      && (applicationChanged || !activePresetRef.current?.id)
     ) {
-      presetProfiles.selectResolvedPreset()
+      selectResolvedPreset()
       return
     }
 
-    const binding = presetProfiles.activeBinding
-    const currentBlocks = activePresetRef.current?.blocks
-    if (!binding || !currentBlocks?.length) return
-
-    if (!contextChanged) return
+    const activeId = activePresetRef.current?.id
+    if (!activeId || !applicationChanged) return
     if (suppressNextProfileApplyRef.current === contextKey) {
       suppressNextProfileApplyRef.current = null
-      lastProfileContextRef.current = contextKey
-      markLoomRuntimeProfileContext(activePresetRef.current?.id, presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId)
+      lastProfileApplicationRef.current = applicationKey
+      markLoomRuntimeProfileContext(activeId, activeChatId, activeCharacterId, activeProfileId)
       return
     }
-    lastProfileContextRef.current = contextKey
-    markLoomRuntimeProfileContext(activePresetRef.current?.id, presetProfiles.activeChatId, presetProfiles.activeCharacterId, presetProfiles.activeProfileId)
-
-    const updatedBlocks = currentBlocks.map(b =>
-      b.id in binding.block_states ? { ...b, enabled: binding.block_states[b.id] } : b
+    lastProfileApplicationRef.current = applicationKey
+    applyRuntimeBlockProfile(activeId, binding?.block_states ?? null, binding?.prompt_variables)
+    markLoomRuntimeProfileContext(
+      binding ? activeId : null,
+      activeChatId,
+      activeCharacterId,
+      activeProfileId,
     )
-
-    const changed = updatedBlocks.some((b, i) => b.enabled !== currentBlocks[i].enabled)
-    if (changed) {
-      saveBlocks(updatedBlocks)
-    }
   }, [
-    presetProfiles.isResolved,
-    presetProfiles.resolvedPresetId,
-    presetProfiles.selectResolvedPreset,
-    presetProfiles.activeBinding,
-    presetProfiles.activeSource,
-    presetProfiles.activeChatId,
-    presetProfiles.activeCharacterId,
-    presetProfiles.activeProfileId,
+    isResolved,
+    resolvedPresetId,
+    selectResolvedPreset,
+    activeBinding,
+    activeSource,
+    activeChatId,
+    activePersonaId,
+    activeCharacterId,
+    activeProfileId,
     activePreset?.id,
-    saveBlocks,
+    applyRuntimeBlockProfile,
   ])
 
   const [view, setView] = useState<'list' | 'edit'>('list')
+  const [activePresetEditorTab, setActivePresetEditorTab] = useState('preset')
+  const [guideOpen, setGuideOpen] = useState(false)
   const [editingBlock, setEditingBlock] = useState<PromptBlock | null>(null)
+  const [blockValidationError, setBlockValidationError] = useState<string | null>(null)
   const [promptMenuOpen, setPromptMenuOpen] = useState(false)
   const [markerMenuOpen, setMarkerMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const [confirmDeletePreset, setConfirmDeletePreset] = useState(false)
+  const [confirmDeletePresetId, setConfirmDeletePresetId] = useState<string | null>(null)
   const [showLegacyExportConfirm, setShowLegacyExportConfirm] = useState(false)
   const [showPromptVariablesModal, setShowPromptVariablesModal] = useState(false)
+  const [showPromptStashModal, setShowPromptStashModal] = useState(false)
   const [collapsedCategories, setCollapsedCategories] = useState<Set<string>>(new Set())
   const [isSearchOpen, setIsSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
   const [hoveredAppendRootDropId, setHoveredAppendRootDropId] = useState<string | null>(null)
   const [armedAppendRootDropId, setArmedAppendRootDropId] = useState<string | null>(null)
+
+  useEffect(() => {
+    setShowPromptVariablesModal(false)
+  }, [
+    presetProfiles.activeChatId,
+    presetProfiles.activePersonaId,
+    presetProfiles.activeCharacterId,
+    presetProfiles.activeProfileId,
+  ])
+
+  const activePresetEditorTabRef = useRef(activePresetEditorTab)
+  const updatePresetDraftRef = useRef(updatePresetDraft)
+  const flushPresetDraftRef = useRef(flushPresetDraft)
+
+  useEffect(() => { activePresetEditorTabRef.current = activePresetEditorTab }, [activePresetEditorTab])
+  useEffect(() => { updatePresetDraftRef.current = updatePresetDraft }, [updatePresetDraft])
+  useEffect(() => { flushPresetDraftRef.current = flushPresetDraft }, [flushPresetDraft])
+
+  useEffect(() => {
+    setPresetEditorController({
+      getState: () => {
+        const preset = activePresetRef.current
+        if (!preset || preset.id !== __contextMeterStore.getState().activeLoomPresetId) {
+          return {
+            open: false,
+            presetId: null,
+            activeTabId: activePresetEditorTabRef.current,
+            preset: null,
+          }
+        }
+        return {
+          open: true,
+          presetId: preset.id,
+          activeTabId: activePresetEditorTabRef.current,
+          preset: toPresetEditorDraft(preset),
+        }
+      },
+      getPromptVariableValues: () => {
+        const preset = activePresetRef.current
+        return preset && preset.id === __contextMeterStore.getState().activeLoomPresetId
+          ? preset.promptVariables
+          : {}
+      },
+      setActiveTab: (tabId) => {
+        setView('list')
+        setEditingBlock(null)
+        setActivePresetEditorTab(tabId)
+      },
+      updatePreset: (mutator, immediate) => {
+        updatePresetDraftRef.current((current) => (
+          applyPresetEditorDraft(current, mutator(toPresetEditorDraft(current)))
+        ), immediate)
+      },
+      flush: () => flushPresetDraftRef.current(),
+    })
+    return () => { setPresetEditorController(null) }
+  }, [])
+
+  useEffect(() => {
+    if (!activePreset || activePreset.id !== activePresetId) {
+      syncPresetEditorState({
+        open: false,
+        presetId: null,
+        activeTabId: activePresetEditorTab,
+        preset: null,
+      }, {})
+      return
+    }
+    syncPresetEditorState({
+      open: true,
+      presetId: activePreset.id,
+      activeTabId: activePresetEditorTab,
+      preset: toPresetEditorDraft(activePreset),
+    }, activePreset.promptVariables)
+  }, [activePreset, activePresetEditorTab, activePresetId])
+
+  useEffect(() => {
+    if (activePresetEditorTab === 'preset') return
+    if (presetEditorTabs.some((tab) => tab.id === activePresetEditorTab)) return
+    setActivePresetEditorTab('preset')
+  }, [activePresetEditorTab, presetEditorTabs])
+
+  const activePresetExtensionTab = useMemo(
+  () =>
+    presetEditorTabs.find(
+      (tab) => tab.id === activePresetEditorTab,
+    ) ?? null,
+  [presetEditorTabs, activePresetEditorTab],
+)
+useEffect(() => {
+  setGuideOpen(false)
+}, [activePresetEditorTab])
 
   const configurableVariableCount = useMemo(() => {
     return (activePreset?.blocks ?? []).reduce((count, b) => {
@@ -1570,6 +2569,7 @@ export default function LoomBuilder({
   }, [activePreset?.blocks])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
+  const presetImportInProgressRef = useRef(false)
   const lastCollapsedPresetRef = useRef<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const scrollTopRef = useRef(0)
@@ -1601,6 +2601,20 @@ export default function LoomBuilder({
   )
 
   const groups = useMemo(() => computeGroups(activePreset?.blocks), [activePreset?.blocks])
+  const effectiveRoles = useMemo(() => new Map(
+    resolvePromptBlockPlacements(
+      activePreset?.blocks ?? [],
+      activePreset?.promptVariables ?? {},
+    ).map((block) => [block.id, block.role] as const),
+  ), [activePreset?.blocks, activePreset?.promptVariables])
+  const categoryIds = useMemo(
+    () => (activePreset?.blocks ?? [])
+      .filter((block) => block.marker === 'category')
+      .map((block) => block.id),
+    [activePreset?.blocks],
+  )
+  const allCategoriesCollapsed = categoryIds.length > 0
+    && categoryIds.every((categoryId) => collapsedCategories.has(categoryId))
 
   const searchTokens = useMemo(
     () => deferredTrimmedSearchQuery.toLowerCase().split(/\s+/).filter(Boolean),
@@ -1638,10 +2652,9 @@ export default function LoomBuilder({
   useEffect(() => {
     if (activePreset?.blocks && activePresetId && activePresetId !== lastCollapsedPresetRef.current) {
       lastCollapsedPresetRef.current = activePresetId
-      const categoryIds = activePreset.blocks.filter(b => b.marker === 'category').map(b => b.id)
       setCollapsedCategories(new Set(categoryIds))
     }
-  }, [activePresetId, activePreset])
+  }, [activePresetId, activePreset?.blocks, categoryIds])
 
   useEffect(() => {
     setIsSearchOpen(false)
@@ -1719,6 +2732,15 @@ export default function LoomBuilder({
       return next
     })
   }, [])
+
+  const toggleAllCategories = useCallback(() => {
+    setCollapsedCategories((current) => {
+      const shouldExpand = categoryIds.length > 0
+        && categoryIds.every((categoryId) => current.has(categoryId))
+      if (shouldExpand) return new Set()
+      return new Set(categoryIds)
+    })
+  }, [categoryIds])
 
   const toggleSearch = useCallback(() => {
     if (isSearchVisible) {
@@ -1826,24 +2848,55 @@ export default function LoomBuilder({
   }, [])
 
   const handleEdit = useCallback((block: PromptBlock) => {
+    setBlockValidationError(null)
     setEditingBlock(block)
     setView('edit')
   }, [])
 
-  const handleEditSave = useCallback((updates: Partial<PromptBlock>) => {
-    if (editingBlock) updateBlock(editingBlock.id, updates)
+  const handleEditSave = useCallback((updates: Partial<PromptBlock>): boolean => {
+    if (!editingBlock) return false
+    const accepted = updateBlock(editingBlock.id, updates)
+    if (!accepted) {
+      setBlockValidationError(lb('blockEditor.validationFailed'))
+      return false
+    }
+    setBlockValidationError(null)
     setView('list')
     setEditingBlock(null)
-  }, [editingBlock, updateBlock])
+    return true
+  }, [editingBlock, lb, updateBlock])
 
   const handleAddTemplate = useCallback((template: { name: string; content: string; role: string }) => {
     addBlock(createBlock({ name: template.name, content: template.content, role: template.role as PromptBlock['role'] }))
     setPromptMenuOpen(false)
   }, [addBlock])
 
+  const handleInsertStashedBlock = useCallback((entry: StashedPromptBlock) => {
+    addBlock(createBlock({ ...entry.block, stashId: entry.id }))
+  }, [addBlock])
+
+  const handleUnstash = useCallback((entry: StashedPromptBlock) => {
+    if (!activePreset) return
+    saveBlocks(activePreset.blocks.map((block) => {
+      if (block.stashId !== entry.id) return block
+      const { stashId: _stashId, ...unlinked } = block
+      return unlinked
+    }))
+  }, [activePreset, saveBlocks])
+
+  const handleAddToStash = useCallback(async (block: PromptBlock) => {
+    try {
+      const entry = await presetsApi.addToStash(block, activePreset?.id)
+      updateBlock(block.id, { stashId: entry.id })
+      addToast({ type: 'success', message: lb('actions.addedToStash') })
+    } catch {
+      addToast({ type: 'error', message: lb('actions.stashFailed') })
+    }
+  }, [activePreset?.id, addToast, lb, updateBlock])
+
   const handleAddCategory = useCallback(() => {
     addBlock(createMarkerBlock('category', lb('actions.newCategory')))
-  }, [addBlock])
+  }, [addBlock, lb])
 
   const handleAddMarker = useCallback((type: string) => {
     addBlock(createMarkerBlock(type))
@@ -1861,25 +2914,24 @@ export default function LoomBuilder({
     }
   }, [confirmDelete, removeBlock])
 
-  const handleRenamePreset = useCallback(async (newName: string) => {
-    if (!activePresetId) return
-    await renamePreset(activePresetId, newName)
-  }, [activePresetId, renamePreset])
+  const handleRenamePreset = useCallback(async (presetId: string, newName: string) => {
+    await renamePreset(presetId, newName)
+  }, [renamePreset])
 
-  const handleDuplicatePreset = useCallback(async () => {
-    if (!activePreset || !activePresetId) return
-    await duplicatePreset(activePresetId, `${activePreset.name}${lb('preset.copySuffix')}`)
-  }, [activePreset, activePresetId, duplicatePreset])
+  const handleDuplicatePreset = useCallback(async (presetId: string, presetName: string) => {
+    await duplicatePreset(presetId, `${presetName}${lb('preset.copySuffix')}`)
+  }, [duplicatePreset, lb])
 
   const handleDeletePreset = useCallback(async () => {
-    if (!activePresetId) return
-    setConfirmDeletePreset(false)
-    await deletePreset(activePresetId)
-  }, [activePresetId, deletePreset])
+    if (!confirmDeletePresetId) return
+    const presetId = confirmDeletePresetId
+    setConfirmDeletePresetId(null)
+    await deletePreset(presetId)
+  }, [confirmDeletePresetId, deletePreset])
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(async (presetId: string) => {
     try {
-      const data = await exportInternal()
+      const data = await exportInternal(presetId)
       if (!data) return
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
       const url = URL.createObjectURL(blob)
@@ -1891,7 +2943,7 @@ export default function LoomBuilder({
     } catch (err: any) {
       toast.error(err.body?.error || err.message || lb('toast.exportFailed'))
     }
-  }, [exportInternal])
+  }, [exportInternal, lb])
 
   const handleExportLegacy = useCallback(() => {
     const data = exportLegacy()
@@ -1912,35 +2964,70 @@ export default function LoomBuilder({
   }, [])
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    try {
-      const text = await file.text()
-      const json = JSON.parse(text)
-      if (importTypeRef.current === 'st') {
-        await importFromST(json, file.name)
-      } else {
-        await importFromFile(json, file.name)
-      }
-    } catch (err) {
-      console.error('[LoomBuilder] Import failed:', err)
-    }
+    // Snapshot before resetting: clearing a file input also empties its live
+    // FileList in Chromium.
+    const files = Array.from(e.target.files ?? [])
     e.target.value = ''
-  }, [importFromFile, importFromST])
+    if (files.length === 0 || presetImportInProgressRef.current) return
+
+    const importType = importTypeRef.current
+    presetImportInProgressRef.current = true
+    try {
+      const result = await importPresetFiles(
+        files,
+        importType === 'st' ? importFromST : importFromFile,
+        {
+          invalidJson: lb('toast.invalidPresetJson'),
+          importFailed: lb('toast.presetImportFailed'),
+        },
+      )
+
+      if (files.length > 1 && result.imported > 0) {
+        toast.success(lb('toast.presetsImported', { count: result.imported }))
+      }
+      if (result.errors.length > 0) {
+        console.error('[LoomBuilder] Preset import failures:', result.errors)
+        toast.error(lb('toast.presetImportErrors', { count: result.errors.length }))
+      }
+    } finally {
+      presetImportInProgressRef.current = false
+    }
+  }, [importFromFile, importFromST, lb])
+
+  const presetEditorToolbar = presetEditorToolbarItems.some((item) => item.visible) ? (
+    <div className={s.extensionToolbar}>
+      {presetEditorToolbarItems.filter((item) => item.visible).map((item) => (
+        <SpindlePresetEditorToolbarItem key={item.id} item={item} />
+      ))}
+    </div>
+  ) : null
 
   // Edit view
-  if (view === 'edit' && editingBlock) {
+  if (activePresetEditorTab === 'preset' && view === 'edit' && editingBlock) {
     return (
-      <BlockEditor
-        block={editingBlock}
-        blocks={activePreset?.blocks ?? []}
-        promptVariables={activePreset?.promptVariables ?? {}}
-        onSave={handleEditSave}
-        onBack={() => { setView('list'); setEditingBlock(null) }}
-        availableMacros={availableMacros}
-        refreshMacros={refreshMacros}
-        compact={compact}
-      />
+      <>
+        {presetEditorToolbar}
+        <span data-spindle-mount="preset_editor_toolbar" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:preset-toolbar`} style={{ display: 'contents' }} />
+        <span data-spindle-mount="loom_builder_toolbar" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:builder-toolbar`} style={{ display: 'contents' }} />
+        <span data-spindle-mount="loom_builder_inspector" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:inspector`} style={{ display: 'contents' }} />
+        <BlockEditor
+          block={editingBlock}
+          blocks={activePreset?.blocks ?? []}
+          promptVariables={activePreset?.promptVariables ?? {}}
+          validationError={blockValidationError}
+          onSave={handleEditSave}
+          onBack={() => {
+            setBlockValidationError(null)
+            setView('list')
+            setEditingBlock(null)
+          }}
+          availableMacros={availableMacros}
+          refreshMacros={refreshMacros}
+          compact={compact}
+          trustedHostFeatures={true}
+          onMoveVariable={movePromptVariable}
+        />
+      </>
     )
   }
 
@@ -1958,21 +3045,42 @@ export default function LoomBuilder({
             onCreate={createPreset}
             onRename={handleRenamePreset}
             onDuplicate={handleDuplicatePreset}
-            onDelete={() => setConfirmDeletePreset(true)}
+            onDelete={setConfirmDeletePresetId}
+            onBulkDelete={bulkDeletePresets}
+            onBulkExport={bulkExportPresets}
             onImport={handleImport}
             onExport={handleExport}
             onExportLegacy={() => setShowLegacyExportConfirm(true)}
           />
-          <button
-            type="button"
-            className={clsx(s.btn, s.searchToggle, isSearchVisible && s.searchToggleActive)}
-            onClick={toggleSearch}
-            disabled={!activePreset}
-            title={isSearchVisible ? lb('search.closeTitle') : lb('search.openTitle')}
-          >
-            <Search size={14} />
-            {isSearchVisible ? lb('search.close') : lb('search.search')}
-          </button>
+          <div className={s.toolbarActions}>
+            <button
+              type="button"
+              className={clsx(s.btn, s.searchToggle, isSearchVisible && s.searchToggleActive)}
+              onClick={toggleSearch}
+              disabled={!activePreset}
+              aria-label={isSearchVisible ? lb('search.close') : lb('search.search')}
+              title={isSearchVisible ? lb('search.closeTitle') : lb('search.openTitle')}
+            >
+              <Search size={14} />
+              <span className={s.toolbarButtonLabel}>{isSearchVisible ? lb('search.close') : lb('search.search')}</span>
+            </button>
+            <button
+              type="button"
+              className={clsx(s.btn, s.categoryToggle)}
+              onClick={toggleAllCategories}
+              disabled={categoryIds.length === 0 || isSearchActive}
+              aria-label={allCategoriesCollapsed ? lb('category.expandAll') : lb('category.collapseAll')}
+              title={isSearchActive
+                ? lb('category.bulkUnavailableSearch')
+                : allCategoriesCollapsed
+                  ? lb('category.expandAll')
+                  : lb('category.collapseAll')}
+            >
+              {allCategoriesCollapsed ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              <span className={s.toolbarButtonLabel}>{allCategoriesCollapsed ? lb('category.expandAll') : lb('category.collapseAll')}</span>
+            </button>
+            <span data-spindle-mount="loom_builder_toolbar" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:builder-toolbar`} style={{ display: 'contents' }} />
+          </div>
           {activePreset && isSearchVisible && (
             <div className={s.searchBarRow}>
               <div className={s.searchField}>
@@ -2006,7 +3114,87 @@ export default function LoomBuilder({
           )}
         </div>
 
-      {activePreset && <PresetCoverHeader preset={activePreset} />}
+        {presetEditorToolbar}
+        <span data-spindle-mount="preset_editor_toolbar" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:preset-toolbar`} style={{ display: 'contents' }} />
+
+        {presetEditorTabs.length > 0 && (
+          <div className={s.extensionTabRow}>
+            <div
+              className={s.extensionTabBar}
+              role="tablist"
+              aria-label={lb('editorTabs.ariaLabel')}
+            >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={activePresetEditorTab === 'preset'}
+              className={clsx(
+              s.extensionTab,
+              activePresetEditorTab === 'preset' &&
+              s.extensionTabActive,
+            )}
+              onClick={() => setActivePresetEditorTab('preset')}
+          >
+             {lb('editorTabs.preset')}
+          </button>
+
+          {presetEditorTabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={activePresetEditorTab === tab.id}
+              className={clsx(
+              s.extensionTab,
+              activePresetEditorTab === tab.id &&
+              s.extensionTabActive,
+          )}
+             onClick={() => setActivePresetEditorTab(tab.id)}
+            >
+              {tab.title}
+            </button>
+          ))}
+            <span data-spindle-mount="preset_editor_tab" data-spindle-scope={`loom:${activePreset?.id ?? activePresetId ?? 'none'}:preset-tab`} style={{ display: 'contents' }} />
+      </div>
+
+        {activePresetExtensionTab?.guide && (
+          <button
+            type="button"
+            className={s.extensionGuideButton}
+            onClick={() => setGuideOpen(true)}
+            aria-label={`Open guide for ${activePresetExtensionTab.title}`}
+            title="Open guide"
+          >
+            <CircleHelp size={15} strokeWidth={1.7} />
+          </button>
+        )}
+      </div>
+    )}
+
+      {activePresetExtensionTab && (
+      <div
+        className={s.extensionTabContent}
+        role="tabpanel"
+      >
+        <SpindlePresetEditorTabContent
+          tab={activePresetExtensionTab}
+        />
+      </div>
+    )}
+
+    {activePresetExtensionTab?.guide && (
+  <GuideViewer
+    isOpen={guideOpen}
+    onClose={() => setGuideOpen(false)}
+    guide={{
+      kind: 'markdown',
+      ...activePresetExtensionTab.guide,
+    }}
+    title={activePresetExtensionTab.title}
+  />
+)}
+
+      <div style={{ display: activePresetEditorTab === 'preset' ? 'contents' : 'none' }}>
 
       {/* Connection profile */}
       {activePreset && connectionProfile && (() => {
@@ -2054,6 +3242,43 @@ export default function LoomBuilder({
                   className={s.profileBtnDismiss}
                   onClick={(e) => { e.stopPropagation(); presetProfiles.clearDefaults() }}
                   title={lb('profiles.clearDefaultsTitle')}
+                  role="button"
+                  tabIndex={0}
+                >
+                  <X size={8} />
+                </span>
+              </button>
+            )}
+
+            {/* Bind / unbind active persona. Persona profiles outrank character
+                profiles, so switching persona restores its own writing mode. */}
+            {!presetProfiles.hasPersonaBinding ? (
+              <button
+                className={s.profileBtn}
+                onClick={presetProfiles.bindToPersona}
+                disabled={!presetProfiles.hasDefaults || presetProfiles.isLoading || !activePreset || !presetProfiles.activePersonaId}
+                title={
+                  !presetProfiles.activePersonaId ? lb('profiles.noPersona')
+                    : !presetProfiles.hasDefaults ? lb('profiles.captureFirst')
+                      : lb('profiles.bindPersona')
+                }
+                type="button"
+              >
+                <Link size={10} /> {lb('profiles.persona')}
+              </button>
+            ) : (
+              <button
+                className={clsx(s.profileBtn, s.profileBtnActive)}
+                onClick={presetProfiles.bindToPersona}
+                disabled={presetProfiles.isLoading || !presetProfiles.activePersonaId}
+                title={lb('profiles.rebindPersona')}
+                type="button"
+              >
+                <RotateCcw size={10} /> {lb('profiles.persona')}
+                <span
+                  className={s.profileBtnDismiss}
+                  onClick={(e) => { e.stopPropagation(); presetProfiles.unbindPersona() }}
+                  title={lb('profiles.removePersona')}
                   role="button"
                   tabIndex={0}
                 >
@@ -2175,6 +3400,7 @@ export default function LoomBuilder({
           {presetProfiles.activeSource !== 'none' && (
             <span className={s.profileSourceBadge}>
               {presetProfiles.activeSource === 'chat' ? lb('profiles.sourceChat') :
+               presetProfiles.activeSource === 'persona' ? lb('profiles.sourcePersona') :
                presetProfiles.activeSource === 'character' ? lb('profiles.sourceCharacter') :
                presetProfiles.activeSource === 'connection' ? lb('profiles.sourceConnection') : lb('profiles.sourceDefault')}
             </span>
@@ -2184,15 +3410,15 @@ export default function LoomBuilder({
 
       {/* Scrollable content: settings + block list */}
       <div className={s.scrollArea} ref={scrollAreaRef} onScroll={handleScrollCapture}>
+        {activePreset && <PresetCoverHeader preset={activePreset} />}
+
         {/* Settings accordion sections */}
         {activePreset && (
           <GenerationSettings
             samplerOverrides={activePreset.samplerOverrides}
-            customBody={activePreset.customBody}
             connectionProfile={connectionProfile}
             samplerParams={samplerParams}
             onSaveSamplers={saveSamplerOverrides}
-            onSaveCustomBody={saveCustomBody}
             onRefreshProfile={refreshConnectionProfile}
           />
         )}
@@ -2206,6 +3432,9 @@ export default function LoomBuilder({
             <button
               type="button"
               className={clsx(s.btn, s.variablesBtn)}
+              // A cached profile lookup must not make this action inert. The
+              // input bar opens the same modal from the active preset; Loom
+              // uses base values if the scoped profile is still resolving.
               onClick={() => setShowPromptVariablesModal(true)}
             >
               <Braces size={14} />
@@ -2258,6 +3487,7 @@ export default function LoomBuilder({
                         onEdit={handleEdit}
                         onDelete={handleDelete}
                         onToggle={toggleBlock}
+                        onToggleChildren={toggleCategoryChildren}
                         childCount={group.children.length}
                         dragDisabled={isSearchActive}
                       />
@@ -2267,9 +3497,11 @@ export default function LoomBuilder({
                         <SortableBlockItem
                           key={block.id}
                           block={block}
+                          effectiveRole={effectiveRoles.get(block.id)}
                           onEdit={handleEdit}
                           onDelete={handleDelete}
                           onToggle={toggleBlock}
+                          onStash={handleAddToStash}
                           indented={!!group.categoryBlock}
                           dragDisabled={isSearchActive}
                         />
@@ -2322,6 +3554,10 @@ export default function LoomBuilder({
             )}
           </div>
 
+          <button className={s.btn} onClick={() => setShowPromptStashModal(true)} type="button">
+            <Archive size={14} /> {lb('actions.fromStash')}
+          </button>
+
           <button className={s.btn} onClick={handleAddCategory} type="button">
             <ChevronRight size={14} /> {lb('actions.addCategory')}
           </button>
@@ -2355,9 +3591,10 @@ export default function LoomBuilder({
           </div>
         </div>
       )}
+      </div>
 
       {/* Hidden file input for import */}
-      <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleFileSelect} />
+      <input ref={fileInputRef} type="file" accept=".json" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
 
       {/* Confirm legacy export */}
         <ConfirmationModal
@@ -2383,25 +3620,37 @@ export default function LoomBuilder({
 
       {/* Confirm preset delete dialog */}
         <ConfirmationModal
-          isOpen={confirmDeletePreset}
+          isOpen={!!confirmDeletePresetId}
+          zIndex={10004}
           title={lb('confirm.deletePresetTitle')}
-          message={lb('confirm.deletePresetMessage', { name: activePreset?.name })}
+          message={lb('confirm.deletePresetMessage', { name: confirmDeletePresetId ? registry[confirmDeletePresetId]?.name : '' })}
           variant="danger"
           confirmText={tc('actions.delete')}
           onConfirm={() => { void handleDeletePreset() }}
-          onCancel={() => setConfirmDeletePreset(false)}
+          onCancel={() => setConfirmDeletePresetId(null)}
         />
 
         {activePreset && (
           <PromptVariablesModal
+            key={promptVariableScopeKey}
             isOpen={showPromptVariablesModal}
             blocks={activePreset.blocks}
-            values={activePreset.promptVariables ?? {}}
+            values={effectivePromptVariableValues}
             onSave={savePromptVariableValues}
             onClose={() => setShowPromptVariablesModal(false)}
           />
         )}
+        <PromptStashModal
+          isOpen={showPromptStashModal}
+          onClose={() => setShowPromptStashModal(false)}
+          onSelect={handleInsertStashedBlock}
+          onUnstash={handleUnstash}
+        />
       </div>
     </PanelFadeIn>
   )
+}
+
+export default function LoomBuilder(props: LoomBuilderProps) {
+  return useSpindleComponentOverride('LoomBuilder', LoomBuilderNative, props)
 }

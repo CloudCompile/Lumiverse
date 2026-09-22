@@ -1,24 +1,58 @@
 import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
-import type { Character, CharacterSummary, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
+import type { Character, CharacterLibraryScope, CharacterPreview, CharacterSummary, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import * as filesSvc from "./files.service";
 import * as imagesSvc from "./images.service";
 import { deleteRegexScriptsByCharacterId } from "./regex-scripts.service";
 import { deleteAutoManagedCharacterWorldBooks } from "./world-books.service";
+import { getCharacterWorldBookIds } from "../utils/character-world-books";
+
+export class InvalidCharacterLibraryScopeError extends Error {
+  readonly code = "INVALID_CHARACTER_LIBRARY_SCOPE" as const;
+  constructor(readonly value: unknown) { super('Character library scope must be exactly "mine" or "shared"'); this.name = "InvalidCharacterLibraryScopeError"; }
+}
+
+export function normalizeCharacterLibraryScope(scope: unknown): CharacterLibraryScope {
+  if (scope === undefined) return "mine";
+  if (scope === "mine" || scope === "shared") return scope;
+  throw new InvalidCharacterLibraryScopeError(scope);
+}
+
+function explicitCharacterInputScope(input: { library_scope?: unknown; extensions?: Record<string, any> }): CharacterLibraryScope | undefined {
+  const direct = input.library_scope === undefined ? undefined : normalizeCharacterLibraryScope(input.library_scope);
+  const mirrorValue = input.extensions && Object.prototype.hasOwnProperty.call(input.extensions, "_lumiverse_library_scope") ? input.extensions._lumiverse_library_scope : undefined;
+  const mirror = mirrorValue === undefined ? undefined : normalizeCharacterLibraryScope(mirrorValue);
+  if (direct !== undefined && mirror !== undefined && direct !== mirror) throw new InvalidCharacterLibraryScopeError({ library_scope: direct, _lumiverse_library_scope: mirror });
+  return direct ?? mirror;
+}
+
+function canonicalCharacterExtensions(extensions: Record<string, any> | undefined, scope: CharacterLibraryScope): Record<string, any> {
+  return { ...(extensions || {}), _lumiverse_library_scope: scope };
+}
 
 // ─── Summary queries (lightweight, for character browser) ─────────────────
 
-const SUMMARY_COLUMNS = `c.id, c.name, c.creator, c.tags, c.image_id, c.created_at, c.updated_at,
+const SUMMARY_COLUMNS = `c.id, c.library_scope, c.name, c.description,
+  COALESCE(NULLIF(TRIM(c.description), ''), NULLIF(TRIM(c.personality), ''), '') AS preview_description,
+  c.creator, c.folder, c.tags, c.image_id, c.created_at, c.updated_at,
   (json_array_length(c.alternate_greetings) > 0) as has_alternate_greetings`;
+
+function getPreviewDescription(description: string | null | undefined, personality: string | null | undefined): string {
+  return description?.trim() || personality?.trim() || "";
+}
 
 function rowToSummary(row: any): CharacterSummary {
   return {
     id: row.id,
+    library_scope: normalizeCharacterLibraryScope(row.library_scope),
     name: row.name,
+    description: row.description || "",
+    preview_description: row.preview_description || "",
     creator: row.creator,
+    folder: row.folder || "",
     tags: JSON.parse(row.tags),
     image_id: row.image_id || null,
     created_at: row.created_at,
@@ -77,6 +111,8 @@ export interface SummaryQueryOptions {
   favoriteIds?: string[];
   filterMode?: "all" | "favorites" | "non-favorites";
   seed?: number;
+  scope?: CharacterLibraryScope;
+  chatId?: string;
 }
 
 const UUID_HEX_SQL = "LOWER(REPLACE(c.id, '-', ''))";
@@ -155,6 +191,7 @@ export function listCharacterSummaries(
 ): PaginatedResult<CharacterSummary> {
   const db = getDb();
   const { search, tags, excludeTags, sort, direction = "desc", favoriteIds, filterMode = "all", seed } = options;
+  const scope = options.scope === undefined ? undefined : normalizeCharacterLibraryScope(options.scope);
 
   if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
     return {
@@ -170,8 +207,13 @@ export function listCharacterSummaries(
     return listCharacterSummariesDiscover(userId, pagination, options);
   }
 
-  const whereClauses: string[] = ["c.user_id = ?"];
+  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0"];
   const whereParams: any[] = [userId];
+  if (scope) { whereClauses.push("c.library_scope = ?"); whereParams.push(scope); }
+  if (options.chatId) {
+    whereClauses.push(`EXISTS (SELECT 1 FROM chats chat_filter WHERE chat_filter.id = ? AND chat_filter.user_id = ? AND (chat_filter.character_id = c.id OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(chat_filter.metadata, '$.character_ids'), '[]')) participant WHERE participant.value = c.id)))`);
+    whereParams.push(options.chatId, userId);
+  }
 
   // FTS5 (trigram) search — falls back to LIKE for 1–2 char queries that
   // trigram cannot match (common for 2-char CJK names like 魔王).
@@ -223,8 +265,69 @@ export function listCharacterSummaries(
 
   const whereStr = whereClauses.join(" AND ");
 
+  const chatRecencyJoin = `
+    LEFT JOIN (
+      SELECT character_id, MAX(last_chatted_at) AS last_chatted_at
+      FROM (
+        SELECT character_id, MAX(updated_at) AS last_chatted_at
+        FROM chats
+        WHERE user_id = ?
+          AND character_id IS NOT NULL
+          AND COALESCE(
+            CASE WHEN json_valid(metadata)
+              THEN json_extract(metadata, '$.hidden_from_recent')
+            END,
+            0
+          ) NOT IN (1, 'true')
+          AND COALESCE(
+            CASE WHEN json_valid(metadata)
+              THEN json_extract(metadata, '$.group')
+            END,
+            0
+          ) NOT IN (1, 'true')
+        GROUP BY character_id
+
+        UNION ALL
+
+        SELECT participant.value AS character_id, MAX(group_chat.updated_at) AS last_chatted_at
+        FROM chats group_chat
+        JOIN json_each(
+          CASE WHEN json_valid(group_chat.metadata)
+            THEN COALESCE(json_extract(group_chat.metadata, '$.character_ids'), '[]')
+            ELSE '[]'
+          END
+        ) participant
+        WHERE group_chat.user_id = ?
+          AND COALESCE(
+            CASE WHEN json_valid(group_chat.metadata)
+              THEN json_extract(group_chat.metadata, '$.hidden_from_recent')
+            END,
+            0
+          ) NOT IN (1, 'true')
+        GROUP BY participant.value
+      ) recent_activity
+      GROUP BY character_id
+    ) cs ON cs.character_id = c.id
+  `;
+
+  // A character owns its one-on-one chats. Group chats are intentionally not
+  // counted here: assigning a single group session to every participant would
+  // overstate the number of chats for each card.
+  const chatCountJoin = `
+    LEFT JOIN (
+      SELECT character_id, COUNT(*) AS chat_count
+      FROM chats
+      WHERE user_id = ?
+        AND character_id IS NOT NULL
+        AND COALESCE(json_extract(metadata, '$.group'), 0) != 1
+      GROUP BY character_id
+    ) cs ON cs.character_id = c.id
+  `;
+
   // Sort
   let orderBy: string;
+  let extraJoin = "";
+  let queryParams = whereParams;
   if (usedFts && !sort) {
     orderBy = "ORDER BY rank"; // FTS5 relevance — only valid when MATCH was used
   } else if (search && !sort) {
@@ -238,17 +341,24 @@ export function listCharacterSummaries(
       case "created":
         orderBy = `ORDER BY c.created_at ${dir}, c.id ASC`;
         break;
+      case "most_chats":
+        extraJoin = chatCountJoin;
+        queryParams = [userId, ...whereParams];
+        orderBy = `ORDER BY COALESCE(cs.chat_count, 0) ${dir}, c.updated_at ${dir}, c.id ASC`;
+        break;
       case "recent":
       default:
-        orderBy = `ORDER BY c.updated_at ${dir}, c.id ASC`;
+        extraJoin = chatRecencyJoin;
+        queryParams = [userId, userId, ...whereParams];
+        orderBy = `ORDER BY MAX(c.updated_at, COALESCE(cs.last_chatted_at, c.updated_at)) ${dir}, c.updated_at ${dir}, c.id ASC`;
         break;
       }
   }
 
   return paginatedQuery(
-    `SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} WHERE ${whereStr} ${orderBy}`,
-    `SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`,
-    whereParams,
+    `SELECT ${SUMMARY_COLUMNS} FROM ${fromClause} ${extraJoin} WHERE ${whereStr} ${orderBy}`,
+    `SELECT COUNT(*) as count FROM ${fromClause} ${extraJoin} WHERE ${whereStr}`,
+    queryParams,
     pagination,
     rowToSummary
   );
@@ -263,6 +373,7 @@ function listCharacterSummariesDiscover(
   const nowSeconds = Math.floor(Date.now() / 1000);
   const shuffleSeed = normalizeShuffleSeed(options.seed);
   const { search, tags, excludeTags, favoriteIds, filterMode = "all" } = options;
+  const scope = options.scope === undefined ? undefined : normalizeCharacterLibraryScope(options.scope);
 
   if (filterMode === "favorites" && (!favoriteIds || favoriteIds.length === 0)) {
     return {
@@ -273,8 +384,13 @@ function listCharacterSummariesDiscover(
     };
   }
 
-  const whereClauses: string[] = ["c.user_id = ?"];
+  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0"];
   const whereParams: any[] = [userId];
+  if (scope) { whereClauses.push("c.library_scope = ?"); whereParams.push(scope); }
+  if (options.chatId) {
+    whereClauses.push(`EXISTS (SELECT 1 FROM chats chat_filter WHERE chat_filter.id = ? AND chat_filter.user_id = ? AND (chat_filter.character_id = c.id OR EXISTS (SELECT 1 FROM json_each(COALESCE(json_extract(chat_filter.metadata, '$.character_ids'), '[]')) participant WHERE participant.value = c.id)))`);
+    whereParams.push(options.chatId, userId);
+  }
 
   let extraJoin = "";
   if (search) {
@@ -380,6 +496,85 @@ export function listCharacterTags(userId: string): { tag: string; count: number 
   return rows;
 }
 
+// ─── Bulk tag update (batch-select bar) ───────────────────────────────────
+
+export type CharacterTagBulkOperation = "add" | "remove" | "replace";
+
+export interface CharacterTagBulkInput {
+  ids: string[];
+  operation: CharacterTagBulkOperation;
+  tags: string[];
+}
+
+export interface CharacterTagBulkResult {
+  updated: number;
+  unchanged: number;
+}
+
+function applyTagOperation(current: string[], operation: CharacterTagBulkOperation, tags: string[]): string[] {
+  if (operation === "add") {
+    const merged = [...current];
+    for (const t of tags) if (!merged.includes(t)) merged.push(t);
+    return merged;
+  }
+  if (operation === "remove") {
+    const remove = new Set(tags);
+    return current.filter((t) => !remove.has(t));
+  }
+  return [...tags]; // replace
+}
+
+function stringArraysEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * Apply a tag operation to many characters in a single transaction.
+ * Mirrors the transactional pattern in tag-library-import.service.ts.
+ * Emits no per-character events; callers refresh the browser afterwards.
+ */
+export function bulkUpdateCharacterTags(userId: string, input: CharacterTagBulkInput): CharacterTagBulkResult {
+  const ids = Array.from(new Set(input.ids.filter((id) => typeof id === "string" && id.length > 0)));
+  if (ids.length === 0) throw new Error("At least one character id is required");
+  const operation = input.operation;
+  if (operation !== "add" && operation !== "remove" && operation !== "replace") {
+    throw new Error("Invalid tag operation");
+  }
+  const tags = Array.from(new Set(input.tags.map((t) => (typeof t === "string" ? t.trim() : "")).filter((t) => t.length > 0)));
+  if (tags.length === 0) throw new Error("At least one tag is required");
+
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = db
+    .query(`SELECT id, tags FROM characters WHERE id IN (${placeholders}) AND user_id = ?`)
+    .all(...ids, userId) as Array<{ id: string; tags: string | null }>;
+
+  const now = Math.floor(Date.now() / 1000);
+  const updateStmt = db.query("UPDATE characters SET tags = ?, updated_at = ? WHERE id = ? AND user_id = ?");
+  let updated = 0;
+  let unchanged = 0;
+  db.transaction(() => {
+    for (const row of rows) {
+      let current: string[] = [];
+      try {
+        const parsed = JSON.parse(row.tags || "[]");
+        if (Array.isArray(parsed)) current = parsed.filter((t) => typeof t === "string");
+      } catch {}
+      const next = applyTagOperation(current, operation, tags);
+      if (stringArraysEqual(current, next)) {
+        unchanged++;
+        continue;
+      }
+      updateStmt.run(JSON.stringify(next), now, row.id, userId);
+      updated++;
+    }
+  })();
+
+  return { updated, unchanged };
+}
+
 // ─── Avatar info (lightweight, no JSON parsing) ───────────────────────────
 
 export function getCharacterAvatarInfo(
@@ -398,7 +593,7 @@ export function getCharacterAvatarInfo(
   return { image_id: row.image_id || null, avatar_path: row.avatar_path || null, avatar_crop_image_id: avatarCropImageId };
 }
 
-export type CharacterSortMode = "recent" | "discover";
+export type CharacterSortMode = "recent" | "discover" | "most_chats";
 
 export type PerspectiveLayerKind = "background" | "framing" | "subject";
 export const LANDING_PERSPECTIVE_LAYERS_KEY = "landing_perspective_layers";
@@ -466,13 +661,17 @@ function sanitizePerspectiveLayerInputs(inputs: unknown): LandingPerspectiveLaye
 }
 
 function rowToCharacter(row: any): Character {
+  const { deleting: _deleting, ...rest } = row;
+  const libraryScope = normalizeCharacterLibraryScope(row.library_scope);
   return {
-    ...row,
+    ...rest,
+    library_scope: libraryScope,
     avatar_path: row.avatar_path || null,
     image_id: row.image_id || null,
+    folder: row.folder || "",
     tags: JSON.parse(row.tags),
     alternate_greetings: JSON.parse(row.alternate_greetings),
-    extensions: JSON.parse(row.extensions),
+    extensions: canonicalCharacterExtensions(JSON.parse(row.extensions), libraryScope),
   };
 }
 
@@ -500,8 +699,69 @@ function collectCharacterImageIds(character: Character): Set<string> {
   return ids;
 }
 
+function unreferencedImageIds(userId: string, ids: Iterable<string>): string[] {
+  const candidates = new Set<string>();
+  for (const imageId of ids) if (imageId) candidates.add(imageId);
+  if (candidates.size === 0) return [];
+  const referenced = imagesSvc.findReferencedImageIds(userId, candidates);
+  return [...candidates].filter((imageId) => !referenced.has(imageId));
+}
+
 function cleanupUnreferencedImageIds(userId: string, ids: Iterable<string>): void {
-  for (const imageId of ids) imagesSvc.deleteImageIfUnreferenced(userId, imageId);
+  const unreferenced = unreferencedImageIds(userId, ids);
+  if (unreferenced.length === 0) return;
+  void imagesSvc.deleteImagesBulk(userId, unreferenced).catch((err) =>
+    console.error("[characters] image cleanup failed:", err instanceof Error ? err.message : err)
+  );
+}
+
+function clearRemovedChatAvatarReferences(userId: string, removedImageIds: Iterable<string>): void {
+  const removed = new Set(removedImageIds);
+  if (removed.size === 0) return;
+  let rows: any[];
+  try {
+    rows = getDb().query("SELECT id, character_id, name, metadata, created_at, updated_at FROM chats WHERE user_id = ?").all(userId) as any[];
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    let metadata: Record<string, any>;
+    try {
+      metadata = JSON.parse(row.metadata || "{}");
+    } catch {
+      continue;
+    }
+    let changed = false;
+    if (typeof metadata.active_avatar_id === "string" && removed.has(metadata.active_avatar_id)) {
+      delete metadata.active_avatar_id;
+      delete metadata.active_avatar_entry_id;
+      changed = true;
+    }
+    if (metadata.group_active_avatar_ids && typeof metadata.group_active_avatar_ids === "object") {
+      const ids = { ...metadata.group_active_avatar_ids };
+      const entries = metadata.group_active_avatar_entry_ids && typeof metadata.group_active_avatar_entry_ids === "object"
+        ? { ...metadata.group_active_avatar_entry_ids }
+        : {};
+      for (const [characterId, imageId] of Object.entries(ids)) {
+        if (typeof imageId !== "string" || !removed.has(imageId)) continue;
+        delete ids[characterId];
+        delete entries[characterId];
+        changed = true;
+      }
+      if (Object.keys(ids).length > 0) metadata.group_active_avatar_ids = ids;
+      else delete metadata.group_active_avatar_ids;
+      if (Object.keys(entries).length > 0) metadata.group_active_avatar_entry_ids = entries;
+      else delete metadata.group_active_avatar_entry_ids;
+    }
+    if (!changed) continue;
+    const now = Math.floor(Date.now() / 1000);
+    getDb().query("UPDATE chats SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+      .run(JSON.stringify(metadata), now, row.id, userId);
+    eventBus.emit(EventType.CHAT_CHANGED, {
+      chat: { ...row, metadata, updated_at: now },
+      changedFields: ["metadata.active_avatar_id", "metadata.group_active_avatar_ids"],
+    }, userId);
+  }
 }
 
 function listCharacterGalleryImageIds(userId: string, characterId: string): string[] {
@@ -523,10 +783,31 @@ export function listCharactersForManifest(userId: string): Array<{ name: string;
   }));
 }
 
+/**
+ * Every character's id and extensions, for scans that only need to inspect
+ * install provenance. Deliberately narrow: a library-wide sweep should not
+ * deserialize full card bodies to answer "which of these came from Chub".
+ */
+export function listCharacterExtensions(userId: string): Array<{ id: string; name: string; extensions: Record<string, any> }> {
+  const db = getDb();
+  const rows = db
+    .query("SELECT id, name, extensions FROM characters WHERE user_id = ? AND deleting = 0")
+    .all(userId) as any[];
+  return rows.map((row) => {
+    let extensions: Record<string, any> = {};
+    try {
+      extensions = JSON.parse(row.extensions) ?? {};
+    } catch {
+      // A card with unreadable extensions simply has no provenance to find.
+    }
+    return { id: row.id, name: row.name, extensions };
+  });
+}
+
 export function listCharacters(userId: string, pagination: PaginationParams): PaginatedResult<Character> {
   return paginatedQuery(
-    "SELECT * FROM characters WHERE user_id = ? ORDER BY updated_at DESC",
-    "SELECT COUNT(*) as count FROM characters WHERE user_id = ?",
+    "SELECT * FROM characters WHERE user_id = ? AND deleting = 0 ORDER BY updated_at DESC",
+    "SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0",
     [userId],
     pagination,
     rowToCharacter
@@ -555,7 +836,7 @@ export function listCharactersDiscover(
   const shuffleValueSql = buildSeededShuffleValueSql(shuffleSeed);
 
   const countRow = db
-    .query("SELECT COUNT(*) as count FROM characters WHERE user_id = ?")
+    .query("SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0")
     .get(userId) as { count: number } | null;
   const total = countRow?.count ?? 0;
 
@@ -570,7 +851,7 @@ export function listCharactersDiscover(
       WHERE user_id = ? AND COALESCE(json_extract(metadata, '$.group'), 0) != 1
       GROUP BY character_id
     ) cs ON cs.character_id = c.id
-    WHERE c.user_id = ?
+    WHERE c.user_id = ? AND c.deleting = 0
     ORDER BY ((${shuffleValueSql}) - (${discoverBoostSql})) ASC,
              ${shuffleKeySql} ASC,
              c.updated_at DESC,
@@ -605,6 +886,38 @@ export function getCharacter(userId: string, id: string): Character | null {
   return rowToCharacter(row);
 }
 
+export function getCharacterPreview(userId: string, id: string): CharacterPreview | null {
+  const character = getCharacter(userId, id);
+  if (!character) return null;
+  const summary: CharacterSummary = rowToSummary({
+    id: character.id,
+    library_scope: character.library_scope,
+    name: character.name,
+    description: character.description,
+    preview_description: getPreviewDescription(character.description, character.personality),
+    creator: character.creator,
+    folder: character.folder,
+    tags: JSON.stringify(character.tags),
+    image_id: character.image_id,
+    created_at: character.created_at,
+    updated_at: character.updated_at,
+    has_alternate_greetings: character.alternate_greetings.length > 0,
+  });
+  const bookIds = getCharacterWorldBookIds(character.extensions);
+  const lorebooks = bookIds.length === 0 ? [] : getDb().query(
+    `SELECT id, name FROM world_books WHERE user_id = ? AND id IN (${bookIds.map(() => "?").join(",")})`
+  ).all(userId, ...bookIds) as Array<{ id: string; name: string }>;
+  const chat = getDb().query(`
+    SELECT c.id, c.name, c.updated_at,
+      (SELECT substr(content, 1, 280) FROM messages WHERE chat_id = c.id ORDER BY index_in_chat DESC LIMIT 1) AS last_message_preview
+    FROM chats c
+    WHERE c.user_id = ? AND c.character_id = ? AND COALESCE(json_extract(c.metadata, '$.group'), 0) != 1
+    ORDER BY (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) DESC, c.updated_at DESC LIMIT 1
+  `).get(userId, id) as { id: string; name: string; updated_at: number; last_message_preview: string | null } | null;
+  const lastChat = chat ? { ...chat, name: chat.name || "", last_message_preview: chat.last_message_preview || "" } : null;
+  return { character: summary, lorebooks, last_chat: lastChat, open_chat_id: lastChat?.id ?? null };
+}
+
 /**
  * Batch-load multiple characters by ID in a single query.
  */
@@ -619,23 +932,34 @@ export function getCharactersByIds(userId: string, ids: string[]): Map<string, C
   return result;
 }
 
-export function createCharacter(userId: string, input: CreateCharacterInput): Character {
+export interface CreateCharacterOptions {
+  /** Bulk workflows publish one library invalidation after committing. */
+  emitEvent?: boolean;
+}
+
+export function createCharacter(
+  userId: string,
+  input: CreateCharacterInput,
+  options: CreateCharacterOptions = {},
+): Character {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const createdAt = input.created_at ?? now;
-  const extensions = { ...(input.extensions || {}) };
+  const libraryScope = explicitCharacterInputScope(input) ?? "mine";
+  const extensions = canonicalCharacterExtensions(input.extensions, libraryScope);
   delete extensions.avatar_crop_image_id;
   delete extensions.original_image_id;
 
   getDb()
     .query(
-      `INSERT INTO characters (id, user_id, name, description, personality, scenario, first_mes, mes_example, creator, creator_notes, system_prompt, post_history_instructions, tags, alternate_greetings, extensions, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO characters (id, user_id, name, library_scope, description, personality, scenario, first_mes, mes_example, creator, creator_notes, system_prompt, post_history_instructions, tags, alternate_greetings, extensions, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
       userId,
       input.name,
+      libraryScope,
       input.description || "",
       input.personality || "",
       input.scenario || "",
@@ -652,12 +976,30 @@ export function createCharacter(userId: string, input: CreateCharacterInput): Ch
       now
     );
 
+  if (input.folder?.trim()) {
+    getDb().query("UPDATE characters SET folder = ? WHERE id = ? AND user_id = ?").run(input.folder.trim(), id, userId);
+  }
+
   const character = getCharacter(userId, id)!;
-  eventBus.emit(EventType.CHARACTER_CREATED, { id, character }, userId);
+  if (options.emitEvent !== false) {
+    eventBus.emit(EventType.CHARACTER_CREATED, { id, character }, userId);
+  }
   return character;
 }
 
-export function updateCharacter(userId: string, id: string, input: UpdateCharacterInput): Character | null {
+export interface UpdateCharacterOptions {
+  /** Background enrichment must not reorder the character library. */
+  preserveUpdatedAt?: boolean;
+  /** Batched workflows publish one update after saving their changes. */
+  emitEvent?: boolean;
+}
+
+export function updateCharacter(
+  userId: string,
+  id: string,
+  input: UpdateCharacterInput,
+  options: UpdateCharacterOptions = {},
+): Character | null {
   const existing = getCharacter(userId, id);
   if (!existing) return null;
   const oldImageIds = collectCharacterImageIds(existing);
@@ -678,18 +1020,31 @@ export function updateCharacter(userId: string, id: string, input: UpdateCharact
     }
   }
 
-  const jsonFields = ["tags", "alternate_greetings", "extensions"] as const;
+  if (input.folder !== undefined) {
+    fields.push("folder = ?");
+    values.push(input.folder.trim());
+  }
+
+  const explicitScope = explicitCharacterInputScope(input);
+  if (explicitScope !== undefined) { fields.push("library_scope = ?"); values.push(explicitScope); }
+  const jsonFields = ["tags", "alternate_greetings"] as const;
   for (const field of jsonFields) {
     if (input[field] !== undefined) {
       fields.push(`${field} = ?`);
       values.push(JSON.stringify(input[field]));
     }
   }
+  if (input.extensions !== undefined || explicitScope !== undefined) {
+    const scope = explicitScope ?? existing.library_scope ?? "mine";
+    fields.push("extensions = ?"); values.push(JSON.stringify(canonicalCharacterExtensions(input.extensions ?? existing.extensions, scope)));
+  }
 
   if (fields.length === 0) return existing;
 
-  fields.push("updated_at = ?");
-  values.push(now);
+  if (!options.preserveUpdatedAt) {
+    fields.push("updated_at = ?");
+    values.push(now);
+  }
   values.push(id);
   values.push(userId);
 
@@ -698,9 +1053,68 @@ export function updateCharacter(userId: string, id: string, input: UpdateCharact
   if (input.extensions !== undefined) {
     const newImageIds = collectCharacterImageIds(updated);
     const removedImageIds = [...oldImageIds].filter((imageId) => !newImageIds.has(imageId));
+    clearRemovedChatAvatarReferences(userId, removedImageIds);
     cleanupUnreferencedImageIds(userId, removedImageIds);
   }
-  eventBus.emit(EventType.CHARACTER_EDITED, { id, character: updated }, userId);
+  if (options.emitEvent !== false) {
+    eventBus.emit(EventType.CHARACTER_EDITED, { id, character: updated }, userId);
+  }
+  return updated;
+}
+
+export function renameCharacterFolder(userId: string, oldName: string, newName: string): Character[] {
+  const source = oldName.trim();
+  const target = newName.trim();
+  if (!source || !target) return [];
+
+  const rows = getDb()
+    .query("SELECT * FROM characters WHERE user_id = ? AND folder = ? AND deleting = 0")
+    .all(userId, source) as any[];
+  if (rows.length === 0) return [];
+  if (source === target) return rows.map(rowToCharacter);
+
+  const now = Math.floor(Date.now() / 1000);
+  getDb()
+    .query("UPDATE characters SET folder = ?, updated_at = ? WHERE user_id = ? AND folder = ? AND deleting = 0")
+    .run(target, now, userId, source);
+
+  const updated = rows.map((row) => rowToCharacter({ ...row, folder: target, updated_at: now }));
+  for (const character of updated) {
+    eventBus.emit(EventType.CHARACTER_EDITED, { id: character.id, character }, userId);
+  }
+  return updated;
+}
+
+export function deleteCharacterFolder(userId: string, name: string): Character[] {
+  const folder = name.trim();
+  if (!folder) return [];
+
+  const rows = getDb()
+    .query("SELECT * FROM characters WHERE user_id = ? AND folder = ? AND deleting = 0")
+    .all(userId, folder) as any[];
+  if (rows.length === 0) return [];
+
+  const now = Math.floor(Date.now() / 1000);
+  getDb()
+    .query("UPDATE characters SET folder = '', updated_at = ? WHERE user_id = ? AND folder = ? AND deleting = 0")
+    .run(now, userId, folder);
+
+  const updated = rows.map((row) => rowToCharacter({ ...row, folder: "", updated_at: now }));
+  for (const character of updated) {
+    eventBus.emit(EventType.CHARACTER_EDITED, { id: character.id, character }, userId);
+  }
+  return updated;
+}
+
+export function bulkUpdateCharacterFolders(userId: string, ids: string[], folder: string): Character[] {
+  const target = folder.trim();
+  const uniqueIds = [...new Set(ids.filter(Boolean))];
+  const updated: Character[] = [];
+
+  for (const id of uniqueIds) {
+    const character = updateCharacter(userId, id, { folder: target });
+    if (character) updated.push(character);
+  }
   return updated;
 }
 
@@ -904,13 +1318,14 @@ export function duplicateCharacter(userId: string, id: string): Character | null
 
   getDb()
     .query(
-      `INSERT INTO characters (id, user_id, name, description, personality, scenario, first_mes, mes_example, creator, creator_notes, system_prompt, post_history_instructions, avatar_path, image_id, tags, alternate_greetings, extensions, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       `INSERT INTO characters (id, user_id, name, library_scope, description, personality, scenario, first_mes, mes_example, creator, creator_notes, system_prompt, post_history_instructions, folder, avatar_path, image_id, tags, alternate_greetings, extensions, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       newId,
       userId,
       `${existing.name} (Copy)`,
+      existing.library_scope ?? "mine",
       existing.description,
       existing.personality,
       existing.scenario,
@@ -920,6 +1335,7 @@ export function duplicateCharacter(userId: string, id: string): Character | null
       existing.creator_notes,
       existing.system_prompt,
       existing.post_history_instructions,
+      existing.folder,
       existing.avatar_path,
       existing.image_id,
       JSON.stringify(existing.tags),
@@ -957,6 +1373,25 @@ export function findCharacterBySourceFilename(userId: string, sourceFilename: st
   return row ? rowToCharacter(row) : null;
 }
 
+/** Load migration identities once so a large import does not issue one lookup
+ * per card. Duplicate legacy identities resolve deterministically to the most
+ * recently updated character, matching the old LIMIT 1 behavior closely. */
+export function listCharacterSourceFilenameIds(userId: string): Map<string, string> {
+  const rows = getDb()
+    .query(
+      `SELECT id, json_extract(extensions, '$._lumiverse_source_filename') AS source_filename
+       FROM characters
+       WHERE user_id = ?
+         AND json_type(extensions, '$._lumiverse_source_filename') = 'text'
+       ORDER BY updated_at ASC`,
+    )
+    .all(userId) as Array<{ id: string; source_filename: string }>;
+
+  const result = new Map<string, string>();
+  for (const row of rows) result.set(row.source_filename, row.id);
+  return result;
+}
+
 export function setCharacterSourceFilename(userId: string, id: string, sourceFilename: string): void {
   const char = getCharacter(userId, id);
   if (!char) return;
@@ -969,16 +1404,159 @@ export function setCharacterSourceFilename(userId: string, id: string, sourceFil
 export function deleteCharacter(userId: string, id: string): boolean {
   const existing = getCharacter(userId, id);
   if (!existing) return false;
+  const marked = getDb()
+    .query("UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0")
+    .run(id, userId);
+  if (marked.changes > 0) eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
+  void scheduleCharacterDeletionCascade(userId, id).catch((err) =>
+    console.error(`[characters] deletion cascade failed for ${id}:`, err instanceof Error ? err.message : err)
+  );
+  return true;
+}
+
+export interface CharacterBatchDeleteResult {
+  deleted: string[];
+  failed: string[];
+}
+
+/**
+ * Mark a set of characters first, then await each resumable cleanup cascade.
+ * Marking the whole set up front keeps assets shared only by members of this
+ * batch from looking live while the first member is being cleaned up.
+ */
+export async function batchDeleteCharacters(userId: string, ids: string[]): Promise<CharacterBatchDeleteResult> {
+  const uniqueIds = [...new Set(ids.filter((id) => typeof id === "string" && id.length > 0))];
+  if (uniqueIds.length === 0) return { deleted: [], failed: [] };
+
+  const existing = getCharactersByIds(userId, uniqueIds);
+  const marked: string[] = [];
+  getDb().transaction(() => {
+    const statement = getDb().query(
+      "UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0",
+    );
+    for (const id of uniqueIds) {
+      if (!existing.has(id)) continue;
+      if (statement.run(id, userId).changes > 0) marked.push(id);
+    }
+  })();
+  for (const id of marked) eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
+
+  const deleted: string[] = [];
+  const failed: string[] = [];
+  for (const id of uniqueIds) {
+    if (!existing.has(id)) {
+      failed.push(id);
+      continue;
+    }
+    try {
+      await scheduleCharacterDeletionCascade(userId, id);
+      if (getCharacter(userId, id)) failed.push(id);
+      else deleted.push(id);
+    } catch (err) {
+      console.error(`[characters] batch deletion cascade failed for ${id}:`, err instanceof Error ? err.message : err);
+      failed.push(id);
+    }
+  }
+  return { deleted, failed };
+}
+
+const characterDeletionCascades = new Map<string, Promise<void>>();
+
+function scheduleCharacterDeletionCascade(userId: string, id: string): Promise<void> {
+  const key = `${userId}\0${id}`;
+  const active = characterDeletionCascades.get(key);
+  if (active) return active;
+  const cascade = runCharacterDeletionCascade(userId, id).finally(() => {
+    if (characterDeletionCascades.get(key) === cascade) characterDeletionCascades.delete(key);
+  });
+  characterDeletionCascades.set(key, cascade);
+  return cascade;
+}
+
+async function runCharacterDeletionCascade(userId: string, id: string): Promise<void> {
+  const existing = getCharacter(userId, id);
+  if (!existing) return;
+
+  // A character FK would cascade-delete its primary chats, bypassing the
+  // non-SQL cleanup in chats.deleteChat (audio, vectors, caches and timers).
+  // Delete those chats explicitly first. Also remove the character from group
+  // metadata where it is not the primary member, so no dead member IDs remain.
+  try {
+    const chatsSvc = await import("./chats.service");
+    const primaryChats = getDb()
+      .query("SELECT id FROM chats WHERE user_id = ? AND character_id = ?")
+      .all(userId, id) as Array<{ id: string }>;
+    chatsSvc.deleteChats(userId, primaryChats.map((row) => row.id));
+
+    const groupRows = getDb().query(
+      `SELECT c.id
+         FROM chats c
+        WHERE c.user_id = ?
+          AND COALESCE(json_extract(c.metadata, '$.group'), 0) = 1
+          AND c.character_id != ?
+          AND EXISTS (
+            SELECT 1 FROM json_each(c.metadata, '$.character_ids') member
+             WHERE member.value = ?
+          )`,
+    ).all(userId, id, id) as Array<{ id: string }>;
+    for (const row of groupRows) {
+      const chat = chatsSvc.getChat(userId, row.id);
+      const members = Array.isArray(chat?.metadata?.character_ids) ? chat.metadata.character_ids : [];
+      if (members.length > 2) chatsSvc.removeGroupMember(userId, row.id, id);
+      else chatsSvc.deleteChat(userId, row.id);
+    }
+  } catch (err: any) {
+    // Focused tests may omit the chats table. Real cleanup failures must keep
+    // the tombstone in place so startup recovery can retry safely.
+    if (!/no such table: chats/i.test(String(err?.message ?? err))) throw err;
+  }
+
   const imageIds = collectCharacterImageIds(existing);
   for (const imageId of listCharacterGalleryImageIds(userId, id)) imageIds.add(imageId);
+  const plan = imagesSvc.imageDeletePlan(userId, unreferencedImageIds(userId, imageIds));
 
-  const result = getDb().query("DELETE FROM characters WHERE id = ? AND user_id = ?").run(id, userId);
-  if (result.changes > 0) {
-    cleanupUnreferencedImageIds(userId, imageIds);
-    if (existing.avatar_path) void filesSvc.deleteAvatar(existing.avatar_path);
-    deleteAutoManagedCharacterWorldBooks(userId, id);
-    deleteRegexScriptsByCharacterId(userId, id);
-    eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
+  await imagesSvc.unlinkPaths(plan.paths);
+  if (existing.avatar_path) {
+    const stillReferenced = (() => {
+      try {
+        return !!getDb().query(
+          `SELECT 1 AS found FROM characters
+            WHERE user_id = ? AND deleting = 0 AND avatar_path = ?
+           UNION ALL
+           SELECT 1 AS found FROM personas WHERE user_id = ? AND avatar_path = ?
+           LIMIT 1`,
+        ).get(userId, existing.avatar_path, userId, existing.avatar_path);
+      } catch {
+        return false;
+      }
+    })();
+    if (!stillReferenced) await filesSvc.deleteAvatar(existing.avatar_path).catch(() => {});
   }
-  return result.changes > 0;
+  await deleteAutoManagedCharacterWorldBooks(userId, id);
+
+  getDb().transaction(() => {
+    imagesSvc.deleteImageRowsOnly(userId, plan.rowIds);
+    deleteRegexScriptsByCharacterId(userId, id);
+    getDb().query("DELETE FROM characters WHERE id = ? AND user_id = ?").run(id, userId);
+  })();
+}
+
+export async function resumePendingCharacterDeletions(): Promise<number> {
+  let rows: Array<{ id: string; user_id: string }>;
+  try {
+    rows = getDb()
+      .query("SELECT id, user_id FROM characters WHERE deleting = 1")
+      .all() as Array<{ id: string; user_id: string }>;
+  } catch {
+    return 0;
+  }
+  for (const row of rows) {
+    try {
+      await scheduleCharacterDeletionCascade(row.user_id, row.id);
+    } catch (err) {
+      console.error(`[characters] deletion resume failed for ${row.id}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  if (rows.length > 0) console.log(`[characters] resumed ${rows.length} interrupted deletion(s)`);
+  return rows.length;
 }

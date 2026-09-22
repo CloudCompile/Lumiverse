@@ -54,6 +54,12 @@ export const characterGalleryApi = {
     })
   },
 
+  renameReference(characterId: string, itemId: string, name: string) {
+    return patch<CharacterGalleryItem>(`/characters/${characterId}/gallery/${itemId}/reference`, {
+      name,
+    })
+  },
+
   imageUrl(imageId: string) {
     return `${BASE_URL}/images/${imageId}`
   },

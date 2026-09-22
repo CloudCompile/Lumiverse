@@ -2,6 +2,7 @@ import { existsSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { extname, join } from "path";
 import { isFfmpegBinaryAvailable, resetFfmpegBinaryResolution, resolveFfmpegBinary } from "./ffmpeg-binary.service";
+import { resetHardwareVideoEncoderResolution, resolveHardwareVideoEncoder } from "./ffmpeg-hardware-encoder.service";
 
 const SUPPORTED_VIDEO_MIME_TO_EXT: Record<string, string> = {
   "video/mp4": ".mp4",
@@ -32,6 +33,7 @@ export async function isFfmpegAvailableForSilentVideo(): Promise<boolean> {
 
 export function resetSilentVideoFfmpegProbe(): void {
   resetFfmpegBinaryResolution();
+  resetHardwareVideoEncoderResolution();
 }
 
 function outputExtensionForMime(mimeType: string): string | null {
@@ -65,6 +67,33 @@ export function isLikelyVideoUpload(mimeType: string, originalFilename?: string)
 }
 
 export type NormalizedVideoCodec = "h264" | "hevc";
+
+export interface VideoInputProbe {
+  durationMs: number | null;
+  codec: NormalizedVideoCodec | null;
+  profile: string | null;
+  pixelFormat: string | null;
+  width: number | null;
+  height: number | null;
+}
+
+export type VideoNormalizationMode = "copy" | "hardware" | "transcode";
+
+export interface NormalizedVideoBufferResult {
+  buffer: Buffer;
+  ext: ".mp4";
+  mimeType: "video/mp4";
+  mode: VideoNormalizationMode;
+  encoder?: string;
+}
+
+const COPY_SAFE_H264_PROFILES = new Set([
+  "baseline",
+  "constrained baseline",
+  "main",
+  "high",
+  "constrained high",
+]);
 
 export interface VideoTranscodeProgress {
   currentTimeMs: number | null;
@@ -107,6 +136,66 @@ function parseFfmpegDurationMs(stderr: string): number | null {
   return parseFfmpegClockToMs(match?.[1]);
 }
 
+/**
+ * Parse the first video stream from ffmpeg's stable human-readable probe
+ * banner. The bundled ffmpeg-static package does not include ffprobe, so this
+ * keeps probing available on hosts that have no separate ffprobe binary.
+ */
+export function parseFfmpegVideoProbe(stderr: string): VideoInputProbe {
+  const result: VideoInputProbe = {
+    durationMs: parseFfmpegDurationMs(stderr),
+    codec: null,
+    profile: null,
+    pixelFormat: null,
+    width: null,
+    height: null,
+  };
+  const streamLine = stderr
+    .split(/\r?\n/)
+    .find((line) => /Stream #.*Video:\s*/i.test(line));
+  if (!streamLine) return result;
+
+  const marker = streamLine.search(/Video:\s*/i);
+  if (marker < 0) return result;
+  const descriptor = streamLine.slice(marker).replace(/^Video:\s*/i, "");
+  const codecName = descriptor.match(/^([a-z0-9_]+)/i)?.[1]?.toLowerCase();
+  if (codecName === "h264" || codecName === "hevc") result.codec = codecName;
+
+  const firstParenthetical = descriptor.match(/^[^(,]+\(([^)]+)\)/)?.[1]?.trim() ?? null;
+  // Codec tags such as `(avc1 / 0x31637661)` occupy the same position when
+  // ffmpeg has no profile to report; do not mistake those for a profile.
+  if (firstParenthetical && !firstParenthetical.includes("/") && !/^0x/i.test(firstParenthetical)) {
+    result.profile = firstParenthetical;
+  }
+
+  const pixelMatch = descriptor.match(
+    /,\s*((?:yuv|yuva|nv|p0|p2|gbrp|rgb|bgr|gray)[a-z0-9_]+)(?:\([^)]*\))?\s*,/i,
+  );
+  if (pixelMatch?.[1]) {
+    result.pixelFormat = pixelMatch[1].toLowerCase();
+    const afterPixelFormat = descriptor.slice((pixelMatch.index ?? 0) + pixelMatch[0].length);
+    const dimensions = afterPixelFormat.match(/(\d{1,6})x(\d{1,6})(?:[\s,]|$)/);
+    if (dimensions) {
+      result.width = Number(dimensions[1]);
+      result.height = Number(dimensions[2]);
+    }
+  }
+  return result;
+}
+
+export function isVideoStreamCopyCompatible(
+  probe: VideoInputProbe,
+  requestedCodec: NormalizedVideoCodec,
+): boolean {
+  if (probe.codec !== requestedCodec || probe.pixelFormat !== "yuv420p") return false;
+  if (!probe.width || !probe.height || probe.width % 2 !== 0 || probe.height % 2 !== 0) return false;
+
+  const profile = probe.profile?.trim().toLowerCase();
+  if (!profile) return false;
+  if (requestedCodec === "hevc") return profile === "main";
+  return COPY_SAFE_H264_PROFILES.has(profile);
+}
+
 function parseFfmpegSpeed(value: string | undefined): number | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -116,14 +205,27 @@ function parseFfmpegSpeed(value: string | undefined): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-async function probeInputDurationMs(ffmpeg: string, inputPath: string): Promise<number | null> {
+async function probeInputVideo(ffmpeg: string, inputPath: string): Promise<VideoInputProbe> {
   const proc = Bun.spawn([ffmpeg, "-hide_banner", "-i", inputPath], {
     stdout: "ignore",
     stderr: "pipe",
   });
   const stderr = proc.stderr ? await Bun.readableStreamToText(proc.stderr as ReadableStream) : "";
   await proc.exited;
-  return parseFfmpegDurationMs(stderr);
+  return parseFfmpegVideoProbe(stderr);
+}
+
+function emitCompletedProgress(
+  onProgress: ((progress: VideoTranscodeProgress) => void) | undefined,
+  durationMs: number | null,
+): void {
+  onProgress?.({
+    currentTimeMs: durationMs,
+    durationMs,
+    percent: 100,
+    speed: null,
+    done: true,
+  });
 }
 
 async function consumeFfmpegProgress(
@@ -342,7 +444,7 @@ export async function normalizeVideoBuffer(
   mimeType: string,
   originalFilename: string | undefined,
   options: NormalizeVideoBufferOptions,
-): Promise<{ buffer: Buffer; ext: ".mp4"; mimeType: "video/mp4" } | null> {
+): Promise<NormalizedVideoBufferResult | null> {
   const ext = resolveVideoInputExtension(mimeType, originalFilename);
   if (!ext || !isLikelyVideoUpload(mimeType, originalFilename)) return null;
 
@@ -357,9 +459,65 @@ export async function normalizeVideoBuffer(
     const inputPath = join(workdir, `input${ext}`);
     const outputPath = join(workdir, "output.mp4");
     await Bun.write(inputPath, input);
-    const inputDurationMs = options.onProgress
-      ? await probeInputDurationMs(ffmpeg, inputPath)
-      : null;
+    const probe = await probeInputVideo(ffmpeg, inputPath);
+
+    if (isVideoStreamCopyCompatible(probe, options.codec)) {
+      const copyArgs = [
+        "-i", inputPath,
+        "-map", "0:v:0",
+        ...(options.stripAudio === false ? ["-map", "0:a?", "-c:a", "copy"] : ["-an"]),
+        "-c:v", "copy",
+        ...(options.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
+        "-movflags", "+faststart",
+        "-y",
+        outputPath,
+      ];
+      const copied = await runFfmpeg(copyArgs, { ffmpegBinary: ffmpeg });
+      if (copied && existsSync(outputPath)) {
+        const data = await Bun.file(outputPath).bytes();
+        if (data.length > 0) {
+          emitCompletedProgress(options.onProgress, probe.durationMs);
+          return {
+            buffer: Buffer.from(data),
+            ext: ".mp4",
+            mimeType: "video/mp4",
+            mode: "copy",
+          };
+        }
+      }
+    }
+
+    const hardwareEncoder = await resolveHardwareVideoEncoder(ffmpeg, options.codec);
+    if (hardwareEncoder) {
+      const hardwareArgs = [
+        "-i", inputPath,
+        "-map", "0:v:0",
+        ...(options.stripAudio === false ? ["-map", "0:a?"] : ["-an"]),
+        ...hardwareEncoder.args,
+        "-pix_fmt", "yuv420p",
+        ...(options.codec === "hevc" ? ["-tag:v", "hvc1"] : []),
+        "-movflags", "+faststart",
+        "-y",
+        outputPath,
+      ];
+      const encoded = await runFfmpeg(hardwareArgs, {
+        ffmpegBinary: ffmpeg,
+        inputDurationMs: probe.durationMs,
+        onProgress: options.onProgress,
+      });
+      if (encoded && existsSync(outputPath)) {
+        const data = await Bun.file(outputPath).bytes();
+        if (data.length > 0) {
+          return {
+            buffer: Buffer.from(data),
+            ext: ".mp4",
+            mimeType: "video/mp4",
+            mode: "hardware",
+            encoder: hardwareEncoder.encoder,
+          };
+        }
+      }
+    }
 
     const codecArgs =
       options.codec === "hevc"
@@ -378,7 +536,7 @@ export async function normalizeVideoBuffer(
 
     const ok = await runFfmpeg(ffmpegArgs, {
       ffmpegBinary: ffmpeg,
-      inputDurationMs,
+      inputDurationMs: probe.durationMs,
       onProgress: options.onProgress,
     });
     if (!ok || !existsSync(outputPath)) return null;
@@ -390,6 +548,7 @@ export async function normalizeVideoBuffer(
       buffer: Buffer.from(data),
       ext: ".mp4",
       mimeType: "video/mp4",
+      mode: "transcode",
     };
   } catch {
     return null;

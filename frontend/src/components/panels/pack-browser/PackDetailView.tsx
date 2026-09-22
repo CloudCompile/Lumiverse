@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 
 import { ChevronLeft, ChevronDown, ChevronRight, Plus, Pencil, Trash2, Settings, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import { packsApi } from '@/api/packs'
+import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -128,6 +129,7 @@ export default function PackDetailView({
  pack, onBack, onEdit, onDelete, onRefresh }: Props) {
   const { t } = useTranslation('panels')
   const { t: tc } = useTranslation('common')
+  const loadAvailableTools = useStore((s) => s.loadAvailableTools)
   const [lumiaOpen, setLumiaOpen] = useState(true)
   const [loomOpen, setLoomOpen] = useState(true)
   const [toolsOpen, setToolsOpen] = useState(true)
@@ -150,11 +152,12 @@ export default function PackDetailView({
         await packsApi.deleteLoomItem(pack.id, deleteConfirm.id)
       } else if (deleteConfirm.type === 'tool') {
         await packsApi.deleteLoomTool(pack.id, deleteConfirm.id)
+        void loadAvailableTools()
       }
       setDeleteConfirm(null)
       onRefresh()
     } catch {}
-  }, [deleteConfirm, pack.id, onRefresh])
+  }, [deleteConfirm, pack.id, onRefresh, loadAvailableTools])
 
   const handleRepairLegacyGenderMapping = useCallback(async () => {
     try {

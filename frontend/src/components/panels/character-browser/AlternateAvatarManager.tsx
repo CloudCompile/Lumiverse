@@ -1,11 +1,17 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { Plus, X, Pencil, Check } from 'lucide-react'
+import { Plus, X, Pencil, Check, Link2 } from 'lucide-react'
 import { imagesApi } from '@/api/images'
 import LazyImage from '@/components/shared/LazyImage'
 import styles from './AlternateAvatarManager.module.css'
 import clsx from 'clsx'
+import {
+  AVATAR_BINDING_FIELDS,
+  PRIMARY_AVATAR_ENTRY_ID,
+  type AvatarBindingField,
+  type AvatarBindings,
+} from '@/lib/avatarBindings'
 
 export interface AlternateAvatarEntry {
   id: string
@@ -18,10 +24,14 @@ interface Props {
   primaryImageId: string | null
   alternates: AlternateAvatarEntry[]
   onChange: (alternates: AlternateAvatarEntry[]) => void
+  bindings: AvatarBindings
+  alternateFields: Record<string, Array<{ id: string; label: string; content: string }>>
+  greetingCount: number
+  onBindingsChange: (bindings: AvatarBindings) => void
   openCropFlow: (file: File) => void
   /** When provided, tapping an avatar selects it for the active chat. */
   activeChatAvatarId?: string | null
-  onAvatarSelect?: (imageId: string | null) => void
+  onAvatarSelect?: (avatarEntryId: string) => void
   /** Upload progress (0-100) for a new alternate avatar being uploaded. */
   uploadProgress?: number | null
 }
@@ -30,6 +40,10 @@ export default function AlternateAvatarManager({
   primaryImageId,
   alternates,
   onChange,
+  bindings,
+  alternateFields,
+  greetingCount,
+  onBindingsChange,
   openCropFlow,
   activeChatAvatarId,
   onAvatarSelect,
@@ -40,6 +54,7 @@ export default function AlternateAvatarManager({
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [bindingEditorId, setBindingEditorId] = useState<string | null>(null)
   const renameInputRef = useRef<HTMLInputElement>(null)
 
   const selectable = !!onAvatarSelect
@@ -63,10 +78,81 @@ export default function AlternateAvatarManager({
   const handleDelete = useCallback(
     (entryId: string) => {
       onChange(alternates.filter((a) => a.id !== entryId))
+      if (bindings[entryId]) {
+        const next = { ...bindings }
+        delete next[entryId]
+        onBindingsChange(next)
+      }
       if (renamingId === entryId) setRenamingId(null)
+      if (bindingEditorId === entryId) setBindingEditorId(null)
     },
-    [alternates, onChange, renamingId]
+    [alternates, bindingEditorId, bindings, onBindingsChange, onChange, renamingId]
   )
+
+  const setBindingValue = useCallback((avatarId: string, key: AvatarBindingField | 'greeting_index', raw: string) => {
+    const next: AvatarBindings = Object.fromEntries(
+      Object.entries(bindings).map(([id, binding]) => [id, { ...binding }]),
+    )
+    const current = { ...(next[avatarId] || {}) }
+    if (raw === '__unchanged__') {
+      delete current[key]
+    } else {
+      const value = key === 'greeting_index'
+        ? Number(raw)
+        : raw === '__default__' ? null : raw
+      current[key] = value as never
+      for (const [otherId, otherBinding] of Object.entries(next)) {
+        if (otherId === avatarId || otherBinding[key] !== value) continue
+        delete otherBinding[key]
+        if (Object.keys(otherBinding).length === 0) delete next[otherId]
+      }
+    }
+    if (Object.keys(current).length > 0) next[avatarId] = current
+    else delete next[avatarId]
+    onBindingsChange(next)
+  }, [bindings, onBindingsChange])
+
+  const renderBindingEditor = (avatarId: string) => {
+    if (bindingEditorId !== avatarId) return null
+    const binding = bindings[avatarId] || {}
+    return (
+      <div className={styles.bindingEditor}>
+        <span className={styles.bindingTitle}>{t('characterBrowser.alternateAvatars.bindings')}</span>
+        {AVATAR_BINDING_FIELDS.map((field) => {
+          const variants = alternateFields[field] || []
+          if (variants.length === 0) return null
+          const value = Object.prototype.hasOwnProperty.call(binding, field)
+            ? binding[field] === null ? '__default__' : binding[field]
+            : '__unchanged__'
+          return (
+            <label key={field} className={styles.bindingRow}>
+              <span>{field}</span>
+              <select value={value ?? '__unchanged__'} onChange={(event) => setBindingValue(avatarId, field, event.target.value)}>
+                <option value="__unchanged__">{t('characterBrowser.alternateAvatars.keepCurrent')}</option>
+                <option value="__default__">{t('characterBrowser.alternateAvatars.default')}</option>
+                {variants.map((variant) => <option key={variant.id} value={variant.id}>{variant.label}</option>)}
+              </select>
+            </label>
+          )
+        })}
+        {greetingCount > 0 && (
+          <label className={styles.bindingRow}>
+            <span>{t('characterBrowser.alternateAvatars.greeting')}</span>
+            <select
+              value={Object.prototype.hasOwnProperty.call(binding, 'greeting_index') ? String(binding.greeting_index ?? 0) : '__unchanged__'}
+              onChange={(event) => setBindingValue(avatarId, 'greeting_index', event.target.value)}
+            >
+              <option value="__unchanged__">{t('characterBrowser.alternateAvatars.keepCurrent')}</option>
+              <option value="0">{t('characterBrowser.alternateAvatars.default')}</option>
+              {Array.from({ length: Math.max(0, greetingCount - 1) }, (_, index) => (
+                <option key={index + 1} value={index + 1}>{t('characterBrowser.alternateAvatars.greetingNumber', { number: index + 1 })}</option>
+              ))}
+            </select>
+          </label>
+        )}
+      </div>
+    )
+  }
 
   const handleStartRename = useCallback((entry: AlternateAvatarEntry) => {
     setRenamingId(entry.id)
@@ -97,7 +183,7 @@ export default function AlternateAvatarManager({
         {primaryImageId && (
           <div
             className={clsx(styles.avatarCard, selectable && styles.avatarCardSelectable)}
-            onClick={selectable ? () => onAvatarSelect!(null) : undefined}
+            onClick={selectable ? () => onAvatarSelect!(PRIMARY_AVATAR_ENTRY_ID) : undefined}
           >
             <LazyImage
               src={imagesApi.smallUrl(primaryImageId)}
@@ -109,6 +195,9 @@ export default function AlternateAvatarManager({
               fallback={<div className={styles.thumbPlaceholder} />}
             />
             <span className={styles.avatarLabel}>{t('characterBrowser.alternateAvatars.primary')}</span>
+            <button type="button" className={styles.bindingBtn} onClick={(event) => { event.stopPropagation(); setBindingEditorId((id) => id === PRIMARY_AVATAR_ENTRY_ID ? null : PRIMARY_AVATAR_ENTRY_ID) }}>
+              <Link2 size={10} /> {Object.keys(bindings[PRIMARY_AVATAR_ENTRY_ID] || {}).length || ''}
+            </button>
           </div>
         )}
 
@@ -120,7 +209,7 @@ export default function AlternateAvatarManager({
             <div
               key={entry.id}
               className={clsx(styles.avatarCard, selectable && styles.avatarCardSelectable)}
-              onClick={selectable ? () => onAvatarSelect!(entry.image_id) : undefined}
+              onClick={selectable ? () => onAvatarSelect!(entry.id) : undefined}
             >
               <LazyImage
                 src={imagesApi.smallUrl(entry.image_id)}
@@ -146,12 +235,32 @@ export default function AlternateAvatarManager({
                   </button>
                 </div>
               ) : (
-                <span className={styles.avatarLabel}>{entry.label}</span>
-              )}
-              <div className={styles.cardActions} onClick={(e) => e.stopPropagation()}>
-                <button type="button" className={styles.iconBtn} onClick={() => handleStartRename(entry)} title={tc('actions.edit')}>
-                  <Pencil size={10} />
+                <button
+                  type="button"
+                  className={styles.avatarLabelButton}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    handleStartRename(entry)
+                  }}
+                  title={tc('actions.edit')}
+                  aria-label={`${tc('actions.edit')}: ${entry.label}`}
+                >
+                  <span className={styles.avatarLabel}>{entry.label}</span>
+                  <Pencil className={styles.labelEditIcon} size={10} aria-hidden="true" />
                 </button>
+              )}
+              <button
+                type="button"
+                className={styles.bindingBtn}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setBindingEditorId((id) => id === entry.id ? null : entry.id)
+                }}
+                title={t('characterBrowser.alternateAvatars.linkFields')}
+              >
+                <Link2 size={10} /> {Object.keys(bindings[entry.id] || {}).length || ''}
+              </button>
+              <div className={styles.cardActions} onClick={(e) => e.stopPropagation()}>
                 <button type="button" className={styles.iconBtn} onClick={() => handleDelete(entry.id)} title={tc('actions.delete')}>
                   <X size={10} />
                 </button>
@@ -181,6 +290,8 @@ export default function AlternateAvatarManager({
           <Plus size={16} />
         </button>
       </div>
+
+      {bindingEditorId && renderBindingEditor(bindingEditorId)}
 
       <input
         ref={fileInputRef}

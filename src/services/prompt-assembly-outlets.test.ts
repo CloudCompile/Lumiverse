@@ -30,6 +30,8 @@ function makeMinimalEnv(): MacroEnv {
       personaSubjectivePronoun: "",
       personaObjectivePronoun: "",
       personaPossessivePronoun: "",
+      personaReflexivePronoun: "",
+      personaPossessivePronounStandalone: "",
       mesExamples: "",
       mesExamplesRaw: "",
       systemPrompt: "",
@@ -80,6 +82,8 @@ function makeEntry(partial: Partial<WorldBookEntry>): WorldBookEntry {
     world_book_id: "wb-1",
     uid: "uid-1",
     outlet_name: null,
+    wi_marker: null,
+    wi_marker_side: null,
     key: [],
     keysecondary: [],
     content: "",
@@ -96,6 +100,7 @@ function makeEntry(partial: Partial<WorldBookEntry>): WorldBookEntry {
     group_weight: 0,
     probability: 100,
     scan_depth: null,
+    exclude_greeting: false,
     case_sensitive: false,
     match_whole_words: false,
     automation_id: null,
@@ -117,6 +122,7 @@ function makeEntry(partial: Partial<WorldBookEntry>): WorldBookEntry {
     created_at: 0,
     updated_at: 0,
     ...partial,
+    revision: partial.revision ?? 1,
   };
 }
 
@@ -174,6 +180,19 @@ describe("resolveWorldInfoOutlets", () => {
     expect(result.dossier).toBe("First\n\nSecond");
     expect(result.Dossier).toBeUndefined();
     expect(result.DOSSIER).toBeUndefined();
+  });
+
+  test("does not include persona add-on outlets", async () => {
+    const env = makeMinimalEnv();
+    env.extra.personaAddonOutlets = {
+      dossier: "Persona note for {{char}}",
+    };
+
+    const result = await resolveWorldInfoOutlets([
+      makeEntry({ outlet_name: "dossier", content: "World note" }),
+    ], env);
+
+    expect(result.dossier).toBe("World note");
   });
 
   test("outlet macros inside concatenated content are resolved", async () => {

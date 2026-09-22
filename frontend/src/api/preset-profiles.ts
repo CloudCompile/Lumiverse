@@ -1,8 +1,10 @@
-import { get, put, del } from './client'
+import { get, put, patch, del } from './client'
+import type { PromptVariableValues } from '@/lib/loom/types'
 
 export interface PresetProfileBinding {
   preset_id: string
   block_states: Record<string, boolean>
+  prompt_variables?: PromptVariableValues
   captured_at: number
   linked_to_defaults?: boolean
 }
@@ -10,7 +12,8 @@ export interface PresetProfileBinding {
 export interface ResolvedPresetProfile {
   preset_id: string | null
   binding: PresetProfileBinding | null
-  source: 'chat' | 'character' | 'connection' | 'defaults' | 'none'
+  source: 'chat' | 'persona' | 'character' | 'connection' | 'defaults' | 'none'
+  source_id: string | null
 }
 
 export const presetProfilesApi = {
@@ -19,10 +22,11 @@ export const presetProfilesApi = {
     return get<PresetProfileBinding>('/preset-profiles/defaults', { preset_id: presetId })
   },
 
-  captureDefaults(presetId: string, blockStates: Record<string, boolean>) {
+  captureDefaults(presetId: string, blockStates: Record<string, boolean>, promptVariables?: PromptVariableValues) {
     return put<PresetProfileBinding>('/preset-profiles/defaults', {
       preset_id: presetId,
       block_states: blockStates,
+      ...(promptVariables ? { prompt_variables: promptVariables } : {}),
     })
   },
 
@@ -30,15 +34,23 @@ export const presetProfilesApi = {
     return del<void>(`/preset-profiles/defaults?preset_id=${encodeURIComponent(presetId)}`)
   },
 
+  updateDefaultsPromptVariables(presetId: string, promptVariables: PromptVariableValues) {
+    return patch<PresetProfileBinding>('/preset-profiles/defaults/prompt-variables', {
+      preset_id: presetId,
+      prompt_variables: promptVariables,
+    })
+  },
+
   // Character bindings
   getCharacterBinding(characterId: string) {
     return get<PresetProfileBinding>(`/preset-profiles/character/${characterId}`)
   },
 
-  setCharacterBinding(characterId: string, presetId: string, blockStates: Record<string, boolean>) {
+  setCharacterBinding(characterId: string, presetId: string, blockStates: Record<string, boolean>, promptVariables?: PromptVariableValues) {
     return put<PresetProfileBinding>(`/preset-profiles/character/${characterId}`, {
       preset_id: presetId,
       block_states: blockStates,
+      ...(promptVariables ? { prompt_variables: promptVariables } : {}),
     })
   },
 
@@ -46,15 +58,51 @@ export const presetProfilesApi = {
     return del<void>(`/preset-profiles/character/${characterId}`)
   },
 
+  updateCharacterPromptVariables(characterId: string, promptVariables: PromptVariableValues) {
+    return patch<PresetProfileBinding>(`/preset-profiles/character/${characterId}/prompt-variables`, {
+      prompt_variables: promptVariables,
+    })
+  },
+
+  // Persona bindings
+  getPersonaBinding(personaId: string) {
+    return get<PresetProfileBinding>(`/preset-profiles/persona/${personaId}`)
+  },
+
+  setPersonaBinding(personaId: string, presetId: string, blockStates: Record<string, boolean>, promptVariables?: PromptVariableValues) {
+    return put<PresetProfileBinding>(`/preset-profiles/persona/${personaId}`, {
+      preset_id: presetId,
+      block_states: blockStates,
+      ...(promptVariables ? { prompt_variables: promptVariables } : {}),
+    })
+  },
+
+  deletePersonaBinding(personaId: string) {
+    return del<void>(`/preset-profiles/persona/${personaId}`)
+  },
+
+  updatePersonaPromptVariables(personaId: string, promptVariables: PromptVariableValues) {
+    return patch<PresetProfileBinding>(`/preset-profiles/persona/${personaId}/prompt-variables`, {
+      prompt_variables: promptVariables,
+    })
+  },
+
   // Chat bindings
   getChatBinding(chatId: string) {
     return get<PresetProfileBinding>(`/preset-profiles/chat/${chatId}`)
   },
 
-  setChatBinding(chatId: string, presetId: string, blockStates: Record<string, boolean>) {
+  setChatBinding(chatId: string, presetId: string, blockStates: Record<string, boolean>, promptVariables?: PromptVariableValues) {
     return put<PresetProfileBinding>(`/preset-profiles/chat/${chatId}`, {
       preset_id: presetId,
       block_states: blockStates,
+      ...(promptVariables ? { prompt_variables: promptVariables } : {}),
+    })
+  },
+
+  updateChatPromptVariables(chatId: string, promptVariables: PromptVariableValues) {
+    return patch<PresetProfileBinding>(`/preset-profiles/chat/${chatId}/prompt-variables`, {
+      prompt_variables: promptVariables,
     })
   },
 
@@ -67,10 +115,11 @@ export const presetProfilesApi = {
     return get<PresetProfileBinding>(`/preset-profiles/connection/${connectionId}`)
   },
 
-  setConnectionBinding(connectionId: string, presetId: string, blockStates: Record<string, boolean>) {
+  setConnectionBinding(connectionId: string, presetId: string, blockStates: Record<string, boolean>, promptVariables?: PromptVariableValues) {
     return put<PresetProfileBinding>(`/preset-profiles/connection/${connectionId}`, {
       preset_id: presetId,
       block_states: blockStates,
+      ...(promptVariables ? { prompt_variables: promptVariables } : {}),
     })
   },
 
@@ -78,11 +127,18 @@ export const presetProfilesApi = {
     return del<void>(`/preset-profiles/connection/${connectionId}`)
   },
 
+  updateConnectionPromptVariables(connectionId: string, promptVariables: PromptVariableValues) {
+    return patch<PresetProfileBinding>(`/preset-profiles/connection/${connectionId}/prompt-variables`, {
+      prompt_variables: promptVariables,
+    })
+  },
+
   // Resolution
-  resolve(chatId: string, presetId?: string | null, connectionId?: string | null) {
+  resolve(chatId: string, presetId?: string | null, connectionId?: string | null, personaId?: string | null) {
     return get<ResolvedPresetProfile>(`/preset-profiles/resolve/${chatId}`, {
       ...(presetId ? { preset_id: presetId } : {}),
       ...(connectionId ? { connection_id: connectionId } : {}),
+      ...(personaId ? { persona_id: personaId } : {}),
     })
   },
 }

@@ -21,8 +21,47 @@ import type {
   MemoryConsolidationRow,
   EmotionalTag,
 } from "./types";
-import type { ConsolidationConfig } from "./config";
+import type {
+  ConsolidationConfig,
+  CortexModelFallbackPair,
+  SidecarReliabilityConfig,
+} from "./config";
+import { getCortexConfig, listCortexFallbackEndpoints } from "./config";
 import { scoreChunkHeuristic } from "./salience-heuristic";
+
+type ConsolidationGenerateRawFn = (opts: {
+  connectionId: string;
+  requestPurpose?: string;
+  messages: Array<{ role: string; content: string }>;
+  parameters: Record<string, any>;
+  signal?: AbortSignal;
+}) => Promise<{ content: string }>;
+
+export type MemorySummarizationRole = "primary" | "secondary";
+export type MemorySummarizationChainStatus = "ok" | "aborted" | "timeout" | "unavailable" | "exhausted";
+
+export interface MemorySummarizationTarget {
+  connectionProfileId: string;
+  model: string | null;
+  role: MemorySummarizationRole;
+}
+
+export interface MemorySummarizationDecision<T = unknown> {
+  status: MemorySummarizationChainStatus;
+  result: T | null;
+  role: MemorySummarizationRole | null;
+  persist: boolean;
+  useExtractive: boolean;
+  attempts: number;
+}
+
+export interface ConsolidationSidecarOptions {
+  memorySummarization?: CortexModelFallbackPair;
+  sidecarReliability?: Pick<SidecarReliabilityConfig, "fallback">;
+  sidecarTimeoutMs?: number;
+  sidecar?: { connectionProfileId?: string | null; model?: string | null };
+  signal?: AbortSignal;
+}
 
 // ─── Row Mapper ────────────────────────────────────────────────
 
@@ -82,6 +121,179 @@ export function deleteConsolidationsForChat(chatId: string): void {
   getDb().query("DELETE FROM memory_consolidations WHERE chat_id = ?").run(chatId);
 }
 
+export function collectMemorySummarizationTargets(
+  pair: CortexModelFallbackPair | undefined,
+  fallbackConnectionId?: string,
+  sidecar?: { connectionProfileId?: string | null; model?: string | null },
+): MemorySummarizationTarget[] {
+  const primaryId = pair?.primary.connectionProfileId
+    || sidecar?.connectionProfileId
+    || fallbackConnectionId
+    || null;
+  const primaryModel = pair?.primary.model ?? sidecar?.model ?? null;
+  const targets: MemorySummarizationTarget[] = [];
+  if (primaryId) {
+    targets.push({ connectionProfileId: primaryId, model: primaryModel, role: "primary" });
+  }
+  const seen = new Set<string>(primaryId ? [primaryId] : []);
+  for (const extra of listCortexFallbackEndpoints(pair)) {
+    if (!extra.connectionProfileId || seen.has(extra.connectionProfileId)) continue;
+    seen.add(extra.connectionProfileId);
+    targets.push({
+      connectionProfileId: extra.connectionProfileId,
+      model: extra.model,
+      role: "secondary",
+    });
+  }
+  return targets;
+}
+
+export function decideMemorySummarizationFallback(
+  status: MemorySummarizationChainStatus,
+  fallback: "heuristic" | "skip",
+): { persist: boolean; useExtractive: boolean } {
+  if (status === "ok") return { persist: true, useExtractive: false };
+  if (status === "aborted") return { persist: false, useExtractive: false };
+  if (fallback === "skip") return { persist: false, useExtractive: false };
+  return { persist: true, useExtractive: true };
+}
+
+function callerAbortReason(signal?: AbortSignal): unknown {
+  return signal?.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+function throwIfCallerAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw callerAbortReason(signal);
+}
+
+export async function runMemorySummarizationSidecar<T>(options: {
+  memorySummarization?: CortexModelFallbackPair;
+  sidecarReliability?: Pick<SidecarReliabilityConfig, "fallback">;
+  sidecarTimeoutMs?: number;
+  sidecar?: { connectionProfileId?: string | null; model?: string | null };
+  sidecarConnectionId?: string;
+  signal?: AbortSignal;
+  extract: (target: MemorySummarizationTarget & { attempt: number; signal?: AbortSignal }) => Promise<T | null>;
+}): Promise<MemorySummarizationDecision<T>> {
+  const {
+    memorySummarization,
+    sidecarReliability,
+    sidecar,
+    sidecarConnectionId,
+    signal,
+    extract,
+  } = options;
+  const fallback = sidecarReliability?.fallback === "skip" ? "skip" : "heuristic";
+  const sidecarTimeoutMs = options.sidecarTimeoutMs ?? 30_000;
+  const targets = collectMemorySummarizationTargets(memorySummarization, sidecarConnectionId, sidecar);
+
+  const finish = (
+    status: MemorySummarizationChainStatus,
+    extra: Partial<MemorySummarizationDecision<T>> = {},
+  ): MemorySummarizationDecision<T> => {
+    const decided = decideMemorySummarizationFallback(status, fallback);
+    return {
+      status,
+      result: extra.result ?? null,
+      role: extra.role ?? null,
+      persist: decided.persist,
+      useExtractive: decided.useExtractive,
+      attempts: extra.attempts ?? 0,
+    };
+  };
+
+  if (signal?.aborted) return finish("aborted");
+  if (targets.length === 0) return finish("unavailable");
+
+  let attempts = 0;
+  let lastRole: MemorySummarizationRole | null = null;
+  let sawTimeout = false;
+  let invokedAny = false;
+
+  for (const target of targets) {
+    if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+    lastRole = target.role;
+
+    const timeoutController = sidecarTimeoutMs > 0 ? new AbortController() : null;
+    const timer = timeoutController
+      ? setTimeout(() => {
+          console.warn(`[memory-cortex] Consolidation sidecar timed out after ${sidecarTimeoutMs}ms, aborting LLM call`);
+          timeoutController.abort();
+        }, sidecarTimeoutMs)
+      : null;
+    const combinedSignal = signal && timeoutController
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : signal ?? timeoutController?.signal;
+
+    attempts += 1;
+    invokedAny = true;
+    try {
+      const result = await extract({
+        ...target,
+        attempt: 1,
+        signal: combinedSignal,
+      });
+      if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+      if (result != null) {
+        return finish("ok", { result, role: target.role, attempts });
+      }
+      throw new Error("sidecar returned empty consolidation");
+    } catch (err: unknown) {
+      if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+      const timedOut = timeoutController?.signal.aborted === true;
+      if (timedOut) sawTimeout = true;
+      const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
+      if (name !== "AbortError" && !timedOut) {
+        console.warn(
+          `[memory-cortex] Consolidation ${target.role} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+  if (!invokedAny) return finish("unavailable", { role: lastRole, attempts });
+  if (sawTimeout) return finish("timeout", { role: lastRole, attempts });
+  return finish("exhausted", { role: lastRole, attempts });
+}
+
+function resolveConsolidationSidecarOptions(
+  userId: string,
+  sidecarConnectionId?: string,
+  sidecarTimeoutMs?: number,
+  sidecarOptions?: ConsolidationSidecarOptions,
+): ConsolidationSidecarOptions {
+  if (sidecarOptions) {
+    return {
+      memorySummarization: sidecarOptions.memorySummarization,
+      sidecarReliability: sidecarOptions.sidecarReliability,
+      sidecarTimeoutMs: sidecarOptions.sidecarTimeoutMs ?? sidecarTimeoutMs,
+      sidecar: sidecarOptions.sidecar,
+      signal: sidecarOptions.signal,
+    };
+  }
+
+  try {
+    const cfg = getCortexConfig(userId);
+    return {
+      memorySummarization: cfg.memorySummarization,
+      sidecarReliability: cfg.sidecarReliability,
+      sidecarTimeoutMs: sidecarTimeoutMs ?? cfg.sidecarTimeoutMs,
+      sidecar: cfg.sidecar,
+    };
+  } catch {
+    return {
+      sidecarTimeoutMs,
+      sidecar: sidecarConnectionId
+        ? { connectionProfileId: sidecarConnectionId, model: null }
+        : undefined,
+    };
+  }
+}
+
 // ─── Consolidation Pipeline ────────────────────────────────────
 
 /**
@@ -92,12 +304,7 @@ export async function maybeConsolidate(
   userId: string,
   chatId: string,
   config: ConsolidationConfig,
-  generateRawFn?: (opts: {
-    connectionId: string;
-    messages: Array<{ role: string; content: string }>;
-    parameters: Record<string, any>;
-    signal?: AbortSignal;
-  }) => Promise<{ content: string }>,
+  generateRawFn?: ConsolidationGenerateRawFn,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
   /** Sampling parameters forwarded to the underlying LLM call. Caller supplies
@@ -107,8 +314,9 @@ export async function maybeConsolidate(
   /** Additional scaffold tag names to strip from raw chunk content before
    *  feeding it to the consolidation LLM or extractive scorer. */
   extraScaffoldTags?: string[],
-): Promise<void> {
-  if (!config.enabled) return;
+  sidecarOptions?: ConsolidationSidecarOptions,
+): Promise<boolean> {
+  if (!config.enabled) return false;
 
   const db = getDb();
 
@@ -122,7 +330,7 @@ export async function maybeConsolidate(
     )
     .get(chatId) as { count: number } | null;
 
-  if (!countRow || countRow.count < config.chunkThreshold) return;
+  if (!countRow || countRow.count < config.chunkThreshold) return false;
 
   // Only fetch the batch we actually need
   const batch = db
@@ -131,49 +339,48 @@ export async function maybeConsolidate(
        FROM chat_chunks cc
        LEFT JOIN memory_salience ms ON ms.chunk_id = cc.id
        WHERE cc.chat_id = ? AND cc.consolidation_id IS NULL
-       ORDER BY cc.created_at ASC
+       ORDER BY cc.message_range_start IS NULL ASC,
+                cc.message_range_start ASC,
+                cc.message_range_end ASC,
+                cc.id ASC
        LIMIT ?`,
     )
     .all(chatId, config.chunksPerConsolidation) as any[];
+  if (batch.length === 0) return false;
 
   let summary: string;
   let title: string | null = null;
 
-  if (config.useSidecar && generateRawFn && sidecarConnectionId) {
-    // Time-bound the sidecar call to prevent hanging promises during consolidation.
-    // Timeout is user-configurable to accommodate thinking models.
-    // Uses AbortController so the underlying HTTP request is cancelled on timeout.
-    const timeoutMs = sidecarTimeoutMs ?? 30_000;
-    const ac = timeoutMs > 0 ? new AbortController() : null;
-    const timer = ac ? setTimeout(() => {
-      console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, aborting LLM call`);
-      ac.abort();
-    }, timeoutMs) : null;
+  const resolvedSidecar = resolveConsolidationSidecarOptions(
+    userId, sidecarConnectionId, sidecarTimeoutMs, sidecarOptions,
+  );
+  if (resolvedSidecar.signal?.aborted) return false;
 
-    const boundGenFn: typeof generateRawFn = ac
-      ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
-      : generateRawFn;
+  if (config.useSidecar && generateRawFn) {
+    const decision = await generateConsolidationSummary(
+      batch,
+      generateRawFn,
+      sidecarConnectionId ?? resolvedSidecar.sidecar?.connectionProfileId ?? "",
+      config.maxTokensPerSummary,
+      samplingParameters,
+      extraScaffoldTags,
+      resolvedSidecar,
+    );
 
-    let result: { summary: string; title: string | null } | null;
-    try {
-      result = await generateConsolidationSummary(
-        batch, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary, samplingParameters, extraScaffoldTags,
-      );
-    } catch (err: any) {
-      if (err?.name === "AbortError" || ac?.signal.aborted) {
-        console.warn(`[memory-cortex] Consolidation sidecar timed out after ${timeoutMs}ms, using extractive fallback`);
-        result = null;
+    if (!decision.persist) {
+      if (decision.status === "aborted") {
+        console.warn("[memory-cortex] Consolidation sidecar aborted, skipping persist");
       } else {
-        throw err;
+        console.warn("[memory-cortex] Consolidation sidecar exhausted, skip persist");
       }
-    } finally {
-      if (timer) clearTimeout(timer);
+      return false;
     }
 
-    if (result) {
-      summary = result.summary;
-      title = result.title;
+    if (decision.result && !decision.useExtractive) {
+      summary = decision.result.summary;
+      title = decision.result.title;
     } else {
+      console.warn("[memory-cortex] Consolidation sidecar exhausted, using extractive fallback");
       summary = extractiveConsolidation(batch, extraScaffoldTags);
       title = inferTitle(batch);
     }
@@ -236,7 +443,11 @@ export async function maybeConsolidate(
   );
 
   // Check for arc-level consolidation
-  await maybeConsolidateArcs(userId, chatId, config, generateRawFn, sidecarConnectionId, sidecarTimeoutMs, samplingParameters, extraScaffoldTags);
+  await maybeConsolidateArcs(
+    userId, chatId, config, generateRawFn, sidecarConnectionId, sidecarTimeoutMs,
+    samplingParameters, extraScaffoldTags, resolvedSidecar,
+  );
+  return true;
 }
 
 /**
@@ -247,16 +458,12 @@ async function maybeConsolidateArcs(
   userId: string,
   chatId: string,
   config: ConsolidationConfig,
-  generateRawFn?: (opts: {
-    connectionId: string;
-    messages: Array<{ role: string; content: string }>;
-    parameters: Record<string, any>;
-    signal?: AbortSignal;
-  }) => Promise<{ content: string }>,
+  generateRawFn?: ConsolidationGenerateRawFn,
   sidecarConnectionId?: string,
   sidecarTimeoutMs?: number,
   samplingParameters?: Record<string, unknown>,
   extraScaffoldTags?: string[],
+  sidecarOptions?: ConsolidationSidecarOptions,
 ): Promise<void> {
   const db = getDb();
 
@@ -293,39 +500,33 @@ async function maybeConsolidateArcs(
   let arcSummary: string;
   let arcTitle: string | null = null;
 
-  if (config.useSidecar && generateRawFn && sidecarConnectionId) {
+  if (sidecarOptions?.signal?.aborted) return;
+
+  if (config.useSidecar && generateRawFn) {
     const combined = summaries.join("\n\n---\n\n");
-    const timeoutMs = sidecarTimeoutMs ?? 30_000;
-    const ac = timeoutMs > 0 ? new AbortController() : null;
-    const timer = ac ? setTimeout(() => {
-      console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, aborting LLM call`);
-      ac.abort();
-    }, timeoutMs) : null;
+    const decision = await generateArcSummary(
+      combined,
+      generateRawFn,
+      sidecarConnectionId ?? sidecarOptions?.sidecar?.connectionProfileId ?? "",
+      config.maxTokensPerSummary,
+      samplingParameters,
+      sidecarOptions,
+    );
 
-    const boundGenFn: typeof generateRawFn = ac
-      ? (opts) => generateRawFn({ ...opts, signal: ac.signal })
-      : generateRawFn;
-
-    let result: { summary: string; title: string | null } | null;
-    try {
-      result = await generateArcSummary(
-        combined, boundGenFn, sidecarConnectionId, config.maxTokensPerSummary, samplingParameters,
-      );
-    } catch (err: any) {
-      if (err?.name === "AbortError" || ac?.signal.aborted) {
-        console.warn(`[memory-cortex] Arc consolidation sidecar timed out after ${timeoutMs}ms, using join fallback`);
-        result = null;
+    if (!decision.persist) {
+      if (decision.status === "aborted") {
+        console.warn("[memory-cortex] Arc consolidation sidecar aborted, skipping persist");
       } else {
-        throw err;
+        console.warn("[memory-cortex] Arc consolidation sidecar exhausted, skip persist");
       }
-    } finally {
-      if (timer) clearTimeout(timer);
+      return;
     }
 
-    if (result) {
-      arcSummary = result.summary;
-      arcTitle = result.title;
+    if (decision.result && !decision.useExtractive) {
+      arcSummary = decision.result.summary;
+      arcTitle = decision.result.title;
     } else {
+      console.warn("[memory-cortex] Arc consolidation sidecar exhausted, using join fallback");
       arcSummary = summaries.join(" ");
       arcTitle = null;
     }
@@ -463,48 +664,61 @@ RULES
 Return exactly one JSON object with this shape and no extra text:
 {"title":"<3-6 word concrete scene title>","summary":"<dense factual summary>"}`;
 
-async function generateConsolidationSummary(
+export async function generateConsolidationSummary(
   chunks: any[],
-  generateRawFn: (opts: any) => Promise<{ content: string }>,
+  generateRawFn: ConsolidationGenerateRawFn,
   connectionId: string,
   maxTokens: number,
   samplingParameters?: Record<string, unknown>,
   extraScaffoldTags?: string[],
-): Promise<{ summary: string; title: string | null }> {
-  try {
-    const content = chunks
-      .map((c: any) => stripNonProseTags(c.content || "", { extraScaffoldTags }))
-      .join("\n\n---\n\n");
-    const prompt = CONSOLIDATION_PROMPT
-      .replace("{{CONTENT}}", content)
-      .replace("{{MAX_TOKENS}}", String(maxTokens));
+  sidecarOptions?: ConsolidationSidecarOptions,
+): Promise<MemorySummarizationDecision<{ summary: string; title: string | null }>> {
+  return runMemorySummarizationSidecar({
+    memorySummarization: sidecarOptions?.memorySummarization,
+    sidecarReliability: sidecarOptions?.sidecarReliability,
+    sidecarTimeoutMs: sidecarOptions?.sidecarTimeoutMs,
+    sidecar: sidecarOptions?.sidecar,
+    sidecarConnectionId: connectionId,
+    signal: sidecarOptions?.signal,
+    extract: async (target) => {
+      const content = chunks
+        .map((c: any) => stripNonProseTags(c.content || "", { extraScaffoldTags }))
+        .join("\n\n---\n\n");
+      const prompt = CONSOLIDATION_PROMPT
+        .replace("{{CONTENT}}", content)
+        .replace("{{MAX_TOKENS}}", String(maxTokens));
 
-    // Caller-supplied temperature/top_p are honored; max_tokens is always set
-    // here from config.maxTokensPerSummary regardless of what the caller passed.
-    const userParams = samplingParameters ?? { temperature: 0.1 };
-    const response = await generateRawFn({
-      connectionId,
-      messages: [
-        { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the source passages." },
-        { role: "user", content: prompt },
-      ],
-      parameters: { ...userParams, max_tokens: maxTokens + 100 },
-    });
+      // Caller-supplied temperature/top_p are honored; max_tokens is always set
+      // here from config.maxTokensPerSummary regardless of what the caller passed.
+      const userParams = samplingParameters ?? { temperature: 0.1 };
+      const response = await generateRawFn({
+        requestPurpose: "memory summarization",
+        connectionId: target.connectionProfileId,
+        messages: [
+          { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the source passages." },
+          { role: "user", content: prompt },
+        ],
+        parameters: {
+          ...userParams,
+          max_tokens: maxTokens + 100,
+          ...(target.model ? { model: target.model } : {}),
+        },
+        signal: target.signal,
+      });
 
-    const json = extractJson(response.content);
-    if (json) {
+      if (target.signal?.aborted) return null;
+
+      const json = extractJson(response.content);
+      if (!json) return null;
       const parsedSummary = typeof json.summary === "string" ? json.summary.trim() : "";
       const parsedTitle = typeof json.title === "string" ? json.title.trim() : "";
+      if (!parsedSummary) return null;
       return {
-        summary: parsedSummary || extractiveConsolidation(chunks, extraScaffoldTags),
+        summary: parsedSummary,
         title: parsedTitle || null,
       };
-    }
-  } catch (err) {
-    console.warn("[memory-cortex] Generative consolidation failed, using extractive:", err);
-  }
-
-  return { summary: extractiveConsolidation(chunks, extraScaffoldTags), title: inferTitle(chunks) };
+    },
+  });
 }
 
 const ARC_PROMPT = `These are sequential scene summaries from a long roleplay. Compress them into ONE arc-level summary that tracks what changed across the sequence.
@@ -526,40 +740,53 @@ Return exactly one JSON object with this shape and no extra text:
 
 async function generateArcSummary(
   combinedSummaries: string,
-  generateRawFn: (opts: any) => Promise<{ content: string }>,
+  generateRawFn: ConsolidationGenerateRawFn,
   connectionId: string,
   maxTokens: number,
   samplingParameters?: Record<string, unknown>,
-): Promise<{ summary: string; title: string | null }> {
-  try {
-    const prompt = ARC_PROMPT
-      .replace("{{CONTENT}}", combinedSummaries)
-      .replace("{{MAX_TOKENS}}", String(maxTokens));
+  sidecarOptions?: ConsolidationSidecarOptions,
+): Promise<MemorySummarizationDecision<{ summary: string; title: string | null }>> {
+  return runMemorySummarizationSidecar({
+    memorySummarization: sidecarOptions?.memorySummarization,
+    sidecarReliability: sidecarOptions?.sidecarReliability,
+    sidecarTimeoutMs: sidecarOptions?.sidecarTimeoutMs,
+    sidecar: sidecarOptions?.sidecar,
+    sidecarConnectionId: connectionId,
+    signal: sidecarOptions?.signal,
+    extract: async (target) => {
+      const prompt = ARC_PROMPT
+        .replace("{{CONTENT}}", combinedSummaries)
+        .replace("{{MAX_TOKENS}}", String(maxTokens));
 
-    const userParams = samplingParameters ?? { temperature: 0.1 };
-    const response = await generateRawFn({
-      connectionId,
-      messages: [
-        { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the supplied summaries." },
-        { role: "user", content: prompt },
-      ],
-      parameters: { ...userParams, max_tokens: maxTokens + 100 },
-    });
+      const userParams = samplingParameters ?? { temperature: 0.1 };
+      const response = await generateRawFn({
+        requestPurpose: "arc summarization",
+        connectionId: target.connectionProfileId,
+        messages: [
+          { role: "system", content: "You are a factual memory summarizer. Output one valid JSON object only. Omit anything not directly supported by the supplied summaries." },
+          { role: "user", content: prompt },
+        ],
+        parameters: {
+          ...userParams,
+          max_tokens: maxTokens + 100,
+          ...(target.model ? { model: target.model } : {}),
+        },
+        signal: target.signal,
+      });
 
-    const json = extractJson(response.content);
-    if (json) {
+      if (target.signal?.aborted) return null;
+
+      const json = extractJson(response.content);
+      if (!json) return null;
       const parsedSummary = typeof json.summary === "string" ? json.summary.trim() : "";
       const parsedTitle = typeof json.title === "string" ? json.title.trim() : "";
+      if (!parsedSummary) return null;
       return {
-        summary: parsedSummary || combinedSummaries,
+        summary: parsedSummary,
         title: parsedTitle || null,
       };
-    }
-  } catch (err) {
-    console.warn("[memory-cortex] Arc summary generation failed:", err);
-  }
-
-  return { summary: combinedSummaries, title: null };
+    },
+  });
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -592,4 +819,136 @@ function extractJson(text: string): any | null {
   } catch {
     return null;
   }
+}
+
+// ─── Summary Parsing & Quality Gate ────────────────────────────
+
+export type SummaryKind = "scene" | "arc";
+type GeneratedSummary = { summary: string; title: string | null };
+
+const SUMMARY_TOOL_NAMES: Record<SummaryKind, string> = {
+  scene: "write_scene_continuity",
+  arc: "write_arc_continuity",
+};
+
+function cleanSummaryResponse(content: string): string {
+  let cleaned = content.trim();
+  cleaned = cleaned.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, "");
+  cleaned = cleaned.replace(/<(think|thinking|reasoning)>[\s\S]*$/gi, "");
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json|text)?\s*\n?/, "").replace(/\n?```\s*$/, "");
+  }
+  return cleaned.trim();
+}
+
+export function parseGeneratedSummary(content: string): GeneratedSummary | null {
+  const json = extractJson(content);
+  if (json) {
+    const summary = typeof json.summary === "string" ? json.summary.trim() : "";
+    if (!summary) return null;
+    return {
+      summary,
+      title: typeof json.title === "string" && json.title.trim() ? json.title.trim() : null,
+    };
+  }
+
+  // JSON is preferred for titles and diagnostics, but many smaller or local
+  // models produce a perfectly usable note as plain text. Treat that as a
+  // candidate and let the semantic quality gate decide whether it needs retry.
+  const plain = cleanSummaryResponse(content);
+  if (!plain || /[{}]/.test(plain)) return null;
+  const summary = plain
+    .replace(/^(?:summary|continuity note)\s*:\s*/i, "")
+    .trim();
+  return summary ? { summary, title: null } : null;
+}
+
+export function parseGeneratedSummaryResponse(
+  response: {
+    content: string;
+    tool_calls?: Array<{ name: string; args: Record<string, unknown> }>;
+  },
+  kind: SummaryKind,
+): GeneratedSummary | null {
+  const expectedName = SUMMARY_TOOL_NAMES[kind];
+  const call = response.tool_calls?.find((candidate) => candidate.name === expectedName);
+  if (call) {
+    const summary = typeof call.args.summary === "string" ? call.args.summary.trim() : "";
+    if (!summary) return null;
+    const title = typeof call.args.title === "string" && call.args.title.trim()
+      ? call.args.title.trim()
+      : null;
+    return { summary, title };
+  }
+  return parseGeneratedSummary(response.content);
+}
+
+/** Return the reason a candidate should be retried, or null when it is compact enough. */
+export function getSummaryQualityIssue(
+  summary: string,
+  source: string,
+  maxWords: number,
+): string | null {
+  const summaryWords = summary.trim().match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? [];
+  const sourceWords = source.trim().match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? [];
+  if (summaryWords.length < 8) return "it is too short to preserve useful continuity";
+  if (summaryWords.length > maxWords) return `it exceeds the ${maxWords}-word limit`;
+  if (sourceWords.length >= maxWords * 2 && summaryWords.length / sourceWords.length > 0.45) {
+    return "it does not compress the source enough";
+  }
+
+  // A weak model often emits source sentences unchanged. Flag sustained
+  // seven-word overlap, while allowing names and short factual phrases.
+  const normalize = (words: string[]) => words.map((word) => word.toLowerCase());
+  const sourcePhrases = new Set<string>();
+  const normalizedSource = normalize(sourceWords);
+  for (let index = 0; index + 7 <= normalizedSource.length; index++) {
+    sourcePhrases.add(normalizedSource.slice(index, index + 7).join(" "));
+  }
+  const normalizedSummary = normalize(summaryWords);
+  let phraseCount = 0;
+  let copiedPhrases = 0;
+  for (let index = 0; index + 7 <= normalizedSummary.length; index++) {
+    phraseCount++;
+    if (sourcePhrases.has(normalizedSummary.slice(index, index + 7).join(" "))) copiedPhrases++;
+  }
+  if (copiedPhrases >= 2 && copiedPhrases / phraseCount >= 0.35) {
+    return "it copies too much source wording instead of synthesizing changes";
+  }
+  return null;
+}
+
+/**
+ * Drain an existing chunk backlog after a rebuild. Rebuild ingestion uses
+ * pre-computed extraction responses, so consolidation must run separately
+ * with the real sidecar adapter after all chunks have been persisted.
+ */
+export async function consolidateBacklog(
+  userId: string,
+  chatId: string,
+  config: ConsolidationConfig,
+  generateRawFn?: ConsolidationGenerateRawFn,
+  sidecarConnectionId?: string,
+  sidecarTimeoutMs?: number,
+  samplingParameters?: Record<string, unknown>,
+  extraScaffoldTags?: string[],
+  sidecarOptions?: ConsolidationSidecarOptions,
+): Promise<number> {
+  let created = 0;
+  if (sidecarOptions?.signal?.aborted) return created;
+  while (await maybeConsolidate(
+    userId,
+    chatId,
+    config,
+    generateRawFn,
+    sidecarConnectionId,
+    sidecarTimeoutMs,
+    samplingParameters,
+    extraScaffoldTags,
+    sidecarOptions,
+  )) {
+    created++;
+    if (sidecarOptions?.signal?.aborted) break;
+  }
+  return created;
 }

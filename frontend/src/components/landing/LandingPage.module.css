@@ -92,6 +92,11 @@
   opacity: 0.4;
 }
 
+/* Let the desktop backdrop be the visual texture in translucent mode. */
+:global(html[data-tauri-desktop][data-desktop-background]) .grid {
+  display: none;
+}
+
 /* Content */
 .content {
   position: relative;
@@ -106,14 +111,76 @@
   box-sizing: border-box;
 }
 
+/* Default to a readable desktop measure. The user can opt into the expanded
+   gallery from the chats toolbar when they want to use a wide display. */
+.contentExpanded {
+  max-width: none;
+}
+
 /* Header */
 .header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 0;
-  margin-bottom: 24px;
+  padding: 16px 0 12px;
+  margin-bottom: 16px;
+}
+
+.landingToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.landingTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.landingTabLabel {
+  white-space: nowrap;
+}
+
+.landingSearch {
+  /* Allow the search field to yield space to the fixed-width toolbar actions
+     at high UI scales and narrow viewports. Without this, its intrinsic
+     minimum width can push the hidden-items button off screen. */
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.hiddenManagerBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--lumiverse-btn-icon, 34px);
+  height: var(--lumiverse-btn-icon, 34px);
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast), border-color var(--lumiverse-transition-fast);
+}
+
+.hiddenManagerBtn:hover,
+.hiddenManagerBtn:focus-visible {
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-050);
+  background: var(--lumiverse-primary-010);
+  outline: none;
+}
+
+.galleryWidthBtnActive {
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-050);
+  background: var(--lumiverse-primary-010);
 }
 
 .logo {
@@ -330,6 +397,19 @@
 
 .chatsLeaving {
   pointer-events: none;
+  /* One temporary compositor layer for the whole gallery is cheaper than
+     promoting every card independently. This class disappears on route exit. */
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  transform-origin: 50% 50%;
+}
+
+.routeEntering {
+  /* Removed by onAnimationComplete so the full landing surface does not keep
+     a large GPU layer allocated while idle. */
+  will-change: transform, opacity;
+  backface-visibility: hidden;
+  transform-origin: 50% 50%;
 }
 
 /* Card tilt wrapper — handles 3D tilt separately from framer-motion entry */
@@ -346,10 +426,18 @@
 
 .cardTilt.tilting {
   transition: transform 100ms ease-out;
+  transform:
+    rotateX(calc(var(--pointer-y, 0) * -9deg))
+    rotateY(calc(var(--pointer-x, 0) * 9deg))
+    scale3d(1.04, 1.04, 1.04);
 }
 
 .cardTilt.mobileMotionTilting {
   transition: transform 180ms ease-out;
+  transform:
+    rotateX(calc(var(--pointer-y, 0) * -4deg))
+    rotateY(calc(var(--pointer-x, 0) * 4deg))
+    scale3d(1.015, 1.015, 1.015);
 }
 
 /* Card — uses CSS animation for entry (no lingering inline styles that
@@ -386,25 +474,37 @@
     0 0 24px var(--lumiverse-primary-010);
 }
 
-/* Mouse-tracking radial shine */
-.card::after {
-  content: '';
+/* Mouse-tracking radial shine. The gradient itself never changes, so the
+   browser rasterizes it once; pointer movement only composites this oversized
+   texture with translate3d rather than repainting a gradient every frame. */
+.cardShine {
   position: absolute;
-  inset: 0;
+  inset: -25%;
   z-index: 3;
   pointer-events: none;
   opacity: 0;
   background: radial-gradient(
-    circle at var(--shine-x, 50%) var(--shine-y, 50%),
+    circle at 50% 50%,
     rgba(255, 255, 255, 0.10) 0%,
-    rgba(255, 255, 255, 0.03) 35%,
-    transparent 60%
+    rgba(255, 255, 255, 0.03) 23%,
+    transparent 40%
+  );
+  transform: translate3d(
+    calc(var(--pointer-x, 0) * 33.333%),
+    calc(var(--pointer-y, 0) * 33.333%),
+    0
   );
   transition: opacity 300ms ease;
 }
 
-.card:hover::after {
+.card:hover .cardShine {
   opacity: 1;
+}
+
+.cardTilt.tilting .cardShine,
+.cardTilt.mobileMotionTilting .cardShine {
+  will-change: transform, opacity;
+  backface-visibility: hidden;
 }
 
 /* Image zoom on card hover */
@@ -431,7 +531,7 @@
    shift, and (b) counter-rotating a fraction of the card's rotation.
    A plane that rotates less than its container reads as closer to
    the viewer, which is the "shifts perspective with the tilt" feel.
-   --tilt-x / --tilt-y (-1..1) are set on .cardTilt by the mouse
+   --pointer-x / --pointer-y (-1..1) are set on .cardTilt by the mouse
    handlers and drive both effects from the same source.
 
    The scale during tilt has to exceed (translate + rotation edge offset)
@@ -447,9 +547,9 @@
   --lazy-image-transform-transition: 120ms ease-out;
   transition: transform 120ms ease-out;
   transform:
-    translate3d(calc(var(--tilt-x, 0) * 8px), calc(var(--tilt-y, 0) * 8px), 0)
-    rotateX(calc(var(--tilt-y, 0) * 1.5deg))
-    rotateY(calc(var(--tilt-x, 0) * -1.5deg))
+    translate3d(calc(var(--pointer-x, 0) * 8px), calc(var(--pointer-y, 0) * 8px), 0)
+    rotateX(calc(var(--pointer-y, 0) * 1.5deg))
+    rotateY(calc(var(--pointer-x, 0) * -1.5deg))
     scale(1.14);
   will-change: transform;
 }
@@ -458,9 +558,9 @@
 .cardTilt.tilting .mosaicCell picture img {
   --lazy-image-transform-transition: 120ms ease-out;
   transform:
-    translate3d(calc(var(--tilt-x, 0) * 4px), calc(var(--tilt-y, 0) * 4px), 0)
-    rotateX(calc(var(--tilt-y, 0) * 1deg))
-    rotateY(calc(var(--tilt-x, 0) * -1deg))
+    translate3d(calc(var(--pointer-x, 0) * 4px), calc(var(--pointer-y, 0) * 4px), 0)
+    rotateX(calc(var(--pointer-y, 0) * 1deg))
+    rotateY(calc(var(--pointer-x, 0) * -1deg))
     scale(1.14);
   will-change: transform;
 }
@@ -528,11 +628,11 @@
 }
 
 .cardTilt.tilting .perspectiveLayer {
-  --layer-mouse-x: calc(var(--tilt-x, 0) * var(--layer-motion-x));
-  --layer-mouse-y: calc(var(--tilt-y, 0) * var(--layer-motion-y));
-  --layer-mouse-depth: calc(var(--tilt-y, 0) * var(--layer-motion-depth));
-  --layer-mouse-tilt-x: calc(var(--tilt-y, 0) * var(--layer-tilt-amount));
-  --layer-mouse-tilt-y: calc(var(--tilt-x, 0) * var(--layer-tilt-amount-neg));
+  --layer-mouse-x: calc(var(--pointer-x, 0) * var(--layer-motion-x));
+  --layer-mouse-y: calc(var(--pointer-y, 0) * var(--layer-motion-y));
+  --layer-mouse-depth: calc(var(--pointer-y, 0) * var(--layer-motion-depth));
+  --layer-mouse-tilt-x: calc(var(--pointer-y, 0) * var(--layer-tilt-amount));
+  --layer-mouse-tilt-y: calc(var(--pointer-x, 0) * var(--layer-tilt-amount-neg));
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -576,7 +676,7 @@
   .cardTilt.mobileMotionTilting .cardAvatarFallback {
     transform: none;
   }
-  .card::after {
+  .cardShine {
     display: none;
   }
 }
@@ -597,7 +697,7 @@
   transform-style: flat;
 }
 
-.container[data-scrolling] .card::after {
+.container[data-scrolling] .cardShine {
   display: none;
 }
 
@@ -648,6 +748,7 @@
   position: relative;
   aspect-ratio: 3 / 4;
   overflow: hidden;
+  background: var(--lumiverse-card-bg);
   transform-style: preserve-3d;
 }
 
@@ -667,6 +768,9 @@
 }
 
 .cardName {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-size: calc(14px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text);
@@ -674,6 +778,25 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   margin: 0;
+}
+
+.cardName svg,
+.listName svg {
+  flex-shrink: 0;
+  color: var(--lumiverse-primary-muted);
+}
+
+.cardName span,
+.listName span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.favoriteCard,
+.favoriteListItem {
+  border-color: var(--lumiverse-primary-030);
 }
 
 .cardMeta {
@@ -742,13 +865,29 @@
   transition: opacity var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
 }
 
-.card:hover .deleteBtn {
+.card:hover .deleteBtn,
+.card:focus-within .deleteBtn {
   opacity: 1;
 }
 
 .deleteBtn:hover {
   color: var(--lumiverse-danger);
   border-color: var(--lumiverse-danger-020);
+}
+
+/* Shift changes the hovered/focused card's action to remove-from-recent. It
+   must not reveal the action on every mounted card just because Shift is down. */
+.card:hover .deleteBtnShift,
+.card:focus-within .deleteBtnShift {
+  opacity: 1;
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-030);
+  background: rgba(10, 10, 14, 0.85);
+}
+
+.deleteBtnShift:hover {
+  color: var(--lumiverse-primary-hover);
+  border-color: var(--lumiverse-primary-050);
 }
 
 /* ---- Group Chat Card ---- */
@@ -931,6 +1070,9 @@
 }
 
 .listName {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin: 0;
   min-width: 0;
   overflow: hidden;
@@ -1010,6 +1152,19 @@
 .listDeleteBtn:hover {
   color: var(--lumiverse-danger);
   border-color: var(--lumiverse-danger-020);
+}
+
+.listItem:hover .listDeleteBtnShift,
+.listItem:focus-within .listDeleteBtnShift {
+  opacity: 1;
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-030);
+  background: color-mix(in srgb, var(--lumiverse-bg-deep) 92%, transparent);
+}
+
+.listDeleteBtnShift:hover {
+  color: var(--lumiverse-primary-hover);
+  border-color: var(--lumiverse-primary-050);
 }
 
 .listSkeleton {
@@ -1154,6 +1309,36 @@
 }
 
 @media (max-width: 600px) {
+  .header {
+    padding-bottom: 4px;
+    margin-bottom: 8px;
+  }
+
+  .landingToolbar {
+    margin-bottom: 14px;
+  }
+
+  /* The Suite adds the Characters tab beside native Chats. Keep the two tabs
+     compact so the chat search remains a useful, tappable width. The label is
+     visually hidden rather than removed so each tab retains its accessible
+     name. */
+  .landingTabsWithSuite .landingTabLabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* Gallery width only changes the desktop/tablet layout. */
+  .galleryWidthBtn {
+    display: none;
+  }
+
   .content {
     padding: 16px;
   }

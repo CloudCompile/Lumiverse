@@ -9,10 +9,9 @@ import { useLongPress } from '@/hooks/useLongPress'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import ImageLightbox from '@/components/shared/ImageLightbox'
 import LazyImage from '@/components/shared/LazyImage'
+import { dispatchMessageContentLayout } from '@/lib/message-content-layout'
 import styles from './MessageAttachments.module.css'
 import clsx from 'clsx'
-
-const MESSAGE_CONTENT_LAYOUT_EVENT = 'lumiverse:message-content-layout'
 
 interface MessageAttachmentsProps {
   attachments: MessageAttachment[]
@@ -35,6 +34,13 @@ function getImageFrameStyle(att: MessageAttachment): CSSProperties | undefined {
 
 function getLocalImageUrl(att: MessageAttachment): string {
   return imagesApi.url(att.image_id)
+}
+
+function getLocalImagePreviewUrl(att: MessageAttachment): string {
+  // Inline message art is capped around 240 CSS px. The 700px tier remains
+  // sharp at high device-pixel ratios without decoding an arbitrary-size
+  // original inside every mounted message row.
+  return imagesApi.largeUrl(att.image_id)
 }
 
 function getRelayPreviewUrl(att: MessageAttachment): string | null {
@@ -65,7 +71,7 @@ export default function MessageAttachments({ attachments, isUser, chatId, messag
     setLightboxFallbackSrc(getRelayPreviewUrl(att))
   }, [])
   const notifyImageLayout = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
-    event.currentTarget.dispatchEvent(new CustomEvent(MESSAGE_CONTENT_LAYOUT_EVENT, { bubbles: true }))
+    dispatchMessageContentLayout(event.currentTarget)
   }, [])
   const closeContextMenu = useCallback(() => {
     setContextMenuPos(null)
@@ -92,7 +98,7 @@ export default function MessageAttachments({ attachments, isUser, chatId, messag
     } catch (err: any) {
       addToast({ type: 'error', title: t('attachments.couldNotRemoveImage'), message: err?.body?.error || err?.message || 'Unknown error' })
     }
-  }, [addToast, chatId, closeContextMenu, messageId, targetImageId])
+  }, [addToast, chatId, closeContextMenu, messageId, targetImageId, t])
 
   // Removes the image currently shown in the lightbox. Throws on failure so the
   // lightbox surfaces its own error toast (the thumbnail context-menu path uses
@@ -143,15 +149,30 @@ export default function MessageAttachments({ attachments, isUser, chatId, messag
   // component as a sibling of MessageAttachments — keeping it out of the
   // flex-wrap row here means the slot can collapse to 0 height (without
   // dragging this wrapper's padding along) when there's no audio.
-  const images = attachments.filter((a) => a.type === 'image')
+  const visualMedia = attachments.filter((a) => a.type === 'image' || a.type === 'video')
 
-  if (images.length === 0) return null
+  if (visualMedia.length === 0) return null
 
   return (
     <>
       <div className={clsx(styles.attachments, isUser && styles.attachmentsUser)}>
-        {images.map((att) =>
-          isUser ? (
+        {visualMedia.map((att) =>
+          att.type === 'video' ? (
+            <video
+              key={att.image_id}
+              src={getLocalImageUrl(att)}
+              className={styles.videoAttachment}
+              controls
+              preload="metadata"
+              playsInline
+              title={att.original_filename}
+              onLoadedMetadata={(event) => dispatchMessageContentLayout(event.currentTarget)}
+              onContextMenu={onImageContextMenu(att.image_id)}
+              onTouchStart={canActOnImage ? onImageTouchStart(att.image_id) : undefined}
+              onTouchMove={canActOnImage ? longPress.onTouchMove : undefined}
+              onTouchEnd={canActOnImage ? longPress.onTouchEnd : undefined}
+            />
+          ) : isUser ? (
             <button
               key={att.image_id}
               type="button"
@@ -165,7 +186,7 @@ export default function MessageAttachments({ attachments, isUser, chatId, messag
               title={att.original_filename}
             >
               <LazyImage
-                src={getLocalImageUrl(att)}
+                src={getLocalImagePreviewUrl(att)}
                 alt={att.original_filename}
                 style={{ objectFit: 'contain' }}
                 spinnerSize={18}
@@ -196,7 +217,7 @@ export default function MessageAttachments({ attachments, isUser, chatId, messag
               onTouchEnd={canActOnImage ? longPress.onTouchEnd : undefined}
             >
               <LazyImage
-                src={getLocalImageUrl(att)}
+                src={getLocalImagePreviewUrl(att)}
                 alt={att.original_filename}
                 className={styles.inlineImage}
                 style={att.width && att.height

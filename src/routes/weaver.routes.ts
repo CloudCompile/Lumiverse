@@ -213,6 +213,56 @@ app.post("/import/start", async (c) => {
   }
 });
 
+app.post("/import/characters/:characterId/inspect", async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json().catch(() => ({}))) as {
+    connection_id?: string | null;
+    model?: string | null;
+  };
+  try {
+    const inspection = await importSvc.inspectGalleryCharacter(
+      userId,
+      c.req.param("characterId"),
+      {
+        connection_id: typeof body.connection_id === "string" ? body.connection_id.trim() || null : null,
+        model: typeof body.model === "string" ? body.model.trim() || null : null,
+      },
+    );
+    return c.json(inspection);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Could not read this character";
+    return c.json({ error: message }, message === "Gallery character not found" ? 404 : 400);
+  }
+});
+
+app.post("/import/characters/:characterId/start", async (c) => {
+  const userId = c.get("userId");
+  const body = (await c.req.json().catch(() => ({}))) as {
+    action?: string;
+    connection_id?: string | null;
+    model?: string | null;
+    persona_id?: string | null;
+  };
+  const action = typeof body.action === "string" ? body.action.trim() : "";
+  if (!action) return c.json({ error: "action is required" }, 400);
+  try {
+    const result = await importSvc.startGalleryCharacterImport(
+      userId,
+      c.req.param("characterId"),
+      {
+        action,
+        connection_id: typeof body.connection_id === "string" ? body.connection_id.trim() || null : null,
+        model: typeof body.model === "string" ? body.model.trim() || null : null,
+        persona_id: typeof body.persona_id === "string" ? body.persona_id.trim() || null : null,
+      },
+    );
+    return c.json(result, 201);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Could not start from this character";
+    return c.json({ error: message }, message === "Gallery character not found" ? 404 : 400);
+  }
+});
+
 app.post("/import/enrich/:bookId/entries/:entryId", async (c) => {
   const userId = c.get("userId");
   const body = (await c.req.json().catch(() => ({}))) as { connection_id?: string; model?: string };

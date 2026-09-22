@@ -80,7 +80,7 @@ async function buildEffectiveDescription(persona: Persona): Promise<string> {
   const states = resolveEffectiveAddonStates(persona, activeChatAddonOverrides(persona.id))
 
   const personaContent = asAddonArray(persona.metadata?.addons)
-    .filter((a) => (states[a.id] ?? a.enabled) && a.content)
+    .filter((a) => (states[a.id] ?? a.enabled) && a.content && !a.outlet_name?.trim())
     .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
     .map((a) => (a.content || '').trim())
     .filter(Boolean)
@@ -125,19 +125,26 @@ export async function buildActivePersonaSnapshot(): Promise<PersonaSnapshot | nu
       subjective: persona.subjective_pronoun,
       objective: persona.objective_pronoun,
       possessive: persona.possessive_pronoun,
+      reflexive: persona.reflexive_pronoun,
+      possessiveStandalone: persona.possessive_pronoun_standalone,
     },
     avatarUrl: null,
   }
 
-  if (persona.image_id) {
-    try {
-      const src = getPersonaAvatarLargeUrlById(persona.id, persona.image_id)
-      const blob = await compressAvatarToWebP(src, 128, 0.72)
-      const dataUrl = await blobToDataUrl(blob)
-      if (dataUrl.length <= MAX_DATA_URL_LEN) snapshot.avatarUrl = dataUrl
-    } catch {
-      // Avatar load/compress failed — fall back to name only.
-    }
+  try {
+    const version = typeof s.activeChatMetadata?.persona_addon_avatar_versions?.[persona.id] === 'string'
+      ? s.activeChatMetadata.persona_addon_avatar_versions[persona.id]
+      : null
+    const src = getPersonaAvatarLargeUrlById(persona.id, null, {
+      chatId: s.activeChatId,
+      version,
+    })
+    if (!src) return snapshot
+    const blob = await compressAvatarToWebP(src, 128, 0.72)
+    const dataUrl = await blobToDataUrl(blob)
+    if (dataUrl.length <= MAX_DATA_URL_LEN) snapshot.avatarUrl = dataUrl
+  } catch {
+    // Avatar load/compress failed — fall back to name only.
   }
 
   return snapshot

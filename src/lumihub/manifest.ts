@@ -5,17 +5,9 @@
 import * as charactersSvc from "../services/characters.service";
 import * as worldBooksSvc from "../services/world-books.service";
 import * as presetsSvc from "../services/presets.service";
+import type { ManifestEntry } from "./manifest-policy";
 
-export interface ManifestEntry {
-  slug: string;
-  type: "character" | "worldbook" | "preset";
-  name: string;
-  creator: string;
-  source: "local" | "chub" | "lumihub";
-  /** Installed version label (presets), so the hub can flag outdated installs. */
-  version?: string;
-  installed_at: number;
-}
+export { selectLumiHubManifestEntries, type ManifestEntry } from "./manifest-policy";
 
 /**
  * Slugify a string: lowercase, replace whitespace/special chars with hyphens,
@@ -40,9 +32,33 @@ export function buildSlug(creator: string, name: string): string {
 /** @deprecated Use buildSlug instead */
 export const buildCharacterSlug = buildSlug;
 
+export interface PresetSlugInfo {
+  /** Canonical hub slug */
+  slug: string;
+  creator: string;
+  version?: string;
+}
+
 /**
- * Build the full install manifest for a user.
- * Returns a lightweight array suitable for syncing to LumiHub.
+ * Resolve a preset's canonical LumiHub slug from its metadata.
+ */
+export function resolvePresetSlug(metadata: Record<string, any> | undefined, name: string): PresetSlugInfo {
+  const md = metadata || {};
+  const storedSlug = typeof md._lumiverse_preset_slug === "string" ? md._lumiverse_preset_slug : null;
+  const creator =
+    typeof md._lumiverse_preset_creator === "string" && md._lumiverse_preset_creator
+      ? md._lumiverse_preset_creator
+      : storedSlug
+        ? storedSlug.split("/")[0]
+        : "unknown";
+  const slug = storedSlug || buildSlug(creator, name);
+  const version = typeof md._lumiverse_preset_version === "string" ? md._lumiverse_preset_version : undefined;
+  return { slug, creator, version };
+}
+
+/**
+ * Build the user's full local install inventory. Callers syncing to LumiHub
+ * must apply selectLumiHubManifestEntries() before sending it upstream.
  */
 export function buildInstallManifest(userId: string): ManifestEntry[] {
   const entries: ManifestEntry[] = [];
@@ -85,15 +101,7 @@ export function buildInstallManifest(userId: string): ManifestEntry[] {
   for (const pr of presets) {
     const md = pr.metadata || {};
     const source = md._lumiverse_install_source as string | undefined;
-    const storedSlug = typeof md._lumiverse_preset_slug === "string" ? md._lumiverse_preset_slug : null;
-    const creator =
-      typeof md._lumiverse_preset_creator === "string" && md._lumiverse_preset_creator
-        ? md._lumiverse_preset_creator
-        : storedSlug
-          ? storedSlug.split("/")[0]
-          : "unknown";
-    const slug = storedSlug || buildSlug(creator, pr.name);
-    const version = typeof md._lumiverse_preset_version === "string" ? md._lumiverse_preset_version : undefined;
+    const { slug, creator, version } = resolvePresetSlug(md, pr.name);
     entries.push({
       slug,
       type: "preset",

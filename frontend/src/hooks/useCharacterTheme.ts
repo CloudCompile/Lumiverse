@@ -18,6 +18,7 @@ import { extractPalette, type ImagePalette } from '@/lib/colorExtraction'
 import { deriveCharacterOverlay, deriveCharacterNameVars } from '@/lib/characterTheme'
 import { resolveMode } from '@/hooks/useThemeApplicator'
 import { wsClient } from '@/ws/client'
+import { hasPendingChatAppearance } from '@/lib/chatAppearance'
 import { EventType } from '@/ws/events'
 import type { ThemeConfig } from '@/types/theme'
 
@@ -31,7 +32,7 @@ const paletteCache = new Map<string, ImagePalette>()
 // (~1KB each) makes re-entry instantaneous. Map insertion order doubles as
 // LRU order; bump PALETTE_CACHE_VERSION when ImagePalette's shape changes.
 const PALETTE_CACHE_KEY = '__lumiverse_palette_cache'
-const PALETTE_CACHE_VERSION = 1
+const PALETTE_CACHE_VERSION = 3
 const PALETTE_CACHE_MAX = 60
 
 try {
@@ -111,6 +112,7 @@ export function useCharacterTheme() {
     Object.keys(s.extensionThemeOverrides).some((id) => !s.mutedExtensionThemes[id])
   )
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const activeChatId = useStore((s) => s.activeChatId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
   const characters = useStore((s) => s.characters)
   const activeCharacter = activeCharacterId
@@ -238,20 +240,18 @@ export function useCharacterTheme() {
   // ── 3. React to CHARACTER_AVATAR_CHANGED — force resample ──
   useEffect(() => {
     return wsClient.on(EventType.CHARACTER_AVATAR_CHANGED, (payload: { chatId: string; characterId: string; imageId: string | null }) => {
-      if (payload.characterId !== activeCharacterId) return
+      if (payload.chatId !== activeChatId || payload.characterId !== activeCharacterId) return
+      if (hasPendingChatAppearance(payload.chatId)) return
 
-      // Invalidate cache so the next render cycle resamples
-      const newImageId = payload.imageId ?? activeCharacter?.image_id ?? null
-      const newKey = activeCharacterId ? `${activeCharacterId}:${newImageId ?? 'legacy'}` : null
-      if (newKey && paletteCache.delete(newKey)) schedulePalettePersist()
+      // Image-id URLs are immutable; changing the key naturally selects a new
+      // palette. Deleting the new key here made optimistic switches resample the
+      // same image when their websocket echo arrived.
 
       // Reset applied refs to force both effects to re-run
       nameAppliedAvatarKeyRef.current = null
       appliedAvatarKeyRef.current = null
       setCharacterThemeOverlay(null)
 
-      // Trigger store update so the avatar URL deps change and effects re-fire
-      useStore.getState().setActiveChatAvatarId(payload.imageId)
     })
-  }, [activeCharacterId, activeCharacter?.image_id, setCharacterThemeOverlay])
+  }, [activeChatId, activeCharacterId, setCharacterThemeOverlay])
 }

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { MacroEnv } from "../macros";
 import type { Message } from "../types/message";
-import { resolveRenderedChatMessages } from "./chat-macro-render.service";
+import { resolveRenderedChatMessages, resolveRenderedMessageContent } from "./chat-macro-render.service";
 
 function makeEnv(): MacroEnv {
   return {
@@ -29,6 +29,8 @@ function makeEnv(): MacroEnv {
       personaSubjectivePronoun: "",
       personaObjectivePronoun: "",
       personaPossessivePronoun: "",
+      personaReflexivePronoun: "",
+      personaPossessivePronounStandalone: "",
       mesExamples: "",
       mesExamplesRaw: "",
       systemPrompt: "",
@@ -127,4 +129,17 @@ describe("resolveRenderedChatMessages", () => {
     expect(result.globalVariables).toEqual({ theme: "noir" });
     expect(result.chatVariables).toEqual({ mood: "calm" });
   });
+});
+
+
+test("owned message sources survive reconciliation without executing native variables", async () => {
+  const env = makeEnv(); env.extra.preserveMessageSource = true;
+  const content = '{{setvar::weather::Clear}}|{{getvar::weather}}';
+  expect(await resolveRenderedMessageContent(content, env)).toBe(content);
+  expect(env.variables.local.size).toBe(0);
+  const result = await resolveRenderedChatMessages({
+    messages: [makeMessage('owned', content, false)], messageIds: ['owned'], macroEnvSeed: env,
+  });
+  expect(result.resolvedById.size).toBe(0);
+  expect(result.chatVariables).toBeUndefined();
 });

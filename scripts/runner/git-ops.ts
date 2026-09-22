@@ -1,5 +1,6 @@
-import { join } from "path";
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
+import { delimiter, join } from "path";
+import { homedir, platform } from "os";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { runGit, getUpstreamRef, getCurrentBranch } from "./lib/git.js";
 import {
   PROJECT_ROOT,
@@ -7,9 +8,10 @@ import {
   TIMEOUT_GIT_FETCH_MS,
   TIMEOUT_GIT_PULL_MS,
   TIMEOUT_GIT_CHECKOUT_MS,
-  TIMEOUT_BUN_CACHE_MS,
   TIMEOUT_BUN_INSTALL_MS,
+  TIMEOUT_BUN_INSTALL_TERMUX_MS,
   TIMEOUT_BUN_BUILD_MS,
+  TIMEOUT_DESKTOP_BUILD_MS,
 } from "./lib/constants.js";
 import { spawnAsync } from "./lib/spawn-async.js";
 import { npmCmd } from "./lib/termux-cli.js";
@@ -18,6 +20,15 @@ export interface UpdateState {
   available: boolean;
   commitsBehind: number;
   latestMessage: string;
+}
+
+export interface DesktopShellState {
+  /** The checkout contains desktop changes the running binary predates. */
+  stale: boolean;
+  /** Commit the running desktop shell was compiled from, if it reported one. */
+  builtSha: string | null;
+  /** Newest commit touching `desktop/` in the checkout. */
+  requiredSha: string | null;
 }
 
 type ProgressReporter = (message: string) => void;
@@ -43,10 +54,11 @@ function getHeadRef(): string {
   return head.out;
 }
 
-function getChangedFilesBetween(fromRef: string, toRef: string): string[] {
+function getChangedFilesBetween(fromRef: string, toRef: string): string[] | null {
   if (fromRef === toRef) return [];
   const diff = runGit("diff", "--name-only", `${fromRef}..${toRef}`);
-  if (!diff.ok || !diff.out) return [];
+  if (!diff.ok) return null;
+  if (!diff.out) return [];
   return diff.out
     .split("\n")
     .map((line) => line.trim())
@@ -66,8 +78,45 @@ function isFrontendBuildInput(filePath: string): boolean {
   return !FRONTEND_BUILD_IGNORED_PATHS.some((prefix) => filePath.startsWith(prefix));
 }
 
-function shouldRebuildFrontend(changedFiles: string[]): boolean {
-  return changedFiles.some(isFrontendBuildInput);
+function shouldRebuildFrontend(changedFiles: string[] | null): boolean {
+  return changedFiles === null || changedFiles.some(isFrontendBuildInput);
+}
+
+/** Newest commit that touched the desktop shell's sources. */
+function getLastDesktopShellCommit(): string | null {
+  const log = runGit("log", "-1", "--format=%H", "--", "desktop");
+  if (!log.ok || !log.out) return null;
+  return log.out;
+}
+
+function commitExists(sha: string): boolean {
+  return runGit("cat-file", "-e", `${sha}^{commit}`).ok;
+}
+
+/**
+ * Decide whether the running desktop shell predates the checkout's desktop
+ * sources.
+ *
+ * The shell is a compiled binary that `applyUpdate` cannot replace, so a pull
+ * carrying `desktop/` changes leaves the user running code the checkout has
+ * already moved past — with no symptom other than the old behaviour
+ * persisting. Equality is the wrong test: the stamped revision is whatever
+ * HEAD was at build time, which normally sits *ahead* of the last commit that
+ * touched `desktop/`. What matters is whether that commit is already reachable
+ * from the build.
+ *
+ * Every branch that cannot answer confidently reports "not stale". A shell
+ * built from an archive, or from a history this checkout does not share, is
+ * unknowable rather than out of date, and a false warning telling someone to
+ * rebuild a current binary is worse than staying quiet.
+ */
+export function evaluateDesktopShell(builtSha: string | null): DesktopShellState {
+  const requiredSha = getLastDesktopShellCommit();
+  if (!builtSha || !requiredSha) return { stale: false, builtSha, requiredSha };
+  if (!commitExists(builtSha)) return { stale: false, builtSha, requiredSha };
+
+  const containsDesktopSources = runGit("merge-base", "--is-ancestor", requiredSha, builtSha).ok;
+  return { stale: !containsDesktopSources, builtSha, requiredSha };
 }
 
 // Termux/proot detection. start.sh exports LUMIVERSE_IS_TERMUX /
@@ -82,16 +131,91 @@ function isProotRuntime(): boolean {
   return process.env.LUMIVERSE_IS_PROOT === "true";
 }
 
-function bunInstallCmd(): string[] {
-  if (isTermuxRuntime() || isProotRuntime()) {
-    // Android filesystem emulation can't hardlink — copyfile is the only
-    // backend that reliably installs without "Cannot find package" corruption.
-    // --ignore-scripts: proot's path translation makes getcwd() fail when bun
-    // forks lifecycle scripts (ssh2, cpu-features), producing spurious
-    // CouldntReadCurrentDirectory errors. Both packages fall back to pure-JS.
-    return ["bun", "install", "--backend=copyfile", "--ignore-scripts"];
+export function bunInstallCmd(
+  platform: NodeJS.Platform = process.platform,
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const installArgs = ["install", "--backend=copyfile", "--ignore-scripts"];
+
+  if (env.LUMIVERSE_IS_TERMUX === "true") {
+    // Native Termux needs syscall interception for bun install even when the
+    // bun-termux wrapper or grun can execute ordinary Bun commands. Mirror
+    // start.sh's _proot_bun path rather than spawning bare Bun from the runner.
+    const bunPath = env.LUMIVERSE_BUN_PATH || "bun";
+    const method = env.LUMIVERSE_BUN_METHOD;
+    if (method === "direct") {
+      return ["proot", "--link2symlink", "-0", bunPath, ...installArgs];
+    }
+    if (method === "grun") {
+      return ["proot", "--link2symlink", "-0", "grun", bunPath, ...installArgs];
+    }
+
+    const prefix = env.PREFIX || "/data/data/com.termux/files/usr";
+    return [
+      "proot", "--link2symlink", "-0",
+      `${prefix}/glibc/lib/ld-linux-aarch64.so.1`,
+      "--library-path", `${prefix}/glibc/lib`,
+      bunPath, ...installArgs,
+    ];
+  }
+  if (env.LUMIVERSE_IS_PROOT === "true") {
+    // A proot-distro shell already provides syscall interception.
+    return ["bun", ...installArgs];
+  }
+  if (platform === "win32") {
+    // Windows normally hardlinks packages from Bun's cache. Filesystem filters
+    // can leave those package directories empty even though install exits 0.
+    return ["bun", "install", "--backend=copyfile"];
   }
   return ["bun", "install"];
+}
+
+export function bunRuntimeCmd(
+  args: string[],
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  if (env.LUMIVERSE_IS_TERMUX === "true") {
+    const bunPath = env.LUMIVERSE_BUN_PATH || "bun";
+    const method = env.LUMIVERSE_BUN_METHOD;
+    if (method === "direct") return [bunPath, ...args];
+    if (method === "grun") return ["grun", bunPath, ...args];
+
+    const prefix = env.PREFIX || "/data/data/com.termux/files/usr";
+    return [
+      "proot", "--link2symlink", "-0",
+      `${prefix}/glibc/lib/ld-linux-aarch64.so.1`,
+      "--library-path", `${prefix}/glibc/lib`,
+      bunPath, ...args,
+    ];
+  }
+  return ["bun", ...args];
+}
+
+const BACKEND_DEPENDENCY_PROBE = [
+  "await import('better-auth');",
+  "await import('@better-auth/oauth-provider');",
+].join(" ");
+
+export function backendDependencyProbeCmd(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return bunRuntimeCmd(["-e", BACKEND_DEPENDENCY_PROBE], env);
+}
+
+const FRONTEND_DEPENDENCY_PROBE = "await import('@better-auth/oauth-provider/client');";
+
+export function frontendDependencyProbeCmd(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return bunRuntimeCmd(["-e", FRONTEND_DEPENDENCY_PROBE], env);
+}
+
+export function bunInstallTimeoutMs(
+  env: Record<string, string | undefined> = process.env,
+): number {
+  return env.LUMIVERSE_IS_TERMUX === "true" || env.LUMIVERSE_IS_PROOT === "true"
+    ? TIMEOUT_BUN_INSTALL_TERMUX_MS
+    : TIMEOUT_BUN_INSTALL_MS;
 }
 
 function clearBunInstallCacheIfTermux(): void {
@@ -109,20 +233,201 @@ function summarizeFrontendChanges(changedFiles: string[]): string {
   return relevant.length > 5 ? `${preview}, ...` : preview;
 }
 
+interface DependencyManifestRefs {
+  fromRef: string;
+  toRef: string;
+}
+
+type PackageManifest = Record<string, unknown>;
+
+const PACKAGE_INSTALL_INPUT_FIELDS = [
+  "dependencies",
+  "devDependencies",
+  "optionalDependencies",
+  "peerDependencies",
+  "peerDependenciesMeta",
+  "bundledDependencies",
+  "overrides",
+  "resolutions",
+  "trustedDependencies",
+  "patchedDependencies",
+  "workspaces",
+  "catalog",
+  "catalogs",
+  "packageManager",
+] as const;
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * A package.json can change its scripts, description, or version without
+ * changing anything Bun must resolve or install. Keep those updates from
+ * triggering a costly node_modules operation, while treating an unreadable
+ * manifest conservatively as changed.
+ */
+export function packageInstallInputsChanged(previous: string, current: string): boolean {
+  try {
+    const previousManifest = JSON.parse(previous) as PackageManifest;
+    const currentManifest = JSON.parse(current) as PackageManifest;
+    const installInputs = (manifest: PackageManifest) => Object.fromEntries(
+      PACKAGE_INSTALL_INPUT_FIELDS.map((field) => [field, manifest[field] ?? null]),
+    );
+    return stableJson(installInputs(previousManifest)) !== stableJson(installInputs(currentManifest));
+  } catch {
+    return true;
+  }
+}
+
+function packageInstallInputsChangedBetween(
+  fromRef: string,
+  toRef: string,
+  packagePath: string,
+): boolean {
+  const previous = runGit("show", `${fromRef}:${packagePath}`);
+  const current = runGit("show", `${toRef}:${packagePath}`);
+  if (!previous.ok || !current.ok) return true;
+  return packageInstallInputsChanged(previous.out, current.out);
+}
+
+function packageDependenciesChanged(
+  changedFiles: string[] | null,
+  packagePath: string,
+  lockfilePath: string,
+  installConfigPaths: string[],
+  manifestRefs?: DependencyManifestRefs,
+): boolean {
+  if (changedFiles === null) return true;
+  if (changedFiles.some((file) => file === lockfilePath || installConfigPaths.includes(file))) return true;
+  if (!changedFiles.includes(packagePath)) return false;
+  if (!manifestRefs) return true;
+  return packageInstallInputsChangedBetween(manifestRefs.fromRef, manifestRefs.toRef, packagePath);
+}
+
+function backendDependenciesChanged(
+  changedFiles: string[] | null,
+  manifestRefs?: DependencyManifestRefs,
+): boolean {
+  return packageDependenciesChanged(
+    changedFiles,
+    "package.json",
+    "bun.lock",
+    ["bunfig.toml", ".npmrc"],
+    manifestRefs,
+  );
+}
+
+function frontendDependenciesChanged(
+  changedFiles: string[] | null,
+  manifestRefs?: DependencyManifestRefs,
+): boolean {
+  return packageDependenciesChanged(
+    changedFiles,
+    "frontend/package.json",
+    "frontend/bun.lock",
+    ["frontend/bunfig.toml", "frontend/.npmrc"],
+    manifestRefs,
+  );
+}
+
+export interface ChangedDependencyPlan {
+  installBackend: boolean;
+  installFrontend: boolean;
+  repairTermuxFrontendNativeDeps: boolean;
+}
+
+/**
+ * Keep source-only Termux rebuilds on the same native-binding repair path that
+ * the pre-optimization update flow got from reinstalling frontend dependencies
+ * on every update. A frontend install already performs this repair itself.
+ */
+export function planChangedDependencies(
+  changedFiles: string[] | null,
+  termuxLike: boolean,
+  manifestRefs?: DependencyManifestRefs,
+): ChangedDependencyPlan {
+  const installBackend = backendDependenciesChanged(changedFiles, manifestRefs);
+  const installFrontend = frontendDependenciesChanged(changedFiles, manifestRefs);
+
+  return {
+    installBackend,
+    installFrontend,
+    repairTermuxFrontendNativeDeps:
+      termuxLike && shouldRebuildFrontend(changedFiles) && !installFrontend,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Stop the backend for an operation and guarantee a best-effort restart on
+ * every exit path. startServer is intentionally idempotent, so retrying it
+ * after a partial start failure is safe.
+ */
+export async function runWithServerStopped(
+  label: string,
+  stopServer: () => Promise<void>,
+  startServer: () => Promise<void>,
+  operation: () => Promise<void>,
+): Promise<void> {
+  let restartRequired = false;
+  try {
+    restartRequired = true;
+    await stopServer();
+    await operation();
+    await startServer();
+    restartRequired = false;
+  } catch (operationError) {
+    if (restartRequired) {
+      log(`${label} failed; restarting the server with the last validated frontend bundle...`);
+      try {
+        await startServer();
+        restartRequired = false;
+      } catch (restartError) {
+        throw new Error(
+          `${errorMessage(operationError)}; automatic server recovery also failed: ${errorMessage(restartError)}`,
+          { cause: operationError },
+        );
+      }
+    }
+    throw operationError;
+  }
+}
+
 async function runCommandOrThrow(
   cmd: string[],
-  opts: { cwd: string; timeoutMs: number; label: string }
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    label: string;
+    env?: Record<string, string | undefined>;
+    onOutput?: (source: "stdout" | "stderr", text: string) => void;
+  }
 ): Promise<void> {
   const result = await spawnAsync(cmd, {
     cwd: opts.cwd,
     timeoutMs: opts.timeoutMs,
+    env: opts.env,
+    onOutput: opts.onOutput,
   });
 
   if (result.exitCode === 0) return;
 
+  const output = result.stderr.trim() || result.stdout.trim();
   const reason = result.timedOut
-    ? `${opts.label} timed out after ${opts.timeoutMs / 1000}s`
-    : result.stderr.trim() || result.stdout.trim() || `${opts.label} failed`;
+    ? `${opts.label} timed out after ${opts.timeoutMs / 1000}s${output ? `\nLast output:\n${output}` : ""}`
+    : output || `${opts.label} failed`;
   throw new Error(reason);
 }
 
@@ -130,13 +435,34 @@ function getUpstreamRefForSync(branchName: string): string {
   return getUpstreamRef(branchName) || `origin/${branchName}`;
 }
 
+export function hardSyncRefusalMessage(branchName: string, upstreamRef: string, ahead: number): string {
+  return `Cannot update '${branchName}' because it has ${ahead} local commit${ahead === 1 ? "" : "s"} not present on ${upstreamRef}. Push them or move them to another branch before retrying; automatic updates will not discard local commits.`;
+}
+
 function assertNoLocalCommitsBeforeHardSync(branchRef: string, branchName: string, upstreamRef: string): void {
   const ahead = getCommitsAhead(branchRef, upstreamRef);
   if (ahead > 0) {
-    throw new Error(
-      `Refusing to hard-sync '${branchName}': it is ${ahead} commit${ahead === 1 ? "" : "s"} ahead of ${upstreamRef}`
-    );
+    throw new Error(hardSyncRefusalMessage(branchName, upstreamRef, ahead));
   }
+}
+
+/** Validate an update before the runner acknowledges it and stops the server. */
+export function assertUpdateCanHardSync(): void {
+  const currentBranch = getCurrentBranch();
+  if (!currentBranch || currentBranch === "HEAD") {
+    throw new Error("Unable to resolve current git branch");
+  }
+  const currentUpstream = getUpstreamRefForSync(currentBranch);
+  assertNoLocalCommitsBeforeHardSync("HEAD", currentBranch, currentUpstream);
+}
+
+/** Validate a branch switch before the runner acknowledges it and stops the server. */
+export function assertBranchCanHardSync(target: string): void {
+  if (!AVAILABLE_BRANCHES.includes(target as any)) {
+    throw new Error(`Invalid branch: ${target}. Available: ${AVAILABLE_BRANCHES.join(", ")}`);
+  }
+  const targetUpstream = getUpstreamRefForSync(target);
+  assertNoLocalCommitsBeforeHardSync(target, target, targetUpstream);
 }
 
 async function stashLocalChanges(label: string): Promise<void> {
@@ -230,58 +556,46 @@ export async function applyUpdate(
   reportProgress?: ProgressReporter,
 ): Promise<void> {
   log("Preparing update...");
-  const previousHead = getHeadRef();
-  const currentBranch = getCurrentBranch();
-  if (!currentBranch || currentBranch === "HEAD") {
-    throw new Error("Unable to resolve current git branch");
-  }
-  const currentUpstream = getUpstreamRefForSync(currentBranch);
-  assertNoLocalCommitsBeforeHardSync("HEAD", currentBranch, currentUpstream);
-
-  // Stop server before destructive operations
-  await stopServer();
-
-  // Clear Bun install cache
-  log("Clearing install cache...");
-  await runCommandOrThrow(["bun", "pm", "cache", "rm"], {
-    cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_BUN_CACHE_MS,
-    label: "package cache clear",
-  });
-
   const frontendDir = join(PROJECT_ROOT, "frontend");
+  assertUpdateCanHardSync();
 
-  reportProgress?.("Syncing repository to upstream branch head...");
-  try {
+  await runWithServerStopped("Update", stopServer, startServer, async () => {
+    const previousHead = getHeadRef();
+    const currentBranch = getCurrentBranch();
+    if (!currentBranch || currentBranch === "HEAD") {
+      throw new Error("Unable to resolve current git branch");
+    }
+    const currentUpstream = getUpstreamRefForSync(currentBranch);
+    assertNoLocalCommitsBeforeHardSync("HEAD", currentBranch, currentUpstream);
+
+    reportProgress?.("Syncing repository to upstream branch head...");
     await stashLocalChanges("lumiverse-runner-auto-stash");
     await resetTrackedFiles("HEAD");
     await syncBranchToUpstream(currentBranch, currentUpstream);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(`Update failed: ${message}`);
-    await recoverFrontendAndStart(frontendDir, startServer);
-    throw error;
-  }
 
-  const currentHead = getHeadRef();
-  const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+    const currentHead = getHeadRef();
+    const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+    if (changedFiles === null) {
+      log("Could not inspect changed files; conservatively installing dependencies and rebuilding the frontend.");
+    }
 
-  // Install dependencies and rebuild only if pulled files touched frontend inputs.
-  reportProgress?.("Installing backend and frontend dependencies...");
-  await ensureDependencies(frontendDir);
-  if (shouldRebuildFrontend(changedFiles)) {
-    const summary = summarizeFrontendChanges(changedFiles);
-    reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
-    log(`Frontend changes detected in update; waiting for Vite build (${summary}).`);
-    await rebuildFrontend(frontendDir);
-  } else {
-    reportProgress?.("No frontend changes detected; restarting server...");
-    log("No frontend source/config changes detected in pulled files; skipping local Vite rebuild.");
-  }
+    await ensureChangedDependencies(frontendDir, changedFiles, reportProgress, {
+      fromRef: previousHead,
+      toRef: currentHead,
+    });
+    if (shouldRebuildFrontend(changedFiles)) {
+      const summary = changedFiles ? summarizeFrontendChanges(changedFiles) : "change list unavailable";
+      reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
+      log(`Frontend changes detected in update; waiting for Vite build (${summary}).`);
+      await rebuildFrontend(frontendDir, reportProgress);
+    } else {
+      reportProgress?.("No frontend changes detected; restarting server...");
+      log("No frontend source/config changes detected in pulled files; skipping local Vite rebuild.");
+    }
 
-  log("Update complete. Restarting server...");
-  reportProgress?.("Starting server...");
-  await startServer();
+    log("Update complete. Restarting server...");
+    reportProgress?.("Starting server...");
+  });
 }
 
 /**
@@ -298,57 +612,46 @@ export async function switchBranch(
   if (!AVAILABLE_BRANCHES.includes(target as any)) {
     throw new Error(`Invalid branch: ${target}. Available: ${AVAILABLE_BRANCHES.join(", ")}`);
   }
-
-  const currentBranch = getCurrentBranch();
-  log(`Switching from '${currentBranch}' to '${target}'...`);
-  const previousHead = getHeadRef();
-  const targetUpstream = getUpstreamRefForSync(target);
-
-  // Stop server
-  await stopServer();
-
-  // Clear install cache
-  log("Clearing install cache...");
-  await runCommandOrThrow(["bun", "pm", "cache", "rm"], {
-    cwd: PROJECT_ROOT,
-    timeoutMs: TIMEOUT_BUN_CACHE_MS,
-    label: "package cache clear",
-  });
+  assertBranchCanHardSync(target);
 
   const frontendDir = join(PROJECT_ROOT, "frontend");
 
-  reportProgress?.(`Syncing '${target}' to upstream branch head...`);
-  try {
+  await runWithServerStopped("Branch switch", stopServer, startServer, async () => {
+    const currentBranch = getCurrentBranch();
+    log(`Switching from '${currentBranch}' to '${target}'...`);
+    const previousHead = getHeadRef();
+    const targetUpstream = getUpstreamRefForSync(target);
+
+    reportProgress?.(`Syncing '${target}' to upstream branch head...`);
     await stashLocalChanges(`lumiverse-branch-switch-${currentBranch || "detached-head"}`);
     await resetTrackedFiles("HEAD");
     await checkoutBranch(target);
     assertNoLocalCommitsBeforeHardSync("HEAD", target, targetUpstream);
     await syncBranchToUpstream(target, targetUpstream);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    log(`Failed to switch to '${target}': ${message}`);
-    await recoverFrontendAndStart(frontendDir, startServer);
-    throw error;
-  }
 
-  const currentHead = getHeadRef();
-  const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+    const currentHead = getHeadRef();
+    const changedFiles = getChangedFilesBetween(previousHead, currentHead);
+    if (changedFiles === null) {
+      log("Could not inspect changed files; conservatively installing dependencies and rebuilding the frontend.");
+    }
 
-  reportProgress?.("Installing backend and frontend dependencies...");
-  await ensureDependencies(frontendDir);
-  if (shouldRebuildFrontend(changedFiles)) {
-    const summary = summarizeFrontendChanges(changedFiles);
-    reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
-    log(`Frontend changes detected after branch switch; waiting for Vite build (${summary}).`);
-    await rebuildFrontend(frontendDir);
-  } else {
-    reportProgress?.("No frontend changes detected; restarting server...");
-    log("No frontend source/config changes detected after branch switch; skipping local Vite rebuild.");
-  }
+    await ensureChangedDependencies(frontendDir, changedFiles, reportProgress, {
+      fromRef: previousHead,
+      toRef: currentHead,
+    });
+    if (shouldRebuildFrontend(changedFiles)) {
+      const summary = changedFiles ? summarizeFrontendChanges(changedFiles) : "change list unavailable";
+      reportProgress?.(`Waiting for Vite build to finish${summary ? ` (${summary})` : ""}...`);
+      log(`Frontend changes detected after branch switch; waiting for Vite build (${summary}).`);
+      await rebuildFrontend(frontendDir, reportProgress);
+    } else {
+      reportProgress?.("No frontend changes detected; restarting server...");
+      log("No frontend source/config changes detected after branch switch; skipping local Vite rebuild.");
+    }
 
-  log(`Branch switch complete. Now on '${target}'. Restarting server...`);
-  reportProgress?.("Starting server...");
-  await startServer();
+    log(`Branch switch complete. Now on '${target}'. Restarting server...`);
+    reportProgress?.("Starting server...");
+  });
 }
 
 // Written into node_modules only after `bun install` exits 0. Its absence
@@ -360,6 +663,7 @@ export async function switchBranch(
 const INSTALL_STAMP = "node_modules/.lumiverse-install-complete";
 const INSTALL_BACKUP_PREFIX = "node_modules.lumiverse-backup-";
 const MAX_MISSING_DEP_PREVIEW = 5;
+const LOCAL_INSTALL_INPUTS = ["package.json", "bun.lock", "bunfig.toml", ".npmrc"];
 
 interface DependencyTreeState {
   hasNodeModules: boolean;
@@ -393,7 +697,10 @@ export function inspectDependencyTree(dir: string): DependencyTreeState {
   const nodeModules = join(dir, "node_modules");
   const hasNodeModules = existsSync(nodeModules);
   const declaredPackages = listDeclaredInstallPackages(dir);
-  const missingPackages = declaredPackages.filter((packageName) => !existsSync(packageInstallPath(nodeModules, packageName)));
+  const missingPackages = declaredPackages.filter((packageName) => {
+    const packageDir = packageInstallPath(nodeModules, packageName);
+    return !existsSync(join(packageDir, "package.json"));
+  });
 
   return {
     hasNodeModules,
@@ -412,6 +719,29 @@ export function summarizeMissingDependencyPackages(missingPackages: string[]): s
 
 function writeInstallStamp(dir: string): void {
   try { writeFileSync(join(dir, INSTALL_STAMP), `${Date.now()}\n`); } catch {}
+}
+
+/**
+ * Detect an install that began after new dependency inputs landed but never
+ * reached writeInstallStamp(). This lets the next update retry even when the
+ * failed update already advanced HEAD and its manifest delta is no longer in
+ * the next changed-file range. Missing stamps may belong to a healthy manual
+ * install, so only an existing, provably older stamp is considered stale.
+ */
+export function dependencyInstallStampIsStale(dir: string): boolean {
+  const stampPath = join(dir, INSTALL_STAMP);
+  if (!existsSync(stampPath)) return false;
+
+  try {
+    const stampMtime = statSync(stampPath).mtimeMs;
+    return LOCAL_INSTALL_INPUTS.some((relativePath) => {
+      const inputPath = join(dir, relativePath);
+      return existsSync(inputPath) && statSync(inputPath).mtimeMs > stampMtime;
+    });
+  } catch {
+    // A concurrently replaced stamp/input is safest to reconcile by reinstalling.
+    return true;
+  }
 }
 
 export function prepareDependencyInstall(dir: string, label: string): PreparedDependencyInstall {
@@ -466,9 +796,11 @@ export function restoreDependencyInstall(
   }
 }
 
+// Keep these aligned with frontend/package.json overrides and optionalDependencies.
+// Rolldown 1.2.4 includes the Android ARMv8.0 SIGILL fix.
 const TERMUX_FRONTEND_NATIVE_DEPS = [
-  "@rolldown/binding-android-arm64@1.0.2",
-  "lightningcss-android-arm64@1.32.0",
+  "@rolldown/binding-android-arm64@1.2.4",
+  "lightningcss-android-arm64@1.33.0",
 ];
 
 async function repairTermuxFrontendNativeDeps(frontendDir: string): Promise<void> {
@@ -509,7 +841,7 @@ async function installDependenciesForDir(
   try {
     await runCommandOrThrow(installCmd, {
       cwd: dir,
-      timeoutMs: TIMEOUT_BUN_INSTALL_MS,
+      timeoutMs: bunInstallTimeoutMs(),
       label: `${label} install`,
     });
     if (postInstall) await postInstall();
@@ -521,36 +853,369 @@ async function installDependenciesForDir(
   }
 }
 
-export async function ensureDependencies(frontendDir: string): Promise<void> {
-  const installCmd = bunInstallCmd();
-  clearBunInstallCacheIfTermux();
+type DependencyTreeLabel = "backend" | "frontend";
 
-  await installDependenciesForDir(PROJECT_ROOT, "backend", installCmd);
-  await installDependenciesForDir(frontendDir, "frontend", installCmd, async () => {
-    await repairTermuxFrontendNativeDeps(frontendDir);
-  });
+class DependencyValidationError extends Error {
+  constructor(
+    readonly dependencyTree: DependencyTreeLabel,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DependencyValidationError";
+  }
 }
 
-export async function rebuildFrontend(frontendDir: string): Promise<void> {
-  log("Rebuilding frontend...");
-  await runCommandOrThrow(["bun", "run", "build"], {
-    cwd: frontendDir,
-    timeoutMs: TIMEOUT_BUN_BUILD_MS,
-    label: "frontend build",
-  });
-  log("Frontend rebuilt successfully.");
+async function verifyBackendDependencies(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(backendDependencyProbeCmd(), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "backend dependency validation",
+    });
+  } catch (error) {
+    throw new DependencyValidationError("backend", errorMessage(error));
+  }
 }
 
-/** Rebuild frontend (best-effort) and restart the server after a git failure. */
-async function recoverFrontendAndStart(
-  frontendDir: string,
-  startServer: () => Promise<void>
+async function verifyFrontendDependencies(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(frontendDependencyProbeCmd(), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "frontend dependency validation",
+    });
+  } catch (error) {
+    throw new DependencyValidationError("frontend", errorMessage(error));
+  }
+}
+
+async function clearBunInstallCacheForRepair(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(bunRuntimeCmd(["pm", "cache", "rm"]), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "Bun package cache clear",
+    });
+  } catch (error) {
+    log(`Could not clear Bun's package cache before dependency repair: ${errorMessage(error)}`);
+  }
+}
+
+async function repairDependencies(
+  dir: string,
+  label: DependencyTreeLabel,
+  installCmd: string[],
+  postInstall: () => Promise<void>,
 ): Promise<void> {
-  log("Rebuilding frontend to restore dist...");
-  await spawnAsync(["bun", "run", "build"], {
-    cwd: frontendDir,
-    timeoutMs: TIMEOUT_BUN_BUILD_MS,
-    ignoreStdout: true,
-  });
-  await startServer();
+  const nodeModules = join(dir, "node_modules");
+  const backupDir = join(
+    dir,
+    `${INSTALL_BACKUP_PREFIX}dependency-repair-${Date.now()}-${process.pid}`,
+  );
+
+  log(`${label[0]?.toUpperCase() ?? ""}${label.slice(1)} dependency validation failed; clearing the package cache and reinstalling from a clean tree...`);
+  try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+  if (existsSync(nodeModules)) renameSync(nodeModules, backupDir);
+
+  try {
+    await clearBunInstallCacheForRepair(dir);
+    await installDependenciesForDir(
+      dir,
+      label,
+      installCmd,
+      postInstall,
+    );
+    try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+    log(`${label[0]?.toUpperCase() ?? ""}${label.slice(1)} dependency tree repaired.`);
+  } catch (error) {
+    try { rmSync(nodeModules, { recursive: true, force: true }); } catch {}
+    if (existsSync(backupDir)) renameSync(backupDir, nodeModules);
+    throw error;
+  }
+}
+
+async function finishFrontendDependencyInstall(frontendDir: string): Promise<void> {
+  await repairTermuxFrontendNativeDeps(frontendDir);
+  await verifyFrontendDependencies(frontendDir);
+}
+
+async function ensureFrontendDependencyTreeHealthy(frontendDir: string): Promise<void> {
+  try {
+    await verifyFrontendDependencies(frontendDir);
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "frontend") throw error;
+    await repairDependencies(
+      frontendDir,
+      "frontend",
+      bunInstallCmd(),
+      async () => finishFrontendDependencyInstall(frontendDir),
+    );
+  }
+}
+
+export async function ensureDependencies(frontendDir: string): Promise<void> {
+  await ensureBackendDependencies();
+  await ensureFrontendDependencies(frontendDir);
+}
+
+export async function ensureBackendDependencies(): Promise<void> {
+  clearBunInstallCacheIfTermux();
+  const installCmd = bunInstallCmd();
+  const postInstall = async (): Promise<void> => verifyBackendDependencies(PROJECT_ROOT);
+  try {
+    await installDependenciesForDir(
+      PROJECT_ROOT,
+      "backend",
+      installCmd,
+      postInstall,
+    );
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "backend") throw error;
+    await repairDependencies(PROJECT_ROOT, "backend", installCmd, postInstall);
+  }
+}
+
+export async function ensureFrontendDependencies(frontendDir: string): Promise<void> {
+  clearBunInstallCacheIfTermux();
+  const installCmd = bunInstallCmd();
+  const postInstall = async (): Promise<void> => finishFrontendDependencyInstall(frontendDir);
+  try {
+    await installDependenciesForDir(frontendDir, "frontend", installCmd, postInstall);
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "frontend") throw error;
+    await repairDependencies(frontendDir, "frontend", installCmd, postInstall);
+  }
+}
+
+async function ensureChangedDependencies(
+  frontendDir: string,
+  changedFiles: string[] | null,
+  reportProgress?: ProgressReporter,
+  manifestRefs?: DependencyManifestRefs,
+): Promise<void> {
+  const plan = planChangedDependencies(
+    changedFiles,
+    isTermuxRuntime() || isProotRuntime(),
+    manifestRefs,
+  );
+  const retryBackendInstall = !plan.installBackend && dependencyInstallStampIsStale(PROJECT_ROOT);
+  const retryFrontendInstall = !plan.installFrontend && dependencyInstallStampIsStale(frontendDir);
+  const installBackend = plan.installBackend || retryBackendInstall;
+  const installFrontend = plan.installFrontend || retryFrontendInstall;
+
+  if (retryBackendInstall) {
+    log("Backend dependency inputs are newer than the last successful install; retrying.");
+  }
+  if (retryFrontendInstall) {
+    log("Frontend dependency inputs are newer than the last successful install; retrying.");
+  }
+
+  if (installBackend) {
+    reportProgress?.("Installing backend dependencies...");
+    await ensureBackendDependencies();
+  }
+  if (installFrontend) {
+    reportProgress?.("Installing frontend dependencies...");
+    await ensureFrontendDependencies(frontendDir);
+  }
+  if (!installBackend && !installFrontend) {
+    log("Dependency manifests are unchanged; skipping package installation.");
+  }
+  if (plan.repairTermuxFrontendNativeDeps && !installFrontend) {
+    reportProgress?.("Repairing Termux frontend native bindings...");
+    await repairTermuxFrontendNativeDeps(frontendDir);
+  }
+}
+
+export const FRONTEND_BUILD_STEPS = [
+  {
+    label: "frontend component metadata extraction",
+    progress: "Extracting frontend component metadata...",
+    command: ["bun", "run", "extract-props"],
+  },
+  {
+    label: "frontend CSS variable extraction",
+    progress: "Extracting frontend CSS variables...",
+    command: ["bun", "run", "extract-css-vars"],
+  },
+  {
+    label: "frontend Vite bundling",
+    progress: "Building the frontend bundle with Vite...",
+    command: ["bun", "run", "scripts/build-frontend.ts"],
+  },
+] as const;
+
+function desktopInstallBundleArgs(): string[] {
+  switch (platform()) {
+    case "darwin": return ["--bundles", "app"];
+    case "win32": return ["--bundles", "nsis"];
+    case "linux": return ["--bundles", "appimage"];
+    default: return [];
+  }
+}
+
+export const DESKTOP_BUILD_STEPS = [
+  {
+    label: "desktop dependency install",
+    progress: "Installing desktop app dependencies...",
+    // Resolved at run time: bunInstallCmd() carries the Windows copyfile
+    // backend and the Termux proot wrapping that a bare `bun install` lacks.
+    command: null,
+  },
+  {
+    label: "desktop Tauri build",
+    progress: "Compiling the desktop app — this can take several minutes...",
+    // The scripted workflow installs the native app artifact directly. Avoid
+    // also building optional distributable media (notably macOS DMGs), whose
+    // Finder/mount tooling can fail after the usable .app already succeeded.
+    command: ["bun", "run", "tauri:finalized", "build", ...desktopInstallBundleArgs()],
+  },
+] as const satisfies ReadonlyArray<{ label: string; progress: string; command: readonly string[] | null }>;
+
+/**
+ * PATH for the build steps. The tray is a GUI app and launches the runner with
+ * the minimal PATH GUI apps receive, plus bun's own directory — cargo is not on
+ * it. `tauri build` shells out to cargo, so without this the toolchain check
+ * passes (it finds `~/.cargo/bin` itself) and the build then fails to find the
+ * very tool it just confirmed. Mirrors the tray's `prepend_bun_dir_to_path`.
+ */
+function desktopBuildEnv(): Record<string, string | undefined> {
+  const cargoBin = join(homedir(), ".cargo", "bin");
+  const current = process.env.PATH ?? "";
+  const alreadyPresent = current.split(delimiter).includes(cargoBin);
+  return {
+    ...process.env,
+    PATH: alreadyPresent ? current : [cargoBin, current].filter(Boolean).join(delimiter),
+  };
+}
+
+/**
+ * Where `tauri build` leaves the installable artifact, per platform. Checked in
+ * order; the first hit wins. macOS names its bundle deterministically, so it is
+ * matched directly, while the Windows and Linux artifacts carry the version in
+ * their filenames and are found by extension.
+ */
+const DESKTOP_BUNDLE_CANDIDATES: Array<{ dir: string; exact?: string; extensions?: string[] }> = [
+  { dir: "macos", exact: "Lumiverse Desktop.app" },
+  { dir: "dmg", extensions: [".dmg"] },
+  { dir: "msi", extensions: [".msi"] },
+  { dir: "nsis", extensions: [".exe"] },
+  { dir: "appimage", extensions: [".AppImage"] },
+  { dir: "deb", extensions: [".deb"] },
+  { dir: "rpm", extensions: [".rpm"] },
+];
+
+/**
+ * Resolve the freshly built bundle so the tray can point the user straight at
+ * it. Returns the bundle root when no known artifact is present — a directory
+ * the user can open is more useful than reporting nothing.
+ */
+export function resolveDesktopBundlePath(): string | null {
+  return selectDesktopBundleArtifact(
+    join(PROJECT_ROOT, "desktop", "src-tauri", "target", "release", "bundle"),
+  );
+}
+
+/** The artifact-picking half of {@link resolveDesktopBundlePath}, taking an
+ * explicit root so it can be exercised against fixtures. */
+export function selectDesktopBundleArtifact(bundleRoot: string): string | null {
+  if (!existsSync(bundleRoot)) return null;
+
+  for (const candidate of DESKTOP_BUNDLE_CANDIDATES) {
+    const dir = join(bundleRoot, candidate.dir);
+    if (!existsSync(dir)) continue;
+
+    if (candidate.exact) {
+      const exact = join(dir, candidate.exact);
+      if (existsSync(exact)) return exact;
+      continue;
+    }
+
+    // Newest by mtime, not last by name: `bundle/` is never cleared, so a
+    // stale artifact from an earlier version can sit beside the fresh one,
+    // and "0.9.0" sorts after "0.10.0" lexicographically.
+    const match = readdirSync(dir)
+      .filter((entry) => candidate.extensions?.some((ext) => entry.endsWith(ext)))
+      .map((entry) => ({ entry, mtimeMs: statSync(join(dir, entry)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)[0];
+    if (match) return join(dir, match.entry);
+  }
+
+  return bundleRoot;
+}
+
+/**
+ * Build the desktop shell in place.
+ *
+ * Deliberately not wrapped in `runWithServerStopped`. The frontend rebuild
+ * stops the server because it replaces the bundle the server is actively
+ * serving; a Tauri build only writes to `desktop/src-tauri/target`, which
+ * nothing serves. Users can keep chatting while it compiles.
+ *
+ * Note this cannot replace the running tray — it produces a bundle, and
+ * installing it is a separate step.
+ */
+export async function rebuildDesktopShell(
+  reportProgress?: ProgressReporter,
+  options: { mirrorOutput?: boolean } = {},
+): Promise<string | null> {
+  const desktopDir = join(PROJECT_ROOT, "desktop");
+  if (!existsSync(join(desktopDir, "src-tauri"))) {
+    throw new Error("This checkout has no desktop/src-tauri directory to build");
+  }
+
+  log("Rebuilding the desktop shell...");
+  const deadline = Date.now() + TIMEOUT_DESKTOP_BUILD_MS;
+  const env = desktopBuildEnv();
+
+  for (const step of DESKTOP_BUILD_STEPS) {
+    const timeoutMs = deadline - Date.now();
+    if (timeoutMs <= 0) {
+      throw new Error(
+        `${step.label} did not start because the desktop build exceeded its ${TIMEOUT_DESKTOP_BUILD_MS / 60_000}m timeout`,
+      );
+    }
+
+    reportProgress?.(step.progress);
+    log(step.progress);
+    await runCommandOrThrow(step.command ? [...step.command] : bunInstallCmd(), {
+      cwd: desktopDir,
+      timeoutMs,
+      label: step.label,
+      env,
+      onOutput: options.mirrorOutput
+        ? (source, text) => (source === "stdout" ? process.stdout : process.stderr).write(text)
+        : undefined,
+    });
+  }
+
+  log("Desktop shell rebuilt successfully.");
+  return resolveDesktopBundlePath();
+}
+
+export async function rebuildFrontend(
+  frontendDir: string,
+  reportProgress?: ProgressReporter,
+): Promise<void> {
+  await ensureFrontendDependencyTreeHealthy(frontendDir);
+  log("Rebuilding frontend...");
+  const deadline = Date.now() + TIMEOUT_BUN_BUILD_MS;
+
+  for (const step of FRONTEND_BUILD_STEPS) {
+    const timeoutMs = deadline - Date.now();
+    if (timeoutMs <= 0) {
+      throw new Error(
+        `${step.label} did not start because the frontend build exceeded its ${TIMEOUT_BUN_BUILD_MS / 1000}s timeout`,
+      );
+    }
+
+    reportProgress?.(step.progress);
+    log(step.progress);
+    await runCommandOrThrow([...step.command], {
+      cwd: frontendDir,
+      timeoutMs,
+      label: step.label,
+    });
+  }
+  log("Frontend rebuilt successfully.");
 }

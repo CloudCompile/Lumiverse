@@ -1,8 +1,8 @@
-import { getProvider } from "../llm/registry";
+import { getActiveFrontendSession } from "../spindle/frontend-session";
+import { describeGenerationStop } from "../llm/generation-stop";
 import type { LlmProvider } from "../llm/provider";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
-import * as secretsSvc from "./secrets.service";
 import * as connectionsSvc from "./connections.service";
 import * as chatsSvc from "./chats.service";
 import * as presetsSvc from "./presets.service";
@@ -10,26 +10,22 @@ import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
 import {
   assemblePrompt,
-  applyProviderReasoningOffSwitch,
-  injectReasoningParams,
   collectVectorActivatedWorldInfo,
   mergeActivatedWorldInfoEntries,
-  getSourceMessageId,
   isChatHistoryMessage,
-  shouldPreserveDisplayReasoningDelimiters,
+  resolveContinuePostfix,
   type VectorActivatedEntry,
 } from "./prompt-assembly.service";
 import * as charactersSvc from "./characters.service";
 import { getEffectiveCharacterName } from "../types/character";
 import { isNoPresetChatMetadata, isTemporaryChatMetadata } from "../types/chat";
 import {
-  describeContentForDisplay,
   getTextContent,
-  type DisplayContentPartSummary,
   type LlmMessage,
   type GenerationParameters,
   type GenerationRequest,
   type GenerationResponse,
+  type GenerationUsage,
   type StreamChunk,
   type GenerationType,
   type ImpersonateMode,
@@ -39,10 +35,22 @@ import {
   type ToolCallResult,
   type LlmThinkingBlock,
 } from "../llm/types";
+import { trimIncompleteTrailingWord } from "../utils/trim-incomplete-word";
+import { healFormattingArtifacts } from "../utils/format-healing";
 import {
   buildInlineToolContinuation,
   type InlineCouncilToolResult,
 } from "./inline-tool-continuation";
+import {
+  applyInlineWebSearchContextSlots,
+  formatInlineWebSearchContext,
+  INLINE_WEB_SEARCH_MAX_QUERY_CHARS,
+  INLINE_WEB_SEARCH_MAX_RESULTS,
+  INLINE_WEB_SEARCH_TOOL,
+  INLINE_WEB_SEARCH_TOOL_NAME,
+  prepareInlineWebSearchMessagesForProvider,
+} from "./inline-web-search";
+import { getWebSearchSettings } from "./web-search-settings.service";
 import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import {
@@ -55,14 +63,17 @@ import {
   appendCouncilDeliberationHistory,
   collectWorldInfoForCouncil,
   formatDeliberation,
+  selectCouncilContextMessages,
   type CouncilEnrichment,
   type CouncilExecutionResultWithHistory,
 } from "./council/council-execution.service";
-import { activateWorldInfo } from "./world-info-activation.service";
+import {
+  activateWorldInfo,
+  type WorldInfoSettings,
+} from "./world-info-activation.service";
 import type {
   CachedCouncilResult,
   CouncilMember,
-  GenerationReasoningOverrideDTO,
 } from "lumiverse-spindle-types";
 import {
   getCouncilSettings,
@@ -72,15 +83,18 @@ import * as councilProfilesSvc from "./council/council-profiles.service";
 import * as tokenizerSvc from "./tokenizer.service";
 import * as breakdownSvc from "./breakdown.service";
 import * as regexScriptsSvc from "./regex-scripts.service";
+import { makePromptActivationSource } from "./prompt-activation.service";
+import { readPromptActivation } from "../utils/regex-prompt-activation";
 import * as pool from "./generation-pool.service";
 import * as summarizePool from "./summarize-pool.service";
 import {
   getSummarizationPromptDefaults,
   buildSummarizationPrompt,
+  selectSummarizationMessages,
 } from "./summarization-prompts.service";
 import {
   detectExpression,
-  detectMultiCharacterExpression,
+  detectMultiCharacterExpressions,
   getExpressionDetectionSettings,
   resolveDetectedExpressionLabel,
 } from "./expression-detection.service";
@@ -90,11 +104,7 @@ import {
   getExpressionGroups,
 } from "./expressions.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
-import {
-  abortChatBackground,
-  abortUserBackgrounds,
-  abortAllBackgrounds,
-} from "./chat-background.service";
+import { abortChatBackground } from "./chat-background.service";
 import {
   createCooperativeYielder,
   yieldToEventLoop,
@@ -114,6 +124,8 @@ import {
 import { toolRegistry } from "../spindle/tool-registry";
 import { executeHostCouncilTool } from "./council/host-tools";
 import { applyPromptCaching } from "./caching";
+import type { GenerationCallOptions, ProviderRequestObserver, RequestOrigin } from "../llm/request-observer";
+import { createRequestObserver } from "./request-history.service";
 import {
   applyPersonaAddonStates,
   getChatPersonaAddonStates,
@@ -121,11 +133,8 @@ import {
 import * as packsSvc from "./packs.service";
 import {
   GuidedReasoningStreamParser,
-  closeUnterminatedDelimitedReasoning,
   extractDelimitedReasoning,
   resolveReasoningDelimiters,
-  separateDelimitedReasoning,
-  wrapDelimitedReasoningStream,
 } from "../utils/reasoning-strip";
 import {
   persistMacroVariableState,
@@ -140,8 +149,70 @@ import {
 import { isPromptRegexChatOwned } from "../spindle/prompt-regex-ownership";
 import { isRunning as isExtensionRunning } from "../spindle/lifecycle";
 import { clampErrorMessage, describeProviderError, ProviderRequestError } from "../utils/provider-errors";
+import {
+  resolveChatGenerationConnection,
+  resolveConnection,
+  resolveProviderAndKey,
+} from "./generation/connection-resolution";
+import { injectConnectionMetadataFlags } from "./generation/connection-metadata";
+import {
+  clearActiveChatGeneration,
+  clearActiveChatGenerationById,
+  getActiveChatGeneration,
+  getActiveGeneration,
+  registerActiveGeneration,
+  removeActiveGeneration,
+  setActiveChatGeneration,
+  touchActiveGeneration,
+} from "./generation/active-generation-registry";
+import {
+  clearCouncilRetry,
+  waitForCouncilRetryDecision,
+} from "./generation/council-retry";
+import {
+  applyDelimitedReasoningParsing,
+  applyEffectiveReasoningSettings,
+  buildDryRunDisplayMessages,
+  closeUnterminatedReasoningTags,
+  extractReasoningDetailsText,
+  extractThinkingBlockText,
+  resolveDryRunMessageReasoning,
+  type DryRunDisplayMessage,
+} from "./generation/reasoning";
+import {
+  rawGenerate,
+  type RawGenerateInput,
+} from "./generation/direct-generation";
+import {
+  calculateGenerationTimingMetrics,
+  resolveGenerationTokenCounts,
+} from "./generation/metrics";
+
+export {
+  getActiveChatGeneration,
+  getActiveGenerationCount,
+  stopAllGenerations,
+  stopChatGenerations,
+  stopGeneration,
+  stopGenerationSweep,
+  stopUserGenerations,
+  sweepInactiveGenerations,
+} from "./generation/active-generation-registry";
+export { resolveCouncilRetry } from "./generation/council-retry";
+export type { DryRunDisplayMessage } from "./generation/reasoning";
+export {
+  quietGenerate,
+  quietGenerateStream,
+  rawGenerate,
+  rawGenerateStream,
+} from "./generation/direct-generation";
+export type {
+  QuietGenerateInput,
+  RawGenerateInput,
+} from "./generation/direct-generation";
 
 interface GenerateInput {
+  frontendSessionId?: string;
   userId: string;
   chat_id: string;
   connection_id?: string;
@@ -156,21 +227,50 @@ interface GenerateInput {
   impersonate_mode?: ImpersonateMode;
   /** For impersonate: free-form text from the user's input box, appended to the impersonation prompt. */
   impersonate_input?: string;
+  /** Exact input-bar draft snapshot captured when this generation started. */
+  user_input?: string;
   /** For impersonate: stream tokens to the frontend but do NOT create a message. The user edits and sends manually. */
   impersonate_draft?: boolean;
   target_character_id?: string;
   regen_feedback?: string;
   regen_feedback_position?: "system" | "user";
+  regen_feedback_format?: string;
   retain_council?: boolean;
   /** Dry-run only: reassemble as if this message were absent from history
    *  (used to reconstruct the prompt that produced an existing assistant turn). */
   exclude_message_id?: string;
   /** Optional abort signal — when fired, cancels an in-flight dry run. */
   signal?: AbortSignal;
+  /** Deterministic id for edit-and-send replay; when set, skip minting a new UUID. */
+  generationId?: string;
 }
+
+/**
+ * The `editAndSendAlwaysUseActiveConnection` Productivity setting, used on the
+ * LEGACY dispatch path — i.e. for outbox rows that recorded no
+ * `connection_id`, either because they were committed before
+ * `migrations/111_generation_outbox_connection_id.sql` or because resolution
+ * came up empty at commit time. Rows that DID record one never reach this read:
+ * the recorded value already baked the opt-in's answer in at commit time.
+ *
+ * The predicate itself now lives in `settings.service`, which owns it for BOTH
+ * ends of the flow — `chats.service.editAndSend` (via
+ * `connections.service.resolveEditAndSendConnectionId`) at commit time and this
+ * module at dispatch time. The rejected alternative was keeping a second copy
+ * here: two independent strict-read implementations for one setting is exactly
+ * how the commit-time and dispatch-time answers would drift, which is the class
+ * of bug this whole change exists to remove. This local alias is retained only
+ * so the `__test__` seam below keeps its existing name and existing callers
+ * (`connections.service.acting-connection.test.ts`,
+ * `edit-and-send-active-connection-optin.property.test.ts`).
+ */
+const readEditAndSendAlwaysUseActiveConnection = (userId: string): boolean =>
+  settingsSvc.readEditAndSendAlwaysUseActiveConnection(userId);
 
 /** Lifecycle context passed from startGeneration → runGeneration */
 interface GenerationLifecycle {
+  frontendSessionId?: string;
+  onProviderRequest?: ProviderRequestObserver;
   /** User-authored messages that immediately preceded this generation. */
   sourceUserMessageIds?: string[];
   /** For regenerate: update swipe on this message instead of creating new */
@@ -208,10 +308,17 @@ interface GenerationLifecycle {
   chatHistoryMessages?: LlmMessage[];
   /** Full assembled outbound message list for prompt breakdown inspection. */
   messages?: LlmMessage[];
+  /** Resolved connection display name, used to enrich a provider 401/403 that
+   *  came back from a connection which sent no stored credential. */
+  connectionName?: string;
   /** Model + provider + preset info for breakdown storage */
   model?: string;
   providerName?: string;
   presetName?: string;
+  /** Resolved preset id */
+  presetId?: string;
+  /** Trim the final word after a directly word-terminated streamed response. */
+  trimIncompleteWords?: boolean;
   /** Max context from connection parameters (for breakdown display) */
   maxContext?: number;
   /** Council named results (for expression detection and other post-generation hooks) */
@@ -221,32 +328,7 @@ interface GenerationLifecycle {
 }
 
 function collectTrailingUserMessageIds(userId: string, chatId: string): string[] {
-  const messages = chatsSvc.getMessages(userId, chatId);
-  const trailing: string[] = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (message.extra?.hidden === true) continue;
-    if (!message.is_user) break;
-    trailing.push(message.id);
-  }
-  trailing.reverse();
-  return trailing;
-}
-
-function injectConnectionMetadataFlags(
-  connection: { provider: string; metadata?: Record<string, any> },
-  params: GenerationParameters,
-): void {
-  if (connection.metadata?.use_responses_api) {
-    params.use_responses_api = true;
-  }
-
-  if (
-    connection.provider === "openrouter" &&
-    connection.metadata?.openrouter
-  ) {
-    params._openrouter = connection.metadata.openrouter;
-  }
+  return chatsSvc.getTrailingVisibleUserMessageIds(userId, chatId);
 }
 
 function omitChatHistoryBreakdownEntries<
@@ -274,123 +356,6 @@ function omitChatHistoryTokenBreakdown(
   };
 }
 
-function normalizeReasoningText(reasoning: unknown): string | undefined {
-  return typeof reasoning === "string" && reasoning.trim().length > 0
-    ? reasoning
-    : undefined;
-}
-
-function extractThinkingBlockText(
-  blocks: LlmThinkingBlock[] | undefined,
-): string | undefined {
-  if (!Array.isArray(blocks) || blocks.length === 0) return undefined;
-  const combined = blocks
-    .map((block) =>
-      block.type === "thinking" && typeof block.thinking === "string"
-        ? block.thinking
-        : "",
-    )
-    .filter((text) => text.trim().length > 0)
-    .join("\n");
-  return combined.trim().length > 0 ? combined : undefined;
-}
-
-function extractReasoningDetailsText(
-  details: Record<string, unknown>[] | undefined,
-): string | undefined {
-  if (!Array.isArray(details) || details.length === 0) return undefined;
-  const combined = details
-    .map((detail) => {
-      if (!detail || typeof detail !== "object") return "";
-      if (typeof detail.text === "string") return detail.text;
-      if (typeof detail.summary === "string") return detail.summary;
-      return "";
-    })
-    .filter((text) => text.trim().length > 0)
-    .join("\n");
-  return combined.trim().length > 0 ? combined : undefined;
-}
-
-function resolveDryRunMessageReasoning(
-  message: LlmMessage,
-  sourceMessage?: Message,
-): string | undefined {
-  return (
-    normalizeReasoningText(sourceMessage?.extra?.reasoning) ??
-    normalizeReasoningText(message.reasoning_content) ??
-    extractThinkingBlockText(message.thinking_blocks) ??
-    extractReasoningDetailsText(message.reasoning_details)
-  );
-}
-
-function shouldExtractDisplayReasoningFromContent(message: LlmMessage): boolean {
-  return (
-    message.role === "assistant" &&
-    isChatHistoryMessage(message) &&
-    !shouldPreserveDisplayReasoningDelimiters(message)
-  );
-}
-
-function buildDryRunDisplayMessages(
-  messages: LlmMessage[],
-  sourceMessagesById?: Map<string, Message>,
-  reasoningSettings?: {
-    prefix?: string;
-    suffix?: string;
-    keepInHistory?: number;
-  } | null,
-): DryRunDisplayMessage[] {
-  const delimiters = resolveReasoningDelimiters(reasoningSettings);
-
-  const displayMessages = messages.map((message) => {
-    const described = describeContentForDisplay(message.content);
-    const extractedReasoning = shouldExtractDisplayReasoningFromContent(message)
-      ? extractDelimitedReasoning(described.text, delimiters)
-      : { cleaned: described.text, reasoning: "" };
-    const sourceMessageId = getSourceMessageId(message);
-    const sourceMessage = sourceMessageId
-      ? sourceMessagesById?.get(sourceMessageId)
-      : undefined;
-    const reasoning =
-      normalizeReasoningText(extractedReasoning.reasoning) ??
-      resolveDryRunMessageReasoning(message, sourceMessage);
-
-    const displayMessage: DryRunDisplayMessage = {
-      ...(message as any),
-      content: extractedReasoning.cleaned,
-    };
-    if (described.contentParts.length > 0) {
-      displayMessage.contentParts = described.contentParts;
-    }
-
-    if (
-      reasoning &&
-      extractedReasoning.cleaned.trim() !== reasoning.trim()
-    ) {
-      displayMessage.reasoning = reasoning;
-    }
-
-    return displayMessage;
-  });
-
-  const keepInHistory = reasoningSettings?.keepInHistory ?? -1;
-  if (keepInHistory !== -1) {
-    let keptReasoningMessages = 0;
-    for (let i = displayMessages.length - 1; i >= 0; i--) {
-      if (!isChatHistoryMessage(messages[i]) || messages[i].role !== "assistant") {
-        continue;
-      }
-      if (!displayMessages[i].reasoning) continue;
-      keptReasoningMessages++;
-      if (keptReasoningMessages > keepInHistory) {
-        delete displayMessages[i].reasoning;
-      }
-    }
-  }
-
-  return displayMessages;
-}
-
 export const __test__ = {
   buildDryRunDisplayMessages,
   extractReasoningDetailsText,
@@ -398,51 +363,12 @@ export const __test__ = {
   injectConnectionMetadataFlags,
   omitChatHistoryBreakdownEntries,
   omitChatHistoryTokenBreakdown,
+  readEditAndSendAlwaysUseActiveConnection,
+  resolveChatGenerationConnection,
   resolveDryRunMessageReasoning,
+  resolveProviderAndKey,
   sumChatHistoryBreakdownTokens,
 };
-
-export interface RawGenerateInput {
-  provider: string;
-  model: string;
-  messages: LlmMessage[];
-  parameters?: GenerationParameters;
-  api_url?: string;
-  /** Optional: resolve key from a connection instead of global lookup */
-  connection_id?: string;
-  /** Optional: use this key directly (for extension endpoints) */
-  api_key?: string;
-  /** Optional tool/function definitions for inline function calling. */
-  tools?: ToolDefinition[];
-  /**
-   * Optional per-request reasoning override. When omitted (or `source: "inherit"`),
-   * the connection's bound reasoning settings are applied, falling back to
-   * the user's global `reasoningSettings`. See `GenerationReasoningOverrideDTO`.
-   */
-  reasoning?: GenerationReasoningOverrideDTO;
-}
-
-export interface QuietGenerateInput {
-  messages: LlmMessage[];
-  connection_id?: string;
-  parameters?: GenerationParameters;
-  /** Optional tool/function definitions for inline function calling. */
-  tools?: ToolDefinition[];
-  /** Optional abort signal — when fired, cancels the in-flight HTTP request. */
-  signal?: AbortSignal;
-  /**
-   * Optional chat id. Currently used by the summarize path to track in-flight
-   * jobs in the summarize pool so frontends can recover state on reconnect or
-   * chat-switch. Ignored by `quietGenerate`.
-   */
-  chat_id?: string;
-  /**
-   * Optional per-request reasoning override. When omitted (or `source: "inherit"`),
-   * the connection's bound reasoning settings are applied, falling back to
-   * the user's global `reasoningSettings`. See `GenerationReasoningOverrideDTO`.
-   */
-  reasoning?: GenerationReasoningOverrideDTO;
-}
 
 /** Input for the /summarize endpoint — backend fetches messages and builds the prompt. */
 export interface SummarizeGenerateInput {
@@ -450,6 +376,8 @@ export interface SummarizeGenerateInput {
   chat_id: string;
   /** Number of recent messages to include in the prompt. */
   message_context: number;
+  /** Number of newest messages to exclude from the prompt. */
+  message_lag?: number;
   /** Previously stored summary text (may be empty). */
   existingSummary?: string;
   /** Active persona / user name. */
@@ -523,16 +451,6 @@ export interface DryRunResult {
   contextClipStats?: import("../llm/types").ContextClipStats;
 }
 
-export interface DryRunDisplayMessage
-  extends Omit<LlmMessage, "content"> {
-  content: string;
-  reasoning?: string;
-  contentParts?: DisplayContentPartSummary[];
-  __chatHistorySource?: boolean;
-  __sourceMessageId?: string;
-  __sourceIndexInChat?: number;
-}
-
 export interface BatchGenerateInput {
   requests: RawGenerateInput[];
   concurrent?: boolean;
@@ -549,6 +467,8 @@ export interface BatchResultItem {
   success: boolean;
   content?: string;
   finish_reason?: string;
+  stop_details?: GenerationResponse["stop_details"];
+  stop_sequence?: string | null;
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
@@ -563,14 +483,27 @@ interface SpindleContext {
   connectionId?: string;
   personaId?: string;
   generationType: string;
+  dryRun?: boolean;
+  userId?: string;
+  cancelGeneration?: boolean;
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
+  __spindleWorldInfoCaptures?: Record<string, ActivatedWorldInfoEntry[]>;
   [key: string]: unknown;
+}
+
+class GenerationCancelledByExtensionError extends Error {
+  constructor() {
+    super("Generation cancelled by extension context handler");
+    this.name = "GenerationCancelledByExtension";
+  }
 }
 
 /** Result of assembling + post-processing the prompt pipeline. */
 interface PromptPipelineResult {
   messages: LlmMessage[];
   parameters: GenerationParameters;
+  /** Preset selected by profile/request resolution for this generation. */
+  resolvedPreset?: { id: string; name: string };
   breakdown?: AssemblyBreakdownEntry[];
   /** Snapshot of chat history messages taken before interceptors/post-processing,
    *  used as the shared tokenization source for both dry-run and generation breakdowns. */
@@ -578,6 +511,8 @@ interface PromptPipelineResult {
   /** The resolved assistant prefill text. When set, the generate service prepends
    *  this to the LLM response since the model continues after the prefill. */
   assistantPrefill?: string;
+  /** The resolved Kimi reasoning prefix, surfaced before streamed reasoning. */
+  assistantReasoningPrefill?: string;
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
   worldInfoStats?: DryRunResult["worldInfoStats"];
   memoryStats?: import("../llm/types").MemoryStats;
@@ -591,35 +526,8 @@ interface PromptPipelineResult {
   macroEnv?: import("../macros/types").MacroEnv;
   /** Snapshot of the macro environment before chat-history evaluation mutates it. */
   macroEnvSeed?: import("../macros/types").MacroEnv;
-}
-
-/**
- * If the generated content contains an unclosed reasoning/thinking tag
- * (e.g. generation was interrupted mid-thought), append the closing tag
- * so the frontend can properly collapse the reasoning block.
- */
-function closeUnterminatedReasoningTags(
-  userId: string,
-  content: string,
-): string {
-  if (!content) return content;
-
-  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
-  return closeUnterminatedDelimitedReasoning(
-    content,
-    resolveReasoningDelimiters(reasoningSetting?.value),
-  );
-}
-
-function getReasoningParseConfig(userId: string): {
-  enabled: boolean;
-  delimiters: ReturnType<typeof resolveReasoningDelimiters>;
-} {
-  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
-  return {
-    enabled: reasoningSetting?.value?.autoParse === true,
-    delimiters: resolveReasoningDelimiters(reasoningSetting?.value),
-  };
+  /** Resolved per-preset setting for streamed response finalization. */
+  trimIncompleteWords?: boolean;
 }
 
 function appendInterceptorBreakdownEntries(
@@ -640,32 +548,6 @@ function appendInterceptorBreakdownEntries(
       extensionName: entry.extensionName,
     }));
   return [...breakdown, ...injected];
-}
-
-function applyDelimitedReasoningParsing(
-  userId: string,
-  response: GenerationResponse,
-): GenerationResponse {
-  const { enabled, delimiters } = getReasoningParseConfig(userId);
-  const parsed = separateDelimitedReasoning(
-    response.content,
-    response.reasoning,
-    delimiters,
-    enabled,
-  );
-  return {
-    ...response,
-    content: parsed.content,
-    ...(parsed.reasoning ? { reasoning: parsed.reasoning } : {}),
-  };
-}
-
-function wrapDelimitedReasoningForUser(
-  userId: string,
-  stream: AsyncGenerator<StreamChunk, void, unknown>,
-): AsyncGenerator<StreamChunk, void, unknown> {
-  const { enabled, delimiters } = getReasoningParseConfig(userId);
-  return wrapDelimitedReasoningStream(stream, delimiters, enabled);
 }
 
 /**
@@ -694,6 +576,70 @@ function errorMessage(err: unknown): string {
   }
 }
 
+/**
+ * Preserve a stable, machine-readable code alongside the human-facing error.
+ * Provider failures normally expose their upstream code; local/setup failures
+ * use a generic code so every terminal error notification has one.
+ */
+function generationErrorCode(err: unknown): string {
+  if (typeof err === "object" && err !== null && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    if (typeof code === "string" && code.trim()) {
+      return clampErrorMessage(code.trim()).slice(0, 120);
+    }
+    if (typeof code === "number" && Number.isFinite(code)) return String(code);
+  }
+  if (err instanceof ProviderRequestError && err.status) {
+    return `http_${err.status}`;
+  }
+  return "generation_failed";
+}
+
+function generationFailurePayload(
+  err: unknown,
+  message: string,
+  connectionName?: string,
+): {
+  error: string;
+  errorCode: string;
+  errorMessage: string;
+  connectionName?: string;
+} {
+  const name = connectionName?.trim();
+  return {
+    error: message,
+    errorCode: generationErrorCode(err),
+    errorMessage: message,
+    ...(name ? { connectionName: name } : {}),
+  };
+}
+
+/**
+ * The residual keyless case the credential preflight deliberately leaves
+ * permissive: a connection with `has_api_key = 0` on a provider that does not
+ * declare a key as required sends no `Authorization` header at all (see
+ * `OpenAICompatibleProvider.headers`). Legitimate for a local endpoint —
+ * misconfiguration for a gateway that wants a key, and indistinguishable up
+ * front. When such a call comes back 401/403, name the connection and say that
+ * no stored key was sent, so the user gets a remedy instead of the raw provider
+ * status line alone. `describeProviderError` has no connection context and is
+ * left untouched.
+ */
+function enrichUnauthenticatedConnectionError(
+  message: string,
+  err: unknown,
+  opts: { apiKey: string; connectionName?: string },
+): string {
+  if (opts.apiKey) return message;
+  if (!(err instanceof ProviderRequestError)) return message;
+  if (err.status !== 401 && err.status !== 403) return message;
+  const connectionName = opts.connectionName?.trim();
+  if (!connectionName) return message;
+  return clampErrorMessage(
+    `${message} No stored API key was sent for connection "${connectionName}" — add one via the connection settings, or switch this chat to a connection that has one.`,
+  );
+}
+
 function parseInlineToolCallName(
   name: string,
 ): { memberIdPrefix: string; qualifiedName: string } | null {
@@ -712,21 +658,31 @@ async function executeInlineCouncilToolCalls(
   toolsByName: Map<string, RuntimeCouncilToolDefinition>,
   membersByPrefix: Map<string, CouncilMember> | undefined,
   contextMessages: LlmMessage[],
+  allowDirectWebSearch = false,
 ): Promise<InlineCouncilToolResult[]> {
   const results: InlineCouncilToolResult[] = [];
+  let directWebSearchExecuted = false;
 
   for (const toolCall of toolCalls) {
     // Try Council-prefixed tool name first (memberIdPrefix_toolName)
     const parsedName = parseInlineToolCallName(toolCall.name);
     let tool: RuntimeCouncilToolDefinition | undefined;
     let member: CouncilMember | undefined;
-    let resolvedQualifiedName: string;
+    let resolvedQualifiedName = toolCall.name;
+    let isCouncilQualifiedCall = false;
 
     if (parsedName) {
       const { memberIdPrefix, qualifiedName } = parsedName;
-      tool = toolsByName.get(qualifiedName);
-      member = membersByPrefix?.get(memberIdPrefix);
-      resolvedQualifiedName = qualifiedName;
+      const candidateTool = toolsByName.get(qualifiedName);
+      const candidateMember = membersByPrefix?.get(memberIdPrefix);
+      // A direct tool may itself contain an underscore (web_search). Treat it
+      // as Council-qualified only when both the member prefix and tool match.
+      if (candidateTool && candidateMember) {
+        tool = candidateTool;
+        member = candidateMember;
+        resolvedQualifiedName = qualifiedName;
+        isCouncilQualifiedCall = true;
+      }
     }
 
     // Fall back to direct lookup — extension inline tools use the sanitized
@@ -737,8 +693,39 @@ async function executeInlineCouncilToolCalls(
     }
 
     if (!tool) continue;
-    // Council tools require a member match; extension inline tools do not
-    if (parsedName && !member && membersByPrefix?.size) continue;
+    const isDirectWebSearch =
+      !isCouncilQualifiedCall &&
+      toolCall.name === INLINE_WEB_SEARCH_TOOL_NAME &&
+      resolvedQualifiedName === INLINE_WEB_SEARCH_TOOL_NAME;
+    if (isDirectWebSearch && (!allowDirectWebSearch || directWebSearchExecuted)) {
+      results.push({
+        callId: toolCall.call_id,
+        qualifiedName: resolvedQualifiedName,
+        toolName: tool.name,
+        toolDisplayName: tool.displayName,
+        result: "Web search can be called only once per generation.",
+        isError: true,
+        isInlineWebSearch: true,
+      });
+      continue;
+    }
+
+    const directQuery = isDirectWebSearch && typeof toolCall.args?.query === "string"
+      ? toolCall.args.query.trim().slice(0, INLINE_WEB_SEARCH_MAX_QUERY_CHARS)
+      : undefined;
+    if (isDirectWebSearch && (!directQuery || directQuery.length < 2)) {
+      results.push({
+        callId: toolCall.call_id,
+        qualifiedName: resolvedQualifiedName,
+        toolName: tool.name,
+        toolDisplayName: tool.displayName,
+        result: "Web search requires a query of at least two characters.",
+        isError: true,
+        isInlineWebSearch: true,
+      });
+      directWebSearchExecuted = true;
+      continue;
+    }
 
     const execution = getCouncilToolExecution(userId, tool);
     if (execution === "llm") continue;
@@ -793,27 +780,57 @@ async function executeInlineCouncilToolCalls(
           __deadlineMs: Date.now() + timeoutMs,
         },
         timeoutMs,
+        userId,
         memberContext,
         contextMessages,
       );
     } else if (execution === "host") {
-      if (!member) continue; // Host tools require a council member
+      if (isCouncilQualifiedCall && !member) continue;
       let lumiaItem: ReturnType<typeof packsSvc.getLumiaItem> = null;
-      try {
-        lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
-      } catch {
-        // Pack/item may have been removed mid-generation.
+      if (member) {
+        try {
+          lumiaItem = packsSvc.getLumiaItem(userId, member.itemId);
+        } catch {
+          // Pack/item may have been removed mid-generation.
+        }
       }
 
-      result = await executeHostCouncilTool({
-        userId,
-        tool,
-        args: toolCall.args ?? {},
-        member,
-        memberContext: buildCouncilMemberContext(member, lumiaItem),
-        contextMessages,
-        timeoutMs,
-      });
+      try {
+        const requestedCount = typeof toolCall.args?.result_count === "number"
+          ? toolCall.args.result_count
+          : Number(toolCall.args?.result_count);
+        const args = isDirectWebSearch
+          ? {
+            ...(toolCall.args ?? {}),
+            query: directQuery,
+            result_count: Number.isFinite(requestedCount)
+              ? Math.max(1, Math.min(INLINE_WEB_SEARCH_MAX_RESULTS, Math.round(requestedCount)))
+              : INLINE_WEB_SEARCH_MAX_RESULTS,
+          }
+          : toolCall.args ?? {};
+        result = await executeHostCouncilTool({
+          userId,
+          tool,
+          args,
+          member,
+          memberContext: member ? buildCouncilMemberContext(member, lumiaItem) : undefined,
+          contextMessages,
+          timeoutMs,
+        });
+      } catch (err) {
+        if (!isDirectWebSearch) throw err;
+        results.push({
+          callId: toolCall.call_id,
+          qualifiedName: resolvedQualifiedName,
+          toolName: tool.name,
+          toolDisplayName: tool.displayName,
+          result: `Web search failed: ${errorMessage(err)}`,
+          isError: true,
+          isInlineWebSearch: true,
+        });
+        directWebSearchExecuted = true;
+        continue;
+      }
     }
 
     results.push({
@@ -822,8 +839,17 @@ async function executeInlineCouncilToolCalls(
       toolName: tool.name,
       toolDisplayName: tool.displayName,
       memberName: member?.itemName,
-      result,
+      // Keep the immediate result compact. The full, untrusted source text is
+      // attached exactly once in the continuation using the provider-safe form.
+      result: isDirectWebSearch
+        ? "Web search completed. Retrieved reference context is available in the following system message."
+        : result,
+      ...(isDirectWebSearch ? {
+        inlineWebSearchContext: result,
+        isInlineWebSearch: true,
+      } : {}),
     });
+    if (isDirectWebSearch) directWebSearchExecuted = true;
   }
 
   return results;
@@ -862,18 +888,6 @@ function raceWithSignal<T>(
   });
 }
 
-// ── Pre-token transient retry ────────────────────────────────────────────────
-// A momentary provider 429/5xx/529 otherwise fails the whole generation. We
-// retry establishing the upstream stream a few times with full-jitter backoff,
-// but ONLY before the first chunk is emitted — once tokens flow, mid-stream
-// failures propagate unchanged (retrying then would duplicate output).
-const GENERATION_MAX_RETRIES = (() => {
-  const raw = Number(process.env.LUMIVERSE_GENERATION_MAX_RETRIES);
-  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 3;
-})();
-const GENERATION_RETRY_BASE_MS = 500;
-const GENERATION_RETRY_MAX_MS = 8_000;
-
 // Max inline tool-call rounds within a single generation (model → tools →
 // model → …). Interleaved-thinking agents can chain many tool calls, so this
 // is tunable; defaults to 3 to preserve historical behaviour.
@@ -881,110 +895,6 @@ const INLINE_TOOL_MAX_ROUNDS = (() => {
   const raw = Number(process.env.LUMIVERSE_INLINE_TOOL_MAX_ROUNDS);
   return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 3;
 })();
-
-function computeBackoffMs(attempt: number, retryAfterMs?: number): number {
-  // Honor a server Retry-After hint when present, clamped to our ceiling.
-  if (retryAfterMs != null && retryAfterMs > 0) {
-    return Math.min(retryAfterMs, GENERATION_RETRY_MAX_MS);
-  }
-  // Full jitter: random in [0, min(cap, base * 2^attempt)].
-  const ceil = Math.min(GENERATION_RETRY_MAX_MS, GENERATION_RETRY_BASE_MS * 2 ** attempt);
-  return Math.floor(Math.random() * ceil);
-}
-
-/** Sleep that rejects immediately if the signal aborts (e.g. user hits Stop). */
-function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-// Track active generations for stop support
-const activeGenerations = new Map<
-  string,
-  {
-    controller: AbortController;
-    userId: string;
-    chatId: string;
-    startedAt: number;
-    /** Resolves when the generation's streaming continuation finishes
-     *  (success, error, or abort). Used by the per-chat lock to wait for
-     *  teardown before starting a replacement generation — this prevents
-     *  two HTTP operations (the old cancel and the new connect) from
-     *  overlapping on Bun's HTTPThread, which has a known null-callback
-     *  race on concurrent cancel+start.
-     *  Created up-front as a deferred promise so it's always present — even
-     *  during the setup phase before the streaming IIFE starts. */
-    completion: Promise<void>;
-  }
->();
-
-// Per-chat generation lock: prevents concurrent generations (including council) in the same chat.
-// Keyed by `${userId}:${chatId}` → generationId. Registered BEFORE council execution so that
-// a second request for the same chat will abort the in-flight one (including its council tools).
-const activeChatGenerations = new Map<string, string>();
-
-// Pending council retry decisions: when council tools partially fail, the generation
-// pauses and waits for the user to decide whether to continue or retry. Keyed by
-// generationId → { resolve, timeout }. The user responds via POST /generate/council-retry.
-/** Safety cap: auto-continue after 10 minutes to prevent permanent resource hangs */
-const COUNCIL_RETRY_SAFETY_CAP_MS = 10 * 60 * 1000;
-
-const pendingCouncilRetries = new Map<
-  string,
-  {
-    userId: string;
-    resolve: (decision: "continue" | "retry") => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }
->();
-
-/**
- * Called from the council-retry route to resolve a pending decision. Verifies
- * the generation belongs to the caller — without this check, any authenticated
- * user could approve/retry another user's pending generation by guessing IDs.
- */
-export function resolveCouncilRetry(
-  userId: string,
-  generationId: string,
-  decision: "continue" | "retry",
-): boolean {
-  const pending = pendingCouncilRetries.get(generationId);
-  if (!pending) return false;
-  if (pending.userId !== userId) return false;
-  clearTimeout(pending.timeout);
-  pendingCouncilRetries.delete(generationId);
-  // Clear the pool flag
-  const poolEntry = pool.getPoolEntry(generationId);
-  if (poolEntry) {
-    poolEntry.councilRetryPending = false;
-    delete poolEntry.councilToolsFailure;
-  }
-  pending.resolve(decision);
-  return true;
-}
-
-/** Resolve connection profile by ID or fall back to the user's default. */
-function resolveConnection(userId: string, connectionId?: string) {
-  const connection = connectionsSvc.resolveConnection(userId, connectionId);
-  if (!connection) {
-    throw new Error("No connection profile found. Create one first.");
-  }
-  return connection;
-}
 
 function resolveActivePresetId(userId: string): string | undefined {
   const activePresetSetting = settingsSvc.getSetting(
@@ -995,12 +905,6 @@ function resolveActivePresetId(userId: string): string | undefined {
     ? activePresetSetting.value
     : undefined;
 }
-
-type ReasoningSettingsSnapshot = {
-  apiReasoning?: boolean;
-  reasoningEffort?: string;
-  thinkingDisplay?: string;
-} | null;
 
 type CouncilResultCache = CachedCouncilResult & {
   fingerprint?: string;
@@ -1026,6 +930,11 @@ function stableJson(value: unknown): string {
     .join(",")}}`;
 }
 
+function excludesLatestUserMessage(toolsSettings: unknown): boolean {
+  return (toolsSettings as { excludeLatestUserMessage?: boolean })
+    .excludeLatestUserMessage === true;
+}
+
 // Hash the council's view of the chat — the (id, content) pairs of the last
 // `contextWindow` messages, the same slice council members consume in
 // buildContextMessages. Mixed into the cache fingerprint so that editing or
@@ -1033,8 +942,13 @@ function stableJson(value: unknown): string {
 function hashCouncilContextMessages(
   messages: Message[],
   contextWindow: number,
+  excludeLatestUserMessage: boolean,
 ): string {
-  const window = messages.slice(-contextWindow);
+  const window = selectCouncilContextMessages(
+    messages,
+    contextWindow,
+    excludeLatestUserMessage,
+  );
   const hasher = new Bun.CryptoHasher("sha256");
   for (const m of window) {
     hasher.update(m.id);
@@ -1064,6 +978,7 @@ function buildCouncilCacheFingerprint(
       mode: councilSettings.toolsSettings.mode,
       timeoutMs: councilSettings.toolsSettings.timeoutMs,
       sidecarContextWindow: councilSettings.toolsSettings.sidecarContextWindow,
+      excludeLatestUserMessage: excludesLatestUserMessage(councilSettings.toolsSettings),
       includeUserPersona: councilSettings.toolsSettings.includeUserPersona,
       includeCharacterInfo: councilSettings.toolsSettings.includeCharacterInfo,
       includeWorldInfo: councilSettings.toolsSettings.includeWorldInfo,
@@ -1099,116 +1014,16 @@ function isReusableCouncilCache(
   return true;
 }
 
-function getEffectiveReasoningSettings(
-  userId: string,
-  connection?: { metadata?: Record<string, any> | null } | null,
-): ReasoningSettingsSnapshot {
-  const boundSettings = connection?.metadata?.reasoningBindings?.settings;
-  if (boundSettings && typeof boundSettings === "object") {
-    return boundSettings as ReasoningSettingsSnapshot;
-  }
-
-  const reasoningSetting = settingsSvc.getSetting(userId, "reasoningSettings");
-  return (reasoningSetting?.value as ReasoningSettingsSnapshot | undefined) ?? null;
-}
-
-/**
- * Resolve a per-request reasoning override down to a `ReasoningSettingsSnapshot`
- * that the existing inject/off-switch helpers can consume. Returns `undefined`
- * to mean "no override — use the inherited settings".
- */
-function resolveReasoningOverride(
-  override: GenerationReasoningOverrideDTO | undefined,
-): ReasoningSettingsSnapshot | undefined {
-  if (!override) return undefined;
-  const source = override.source ?? "inherit";
-  if (source === "inherit") return undefined;
-  if (source === "off") {
-    return { apiReasoning: false };
-  }
-  // source === "custom"
-  return {
-    apiReasoning: override.apiReasoning ?? true,
-    reasoningEffort: override.effort ?? "auto",
-    thinkingDisplay: override.thinkingDisplay ?? "auto",
-  };
-}
-
-function applyEffectiveReasoningSettings(
-  userId: string,
-  connection: { metadata?: Record<string, any> | null },
-  providerName: string,
-  modelName: string | undefined,
-  params: GenerationParameters,
-  override?: GenerationReasoningOverrideDTO,
-): void {
-  const resolvedOverride = resolveReasoningOverride(override);
-  const reasoningSettings =
-    resolvedOverride !== undefined
-      ? resolvedOverride
-      : getEffectiveReasoningSettings(userId, connection);
-
-  if (reasoningSettings?.apiReasoning) {
-    const effort = reasoningSettings.reasoningEffort || "auto";
-    const isToggleOnly = providerName === "moonshot" || providerName === "zai";
-    if (effort !== "auto" || isToggleOnly) {
-      injectReasoningParams(
-        params,
-        providerName,
-        effort,
-        modelName,
-        reasoningSettings.thinkingDisplay,
-      );
-    }
-    return;
-  }
-
-  if (reasoningSettings?.apiReasoning !== false) return;
-
-  applyProviderReasoningOffSwitch(params as any, providerName, modelName);
-}
-
-/** Resolve provider and API key from a connection profile. */
-async function resolveProviderAndKey(
-  userId: string,
-  connectionId: string,
-): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string; connection: ConnectionProfile }> {
-  const connection = connectionsSvc.resolveConnection(userId, connectionId);
-  if (!connection) {
-    throw new Error(`Connection not found: ${connectionId}`);
-  }
-
-  const provider = getProvider(connection.provider);
-  if (!provider) {
-    throw new Error(`Unknown provider: ${connection.provider}`);
-  }
-
-  const apiKey = await secretsSvc.getSecret(
-    userId,
-    connectionsSvc.connectionSecretKey(connection.id),
-  );
-  if (!apiKey && provider.capabilities.apiKeyRequired) {
-    throw new Error(
-      `No API key found for connection "${connection.name}". Add one via the connection settings.`,
-    );
-  }
-
-  return {
-    provider,
-    apiKey: apiKey || "",
-    apiUrl: connectionsSvc.resolveEffectiveApiUrl(connection),
-    connection,
-  };
-}
-
 /**
  * Shared prompt pipeline: build spindle context, assemble prompt, run
  * interceptors, apply post-processing, and merge parameters.
  */
 async function runPromptPipeline(opts: {
+  frontendSessionId?: string;
   userId: string;
   chatId: string;
   connectionId?: string;
+  model?: string;
   presetId?: string;
   forcePresetId?: boolean;
   personaId?: string;
@@ -1216,10 +1031,13 @@ async function runPromptPipeline(opts: {
   generationType: string;
   impersonateMode?: ImpersonateMode;
   impersonateInput?: string;
+  userInput?: string;
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
   rejectedSwipe?: string;
+  continueMessageId?: string;
+  continuePostfix?: string;
   targetCharacterId?: string;
   councilToolResults?: any[];
   councilNamedResults?: Record<string, string>;
@@ -1227,7 +1045,9 @@ async function runPromptPipeline(opts: {
   precomputedVectorEntries?: VectorActivatedEntry[];
   regenFeedback?: string;
   regenFeedbackPosition?: "system" | "user";
+  regenFeedbackFormat?: string;
   signal?: AbortSignal;
+  isDryRun?: boolean;
 }): Promise<PromptPipelineResult> {
   // Yield to the event loop before entering the assembly pipeline so a stop
   // clicked in the first few ticks after the generation starts can actually
@@ -1241,17 +1061,24 @@ async function runPromptPipeline(opts: {
 
   // Build spindle context
   let spindleContext: SpindleContext = {
+    frontendSessionId: opts.frontendSessionId,
     chatId: opts.chatId,
     connectionId: opts.connectionId,
     personaId: opts.personaId,
     generationType: opts.generationType,
+    dryRun: opts.isDryRun === true,
+    userId: opts.userId,
   };
   if (contextHandlerChain.count > 0) {
-    spindleContext = (await contextHandlerChain.run(
+    const handled = (await contextHandlerChain.run(
       spindleContext,
       opts.userId,
       opts.signal,
-    )) as SpindleContext;
+    )) as SpindleContext | undefined;
+    if (handled) spindleContext = { ...handled, frontendSessionId: opts.frontendSessionId };
+    if (spindleContext.cancelGeneration === true) {
+      throw new GenerationCancelledByExtensionError();
+    }
   }
 
   // Build messages: use explicit messages if provided, otherwise assemble from preset
@@ -1260,7 +1087,11 @@ async function runPromptPipeline(opts: {
   let breakdown: AssemblyBreakdownEntry[] | undefined;
   let interceptorBreakdown: InterceptorBreakdownEntry[] | undefined;
   let assistantPrefill: string | undefined;
+  let assistantReasoningPrefill: string | undefined;
   let activatedWorldInfo: ActivatedWorldInfoEntry[] | undefined;
+  let spindleWorldInfoCaptures:
+    | Record<string, ActivatedWorldInfoEntry[]>
+    | undefined;
   let worldInfoStats: DryRunResult["worldInfoStats"] | undefined;
   let memoryStats: import("../llm/types").MemoryStats | undefined;
   let databankStats: import("../llm/types").DatabankStats | undefined;
@@ -1269,6 +1100,8 @@ async function runPromptPipeline(opts: {
     | { chatId: string; partial: Record<string, any> }
     | undefined;
   let macroEnv: import("../macros/types").MacroEnv | undefined;
+  let trimIncompleteWords = false;
+  let resolvedPreset: { id: string; name: string } | undefined;
 
   let deliberationHandledByMacro = false;
 
@@ -1284,10 +1117,14 @@ async function runPromptPipeline(opts: {
       personaId: opts.personaId,
       personaAddonStates: opts.personaAddonStates,
       generationType: opts.generationType as GenerationType,
+      macroCommit: opts.isDryRun !== true,
       impersonateMode: opts.impersonateMode,
       impersonateInput: opts.impersonateInput,
+      userInput: opts.userInput,
       excludeMessageId: opts.excludeMessageId,
       rejectedSwipe: opts.rejectedSwipe,
+      continueMessageId: opts.continueMessageId,
+      continuePostfix: opts.continuePostfix,
       targetCharacterId: opts.targetCharacterId,
       councilToolResults: opts.councilToolResults,
       councilNamedResults: opts.councilNamedResults,
@@ -1295,6 +1132,7 @@ async function runPromptPipeline(opts: {
       precomputedVectorEntries: opts.precomputedVectorEntries,
       regenFeedback: opts.regenFeedback,
       regenFeedbackPosition: opts.regenFeedbackPosition,
+      regenFeedbackFormat: opts.regenFeedbackFormat,
       skipPromptRegex: isPromptRegexChatOwned(opts.chatId, isExtensionRunning),
       signal: opts.signal,
     };
@@ -1330,7 +1168,9 @@ async function runPromptPipeline(opts: {
     assembledParams = assemblyResult.parameters;
     breakdown = assemblyResult.breakdown;
     assistantPrefill = assemblyResult.assistantPrefill;
+    assistantReasoningPrefill = assemblyResult.assistantReasoningPrefill;
     activatedWorldInfo = assemblyResult.activatedWorldInfo;
+    spindleWorldInfoCaptures = assemblyResult.spindleWorldInfoCaptures;
     worldInfoStats = assemblyResult.worldInfoStats;
     memoryStats = assemblyResult.memoryStats;
     databankStats = assemblyResult.databankStats;
@@ -1338,6 +1178,8 @@ async function runPromptPipeline(opts: {
     deferredWiState = assemblyResult.deferredWiState;
     deliberationHandledByMacro = !!assemblyResult.deliberationHandledByMacro;
     macroEnv = assemblyResult.macroEnv;
+    trimIncompleteWords = assemblyResult.trimIncompleteWords === true;
+    resolvedPreset = assemblyResult.resolvedPreset;
   }
 
   // Snapshot chat history messages BEFORE interceptors/post-processing can
@@ -1356,6 +1198,10 @@ async function runPromptPipeline(opts: {
   // Expose activated world info to spindle context
   if (activatedWorldInfo) {
     spindleContext.activatedWorldInfo = activatedWorldInfo;
+  }
+  delete spindleContext.__spindleWorldInfoCaptures;
+  if (spindleWorldInfoCaptures) {
+    spindleContext.__spindleWorldInfoCaptures = spindleWorldInfoCaptures;
   }
 
   // Run Spindle interceptor pipeline on assembled messages
@@ -1405,13 +1251,43 @@ async function runPromptPipeline(opts: {
       // works regardless of contiguity — depth-injected blocks splicing into
       // the chat history range no longer skew depth values.
       const chatHistoryDepth = new Map<number, number>();
+      const hasRepeatBack = regexScriptsSvc.hasRegexMatchAction(
+        promptScripts,
+        "repeat_back",
+      );
+      const chatHistoryPosition = hasRepeatBack
+        ? new Map<number, number>()
+        : null;
       const chIndices: number[] = [];
       for (let i = 0; i < messages.length; i++) {
         if (isChatHistoryMessage(messages[i])) chIndices.push(i);
       }
       for (let pos = 0; pos < chIndices.length; pos++) {
         chatHistoryDepth.set(chIndices[pos], chIndices.length - 1 - pos);
+        chatHistoryPosition?.set(chIndices[pos], pos);
       }
+      const originalPromptContent = hasRepeatBack
+        ? messages.map((message) => getTextContent(message))
+        : [];
+      const promptRegexOptionsFor = (index: number, message: LlmMessage) => {
+        if (!hasRepeatBack) return { source: "prompt_backend" as const };
+        const position = chatHistoryPosition!.get(index);
+        let previousContent: string | undefined;
+        if (position !== undefined && position > 0) {
+          for (let previous = position! - 1; previous >= 1; previous--) {
+            const previousIndex = chIndices[previous]!;
+            if (messages[previousIndex]?.role === message.role) {
+              previousContent = originalPromptContent[previousIndex];
+              break;
+            }
+          }
+          previousContent ??= originalPromptContent[chIndices[0]!];
+        }
+        return {
+          source: "prompt_backend" as const,
+          ...(previousContent !== undefined ? { previousContent } : {}),
+        };
+      };
 
       const regexedChatHistoryMessages: LlmMessage[] = [];
 
@@ -1449,7 +1325,7 @@ async function runPromptPipeline(opts: {
               depth,
               macroEnv,
               undefined,
-              { source: "prompt_backend" },
+              promptRegexOptionsFor(i, msg),
             ),
           };
         } else if (Array.isArray(msg.content)) {
@@ -1465,7 +1341,7 @@ async function runPromptPipeline(opts: {
                       depth,
                       macroEnv,
                       undefined,
-                      { source: "prompt_backend" },
+                      promptRegexOptionsFor(i, msg),
                     ),
                   }
                 : part,
@@ -1512,7 +1388,9 @@ async function runPromptPipeline(opts: {
   // Filter out any messages that became entirely empty after interceptors/regex scripts.
   // Many providers and LLM proxies drop requests entirely or hang if they encounter empty messages.
   const hasNonEmptyContent = (msg: LlmMessage) => {
-    if (typeof msg.content === "string") return msg.content.trim().length > 0;
+    if (typeof msg.content === "string") {
+      return msg.content.trim().length > 0 || (msg.role === "assistant" && msg.partial === true);
+    }
     if (Array.isArray(msg.content)) return msg.content.length > 0;
     return true;
   };
@@ -1540,16 +1418,20 @@ async function runPromptPipeline(opts: {
     opts.userId,
     effectiveConnection,
     effectiveConnection.provider,
-    effectiveConnection.model || undefined,
+    opts.model || effectiveConnection.model || undefined,
     parameters,
+    undefined,
+    !!opts.inputMessages,
   );
 
   return {
     messages,
     parameters,
+    resolvedPreset,
     breakdown,
     chatHistoryMessages,
     assistantPrefill,
+    assistantReasoningPrefill,
     activatedWorldInfo,
     worldInfoStats,
     memoryStats,
@@ -1559,45 +1441,69 @@ async function runPromptPipeline(opts: {
     spindleContext,
     deliberationHandledByMacro,
     macroEnv,
+    trimIncompleteWords,
   };
 }
 
-/** Resolve provider and key for raw generate: supports connection_id, direct api_key, or provider-name lookup. */
-async function resolveRawProviderAndKey(
-  userId: string,
-  input: RawGenerateInput,
-): Promise<{ provider: LlmProvider; apiKey: string; apiUrl: string; connection: ConnectionProfile | null }> {
-  // If a connection_id is provided, use per-connection key
-  if (input.connection_id) {
-    return resolveProviderAndKey(userId, input.connection_id);
-  }
+function resolveStartGenerationId(input: GenerateInput): string {
+  const requested = typeof input.generationId === "string" ? input.generationId.trim() : "";
+  return requested || crypto.randomUUID();
+}
 
-  // If a direct api_key is provided, use it
-  if (input.api_key) {
-    const provider = getProvider(input.provider);
-    if (!provider) throw new Error(`Unknown provider: ${input.provider}`);
-    return { provider, apiKey: input.api_key, apiUrl: input.api_url || "", connection: null };
-  }
+function reusableStagedSwipeIndex(message: Message): number | undefined {
+  if (!Array.isArray(message.swipes) || message.swipes.length === 0) return undefined;
+  const lastIdx = message.swipes.length - 1;
+  return message.swipes[lastIdx] === "" ? lastIdx : undefined;
+}
 
-  // Fallback: look up provider by name, but there's no global key anymore.
-  // For backward compat with extensions that pass provider+api_key inline, require api_key.
-  const provider = getProvider(input.provider);
-  if (!provider) throw new Error(`Unknown provider: ${input.provider}`);
-
-  if (provider.capabilities.apiKeyRequired) {
-    throw new Error(
-      `No API key provided. Pass api_key or connection_id in the request.`,
-    );
-  }
-
-  return { provider, apiKey: "", apiUrl: input.api_url || "", connection: null };
+/**
+ * Out-of-band start options. Deliberately a SECOND POSITIONAL ARGUMENT rather
+ * than a field on `GenerateInput`: `chatRoute` in `src/routes/generate.routes.ts`
+ * builds its service input as `handler({ ...body, userId, signal, ...extras })`,
+ * so any in-band field would be settable by any client on `POST /generate`,
+ * `/regenerate`, and `/continue` — handing a forged interactive send the
+ * Edit-and-Send override. `chatRoute` calls `handler(inputObject)` with exactly
+ * one argument. Multiplayer and WorkerHost supply trusted `requestOrigin`
+ * metadata separately; none of these options can come from body spreading.
+ */
+export interface StartGenerationOptions {
+  requestOrigin?: RequestOrigin;
+  origin?: "edit_and_send";
+  /**
+   * The connection profile the Edit-and-Send request was COMMITTED against, read
+   * off `generation_outbox.connection_id` by the dispatcher. Authoritative: it is
+   * the first rung of `resolveChatGenerationConnection`, ahead of the
+   * active-profile opt-in and ahead of the chat's `connection_profile_id` pin, so
+   * no live-state re-read on a retry tick or during crash recovery can retarget a
+   * request the user already committed.
+   *
+   * In this out-of-band bag rather than on `GenerateInput` for the same security
+   * reason as `origin` (see above): an in-band field would be spread out of the
+   * request body by `chatRoute` and therefore forgeable by any client.
+   */
+  connectionId?: string;
 }
 
 export async function startGeneration(
   input: GenerateInput,
+  options?: StartGenerationOptions,
 ): Promise<{ generationId: string; status: string }> {
-  const generationId = crypto.randomUUID();
+  input = { ...input, frontendSessionId: getActiveFrontendSession(input.userId) };
+  const requestedGenerationId =
+    typeof input.generationId === "string" ? input.generationId.trim() : "";
+  const generationId = resolveStartGenerationId(input);
   let genType = input.generation_type || "normal";
+
+  if (requestedGenerationId) {
+    const existing = getActiveGeneration(generationId);
+    if (existing && existing.userId === input.userId && existing.chatId === input.chat_id) {
+      return { generationId, status: "streaming" };
+    }
+    const poolEntry = pool.getPoolEntry(generationId);
+    if (poolEntry && poolEntry.userId === input.userId && poolEntry.chatId === input.chat_id) {
+      return { generationId, status: "streaming" };
+    }
+  }
 
   // Safety fallback: regenerate/continue should only target an assistant
   // message when the latest chat message is assistant-authored.
@@ -1619,10 +1525,12 @@ export async function startGeneration(
   // --- Per-chat generation lock ---
   // Stop any existing generation for this chat (including in-flight council tools)
   // before proceeding. This prevents council re-firing and generation interruption.
-  const chatKey = `${input.userId}:${input.chat_id}`;
-  const existingGenId = activeChatGenerations.get(chatKey);
+  const existingGenId = getActiveChatGeneration(
+    input.userId,
+    input.chat_id,
+  );
   if (existingGenId) {
-    const existing = activeGenerations.get(existingGenId);
+    const existing = getActiveGeneration(existingGenId);
     if (existing) {
       console.debug(
         "[generate] Aborting existing generation %s for chat %s before starting new one",
@@ -1640,18 +1548,9 @@ export async function startGeneration(
         new Promise<void>((r) => setTimeout(r, 2000)),
       ]);
     }
-    activeGenerations.delete(existingGenId);
-    activeChatGenerations.delete(chatKey);
+    removeActiveGeneration(existingGenId);
+    clearActiveChatGeneration(input.userId, input.chat_id, existingGenId);
   }
-
-  // Tear down any fire-and-forget background work (cortex cache warming,
-  // databank retrieval) left over from prior generations on this chat.
-  // Successful completions don't abort their own controllers, so without
-  // this, slow embedding APIs can accumulate orphan tasks across sends.
-  // Await teardown so background fetch reader.cancel() completes before
-  // the new generation starts its own fetches — overlapping cancel+start
-  // on Bun's HTTPThread triggers a null-callback segfault.
-  await abortChatBackground(input.userId, input.chat_id);
 
   // Register this generation early (before council) so it can be tracked and aborted.
   // The completion promise is created up-front (deferred) so a replacement
@@ -1660,14 +1559,19 @@ export async function startGeneration(
   const abortController = new AbortController();
   let resolveCompletion!: () => void;
   const completion = new Promise<void>((r) => { resolveCompletion = r; });
-  activeGenerations.set(generationId, {
+  const generationStartedAt = Date.now();
+  registerActiveGeneration(generationId, {
     controller: abortController,
     userId: input.userId,
     chatId: input.chat_id,
-    startedAt: Date.now(),
+    startedAt: generationStartedAt,
+    // Until the provider returns its first token, the generation start is the
+    // last observed progress. This still protects requests that never begin
+    // streaming while allowing long-running streams to continue indefinitely.
+    lastTokenAt: generationStartedAt,
     completion,
   });
-  activeChatGenerations.set(chatKey, generationId);
+  setActiveChatGeneration(input.userId, input.chat_id, generationId);
 
   // Helper: bail out cleanly if aborted during the setup phase.
   // Throws the same DOMException shape that fetch / AbortSignal.any use so
@@ -1684,13 +1588,75 @@ export async function startGeneration(
 
   // Hoisted so the catch block can clean up the staged message on abort
   let stagedMessageId: string | undefined;
+  // Swipes are staged before the slower preflight work below. Keep both the
+  // original snapshot and the staged result: the former is the response being
+  // replaced, while the latter carries the new swipe index and active state.
+  let stagedSwipeOriginal: Message | null = null;
+  let stagedSwipe: Message | null = null;
+  let stagedSwipeId: number | undefined;
 
   try {
-    const connection = resolveConnection(input.userId, input.connection_id);
-    input.connection_id = connection.id;
+    // Stage a swipe before cancelling background work, resolving secrets, or
+    // validating the preset. This is the user-visible part of the action, and
+    // it must not wait behind cache-warming HTTP teardown (which is bounded at
+    // two seconds) or any later prompt-assembly preflight.
+    if (genType === "regenerate" || genType === "swipe") {
+      const target = input.message_id
+        ? chatsSvc.getMessage(input.userId, input.message_id)
+        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+      if (target && !target.is_user) {
+        const reuseIdx = requestedGenerationId ? reusableStagedSwipeIndex(target) : undefined;
+        if (reuseIdx != null) {
+          const priorIdx = reuseIdx > 0 ? reuseIdx - 1 : reuseIdx;
+          stagedSwipeOriginal = {
+            ...target,
+            swipe_id: priorIdx,
+            content: target.swipes[priorIdx] ?? target.content,
+          };
+          stagedSwipe = { ...target, swipe_id: reuseIdx };
+          stagedSwipeId = reuseIdx;
+        } else {
+          stagedSwipeOriginal = target;
+          stagedSwipe = chatsSvc.addSwipe(input.userId, target.id, "");
+          stagedSwipeId = stagedSwipe?.swipe_id;
+        }
+      }
+    }
+
+    // Tear down any fire-and-forget background work (cortex cache warming,
+    // databank retrieval) left over from prior generations on this chat. The
+    // user-visible swipe above is deliberately staged first; only the later
+    // provider/prompt work needs to wait for this bounded HTTP teardown.
+    await abortChatBackground(input.userId, input.chat_id);
+    checkAborted();
+
     // Loaded before preset resolution: no-preset temp chats bypass the preset
     // requirement entirely (assertUsablePreset would otherwise reject them).
     const chat = chatsSvc.getChat(input.userId, input.chat_id);
+    const connection = resolveChatGenerationConnection(
+      input.userId,
+      chat?.metadata,
+      input.connection_id,
+      {
+        // The connection this request was COMMITTED against, forwarded from
+        // `generation_outbox.connection_id` by the dispatcher. Gated on the
+        // origin for the same reason as below — and because an interactive
+        // caller must not be able to express it at all. `undefined` for
+        // pre-migration rows and for commits where nothing resolved, which then
+        // take the unchanged ladder.
+        authoritativeConnectionId: options?.origin === "edit_and_send"
+          ? options.connectionId
+          : undefined,
+        // Short-circuited on the origin: interactive paths never reach the
+        // settings read, so they issue ZERO extra queries (and
+        // `generate.service.edit-and-send.test.ts` runs startGeneration with no
+        // database at all). Kept for the legacy path only: a row that recorded a
+        // connection returns from rung 0 before this value is ever consulted.
+        preferActiveConnection: options?.origin === "edit_and_send"
+          && readEditAndSendAlwaysUseActiveConnection(input.userId),
+      },
+    );
+    input.connection_id = connection.id;
     const isNoPresetChat = isNoPresetChatMetadata(chat?.metadata);
     if (isNoPresetChat) {
       input.preset_id = undefined;
@@ -1702,7 +1668,8 @@ export async function startGeneration(
       if (
         input.force_preset_id &&
         genType === "impersonate" &&
-        input.impersonate_mode === "oneliner" &&
+        (input.impersonate_mode === "oneliner" ||
+          input.impersonate_mode === "preset") &&
         input.preset_id &&
         !presetsSvc.getPreset(input.userId, input.preset_id)
       ) {
@@ -1738,9 +1705,11 @@ export async function startGeneration(
         : [];
     let targetAssistantMessage: Message | null = null;
     if (genType === "regenerate" || genType === "swipe") {
-      targetAssistantMessage = input.message_id
+      // Reuse the pre-staging snapshot. Re-reading here would see the blank
+      // active swipe and lose the original content for rejected-swipe macros.
+      targetAssistantMessage = stagedSwipeOriginal ?? (input.message_id
         ? chatsSvc.getMessage(input.userId, input.message_id)
-        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id);
+        : chatsSvc.getLastAssistantMessage(input.userId, input.chat_id));
     } else if (genType === "continue") {
       targetAssistantMessage = input.message_id
         ? chatsSvc.getMessage(input.userId, input.message_id)
@@ -1765,7 +1734,8 @@ export async function startGeneration(
     let characterName = "Assistant";
     const requestedTargetCharId =
       input.target_character_id &&
-      (!isGroupChat || groupCharacterIds.includes(input.target_character_id))
+      isGroupChat &&
+      groupCharacterIds.includes(input.target_character_id)
         ? input.target_character_id
         : undefined;
     const messageTargetCharId =
@@ -1826,7 +1796,12 @@ export async function startGeneration(
     );
 
     const lifecycle: GenerationLifecycle = {
+      frontendSessionId: input.frontendSessionId,
+      onProviderRequest: createRequestObserver(input.userId, options?.requestOrigin ?? {
+        kind: "chat", name: "Chat", operation: options?.origin ?? genType,
+      }, { chatId: input.chat_id, generationId, connectionId: connection.id }, [apiKey]),
       characterName,
+      connectionName: connection.name,
       generationType: genType,
       personaId: resolvedPersona?.id,
       personaName: resolvedPersona?.name || "User",
@@ -1857,13 +1832,13 @@ export async function startGeneration(
         rejectedSwipe = targetMsg.content;
         // Add a blank swipe immediately so the frontend shows cleared content
         // before council/assembly begins (MESSAGE_SWIPED event fires now).
-        const withBlank = chatsSvc.addSwipe(input.userId, targetMsg.id, "");
+        const withBlank = stagedSwipe ?? chatsSvc.addSwipe(input.userId, targetMsg.id, "");
         lifecycle.targetSwipeIdx = withBlank ? withBlank.swipe_id : 0;
         targetSwipeId = lifecycle.targetSwipeIdx;
         // Clear stale generation metrics from the previous swipe so the pill
         // doesn't display outdated values while the new generation runs.
         // Uses patchMessageExtra to avoid triggering chunk rebuilds / WS events.
-        const prevExtra = targetMsg.extra;
+        const prevExtra = withBlank?.extra ?? targetMsg.extra;
         if (
           prevExtra &&
           (prevExtra.tokenCount != null ||
@@ -1896,8 +1871,10 @@ export async function startGeneration(
         const cpPreset = cpPresetId
           ? presetsSvc.getPreset(input.userId, cpPresetId)
           : null;
-        lifecycle.continuePostfix =
-          cpPreset?.prompts?.completionSettings?.continuePostfix || "";
+        lifecycle.continuePostfix = resolveContinuePostfix(
+          lastMsg.content,
+          cpPreset?.prompts?.completionSettings?.continuePostfix || "",
+        );
       }
     }
 
@@ -1905,7 +1882,9 @@ export async function startGeneration(
     // has a real message ID to attach to the streaming bubble via data-message-id.
     // This eliminates the duplicate ephemeral bubble and renders tokens in-place
     // on the message card, matching the regenerate/swipe UX.
-    if (genType === "normal") {
+    // Edit-and-send supplies a durable generationId and already owns the branch
+    // target — do not pre-create a second placeholder on that path.
+    if (genType === "normal" && !requestedGenerationId) {
       const extra: Record<string, any> = {};
       if (targetCharId) extra.character_id = targetCharId;
       const stagedMsg = chatsSvc.createMessage(
@@ -1931,6 +1910,7 @@ export async function startGeneration(
 
     // Register pool entry for recovery — at this point we have all the metadata
     pool.createPoolEntry({
+      frontendSessionId: input.frontendSessionId,
       generationId,
       userId: input.userId,
       chatId: input.chat_id,
@@ -1938,6 +1918,7 @@ export async function startGeneration(
       characterName,
       characterId: targetCharId,
       model: connection.model,
+      connectionName: connection.name,
       targetMessageId: lifecycle.targetMessageId,
       targetSwipeId,
     });
@@ -1957,6 +1938,7 @@ export async function startGeneration(
         characterId: targetCharId,
         characterName,
         generationType: lifecycle.generationType,
+        frontendSessionId: lifecycle.frontendSessionId,
       },
       input.userId,
     );
@@ -2001,6 +1983,7 @@ export async function startGeneration(
           | Map<string, RuntimeCouncilToolDefinition>
           | undefined;
         let inlineMembersByPrefix: Map<string, CouncilMember> | undefined;
+        let inlineWebSearchEnabled = false;
         let precomputedVectorEntries: VectorActivatedEntry[] | undefined;
 
         // Council is active when enabled with members. Tools run if any member has tools assigned.
@@ -2089,6 +2072,7 @@ export async function startGeneration(
             councilContextHash = hashCouncilContextMessages(
               councilMessages,
               councilSettings.toolsSettings.sidecarContextWindow,
+              excludesLatestUserMessage(councilSettings.toolsSettings),
             );
 
             // Check if we can reuse cached council results for regens/swipes/continues
@@ -2187,6 +2171,10 @@ export async function startGeneration(
                   resolvedPersona,
                   input.chat_id,
                 );
+              const councilWorldInfoSettings =
+                (settingsSvc.getSetting(input.userId, "worldInfoSettings")?.value as
+                  | Partial<WorldInfoSettings>
+                  | undefined) ?? {};
               let councilWiActivated =
                 wiEntries.length > 0
                   ? activateWorldInfo({
@@ -2194,6 +2182,7 @@ export async function startGeneration(
                       messages: councilMessages,
                       chatTurn: councilMessages.length,
                       wiState: {},
+                      settings: councilWorldInfoSettings,
                     }).activatedEntries
                   : [];
 
@@ -2206,10 +2195,12 @@ export async function startGeneration(
                 wiEntries,
                 councilMessages,
                 abortController.signal,
+                councilWorldInfoSettings,
               );
               councilWiActivated = mergeActivatedWorldInfoEntries(
                 councilWiActivated,
                 vectorActivated,
+                councilWorldInfoSettings,
               ).activatedEntries;
 
               // Cache for assembly to reuse
@@ -2234,6 +2225,7 @@ export async function startGeneration(
 
               // Execute pre-generation tool calls (abort-aware)
               councilResult = await executeCouncil({
+                generationId,
                 userId: input.userId,
                 chatId: input.chat_id,
                 personaId: input.persona_id,
@@ -2300,26 +2292,9 @@ export async function startGeneration(
                   // Pause indefinitely — no short timer. The frontend controls when to
                   // show the modal (only when the user navigates to this chat). A 10-minute
                   // safety cap prevents permanent resource hangs if the user never responds.
-                  const decision = await new Promise<"continue" | "retry">(
-                    (resolve) => {
-                      const timeout = setTimeout(() => {
-                        console.debug(
-                          "[council] Safety cap reached for %s — auto-continuing",
-                          generationId,
-                        );
-                        pendingCouncilRetries.delete(generationId);
-                        if (poolEntry) {
-                          poolEntry.councilRetryPending = false;
-                          delete poolEntry.councilToolsFailure;
-                        }
-                        resolve("continue");
-                      }, COUNCIL_RETRY_SAFETY_CAP_MS);
-                      pendingCouncilRetries.set(generationId, {
-                        userId: input.userId,
-                        resolve,
-                        timeout,
-                      });
-                    },
+                  const decision = await waitForCouncilRetryDecision(
+                    input.userId,
+                    generationId,
                   );
 
                   checkAborted();
@@ -2331,6 +2306,7 @@ export async function startGeneration(
                     );
                     // Re-execute only the failed tools by creating a retry run
                     const retryResult = await executeCouncil({
+                      generationId,
                       userId: input.userId,
                       chatId: input.chat_id,
                       personaId: input.persona_id,
@@ -2441,6 +2417,40 @@ export async function startGeneration(
                 parameters: argsSchema,
               });
             }
+          }
+        }
+
+        // ── Built-in Inline Web Search (independent of Council) ──────────
+        // This is intentionally separate from the preset's Google-native
+        // grounding option. It uses the user's configured web-search
+        // provider and is only offered when both web search and function
+        // calling are explicitly available.
+        if (genType !== "impersonate") {
+          const presetId = input.preset_id || connection.preset_id;
+          const preset = presetId
+            ? presetsSvc.getPreset(input.userId, presetId)
+            : null;
+          const completionSettings = preset?.prompts?.completionSettings;
+          const webSearchSettings = await getWebSearchSettings(input.userId);
+          const configured = webSearchSettings.enabled && !!webSearchSettings.apiUrl &&
+            (webSearchSettings.provider === "searxng" || webSearchSettings.hasApiKey);
+          if (configured && webSearchSettings.inlineToolEnabled && completionSettings?.enableFunctionCalling !== false) {
+            if (!inlineTools) inlineTools = [];
+            if (!inlineToolDefsByName) {
+              inlineToolDefsByName = new Map<string, RuntimeCouncilToolDefinition>();
+            }
+            inlineToolDefsByName.set(INLINE_WEB_SEARCH_TOOL_NAME, {
+              name: INLINE_WEB_SEARCH_TOOL_NAME,
+              displayName: "Web Search",
+              description: INLINE_WEB_SEARCH_TOOL.description,
+              category: "context",
+              execution: "host",
+              argsSchema: INLINE_WEB_SEARCH_TOOL.parameters,
+              strict: true,
+              inputExamples: INLINE_WEB_SEARCH_TOOL.inputExamples,
+            });
+            inlineTools.push(INLINE_WEB_SEARCH_TOOL);
+            inlineWebSearchEnabled = true;
           }
         }
 
@@ -2575,9 +2585,11 @@ export async function startGeneration(
         // a GENERATION_STOPPED event so the frontend clears its streaming state.
         const pipeline = await raceWithSignal(
           runPromptPipeline({
+            frontendSessionId: input.frontendSessionId,
             userId: input.userId,
             chatId: input.chat_id,
             connectionId: input.connection_id,
+            model: connection.model,
             presetId: input.preset_id,
             forcePresetId: input.force_preset_id,
             personaId: input.persona_id,
@@ -2589,10 +2601,13 @@ export async function startGeneration(
                 : undefined,
             impersonateInput:
               genType === "impersonate" ? input.impersonate_input : undefined,
+            userInput: input.user_input,
             inputMessages: input.messages,
             inputParameters: input.parameters,
             excludeMessageId,
             rejectedSwipe,
+            continueMessageId: lifecycle.continueMessageId,
+            continuePostfix: lifecycle.continuePostfix,
             targetCharacterId: pipelineTargetCharId,
             councilToolResults,
             councilNamedResults,
@@ -2601,6 +2616,7 @@ export async function startGeneration(
             precomputedVectorEntries,
             regenFeedback: input.regen_feedback,
             regenFeedbackPosition: input.regen_feedback_position,
+            regenFeedbackFormat: input.regen_feedback_format,
             signal: abortController.signal,
           }),
           abortController.signal,
@@ -2613,6 +2629,23 @@ export async function startGeneration(
           activatedWorldInfo,
           deliberationHandledByMacro,
         } = pipeline;
+
+        // A context anchor is a strict guardrail: older history may be clipped,
+        // but the marked message and every newer turn must fit together. Abort
+        // before the primary provider receives any prompt when that protected
+        // tail exceeds the available history budget.
+        if (pipeline.contextClipStats?.anchorOverflow) {
+          const protectedTokens = pipeline.contextClipStats.protectedHistoryTokens ?? 0;
+          const availableTokens = Math.max(
+            0,
+            pipeline.contextClipStats.remainingHistoryBudget,
+          );
+          throw new Error(
+            `Protected context anchor needs ${protectedTokens.toLocaleString()} tokens, ` +
+              `but only ${availableTokens.toLocaleString()} fit after prompt overhead. ` +
+              `Increase Context Size or lower Max Response.`,
+          );
+        }
 
         // Persist deferred WI state and dirty chat variables after assembly.
         // Both go through mergeChatMetadata so that any user-driven metadata edits
@@ -2674,11 +2707,12 @@ export async function startGeneration(
           | undefined;
         lifecycle.councilNamedResults = councilNamedResults;
         lifecycle.contextClipStats = pipeline.contextClipStats;
+        lifecycle.trimIncompleteWords = pipeline.trimIncompleteWords;
 
         // Strip internal-only keys before they reach the provider
         delete mergedParams.max_context_length;
 
-        injectConnectionMetadataFlags(connection, mergedParams);
+        injectConnectionMetadataFlags(connection, mergedParams, input.chat_id);
 
         const cached = applyPromptCaching(
           {
@@ -2711,11 +2745,14 @@ export async function startGeneration(
             (mergedParams.seed + lifecycle.targetSwipeIdx) % MAX_SEED;
         }
 
-        // Resolve preset name for breakdown display
-        const presetId = input.preset_id || connection.preset_id;
+        // Use the preset assembly actually selected, including profile overrides.
+        const presetId = pipeline.resolvedPreset?.id
+          ?? (input.messages ? input.preset_id || connection.preset_id : undefined);
         if (presetId) {
-          const preset = presetsSvc.getPreset(input.userId, presetId);
-          if (preset) lifecycle.presetName = preset.name;
+          const presetName = pipeline.resolvedPreset?.name
+            ?? presetsSvc.getPreset(input.userId, presetId)?.name;
+          lifecycle.presetId = presetId;
+          if (presetName) lifecycle.presetName = presetName;
         }
 
         // Final abort checkpoint between assembly completion and runGeneration
@@ -2739,8 +2776,10 @@ export async function startGeneration(
           inlineTools,
           inlineToolDefsByName,
           inlineMembersByPrefix,
+          inlineWebSearchEnabled,
           councilSettings.toolsSettings.timeoutMs,
           pipeline.assistantPrefill,
+          pipeline.assistantReasoningPrefill,
           pipeline.macroEnv,
           pipeline.macroEnvSeed,
         );
@@ -2748,22 +2787,16 @@ export async function startGeneration(
         // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted.
         // Only clear the per-chat mapping if it still points at THIS generation —
         // a newer startGeneration on the same chat may have already taken over the
-        // chatKey (see line 590), and wiping it would strand the new generation.
-        activeGenerations.delete(generationId);
-        if (activeChatGenerations.get(chatKey) === generationId) {
-          activeChatGenerations.delete(chatKey);
-        }
+        // chat lock, and wiping it would strand the new generation.
+        removeActiveGeneration(generationId);
+        clearActiveChatGeneration(input.userId, input.chat_id, generationId);
 
         // Clean up any pending council retry decision
-        const pendingRetry = pendingCouncilRetries.get(generationId);
-        if (pendingRetry) {
-          clearTimeout(pendingRetry.timeout);
-          pendingCouncilRetries.delete(generationId);
-        }
+        clearCouncilRetry(generationId);
 
-        // If this was a user-initiated abort (stop request), emit proper events so the
-        // frontend can reset its streaming state and clean up.
-        if (abortController.signal.aborted) {
+        // User aborts and extension-requested cancels both emit stop events so
+        // the frontend resets its streaming state.
+        if (abortController.signal.aborted || err instanceof GenerationCancelledByExtensionError) {
           // Clean up staged message if one was created (sidecar council mode)
           if (stagedMessageId) {
             try {
@@ -2796,14 +2829,16 @@ export async function startGeneration(
         abortChatBackground(input.userId, input.chat_id);
 
         const msg = errorMessage(err);
-        pool.errorPool(generationId, msg);
+        const failure = generationFailurePayload(err, msg, lifecycle.connectionName);
+        pool.errorPool(generationId, msg, failure);
         eventBus.emit(
           EventType.GENERATION_ENDED,
           {
             generationId,
             chatId: input.chat_id,
-            error: msg,
+            ...failure,
             generationType: lifecycle.generationType,
+            frontendSessionId: lifecycle.frontendSessionId,
           },
           input.userId,
         );
@@ -2823,8 +2858,21 @@ export async function startGeneration(
         /* best-effort cleanup */
       }
     }
-    activeGenerations.delete(generationId);
-    activeChatGenerations.delete(chatKey);
+    // A failure before GENERATION_STARTED has no terminal event for the
+    // frontend to reconcile. Remove the early blank swipe ourselves, but only
+    // when its slot is still the empty value we staged.
+    if (stagedSwipeOriginal && stagedSwipeId != null) {
+      try {
+        const current = chatsSvc.getMessage(input.userId, stagedSwipeOriginal.id);
+        if (current?.swipes[stagedSwipeId] === "") {
+          chatsSvc.deleteSwipe(input.userId, stagedSwipeOriginal.id, stagedSwipeId);
+        }
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+    removeActiveGeneration(generationId);
+    clearActiveChatGeneration(input.userId, input.chat_id, generationId);
     resolveCompletion();
     pool.errorPool(generationId, errorMessage(err));
     throw err;
@@ -2839,11 +2887,11 @@ export async function startGeneration(
 export async function dryRunGeneration(
   input: GenerateInput,
 ): Promise<DryRunResult> {
+  input = { ...input, frontendSessionId: getActiveFrontendSession(input.userId) };
   const genType = input.generation_type || "normal";
+  const sourceMessages = chatsSvc.getMessages(input.userId, input.chat_id);
   const sourceMessagesById = new Map(
-    chatsSvc
-      .getMessages(input.userId, input.chat_id)
-      .map((message) => [message.id, message] as const),
+    sourceMessages.map((message) => [message.id, message] as const),
   );
   const dryRunReasoningSettings =
     settingsSvc.getSetting(input.userId, "reasoningSettings")?.value ?? null;
@@ -2851,6 +2899,17 @@ export async function dryRunGeneration(
   // No-preset temp chats bypass preset resolution/assertion (same as
   // startGeneration); assembly falls back to raw message mapping.
   const dryRunChat = chatsSvc.getChat(input.userId, input.chat_id);
+  const dryRunIsGroupChat = dryRunChat?.metadata?.group === true;
+  const dryRunGroupCharacterIds =
+    dryRunIsGroupChat && Array.isArray(dryRunChat?.metadata?.character_ids)
+      ? (dryRunChat.metadata.character_ids as string[])
+      : [];
+  const dryRunTargetCharacterId =
+    dryRunIsGroupChat &&
+    typeof input.target_character_id === "string" &&
+    dryRunGroupCharacterIds.includes(input.target_character_id)
+      ? input.target_character_id
+      : undefined;
   const isNoPresetChat = isNoPresetChatMetadata(dryRunChat?.metadata);
   if (isNoPresetChat) {
     input.preset_id = undefined;
@@ -2873,7 +2932,11 @@ export async function dryRunGeneration(
     }
   }
 
-  const connection = resolveConnection(input.userId, input.connection_id);
+  const connection = resolveChatGenerationConnection(
+    input.userId,
+    dryRunChat?.metadata,
+    input.connection_id,
+  );
   input.connection_id = connection.id;
   if (!isNoPresetChat) {
     presetsSvc.assertUsablePreset(
@@ -2884,10 +2947,30 @@ export async function dryRunGeneration(
   }
   const { provider } = await resolveProviderAndKey(input.userId, connection.id);
 
+  const dryRunContinueTarget =
+    genType === "continue"
+      ? input.message_id
+        ? sourceMessagesById.get(input.message_id) ?? null
+        : [...sourceMessages].reverse().find((message) => !message.is_user) ?? null
+      : null;
+  const dryRunPresetId = input.preset_id || connection.preset_id;
+  const dryRunContinueConfiguredPostfix = dryRunPresetId
+    ? presetsSvc.getPreset(input.userId, dryRunPresetId)?.prompts
+        ?.completionSettings?.continuePostfix || ""
+    : "";
+  const dryRunContinuePostfix = dryRunContinueTarget
+    ? resolveContinuePostfix(
+        dryRunContinueTarget.content,
+        dryRunContinueConfiguredPostfix,
+      )
+    : undefined;
+
   const pipeline = await runPromptPipeline({
+    frontendSessionId: input.frontendSessionId,
     userId: input.userId,
     chatId: input.chat_id,
     connectionId: input.connection_id,
+    model: connection.model,
     presetId: input.preset_id,
     forcePresetId: input.force_preset_id,
     personaId: input.persona_id,
@@ -2899,11 +2982,15 @@ export async function dryRunGeneration(
         : undefined,
     impersonateInput:
       genType === "impersonate" ? input.impersonate_input : undefined,
+    userInput: input.user_input,
     inputMessages: input.messages,
     inputParameters: input.parameters,
     excludeMessageId: input.exclude_message_id,
-    targetCharacterId: input.target_character_id,
+    continueMessageId: dryRunContinueTarget?.id,
+    continuePostfix: dryRunContinuePostfix,
+    targetCharacterId: dryRunTargetCharacterId,
     signal: input.signal,
+    isDryRun: true,
   });
 
   // Compute token counts for the breakdown
@@ -2982,8 +3069,10 @@ async function runGeneration(
   tools?: ToolDefinition[],
   inlineToolDefsByName?: Map<string, RuntimeCouncilToolDefinition>,
   inlineMembersByPrefix?: Map<string, CouncilMember>,
+  inlineWebSearchEnabled = false,
   inlineToolTimeoutMs?: number,
   assistantPrefill?: string,
+  assistantReasoningPrefill?: string,
   macroEnv?: import("../macros/types").MacroEnv,
   macroEnvSeed?: import("../macros/types").MacroEnv,
 ): Promise<void> {
@@ -3086,7 +3175,6 @@ async function runGeneration(
       generationId,
       chatId,
       model,
-      breakdown: lifecycle.breakdown,
       targetMessageId: lifecycle.targetMessageId,
       targetSwipeId: lifecycle.streamingSwipeId,
       characterId: lifecycle.targetCharacterId,
@@ -3098,12 +3186,70 @@ async function runGeneration(
 
   let fullContent = "";
   let fullReasoning = "";
-
-  let streamUsage:
-    | { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+  const trimIncompleteWords = lifecycle.trimIncompleteWords === true;
+  let responseBehaviorOptions:
+    | {
+        source: "response_backend";
+        previousContent?: string;
+      }
     | undefined;
+  const getResponseBehaviorOptions = () => {
+    if (responseBehaviorOptions) return responseBehaviorOptions;
+    const beforeMessageId =
+      lifecycle.continueMessageId
+      ?? lifecycle.targetMessageId
+      ?? lifecycle.stagedMessageId;
+    const previousContent = chatsSvc.getPreviousSameRoleContent(
+      userId,
+      chatId,
+      false,
+      beforeMessageId,
+    );
+    responseBehaviorOptions = {
+      source: "response_backend",
+      ...(previousContent !== undefined ? { previousContent } : {}),
+    };
+    return responseBehaviorOptions;
+  };
+  const responseOptionsFor = (scripts: readonly { metadata?: Record<string, any> }[]) =>
+    regexScriptsSvc.hasRegexMatchAction(scripts, "repeat_back")
+      ? getResponseBehaviorOptions()
+      : { source: "response_backend" as const };
+
+  let streamUsage: GenerationUsage | undefined;
+  let finishReason: string | undefined;
+  let stopDetails: GenerationResponse["stop_details"];
+  let stopSequence: string | null | undefined;
+  const stopMetadata = () => ({
+    ...(finishReason ? { finish_reason: finishReason } : {}),
+    ...(stopDetails !== undefined ? { stop_details: stopDetails } : {}),
+    ...(stopSequence !== undefined ? { stop_sequence: stopSequence } : {}),
+  });
   let reasoningStartedAt = 0;
   let reasoningDurationMs = 0;
+  // Keep the provider-native carrier independently from the text shown in the
+  // Reasoning tab. `fullReasoning` also contains parsed CoT, which must never
+  // be replayed as API reasoning on a later assistant history turn.
+  let nativeReasoningContent = "";
+  let nativeThinkingBlocks: LlmThinkingBlock[] | undefined;
+  let nativeReasoningDetails: Record<string, unknown>[] | undefined;
+  let nativeThoughtSignature: string | undefined;
+
+  function storedReasoningCarrier(): Record<string, unknown> | undefined {
+    if (nativeThinkingBlocks?.length) {
+      return { type: "thinking_blocks", blocks: nativeThinkingBlocks };
+    }
+    if (nativeReasoningDetails?.length) {
+      return { type: "reasoning_details", details: nativeReasoningDetails };
+    }
+    if (nativeThoughtSignature) {
+      return { type: "gemini_thought_signature", signature: nativeThoughtSignature };
+    }
+    if (nativeReasoningContent) {
+      return { type: "reasoning_content", content: nativeReasoningContent };
+    }
+    return undefined;
+  }
 
   // ── Guided CoT detection ───────────────────────────────────────────
   // When autoParse is enabled, detect the user's configured reasoning
@@ -3159,6 +3305,9 @@ async function runGeneration(
   }> {
     flushCotBuffers();
     let closedContent = closeUnterminatedReasoningTags(userId, fullContent);
+    if (useStreaming && trimIncompleteWords) {
+      closedContent = trimIncompleteStreamTail(closedContent);
+    }
 
     const responseScripts = regexScriptsSvc.getActiveScripts(userId, {
       characterId: lifecycle.targetCharacterId,
@@ -3173,7 +3322,7 @@ async function runGeneration(
         0,
         macroEnv,
         undefined,
-        { source: "response_backend" },
+        responseOptionsFor(responseScripts),
       );
       if (fullReasoning) {
         fullReasoning = await regexScriptsSvc.applyRegexScripts(
@@ -3183,10 +3332,12 @@ async function runGeneration(
           0,
           macroEnv,
           undefined,
-          { source: "response_backend" },
+          responseOptionsFor(responseScripts),
         );
       }
     }
+    closedContent = healFormattingArtifacts(closedContent);
+    const carrier = storedReasoningCarrier();
 
     let messageId: string | undefined;
     if (lifecycle.targetMessageId && lifecycle.targetSwipeIdx != null) {
@@ -3197,18 +3348,21 @@ async function runGeneration(
         closedContent,
       );
       messageId = updated?.id ?? lifecycle.targetMessageId;
-      if (fullReasoning) {
+      if (fullReasoning || carrier) {
         // Target the regenerated swipe, not the displayed one (the user may have
         // navigated away mid-stream before stopping).
         chatsSvc.setSwipeScopedExtra(
           userId,
           lifecycle.targetMessageId,
           lifecycle.streamingSwipeId,
-          { reasoning: fullReasoning },
+          {
+            ...(fullReasoning ? { reasoning: fullReasoning } : {}),
+            ...(carrier ? { reasoningCarrier: carrier } : {}),
+          },
         );
       }
     } else if (lifecycle.stagedMessageId) {
-      if (!closedContent && !fullReasoning) {
+      if (!closedContent && !fullReasoning && !carrier) {
         try {
           chatsSvc.deleteMessage(userId, lifecycle.stagedMessageId);
         } catch {
@@ -3219,9 +3373,14 @@ async function runGeneration(
 
       const existingStagedExtra =
         chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
-      const partialExtra = fullReasoning
-        ? { ...existingStagedExtra, reasoning: fullReasoning }
-        : existingStagedExtra;
+      const partialExtra =
+        fullReasoning || carrier
+          ? {
+              ...existingStagedExtra,
+              ...(fullReasoning ? { reasoning: fullReasoning } : {}),
+              ...(carrier ? { reasoningCarrier: carrier } : {}),
+            }
+          : existingStagedExtra;
       chatsSvc.updateMessage(userId, lifecycle.stagedMessageId, {
         content: closedContent,
         ...(Object.keys(partialExtra).length > 0
@@ -3230,7 +3389,7 @@ async function runGeneration(
         skipCouncilCacheInvalidation: true,
       });
       messageId = lifecycle.stagedMessageId;
-    } else if (lifecycle.continueMessageId && closedContent) {
+    } else if (lifecycle.continueMessageId && (closedContent || fullReasoning || carrier)) {
       const combined =
         (lifecycle.continueOriginalContent ?? "") +
         (lifecycle.continuePostfix ?? "") +
@@ -3242,19 +3401,22 @@ async function runGeneration(
         contentSwipeId: lifecycle.streamingSwipeId,
         skipCouncilCacheInvalidation: true,
       });
-      if (fullReasoning) {
+      if (fullReasoning || carrier) {
         chatsSvc.setSwipeScopedExtra(
           userId,
           lifecycle.continueMessageId,
           lifecycle.streamingSwipeId,
-          { reasoning: fullReasoning },
+          {
+            ...(fullReasoning ? { reasoning: fullReasoning } : {}),
+            ...(carrier ? { reasoningCarrier: carrier } : {}),
+          },
         );
       }
       messageId = lifecycle.continueMessageId;
     } else if (lifecycle.impersonateDraft) {
       // Impersonate draft: do not persist the partial content as a message.
       // The streamed text is already in the frontend's input box.
-    } else if (closedContent) {
+    } else if (closedContent || fullReasoning || carrier) {
       const isImpersonate = lifecycle.generationType === "impersonate";
       const extra: Record<string, any> = {};
       if (isImpersonate && lifecycle.personaId)
@@ -3262,6 +3424,7 @@ async function runGeneration(
       if (!isImpersonate && lifecycle.targetCharacterId)
         extra.character_id = lifecycle.targetCharacterId;
       if (fullReasoning) extra.reasoning = fullReasoning;
+      if (!isImpersonate && carrier) extra.reasoningCarrier = carrier;
       const created = chatsSvc.createMessage(
         chatId,
         {
@@ -3277,6 +3440,15 @@ async function runGeneration(
       messageId = created.id;
     }
 
+    if (messageId && lifecycle.generationType !== "impersonate") {
+      const saved = chatsSvc.getMessage(userId, messageId);
+      const savedContent = saved?.swipes[lifecycle.streamingSwipeId ?? saved.swipe_id] ?? closedContent;
+      chatsSvc.setSwipeScopedExtra(userId, messageId, lifecycle.streamingSwipeId, {
+        promptActivation: makePromptActivationSource(savedContent, lifecycle.presetId, false),
+        generationOutcome: finishReason ? stopMetadata() : null,
+        ...(streamUsage ? { usage: streamUsage } : {}),
+      });
+    }
     return { messageId, content: closedContent };
   }
 
@@ -3288,9 +3460,19 @@ async function runGeneration(
   // the prefill is (or starts with) the configured reasoning prefix, it's
   // classified as reasoning from the first token instead of leaking into the
   // content bubble and then being re-extracted by the post-parse safety net.
+  if (assistantReasoningPrefill) {
+    emitReasoningToken(assistantReasoningPrefill);
+  }
   if (assistantPrefill) {
     processContentToken(assistantPrefill);
   }
+
+  // Prefill is explicitly authored and complete by definition. Only the
+  // provider-produced tail is eligible for incomplete-word trimming.
+  const assistantPrefillContentLength = fullContent.length;
+  const trimIncompleteStreamTail = (content: string): string =>
+    content.slice(0, assistantPrefillContentLength) +
+    trimIncompleteTrailingWord(content.slice(assistantPrefillContentLength));
 
   // Determine streaming mode from _streaming parameter (defaults to true)
   const useStreaming = parameters._streaming !== false;
@@ -3315,8 +3497,12 @@ async function runGeneration(
     // they must stay on the legacy path until their carrier is wired).
     const interleavedStructured =
       !!tools?.length && provider.capabilities.interleavedThinking === true;
+    let inlineWebSearchUsed = false;
 
     for (let inlineRound = 0; inlineRound < INLINE_TOOL_MAX_ROUNDS; inlineRound++) {
+      finishReason = undefined;
+      stopDetails = undefined;
+      stopSequence = undefined;
       // fullContent/fullReasoning accumulate across rounds for the final
       // persisted message; capture the start offsets so we can slice out just
       // this round's delta for the continuation we feed back to the provider.
@@ -3328,12 +3514,14 @@ async function runGeneration(
       let pendingThinkingBlocks: LlmThinkingBlock[] | undefined;
       // OpenRouter reasoning_details captured this round, replayed likewise.
       let pendingReasoningDetails: Record<string, unknown>[] | undefined;
+      let pendingThoughtSignature: string | undefined;
 
       // Non-streaming path: call generate() once, then synthesize a single-chunk stream.
-      // Wrapped in a factory so the pre-token retry below can re-issue a clean request.
-      const makeStream = (): AsyncGenerator<StreamChunk, void, unknown> => useStreaming
+      // Each tool round gets one provider attempt; failures surface without retries.
+      const stream: AsyncGenerator<StreamChunk, void, unknown> = useStreaming
         ? provider.generateStream(apiKey, apiUrl, {
-            messages: generationMessages,
+            onProviderRequest: lifecycle.onProviderRequest,
+            messages: prepareInlineWebSearchMessagesForProvider(generationMessages),
             model,
             parameters,
             stream: true,
@@ -3342,7 +3530,8 @@ async function runGeneration(
           })
         : (async function* () {
             const result = await provider.generate(apiKey, apiUrl, {
-              messages: generationMessages,
+              onProviderRequest: lifecycle.onProviderRequest,
+              messages: prepareInlineWebSearchMessagesForProvider(generationMessages),
               model,
               parameters,
               stream: false,
@@ -3353,49 +3542,17 @@ async function runGeneration(
               token: result.content,
               reasoning: result.reasoning,
               finish_reason: result.finish_reason,
+              stop_details: result.stop_details,
+              stop_sequence: result.stop_sequence,
               tool_calls: result.tool_calls,
               thinking_blocks: result.thinking_blocks,
               reasoning_details: result.reasoning_details,
+              thought_signature: result.thought_signature,
               usage: result.usage,
             };
           })();
 
-      // Establish the stream and pull its FIRST chunk under a bounded retry.
-      // Streaming providers throw transport/HTTP errors on the first `.next()`
-      // (before the body reader exists), so a retry here re-issues a clean
-      // request and cannot duplicate emitted tokens. Once the first chunk lands
-      // we never retry — mid-stream failures fall through to the outer catch.
-      let iter!: AsyncIterator<StreamChunk, void>;
-      let firstResult!: IteratorResult<StreamChunk, void>;
-      for (let attempt = 0; ; attempt++) {
-        const candidate = makeStream()[Symbol.asyncIterator]();
-        try {
-          firstResult = await raceWithSignal(candidate.next(), signal);
-          iter = candidate;
-          break;
-        } catch (err) {
-          try {
-            await candidate.return?.(undefined);
-          } catch {
-            /* best-effort */
-          }
-          const retryable =
-            attempt < GENERATION_MAX_RETRIES &&
-            !signal.aborted &&
-            err instanceof ProviderRequestError &&
-            err.retryable;
-          if (!retryable) throw err;
-          try {
-            await abortableSleep(
-              computeBackoffMs(attempt, (err as ProviderRequestError).retryAfterMs),
-              signal,
-            );
-          } catch {
-            // Aborted during backoff — surface the original provider error.
-            throw err;
-          }
-        }
-      }
+      const iter = stream[Symbol.asyncIterator]();
 
       // Drive the iterator manually so each `.next()` can be raced against the
       // abort signal. Streaming providers forward aborts only until response
@@ -3403,27 +3560,19 @@ async function runGeneration(
       // switch to user-space read cancellation to avoid Bun's mid-stream abort
       // crash on Windows.
       const maybeYieldDuringStream = createCooperativeYielder(32, signal);
-      let consumedFirst = false;
       while (true) {
         let result: IteratorResult<StreamChunk, void>;
-        if (!consumedFirst) {
-          // The first chunk was already obtained (and signal-raced) during
-          // stream establishment above; process it before resuming the pull.
-          consumedFirst = true;
-          result = firstResult;
-        } else {
+        try {
+          result = await raceWithSignal(iter.next(), signal);
+        } catch (err) {
+          // Close the generator on abort or provider failure, then let the
+          // outer catch surface the error and persist any partial output.
           try {
-            result = await raceWithSignal(iter.next(), signal);
-          } catch (err) {
-            // Signal won the race. Tell the generator to clean up (best-effort)
-            // and rethrow so the outer catch handles emission.
-            try {
-              await iter.return?.(undefined);
-            } catch {
-              /* best-effort */
-            }
-            throw err;
+            await iter.return?.(undefined);
+          } catch {
+            /* best-effort */
           }
+          throw err;
         }
         if (result.done) break;
         const chunk = result.value;
@@ -3446,10 +3595,18 @@ async function runGeneration(
           break;
         }
 
+        // The generation watchdog is based on upstream token activity, not
+        // total request age. Count reasoning as well as visible content: both
+        // are streamed model output and demonstrate the provider is healthy.
+        if (chunk.reasoning || chunk.token) {
+          touchActiveGeneration(generationId);
+        }
+
         // Emit reasoning tokens (provider thinking/extended thinking)
         if (chunk.reasoning) {
           if (!reasoningStartedAt) reasoningStartedAt = Date.now();
           fullReasoning += chunk.reasoning;
+          nativeReasoningContent += chunk.reasoning;
           const appended = pool.appendPoolReasoning(generationId, chunk.reasoning);
           queueStreamSegment(chunk.reasoning, appended.seq, appended.offset, "reasoning");
         }
@@ -3464,26 +3621,58 @@ async function runGeneration(
 
         if (chunk.thinking_blocks) {
           pendingThinkingBlocks = chunk.thinking_blocks;
+          nativeThinkingBlocks = [
+            ...(nativeThinkingBlocks ?? []),
+            ...chunk.thinking_blocks,
+          ];
         }
 
         if (chunk.reasoning_details) {
           pendingReasoningDetails = chunk.reasoning_details;
+          nativeReasoningDetails = [
+            ...(nativeReasoningDetails ?? []),
+            ...chunk.reasoning_details,
+          ];
+        }
+
+        if (chunk.thought_signature) {
+          pendingThoughtSignature = chunk.thought_signature;
+          nativeThoughtSignature = chunk.thought_signature;
         }
 
         // Capture provider usage data (token counts) from the stream
         if (chunk.usage) {
           streamUsage = chunk.usage;
         }
+        if (chunk.stop_details !== undefined) stopDetails = chunk.stop_details;
+        if (chunk.stop_sequence !== undefined) stopSequence = chunk.stop_sequence;
 
         await maybeYieldDuringStream();
 
         if (chunk.finish_reason) {
+          finishReason = chunk.finish_reason;
+          await iter.return?.(undefined);
           break;
         }
       }
 
       if (signal.aborted) {
         break;
+      }
+
+      // A terminal API response can still be incomplete. Route these outcomes
+      // through the existing partial-save/error UI before executing any tools.
+      const stopError = describeGenerationStop(finishReason, stopDetails);
+      if (stopError) {
+        throw new ProviderRequestError({
+          provider: provider.displayName,
+          operation: "generation",
+          code: stopDetails?.type === "failed"
+            ? stopDetails.category || finishReason
+            : finishReason,
+          detail: stopError,
+          retryable: false,
+        });
       }
 
       // This round's freshly-streamed deltas (not the cross-round accumulation).
@@ -3515,6 +3704,7 @@ async function runGeneration(
               inlineToolDefsByName,
               inlineMembersByPrefix,
               inlineContextMessages,
+              inlineWebSearchEnabled && !inlineWebSearchUsed,
             )
           : [];
 
@@ -3522,18 +3712,54 @@ async function runGeneration(
         break;
       }
 
+      const inlineWebSearchContexts = inlineCouncilResults
+        .flatMap((result) => result.inlineWebSearchContext
+          ? [formatInlineWebSearchContext(result.inlineWebSearchContext)]
+          : []);
+      if (inlineCouncilResults.some((result) => result.isInlineWebSearch)) {
+        inlineWebSearchUsed = true;
+      }
+
+      // Prefer explicit {{webSearchContext}} slots captured from preset blocks.
+      // If none exist, retain the safe end-of-context fallback from phase one.
+      const manualPlacement = inlineWebSearchContexts.length > 0
+        ? applyInlineWebSearchContextSlots(generationMessages, inlineWebSearchContexts.join("\n\n"))
+        : { messages: generationMessages, placed: false };
+
+      // Native tool-result protocols require the matching user tool_result to
+      // immediately follow the assistant tool_use. When no manual slot exists,
+      // put the bounded context in that result for structured providers; legacy
+      // continuations retain the separate system-context fallback below.
+      const manuallyPlacedResults = manualPlacement.placed
+        ? inlineCouncilResults.map((result) => result.inlineWebSearchContext
+          ? {
+            ...result,
+            result: "Web search completed. Retrieved reference context has been placed in the preset's webSearchContext slot.",
+          }
+          : result)
+        : inlineCouncilResults;
+      const continuationResults = interleavedStructured && !manualPlacement.placed
+        ? inlineCouncilResults.map((result) => result.inlineWebSearchContext
+          ? { ...result, result: formatInlineWebSearchContext(result.inlineWebSearchContext) }
+          : result)
+        : manuallyPlacedResults;
+
       generationMessages = [
-        ...generationMessages,
+        ...manualPlacement.messages,
         ...buildInlineToolContinuation({
           structured: interleavedStructured,
           legacyAssistantOutput: fullAssistantOutput,
           roundContent,
           roundReasoning,
           toolCalls: pendingToolCalls ?? [],
-          results: inlineCouncilResults,
+          results: continuationResults,
           thinkingBlocks: pendingThinkingBlocks,
           reasoningDetails: pendingReasoningDetails,
+          thoughtSignature: pendingThoughtSignature,
         }),
+        ...(!interleavedStructured && !manualPlacement.placed
+          ? inlineWebSearchContexts.map((content) => ({ role: "system", content } satisfies LlmMessage))
+          : []),
       ];
     }
 
@@ -3574,6 +3800,20 @@ async function runGeneration(
         }
       }
 
+      if (useStreaming && trimIncompleteWords) {
+        fullContent = trimIncompleteStreamTail(fullContent);
+      }
+
+      // Capture the complete, combined source before response regex can hide control blocks.
+      const preserveActivationSource = lifecycle.presetId && regexScriptsSvc.getPresetActivationScripts(
+        userId, lifecycle.presetId, { chatId, characterId: lifecycle.targetCharacterId },
+      ).some((script) => readPromptActivation(script.metadata)?.source === "ai_output");
+      const activationSource = preserveActivationSource
+        ? (lifecycle.continueMessageId
+          ? (lifecycle.continueOriginalContent ?? "") + (lifecycle.continuePostfix ?? "") + fullContent
+          : fullContent)
+        : undefined;
+
       // Apply regex scripts (response target) to completed content
       {
         const responseScripts = regexScriptsSvc.getActiveScripts(userId, {
@@ -3589,7 +3829,7 @@ async function runGeneration(
             0,
             macroEnv,
             undefined,
-            { source: "response_backend" },
+            responseOptionsFor(responseScripts),
           );
           if (fullReasoning) {
             fullReasoning = await regexScriptsSvc.applyRegexScripts(
@@ -3599,11 +3839,12 @@ async function runGeneration(
               0,
               macroEnv,
               undefined,
-              { source: "response_backend" },
+              responseOptionsFor(responseScripts),
             );
           }
         }
       }
+      fullContent = healFormattingArtifacts(fullContent);
 
       let messageId: string | undefined;
 
@@ -3736,8 +3977,17 @@ async function runGeneration(
       // breakdown tokenization) is deferred so the frontend can clear its stop
       // button as soon as the message itself is safely stored.
       {
-        const immediateExtra: Record<string, any> = {};
+        const immediateExtra: Record<string, any> = {
+          generationOutcome: finishReason ? stopMetadata() : null,
+        };
+        if (lifecycle.generationType !== "impersonate") {
+          immediateExtra.promptActivation = makePromptActivationSource(fullContent, lifecycle.presetId, true, activationSource);
+        }
         if (fullReasoning) immediateExtra.reasoning = fullReasoning;
+        const carrier = storedReasoningCarrier();
+        if (carrier && lifecycle.generationType !== "impersonate") {
+          immediateExtra.reasoningCarrier = carrier;
+        }
         if (streamUsage) immediateExtra.usage = streamUsage;
         if (reasoningDurationMs > 0)
           immediateExtra.reasoningDuration = reasoningDurationMs;
@@ -3763,7 +4013,9 @@ async function runGeneration(
           messageId,
           content: fullContent,
           usage: streamUsage,
+          ...stopMetadata(),
           generationType: lifecycle.generationType,
+          frontendSessionId: lifecycle.frontendSessionId,
           impersonateDraft: lifecycle.impersonateDraft || undefined,
         },
         userId,
@@ -3778,19 +4030,28 @@ async function runGeneration(
 
         // ── Generation metrics (tokenCount, TTFT, TPS) ───────────────────
         const finalPoolEntry = pool.getPoolEntry(generationId);
-        let resolvedTokenCount: number | undefined;
-        const fullOutput = fullReasoning
-          ? fullReasoning + fullContent
-          : fullContent;
-        if (fullOutput.length > 0) {
+        let calculatedResponseTokenCount: number | undefined;
+        const providerTokenCounts = resolveGenerationTokenCounts(
+          streamUsage?.completion_tokens,
+        );
+        // Provider completion usage is authoritative. Only pay the cost of
+        // tokenizing the finalized message when the provider omitted it.
+        if (providerTokenCounts.messageTokenCount == null && fullContent.length > 0) {
           try {
-            resolvedTokenCount =
-              (await tokenizerSvc.countForModel(model, fullOutput)) ??
+            calculatedResponseTokenCount =
+              (await tokenizerSvc.countForModel(model, fullContent)) ??
               undefined;
           } catch {
-            resolvedTokenCount = undefined;
+            calculatedResponseTokenCount = undefined;
           }
         }
+        const {
+          messageTokenCount: resolvedTokenCount,
+          responseTokenCount,
+        } = resolveGenerationTokenCounts(
+          streamUsage?.completion_tokens,
+          calculatedResponseTokenCount,
+        );
 
         let generationMetrics:
           | {
@@ -3800,43 +4061,27 @@ async function runGeneration(
               wasStreaming: boolean;
               model?: string;
               provider?: string;
+              presetId?: string;
+              presetName?: string;
             }
           | undefined;
         if (finalPoolEntry) {
-          const wasStreaming = finalPoolEntry.wasStreaming ?? true;
-          const streamStart = finalPoolEntry.streamingStartedAt;
-          const now = Date.now();
-          const durationMs = streamStart ? now - streamStart : 0;
-          let ttft: number | undefined;
-          let tps: number | undefined;
-
-          if (wasStreaming && streamStart) {
-            if (finalPoolEntry.firstTokenAt) {
-              ttft = finalPoolEntry.firstTokenAt - streamStart;
-            }
-            if (
-              finalPoolEntry.firstTokenAt &&
-              resolvedTokenCount &&
-              resolvedTokenCount > 1
-            ) {
-              const streamDurationSec =
-                (now - finalPoolEntry.firstTokenAt) / 1000;
-              if (streamDurationSec > 0) {
-                tps =
-                  Math.round((resolvedTokenCount / streamDurationSec) * 10) /
-                  10;
-              }
-            }
-          }
+          // completedAt freezes the response boundary before this deferred
+          // tokenizer/bookkeeping work runs.
+          const timingMetrics = calculateGenerationTimingMetrics(
+            finalPoolEntry,
+            responseTokenCount,
+          );
 
           generationMetrics = {
-            durationMs,
-            wasStreaming,
-            ...(ttft != null ? { ttft } : {}),
-            ...(tps != null ? { tps } : {}),
+            ...timingMetrics,
             ...(lifecycle.model ? { model: lifecycle.model } : {}),
             ...(lifecycle.providerName
               ? { provider: lifecycle.providerName }
+              : {}),
+            ...(lifecycle.presetId ? { presetId: lifecycle.presetId } : {}),
+            ...(lifecycle.presetName
+              ? { presetName: lifecycle.presetName }
               : {}),
           };
         }
@@ -3908,6 +4153,7 @@ async function runGeneration(
               parameters,
               usage: streamUsage,
               presetName: lifecycle.presetName,
+              presetId: lifecycle.presetId,
               tokenizer_name: tokenResult.tokenizer_name,
             };
             if (messageId) {
@@ -3980,7 +4226,11 @@ async function runGeneration(
         emittedStopped = true;
       }
     } else {
-      const msg = errorMessage(err);
+      const msg = enrichUnauthenticatedConnectionError(errorMessage(err), err, {
+        apiKey,
+        connectionName: lifecycle.connectionName,
+      });
+      const failure = generationFailurePayload(err, msg, lifecycle.connectionName);
       abortChatBackground(userId, chatId);
       // Socket drops, provider 5xx mid-stream, etc. — persist whatever was
       // already streamed so the user keeps the visible content rather than
@@ -3991,11 +4241,16 @@ async function runGeneration(
         const persisted = await persistPartialContent();
         savedMessageId = persisted.messageId;
         savedContent = persisted.content;
+        if (savedMessageId) {
+          chatsSvc.setSwipeScopedExtra(userId, savedMessageId, lifecycle.streamingSwipeId, {
+            generationOutcome: { ...stopMetadata(), error: msg },
+          });
+        }
       } catch {
         /* best-effort; never let save failure shadow the original error */
       }
       flushPendingStreamSegments();
-      pool.errorPool(generationId, msg);
+      pool.errorPool(generationId, msg, failure);
       eventBus.emit(
         EventType.GENERATION_ENDED,
         {
@@ -4003,23 +4258,21 @@ async function runGeneration(
           chatId,
           messageId: savedMessageId,
           content: savedContent,
-          error: msg,
+          ...failure,
+          ...stopMetadata(),
+          usage: streamUsage,
           generationType: lifecycle.generationType,
+          frontendSessionId: lifecycle.frontendSessionId,
         },
         userId,
       );
     }
   } finally {
     flushPendingStreamSegments();
-    activeGenerations.delete(generationId);
+    removeActiveGeneration(generationId);
     // Clean up per-chat lock (only if this generation still owns it — a newer
     // generation may have already replaced it via startGeneration).
-    for (const [key, id] of activeChatGenerations) {
-      if (id === generationId) {
-        activeChatGenerations.delete(key);
-        break;
-      }
-    }
+    clearActiveChatGenerationById(generationId);
   }
 }
 
@@ -4040,8 +4293,8 @@ async function fireExpressionDetection(
 
   // ── Multi-character expression groups ──────────────────────────────────────
   // Cards with expression_groups (e.g., multi-character RisuAI imports) use a
-  // two-stage pipeline: identify the focus character, then detect expression
-  // within that character's label set.
+  // two-stage pipeline: identify every visible character, then detect each
+  // expression within that character's own label set.
   const expressionGroups = getExpressionGroups(userId, characterId);
   if (expressionGroups && Object.keys(expressionGroups).length > 0) {
     const detectionSettings = getExpressionDetectionSettings(userId);
@@ -4055,7 +4308,7 @@ async function fireExpressionDetection(
         content: m.content,
       }));
 
-    const result = await detectMultiCharacterExpression(
+    const results = await detectMultiCharacterExpressions(
       {
         userId,
         chatId,
@@ -4068,16 +4321,8 @@ async function fireExpressionDetection(
       rawGenerate,
     );
 
-    if (result) {
-      emitExpressionChanged(
-        userId,
-        chatId,
-        chat,
-        characterId,
-        result.expression,
-        result.imageId,
-        result.characterGroup,
-      );
+    if (results !== null) {
+      emitMultiCharacterExpressionsChanged(userId, chatId, characterId, results);
     }
     return;
   }
@@ -4145,6 +4390,49 @@ async function fireExpressionDetection(
   }
 }
 
+function emitMultiCharacterExpressionsChanged(
+  userId: string,
+  chatId: string,
+  characterId: string,
+  results: Array<{ characterGroup: string; expression: string; imageId: string }>,
+): void {
+  const expressions = Object.fromEntries(results.map((result) => [
+    result.characterGroup,
+    { label: result.expression, imageId: result.imageId },
+  ]));
+  const primary = results[0];
+
+  // This is a snapshot of the characters visible in the latest response, not
+  // an accumulating history. Replacing it removes sprites that left the scene.
+  chatsSvc.mergeChatMetadata(userId, chatId, {
+    multi_character_expressions: expressions,
+    active_expression: primary?.expression ?? null,
+    active_expression_group: primary?.characterGroup ?? null,
+  });
+
+  eventBus.emit(
+    EventType.MULTI_CHARACTER_EXPRESSIONS_CHANGED,
+    { chatId, characterId, expressions },
+    userId,
+  );
+
+  // Keep the original single-expression signal for older clients and
+  // extensions. New clients use the batch event above to render every result.
+  if (primary) {
+    eventBus.emit(
+      EventType.EXPRESSION_CHANGED,
+      {
+        chatId,
+        characterId,
+        label: primary.expression,
+        imageId: primary.imageId,
+        expressionGroup: primary.characterGroup,
+      },
+      userId,
+    );
+  }
+}
+
 function emitExpressionChanged(
   userId: string,
   chatId: string,
@@ -4195,322 +4483,6 @@ function emitExpressionChanged(
   );
 }
 
-export function stopGeneration(userId: string, generationId: string): boolean {
-  const entry = activeGenerations.get(generationId);
-  // User scoping: a generationId is unguessable, but never let one user's
-  // stop request abort another user's generation.
-  if (!entry || entry.userId !== userId) return false;
-  entry.controller.abort();
-  // Tear down any fire-and-forget background work for this chat too —
-  // the user asked to stop, so cache-warming cortex/databank queries
-  // should die with the visible generation.
-  abortChatBackground(entry.userId, entry.chatId);
-  return true;
-}
-
-export function stopUserGenerations(userId: string): void {
-  for (const [id, entry] of activeGenerations) {
-    if (entry.userId === userId) {
-      entry.controller.abort();
-    }
-  }
-  abortUserBackgrounds(userId);
-}
-
-export function stopChatGenerations(userId: string, chatId: string): boolean {
-  const chatKey = `${userId}:${chatId}`;
-  const genId = activeChatGenerations.get(chatKey);
-  let stopped = false;
-  if (genId) {
-    const entry = activeGenerations.get(genId);
-    if (entry) {
-      entry.controller.abort();
-      stopped = true;
-    }
-  }
-  abortChatBackground(userId, chatId);
-  return stopped;
-}
-
-export function stopAllGenerations(): void {
-  for (const [id, entry] of activeGenerations) {
-    entry.controller.abort();
-  }
-  activeGenerations.clear();
-  activeChatGenerations.clear();
-  abortAllBackgrounds();
-}
-
-/** Returns the active generationId for a chat, if any. */
-export function getActiveChatGeneration(
-  userId: string,
-  chatId: string,
-): string | undefined {
-  return activeChatGenerations.get(`${userId}:${chatId}`);
-}
-
-export function getActiveGenerationCount(): number {
-  return activeGenerations.size;
-}
-
-// Periodically abort generations that have been running too long (provider hung, broken stream)
-const GENERATION_MAX_AGE_MS = 10 * 60 * 1000; // 10 minutes
-let _generationSweepTimer: ReturnType<typeof setInterval> | null = setInterval(
-  () => {
-    const now = Date.now();
-    for (const [id, entry] of activeGenerations) {
-      if (now - entry.startedAt > GENERATION_MAX_AGE_MS) {
-        console.warn(
-          `[generate] Aborting stale generation ${id} (age: ${Math.round((now - entry.startedAt) / 1000)}s)`,
-        );
-        entry.controller.abort();
-      }
-    }
-  },
-  60_000,
-);
-
-export function stopGenerationSweep(): void {
-  if (_generationSweepTimer) {
-    clearInterval(_generationSweepTimer);
-    _generationSweepTimer = null;
-  }
-}
-
-// --- Stream-to-response helper ---
-// Some providers (especially with tool calling) work better with streaming.
-// This helper consumes a stream and produces a full GenerationResponse,
-// properly accumulating tool call deltas.
-
-async function consumeStream(
-  stream: AsyncGenerator<StreamChunk, void, unknown>,
-  userId?: string,
-): Promise<GenerationResponse> {
-  let content = "";
-  let reasoning = "";
-  let finishReason = "stop";
-  let toolCalls: import("../llm/types").ToolCallResult[] | undefined;
-  let usage: GenerationResponse["usage"];
-
-  const source = userId
-    ? wrapDelimitedReasoningForUser(userId, stream)
-    : stream;
-  for await (const chunk of source) {
-    if (chunk.token) content += chunk.token;
-    if (chunk.reasoning) reasoning += chunk.reasoning;
-    if (chunk.usage) usage = chunk.usage;
-    if (chunk.finish_reason) finishReason = chunk.finish_reason;
-    if (chunk.tool_calls) toolCalls = chunk.tool_calls;
-  }
-
-  return {
-    content,
-    reasoning: reasoning || undefined,
-    finish_reason: finishReason,
-    tool_calls: toolCalls,
-    usage,
-  };
-}
-
-// --- Extension generation (stateless, synchronous, no WS events) ---
-
-interface PreparedGenerationCall {
-  provider: LlmProvider;
-  apiKey: string;
-  apiUrl: string;
-  request: GenerationRequest;
-}
-
-async function prepareRawCall(
-  userId: string,
-  input: RawGenerateInput & { signal?: AbortSignal },
-): Promise<PreparedGenerationCall> {
-  const { provider, apiKey, apiUrl, connection } = await resolveRawProviderAndKey(
-    userId,
-    input,
-  );
-  const parameters: GenerationParameters = { ...(input.parameters || {}) };
-  const reasoningConnection = connection;
-  applyEffectiveReasoningSettings(
-    userId,
-    reasoningConnection || {},
-    provider.name,
-    input.model,
-    parameters,
-    input.reasoning,
-  );
-  if (reasoningConnection) injectConnectionMetadataFlags(reasoningConnection, parameters);
-
-  const cached = applyPromptCaching(
-    {
-      provider: provider.name,
-      model: input.model,
-      metadata: reasoningConnection?.metadata,
-    },
-    { params: parameters, messages: input.messages, tools: input.tools },
-  );
-
-  const request: GenerationRequest = {
-    messages: cached.messages,
-    model: input.model,
-    parameters: cached.params,
-    tools: cached.tools,
-    signal: input.signal,
-  };
-  return { provider, apiKey, apiUrl, request };
-}
-
-async function prepareQuietCall(
-  userId: string,
-  input: QuietGenerateInput,
-): Promise<PreparedGenerationCall> {
-  const connection = resolveConnection(userId, input.connection_id);
-  const { provider, apiKey, apiUrl } = await resolveProviderAndKey(
-    userId,
-    connection.id,
-  );
-
-  // Merge preset parameters with request overrides
-  let mergedParams: GenerationParameters = input.parameters || {};
-  if (connection.preset_id) {
-    const preset = presetsSvc.getPreset(userId, connection.preset_id);
-    if (preset) {
-      mergedParams = { ...preset.parameters, ...mergedParams };
-    }
-  }
-
-  applyEffectiveReasoningSettings(
-    userId,
-    connection,
-    provider.name,
-    connection.model || undefined,
-    mergedParams,
-    input.reasoning,
-  );
-
-  // Allow callers (e.g. Memory Cortex sidecar) to override the model without
-  // swapping connection profiles. Strip the key from parameters so it doesn't
-  // leak into provider-specific request bodies as an unknown field. Resolved
-  // before caching dispatch so model-gated strategies see the actual model
-  // that will be sent.
-  const paramModel =
-    typeof (mergedParams as any).model === "string"
-      ? (mergedParams as any).model.trim()
-      : "";
-  if ("model" in mergedParams) delete (mergedParams as any).model;
-
-  injectConnectionMetadataFlags(connection, mergedParams);
-
-  const resolvedModel = paramModel || connection.model;
-  const cached = applyPromptCaching(
-    {
-      provider: provider.name,
-      model: resolvedModel,
-      metadata: connection.metadata,
-    },
-    { params: mergedParams, messages: input.messages, tools: input.tools },
-  );
-
-  const request: GenerationRequest = {
-    messages: cached.messages,
-    model: resolvedModel,
-    parameters: cached.params,
-    tools: cached.tools,
-    signal: input.signal,
-  };
-
-  return { provider, apiKey, apiUrl, request };
-}
-
-export async function rawGenerate(
-  userId: string,
-  input: RawGenerateInput & { signal?: AbortSignal },
-): Promise<GenerationResponse> {
-  const { provider, apiKey, apiUrl, request } = await prepareRawCall(
-    userId,
-    input,
-  );
-
-  // Use streaming when tools are present — some providers only emit tool call
-  // deltas correctly via the streaming path. Consume the stream internally to
-  // produce a complete response.
-  if (input.tools && input.tools.length > 0) {
-    return consumeStream(
-      provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),
-      userId,
-    );
-  }
-
-  return applyDelimitedReasoningParsing(
-    userId,
-    await provider.generate(apiKey, apiUrl, { ...request, stream: false }),
-  );
-}
-
-export async function quietGenerate(
-  userId: string,
-  input: QuietGenerateInput,
-): Promise<GenerationResponse> {
-  const { provider, apiKey, apiUrl, request } = await prepareQuietCall(
-    userId,
-    input,
-  );
-
-  // Use streaming when tools are present — some providers only emit tool call
-  // deltas correctly via the streaming path.
-  if (request.tools && request.tools.length > 0) {
-    return consumeStream(
-      provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),
-      userId,
-    );
-  }
-
-  return applyDelimitedReasoningParsing(
-    userId,
-    await provider.generate(apiKey, apiUrl, { ...request, stream: false }),
-  );
-}
-
-/**
- * Streaming variant of {@link rawGenerate}. Returns the raw provider stream
- * iterator with the caller's `AbortSignal` already wired in. Used by
- * Spindle's `request_generation_stream` RPC to pipe chunks back to the
- * extension worker.
- */
-export async function rawGenerateStream(
-  userId: string,
-  input: RawGenerateInput & { signal?: AbortSignal },
-): Promise<AsyncGenerator<StreamChunk, void, unknown>> {
-  const { provider, apiKey, apiUrl, request } = await prepareRawCall(
-    userId,
-    input,
-  );
-  return wrapDelimitedReasoningForUser(
-    userId,
-    provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),
-  );
-}
-
-/**
- * Streaming variant of {@link quietGenerate}. Same parameter resolution as
- * `quietGenerate` (preset merge, reasoning injection, connection metadata)
- * but returns the underlying provider stream iterator instead of an
- * aggregated response.
- */
-export async function quietGenerateStream(
-  userId: string,
-  input: QuietGenerateInput,
-): Promise<AsyncGenerator<StreamChunk, void, unknown>> {
-  const { provider, apiKey, apiUrl, request } = await prepareQuietCall(
-    userId,
-    input,
-  );
-  return wrapDelimitedReasoningForUser(
-    userId,
-    provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),
-  );
-}
-
 /**
  * Summarize generation — used by the Loom Summary feature.
  * Accepts raw message data and builds the prompt internally using the shared
@@ -4532,10 +4504,15 @@ export async function summarizeGenerate(
   }
 
   try {
-    // Fetch messages from the database (last N by message_context)
+    // Fetch messages from the database. A trailing lag keeps the newest
+    // messages out of the summary until their swipes/edits have settled.
     const allMessages = chatsSvc.getMessages(userId, chatId);
     const visibleMessages = allMessages.filter((m) => m.extra?.hidden !== true);
-    const recentMessages = visibleMessages.slice(-input.message_context);
+    const recentMessages = selectSummarizationMessages(
+      visibleMessages,
+      input.message_context,
+      input.message_lag,
+    );
 
     if (recentMessages.length === 0) {
       throw new Error('No messages to summarize');
@@ -4609,6 +4586,8 @@ export async function summarizeGenerate(
       provider.name,
       sidecarModel || connection.model || undefined,
       mergedParams,
+      undefined,
+      true,
     );
 
     const resolvedModel = sidecarModel || connection.model;
@@ -4626,6 +4605,9 @@ export async function summarizeGenerate(
     );
 
     const request: GenerationRequest = {
+      onProviderRequest: createRequestObserver(userId, { kind: "sidecar", name: "Loom Summary", operation: "summarize" }, {
+        chatId, generationId, connectionId: connection.id,
+      }, [apiKey]),
       messages: cached.messages,
       model: resolvedModel,
       parameters: cached.params,
@@ -4746,6 +4728,9 @@ async function processRebuildBatch(
   );
 
   const request = {
+    onProviderRequest: createRequestObserver(userId, { kind: "sidecar", name: "Loom Summary", operation: `rebuild batch ${batchIdx + 1}/${totalBatches}` }, {
+      chatId, generationId, connectionId: ctx.connection.id,
+    }, [apiKey]),
     messages: cached.messages,
     model: sidecarModel || ctx.connection.model,
     parameters: cached.params,
@@ -4760,29 +4745,19 @@ async function processRebuildBatch(
       await provider.generate(apiKey, apiUrl, request),
     );
   } catch (err: any) {
-    // Retry once on failure
-    try {
-      await new Promise<void>((r) => setTimeout(r, 500));
-      result = applyDelimitedReasoningParsing(
-        userId,
-        await provider.generate(apiKey, apiUrl, request),
-      );
-    } catch (retryErr: any) {
-      // On retry failure, keep the previous summary unchanged
-      console.warn(
-        `[rebuild] Batch ${batchIdx + 1}/${totalBatches} failed, keeping previous summary`,
-        retryErr?.message,
-      );
-      summarizePool.emitSummarizationProgress({
-        chatId,
-        generationId,
-        batchNumber: batchIdx + 1,
-        totalBatches,
-        messagesProcessed: messagesProcessed + batch.length,
-        userId,
-      });
-      return { summary: currentSummary, messagesProcessed: messagesProcessed + batch.length, failed: true };
-    }
+    console.warn(
+      `[rebuild] Batch ${batchIdx + 1}/${totalBatches} failed, keeping previous summary`,
+      err?.message,
+    );
+    summarizePool.emitSummarizationProgress({
+      chatId,
+      generationId,
+      batchNumber: batchIdx + 1,
+      totalBatches,
+      messagesProcessed: messagesProcessed + batch.length,
+      userId,
+    });
+    return { summary: currentSummary, messagesProcessed: messagesProcessed + batch.length, failed: true };
   }
 
   const batchSummary = result.content?.trim();
@@ -5125,6 +5100,7 @@ function applyPostProcessing(messages: LlmMessage[], mode: string): void {
 export async function batchGenerate(
   userId: string,
   input: BatchGenerateInput,
+  options?: GenerationCallOptions,
 ): Promise<BatchResultItem[]> {
   const processOne = async (
     req: RawGenerateInput,
@@ -5134,12 +5110,14 @@ export async function batchGenerate(
       const result = await rawGenerate(userId, {
         ...req,
         signal: input.signal,
-      });
+      }, { ...options, origin: options?.origin ?? { kind: "api", name: "Local API", operation: "batch" } });
       return {
         index,
         success: true,
         content: result.content,
         finish_reason: result.finish_reason,
+        stop_details: result.stop_details,
+        stop_sequence: result.stop_sequence,
         usage: result.usage,
       };
     } catch (err: unknown) {

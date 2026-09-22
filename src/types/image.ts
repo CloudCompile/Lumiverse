@@ -7,6 +7,7 @@ export interface Image {
   width: number | null;
   height: number | null;
   has_thumbnail: boolean;
+  skip_thumbnail_processing: boolean;
   url: string;
   specificity: "full" | "sm" | "lg";
   owner_extension_identifier: string | null;

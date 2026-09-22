@@ -337,6 +337,8 @@ export async function* wrapDelimitedReasoningStream(
     if (chunk.finish_reason) {
       trailingChunk = {
         finish_reason: chunk.finish_reason,
+        stop_details: chunk.stop_details,
+        stop_sequence: chunk.stop_sequence,
       };
     }
   }

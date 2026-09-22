@@ -7,8 +7,11 @@ import { runRegexRequest, type RegexRequest } from "./regex-sandbox-core";
  * an evaluation exceeds its timeout.
  *
  * Protocol:
- *   in:  { id, op: "replace" | "test" | "collect", pattern, flags, input, replacement? }
- *   out: { id, ok: true, result } | { id, ok: false, error }
+ *   in:  { id, op: "replace" | "test" | "collect" | "capture-replacements",
+ *          pattern, flags, input, replacement? }
+ *   out: { id, type: "started" }
+ *      | { id, ok: true, result }
+ *      | { id, ok: false, error }
  */
 
 // `self` is a global inside Bun Workers. We narrow its type here without
@@ -20,6 +23,9 @@ const workerSelf = self as unknown as {
 
 workerSelf.addEventListener("message", (event: MessageEvent) => {
   const data = event.data as RegexRequest;
+  // This is the attribution boundary: only time after this acknowledgement is
+  // charged to the regex. Worker startup and message dispatch happen before it.
+  workerSelf.postMessage({ id: data.id, type: "started" });
   try {
     workerSelf.postMessage({ id: data.id, ok: true, result: runRegexRequest(data) });
   } catch (err: unknown) {

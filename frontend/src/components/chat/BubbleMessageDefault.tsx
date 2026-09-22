@@ -5,7 +5,7 @@
 import { useRef, useCallback, useState, useMemo, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import { Copy, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square } from 'lucide-react'
+import { Copy, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square, Anchor } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
 import MessageContent from './MessageContent'
 import MessageEditArea from './MessageEditArea'
@@ -27,6 +27,7 @@ import { useMessagePlayback } from '@/hooks/useMessagePlayback'
 import { copyTextToClipboard, getSelectionTextWithin } from '@/lib/clipboard'
 import { scheduleReplay as scheduleSpindleInjectionReplay } from '@/lib/spindle/dom-injection-registry'
 import { useStore } from '@/store'
+import { requestHostIntent } from '@/lib/hostIntents'
 import type { Message } from '@/types/api'
 import type { GenerationMetrics } from '@/types/ws-events'
 import styles from './BubbleMessage.module.css'
@@ -39,6 +40,7 @@ export interface BubbleMessageDefaultProps {
   isSelectMode: boolean
   isSelected: boolean
   onToggleSelect?: (e: React.MouseEvent) => void
+  findQuery: string
   // Pre-computed from useMessageCard
   isEditing: boolean
   editContent: string
@@ -60,12 +62,16 @@ export interface BubbleMessageDefaultProps {
   displayName: string
   macroUserName: string
   isHidden: boolean
+  isContextAnchor: boolean
   userLeft: boolean
   handleEdit: () => void
   handleSaveEdit: () => void
+  handleEditAndSend: () => void
+  editAndSendPending: boolean
   handleCancelEdit: () => void
   handleDelete: () => void
   handleToggleHidden: () => void
+  handleToggleContextAnchor: () => void
   handleFork: () => void
   handlePromptBreakdown: () => void
 }
@@ -100,6 +106,8 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
     || generationMetrics.tps != null
     || !!generationMetrics.model
     || !!generationMetrics.provider
+    || !!generationMetrics.presetName
+    || !!generationMetrics.presetId
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -153,6 +161,14 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
               <span className={styles.tooltipValue}>{generationMetrics!.provider}</span>
             </span>
           )}
+          {(generationMetrics!.presetName || generationMetrics!.presetId) && (
+            <span className={styles.tooltipRow}>
+              <span className={styles.tooltipLabel}>{t('messageMeta.preset')}</span>
+              <span className={styles.tooltipValue}>
+                {generationMetrics!.presetName || generationMetrics!.presetId}
+              </span>
+            </span>
+          )}
           {generationMetrics!.ttft != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.firstToken')}</span>
@@ -174,11 +190,12 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
 
 export default function BubbleMessageDefault({
   message, chatId, depth, isSelectMode, isSelected, onToggleSelect,
+  findQuery,
   isEditing, editContent, setEditContent, editReasoning, setEditReasoning, showReasoningEditor,
   isUser, isActivelyStreaming, displayContent, reasoning, reasoningDuration, reasoningStartedAt,
-  tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden, userLeft,
-  handleEdit, handleSaveEdit, handleCancelEdit, handleDelete, handleToggleHidden,
-  handleFork, handlePromptBreakdown,
+  tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden, isContextAnchor, userLeft,
+  handleEdit, handleSaveEdit, handleEditAndSend, handleCancelEdit, handleDelete, handleToggleHidden, handleToggleContextAnchor,
+  handleFork, handlePromptBreakdown, editAndSendPending,
 }: BubbleMessageDefaultProps) {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('common')
@@ -186,8 +203,8 @@ export default function BubbleMessageDefault({
   const swipeGesturesEnabled = useStore((s) => s.swipeGesturesEnabled)
   const showMessageTokenCount = useStore((s) => s.showMessageTokenCount ?? true)
   const messageContextMenuEnabled = useStore((s) => s.messageContextMenuEnabled ?? true)
-  // Keep a MessageAudioSlot wrapper mounted on every assistant bubble
-  // when TTS is enabled, OR whenever an audio attachment already exists.
+  // Keep a MessageAudioSlot wrapper mounted on every assistant bubble when
+  // TTS is enabled, and on either side whenever an audio attachment exists.
   // The slot itself is height-zero when no audio is attached (no wasted
   // space, no contribution to row height) and transitions smoothly to
   // its natural height when audio arrives. Always-mounted is required
@@ -205,7 +222,7 @@ export default function BubbleMessageDefault({
       a && a.type === 'audio' && (a.swipe_id === undefined || a.swipe_id === message.swipe_id),
     ) ?? null
   }, [message.extra?.attachments, message.swipe_id])
-  const renderAudioSlot = !isEditing && (ttsEnabled || !!audioAttachment) && !message.is_user
+  const renderAudioSlot = !isEditing && (!!audioAttachment || (ttsEnabled && !message.is_user))
   const isHighlighted = useStore((s) => s.highlightedMessageId === message.id)
   const cardRef = useRef<HTMLDivElement>(null)
 
@@ -236,6 +253,9 @@ export default function BubbleMessageDefault({
     confirmDelete,
     cancelDelete,
   } = useMessagePlayback(message.id, message.content, message.name, message.is_user)
+  // Uploaded user audio owns its own inline player. Do not label the message's
+  // TTS action as "regenerate" or let it replace the uploaded recording.
+  const canUseTtsAction = canPlay && (!isUser || !audioAttachment)
   const canOpenContextMenu = !isEditing && !isSelectMode && messageContextMenuEnabled
 
   const closeContextMenu = useCallback(() => setContextMenuPos(null), [])
@@ -256,10 +276,30 @@ export default function BubbleMessageDefault({
     },
   })
 
+  const isRegexActionEvent = useCallback((e: React.SyntheticEvent) => {
+    const path = typeof e.nativeEvent.composedPath === 'function'
+      ? e.nativeEvent.composedPath()
+      : [e.target]
+
+    return path.some((node) => (
+      node instanceof Element
+      && node.hasAttribute('data-lumiverse-regex-action')
+    ))
+  }, [])
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (!canOpenContextMenu) return
+    if (isRegexActionEvent(e)) {
+      e.preventDefault()
+      return
+    }
     longPress.onContextMenu(e)
-  }, [canOpenContextMenu, longPress])
+  }, [canOpenContextMenu, isRegexActionEvent, longPress])
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!canOpenContextMenu || isRegexActionEvent(e)) return
+    longPress.onTouchStart(e)
+  }, [canOpenContextMenu, isRegexActionEvent, longPress])
 
   const contextMenuItems: ContextMenuEntry[] = useMemo(() => [
     {
@@ -274,7 +314,7 @@ export default function BubbleMessageDefault({
       icon: <Pencil size={14} />,
       onClick: () => contextAction(handleEdit),
     },
-    ...(canPlay ? [{
+    ...(canUseTtsAction ? [{
       key: 'play',
       label: isGenerating
         ? t('messageActions.cancelTtsGeneration')
@@ -293,6 +333,13 @@ export default function BubbleMessageDefault({
       active: isHidden,
       onClick: () => contextAction(handleToggleHidden),
     },
+    ...(!isHidden ? [{
+      key: 'toggle-context-anchor',
+      label: isContextAnchor ? t('messageActions.clearContextAnchor') : t('messageActions.setContextAnchor'),
+      icon: <Anchor size={14} />,
+      active: isContextAnchor,
+      onClick: () => contextAction(handleToggleContextAnchor),
+    }] satisfies ContextMenuEntry[] : []),
     {
       key: 'fork',
       label: t('messageActions.fork'),
@@ -314,8 +361,8 @@ export default function BubbleMessageDefault({
       onClick: () => contextAction(handleDelete),
     },
   ], [
-    canPlay, contextAction, handleCopy, handleDelete, handleEdit, handleFork,
-    handlePromptBreakdown, handleToggleHidden, hasSavedAudio, isGenerating, isHidden, isPlaying, isUser,
+    canUseTtsAction, contextAction, handleCopy, handleDelete, handleEdit, handleFork,
+    handlePromptBreakdown, handleToggleHidden, handleToggleContextAnchor, hasSavedAudio, isGenerating, isHidden, isContextAnchor, isPlaying, isUser,
     togglePlayback, t, tc,
   ])
 
@@ -343,7 +390,7 @@ export default function BubbleMessageDefault({
       data-message-id={message.id}
       onClick={isSelectMode ? onToggleSelect : undefined}
       onContextMenu={handleContextMenu}
-      onTouchStart={canOpenContextMenu ? longPress.onTouchStart : undefined}
+      onTouchStart={canOpenContextMenu ? handleTouchStart : undefined}
       onTouchMove={canOpenContextMenu ? longPress.onTouchMove : undefined}
       onTouchEnd={canOpenContextMenu ? longPress.onTouchEnd : undefined}
     >
@@ -360,7 +407,12 @@ export default function BubbleMessageDefault({
             <div
               className={styles.avatar}
               style={fullAvatarUrl ? { cursor: 'pointer' } : undefined}
-              onClick={fullAvatarUrl ? (e) => { e.stopPropagation(); openFloatingAvatar(fullAvatarUrl, displayName) } : undefined}
+              onClick={fullAvatarUrl ? (e) => {
+                e.stopPropagation()
+                if (!requestHostIntent('image-preview', { imageUrl: fullAvatarUrl, caption: displayName, source: 'bubble-message-avatar' })) {
+                  openFloatingAvatar(fullAvatarUrl, displayName)
+                }
+              } : undefined}
             >
               {displayAvatarUrl ? (
                 <LazyImage
@@ -393,6 +445,7 @@ export default function BubbleMessageDefault({
               />
             </div>
           </div>
+          <span data-spindle-mount="message_header" data-spindle-scope={`message:${message.id}:bubble:header`} style={{ display: 'contents' }} />
         </div>
 
         {reasoning && !isEditing && (
@@ -413,12 +466,16 @@ export default function BubbleMessageDefault({
         )}
 
         <div className={styles.content}>
+          <span data-spindle-mount="message_body_before" data-spindle-scope={`message:${message.id}:bubble:body-before`} style={{ display: 'contents' }} />
           {isEditing ? (
             <MessageEditArea
               editContent={editContent}
               onChangeContent={setEditContent}
               onSave={handleSaveEdit}
               onCancel={handleCancelEdit}
+              onEditAndSend={isUser ? handleEditAndSend : undefined}
+              messageId={message.id}
+              editAndSendDisabled={editAndSendPending}
               editReasoning={showReasoningEditor ? editReasoning : undefined}
               onChangeReasoning={showReasoningEditor ? setEditReasoning : undefined}
             />
@@ -431,11 +488,13 @@ export default function BubbleMessageDefault({
               messageId={message.id}
               chatId={chatId}
               depth={depth}
+              findQuery={findQuery}
             />
           ) : isActivelyStreaming ? (
             <StreamingIndicator />
           ) : null}
         </div>
+        <span data-spindle-mount="message_body_after" data-spindle-scope={`message:${message.id}:bubble:body-after`} style={{ display: 'contents' }} />
 
         {isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
           <div className={styles.content}>
@@ -455,39 +514,42 @@ export default function BubbleMessageDefault({
         {!isUser && !isEditing && message.index_in_chat !== 0 && (
           <SwipeControls message={message} chatId={chatId} variant="bubble" />
         )}
+        <span data-spindle-mount="message_swipe_indicators" data-spindle-scope={`message:${message.id}:bubble:swipe-indicators`} style={{ display: 'contents' }} />
 
         {message.index_in_chat === 0 && !isUser && !isEditing && (
           <GreetingNav message={message} chatId={chatId} variant="bubble" />
         )}
+        <span data-spindle-mount="message_footer" data-spindle-scope={`message:${message.id}:bubble:footer`} style={{ display: 'contents' }} />
       </div>
 
       {!isEditing && !isSelectMode && (
-        <>
-          <BubbleActions
-            onEdit={handleEdit}
-            onDelete={handleDelete}
-            onToggleHidden={handleToggleHidden}
-            onFork={handleFork}
-            onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
-            onPlay={canPlay ? togglePlayback : undefined}
-            isPlaying={isPlaying}
-            isGenerating={isGenerating}
-            hasSavedAudio={hasSavedAudio}
-            isHidden={isHidden}
-            content={message.content}
-            className={styles.actionsPill}
-          >
-            {!isUser && (
-              <VoteButtons
-                messageId={message.id}
-                swipeId={message.swipe_id}
-                chatId={chatId}
-                model={generationMetrics?.model}
-                provider={generationMetrics?.provider}
-              />
-            )}
-          </BubbleActions>
-        </>
+        <BubbleActions
+          messageId={message.id}
+          onEdit={handleEdit}
+          onDelete={handleDelete}
+          onToggleHidden={handleToggleHidden}
+          onToggleContextAnchor={handleToggleContextAnchor}
+          onFork={handleFork}
+          onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
+          onPlay={canUseTtsAction ? togglePlayback : undefined}
+          isPlaying={isPlaying}
+          isGenerating={isGenerating}
+          hasSavedAudio={hasSavedAudio}
+          isHidden={isHidden}
+          isContextAnchor={isContextAnchor}
+          content={message.content}
+          className={styles.actionsPill}
+        >
+          {!isUser && (
+            <VoteButtons
+              messageId={message.id}
+              swipeId={message.swipe_id}
+              chatId={chatId}
+              model={generationMetrics?.model}
+              provider={generationMetrics?.provider}
+            />
+          )}
+        </BubbleActions>
       )}
 
       <ContextMenu position={contextMenuPos} items={contextMenuItems} onClose={closeContextMenu} />

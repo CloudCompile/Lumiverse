@@ -27,7 +27,7 @@ function resolveConnection(userId: string, connectionId?: string) {
 export async function synthesize(userId: string, input: SynthesizeInput): Promise<TtsResponse> {
   const profile = resolveConnection(userId, input.connectionId);
 
-  const provider = getTtsProvider(profile.provider);
+  const provider = getTtsProvider(profile.provider, userId);
   if (!provider) throw new Error(`Unknown TTS provider: ${profile.provider}`);
 
   const apiKey = await secretsSvc.getSecret(userId, ttsConnSvc.ttsConnectionSecretKey(profile.id));
@@ -44,7 +44,8 @@ export async function synthesize(userId: string, input: SynthesizeInput): Promis
     signal: input.signal,
   };
 
-  return provider.synthesize(apiKey || "", profile.api_url || "", request);
+  const effectiveUrl = ttsConnSvc.resolveEffectiveTtsApiUrl(profile);
+  return provider.synthesize(apiKey || "", effectiveUrl, request);
 }
 
 export async function* synthesizeStream(
@@ -53,7 +54,7 @@ export async function* synthesizeStream(
 ): AsyncGenerator<TtsStreamChunk, void, unknown> {
   const profile = resolveConnection(userId, input.connectionId);
 
-  const provider = getTtsProvider(profile.provider);
+  const provider = getTtsProvider(profile.provider, userId);
   if (!provider) throw new Error(`Unknown TTS provider: ${profile.provider}`);
 
   if (!provider.capabilities.supportsStreaming) {
@@ -74,5 +75,6 @@ export async function* synthesizeStream(
     signal: input.signal,
   };
 
-  yield* provider.synthesizeStream(apiKey || "", profile.api_url || "", request);
+  const effectiveUrl = ttsConnSvc.resolveEffectiveTtsApiUrl(profile);
+  yield* provider.synthesizeStream(apiKey || "", effectiveUrl, request);
 }

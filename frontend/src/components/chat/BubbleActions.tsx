@@ -2,15 +2,17 @@ import { useState, useCallback } from 'react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { Copy, Check, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square } from 'lucide-react'
+import { Copy, Check, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square, Anchor } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import styles from './BubbleActions.module.css'
 
 interface BubbleActionsProps {
+  messageId?: string
   onEdit: () => void
   onDelete: () => void
   onToggleHidden: () => void
+  onToggleContextAnchor: () => void
   onFork: () => void
   onPromptBreakdown?: () => void
   onPlay?: () => void
@@ -22,15 +24,18 @@ interface BubbleActionsProps {
    *  changes the play tooltip to "Regenerate". */
   hasSavedAudio?: boolean
   isHidden: boolean
+  isContextAnchor: boolean
   content: string
   className?: string
   children?: ReactNode
 }
 
 export default function BubbleActions({
+  messageId,
   onEdit,
   onDelete,
   onToggleHidden,
+  onToggleContextAnchor,
   onFork,
   onPromptBreakdown,
   onPlay,
@@ -38,6 +43,7 @@ export default function BubbleActions({
   isGenerating,
   hasSavedAudio,
   isHidden,
+  isContextAnchor,
   content,
   className,
   children,
@@ -88,6 +94,25 @@ export default function BubbleActions({
       >
         {isHidden ? <Eye size={13} /> : <EyeOff size={13} />}
       </button>
+      <button
+        type="button"
+        onClick={onToggleContextAnchor}
+        title={isHidden
+          ? t('messageActions.contextAnchorHidden')
+          : isContextAnchor
+            ? t('messageActions.clearContextAnchor')
+            : t('messageActions.setContextAnchor')}
+        aria-label={isHidden
+          ? t('messageActions.contextAnchorHidden')
+          : isContextAnchor
+            ? t('messageActions.clearContextAnchor')
+            : t('messageActions.setContextAnchor')}
+        aria-pressed={isContextAnchor}
+        disabled={isHidden}
+        className={isContextAnchor ? styles.contextAnchorActive : undefined}
+      >
+        <Anchor size={13} />
+      </button>
       <button type="button" onClick={onFork} title={t('messageActions.fork')} aria-label={t('messageActions.forkAria')}>
         <IconGitFork size={13} />
       </button>
@@ -99,6 +124,9 @@ export default function BubbleActions({
       <button type="button" onClick={onDelete} title={tc('actions.delete')} aria-label={tc('actions.delete')}>
         <Trash2 size={13} />
       </button>
+      {messageId && (
+        <span data-spindle-mount="message_actions" data-spindle-scope={`message:${messageId}:actions`} style={{ display: 'contents' }} />
+      )}
       {children}
     </div>
   )

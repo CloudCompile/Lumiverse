@@ -1,7 +1,13 @@
 import { getDb } from "../db/connection";
-import { eventBus } from "../ws/bus";
+import { emitProviderRegistryChanged, eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import * as secretsSvc from "./secrets.service";
+import {
+  providerRegistry,
+  type HostScopeContext,
+  type ProviderDescriptor,
+  type RegisteredProvider,
+} from "../spindle/provider-registry";
 import type {
   SttConnectionProfile,
   CreateSttConnectionInput,
@@ -59,16 +65,184 @@ function rowToProfile(row: any): SttConnectionProfile {
   };
 }
 
-export function listProviders(): SttProviderInfo[] {
-  return STT_PROVIDERS;
+const CONSUMER_PROVIDER_SCOPE = "frontend";
+const sttConsumerRevisions = new Map<string, number>();
+
+function sttDisplayName(record: RegisteredProvider): string {
+  const description = record.descriptor.description;
+  if (description && typeof description === "object" && !Array.isArray(description)) {
+    const name = (description as Record<string, unknown>).name;
+    if (typeof name === "string" && name.trim()) return name.trim();
+  }
+  return record.key.id;
 }
 
-export function getProvider(providerId: string): SttProviderInfo | null {
-  return STT_PROVIDERS.find((provider) => provider.id === providerId) || null;
+function sttDenied(record: RegisteredProvider): boolean {
+  const description = record.descriptor.description;
+  if (!description || typeof description !== "object" || Array.isArray(description)) return false;
+  const rec = description as Record<string, unknown>;
+  return rec.denied === true || rec.visible === false || rec.status === "denied";
 }
 
-export function resolveSttApiUrl(profile: { provider: string; api_url?: string | null }): string {
-  const provider = getProvider(profile.provider);
+function registrySttProvider(record: RegisteredProvider): SttProviderInfo {
+  const description = record.descriptor.description;
+  const defaultUrl = description && typeof description === "object" && !Array.isArray(description)
+    && typeof (description as Record<string, unknown>).defaultUrl === "string"
+    ? String((description as Record<string, unknown>).defaultUrl)
+    : "";
+  return {
+    id: record.key.id,
+    name: sttDisplayName(record),
+    capabilities: {
+      apiKeyRequired: false,
+      defaultUrl,
+      modelListStyle: "static",
+      staticModels: [],
+    },
+  };
+}
+
+function visibleSttRecords(userId?: string): RegisteredProvider[] {
+  // Absent userId resolves SYSTEM-scope providers ONLY — never an all-scopes
+  // sweep across other users' records. Every production caller passes the
+  // authenticated user id explicitly; tests may pass "system" semantics.
+  const scopes: readonly (`user:${string}` | "system")[] = userId
+    ? [`user:${userId}` as const, "system" as const]
+    : ["system" as const];
+  const records = providerRegistry.listVisible(scopes);
+  const extra: RegisteredProvider[] = [];
+  for (const record of records) {
+    try {
+      if (record.key.kind !== "stt") continue;
+      if (sttDenied(record)) continue;
+      extra.push(record);
+    } catch {
+      // Isolated: one bad STT descriptor cannot hide the built-ins.
+    }
+  }
+  return extra;
+}
+
+export function listProviders(userId?: string): SttProviderInfo[] {
+  const extras: SttProviderInfo[] = [];
+  try {
+    for (const record of visibleSttRecords(userId)) {
+      try {
+        extras.push(registrySttProvider(record));
+      } catch {
+        // Isolated adapter mapping.
+      }
+    }
+  } catch {
+    return STT_PROVIDERS;
+  }
+  return [...STT_PROVIDERS, ...extras];
+}
+
+export function getProvider(providerId: string, userId?: string): SttProviderInfo | null {
+  const builtin = STT_PROVIDERS.find((provider) => provider.id === providerId);
+  if (builtin) return builtin;
+  const record = visibleSttRecords(userId).find((entry) => entry.key.id === providerId);
+  return record ? registrySttProvider(record) : null;
+}
+
+function nextSttRevision(userId: string): { generation: number; revision: number } {
+  const revision = (sttConsumerRevisions.get(userId) ?? 0) + 1;
+  sttConsumerRevisions.set(userId, revision);
+  return { generation: 1, revision };
+}
+
+export function publishSttProviderRegistryChanged(args: {
+  userId: string;
+  action: "add" | "remove" | "change";
+  payload: unknown;
+}): void {
+  const clock = nextSttRevision(args.userId);
+  emitProviderRegistryChanged({
+    userId: args.userId,
+    scope: CONSUMER_PROVIDER_SCOPE,
+    action: args.action,
+    generation: clock.generation,
+    revision: clock.revision,
+    payload: args.payload,
+  });
+}
+
+export function commitSttRegistryProvider(
+  descriptor: ProviderDescriptor,
+  host: HostScopeContext & { installationId: string },
+  userId: string,
+): RegisteredProvider {
+  const record = providerRegistry.register(descriptor, host);
+  publishSttProviderRegistryChanged({
+    userId,
+    action: "add",
+    payload: {
+      id: record.key.id,
+      kind: record.key.kind,
+      name: sttDisplayName(record),
+      installationId: record.key.installationId,
+    },
+  });
+  return record;
+}
+
+export function revokeSttRegistryProvider(
+  ref: { kind: string; id: string },
+  host: HostScopeContext & { installationId: string },
+  userId: string,
+): boolean {
+  const removed = providerRegistry.unregister(ref, host);
+  if (removed) {
+    publishSttProviderRegistryChanged({
+      userId,
+      action: "remove",
+      payload: { id: ref.id, kind: ref.kind },
+    });
+  }
+  return removed;
+}
+
+export type HostSttEngine = Omit<ProviderDescriptor, "kind" | "id"> & Partial<HostScopeContext> & {
+  installationId?: string;
+};
+
+function hostScopeFromSttEngine(engine: HostSttEngine): HostScopeContext & { installationId: string } {
+  const installationId = typeof engine.installationId === "string" && engine.installationId.trim()
+    ? engine.installationId.trim()
+    : "host";
+  const installScope = engine.installScope === "user" || engine.installScope === "operator" || engine.installScope === "system"
+    ? engine.installScope
+    : "system";
+  return {
+    installationId,
+    installScope,
+    installedByUserId: engine.installedByUserId,
+    authenticatedSubject: engine.authenticatedSubject,
+  };
+}
+
+export function registerSttEngine(id: string, engine: HostSttEngine): () => void {
+  const host = hostScopeFromSttEngine(engine);
+  providerRegistry.register({
+    kind: "stt",
+    id,
+    description: engine.description ?? engine,
+    broker: engine.broker,
+    generation: engine.generation,
+    revision: engine.revision,
+    owner: engine.owner,
+  }, host);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    providerRegistry.unregister({ kind: "stt", id }, host);
+  };
+}
+
+export function resolveSttApiUrl(profile: { provider: string; api_url?: string | null }, userId?: string): string {
+  const provider = getProvider(profile.provider, userId);
   const raw = (profile.api_url || "").trim();
   const baseUrl = raw || provider?.capabilities.defaultUrl || "https://api.openai.com/v1";
   return baseUrl.replace(/\/+$/, "");
@@ -93,11 +267,12 @@ async function fetchSttModels(
   provider: SttProviderInfo,
   apiKey: string,
   profile: { provider: string; api_url?: string | null },
+  userId?: string,
 ): Promise<Array<{ id: string; label: string }>> {
   const data = await fetchProviderJson<any>(
     provider.name,
     "model listing",
-    `${resolveSttApiUrl(profile)}/models`,
+    `${resolveSttApiUrl(profile, userId)}/models`,
     { headers: { Authorization: `Bearer ${apiKey}` } },
   );
   return filterSttModels(data);
@@ -107,10 +282,11 @@ export async function resolveConnectionModel(
   provider: SttProviderInfo,
   profile: SttConnectionProfile,
   apiKey: string,
+  userId?: string,
 ): Promise<string> {
   if (profile.model.trim()) return profile.model.trim();
 
-  const models = await fetchSttModels(provider, apiKey, profile);
+  const models = await fetchSttModels(provider, apiKey, profile, userId);
   const firstModel = models[0]?.id;
   if (firstModel) return firstModel;
 
@@ -299,7 +475,7 @@ export async function testConnection(userId: string, id: string): Promise<{ succ
   const profile = getConnection(userId, id);
   if (!profile) return { success: false, message: "Connection not found", provider: "" };
 
-  const provider = getProvider(profile.provider);
+  const provider = getProvider(profile.provider, userId);
   if (!provider) {
     return { success: false, message: `Unknown provider: ${profile.provider}`, provider: profile.provider };
   }
@@ -310,12 +486,12 @@ export async function testConnection(userId: string, id: string): Promise<{ succ
   }
 
   try {
-    const model = await resolveConnectionModel(provider, profile, apiKey || "");
+    const model = await resolveConnectionModel(provider, profile, apiKey || "", userId);
     const formData = new FormData();
     formData.append("model", model);
     formData.append("file", new Blob([new Uint8Array(44)], { type: "audio/wav" }), "test.wav");
 
-    const res = await fetch(`${resolveSttApiUrl(profile)}/audio/transcriptions`, {
+    const res = await fetch(`${resolveSttApiUrl(profile, userId)}/audio/transcriptions`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}` },
       body: formData,
@@ -355,7 +531,7 @@ export async function listConnectionModelsPreview(
   const existing = input.connection_id ? getConnection(userId, input.connection_id) : null;
   const providerId = input.provider;
 
-  const provider = getProvider(providerId);
+  const provider = getProvider(providerId, userId);
   if (!provider) return { models: [], provider: providerId, error: `Unknown provider: ${providerId}` };
 
   let apiKey = input.api_key;
@@ -371,7 +547,7 @@ export async function listConnectionModelsPreview(
     const models = await fetchSttModels(provider, apiKey || "", {
       provider: providerId,
       api_url: input.api_url ?? existing?.api_url ?? "",
-    });
+    }, userId);
     const error = models.length === 0
       ? "Provider model listing did not include any obvious transcription models"
       : undefined;

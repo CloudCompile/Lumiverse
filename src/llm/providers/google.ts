@@ -1,8 +1,17 @@
+import { parseGoogleResponse, readGoogleStream } from "./google-response";
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { cancelStreamAndCloseConnection, createCooperativeYielder, fetchWithPreflightAbort, readJsonWithAbort, readWithAbort } from "../stream-utils";
-import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
+import { fetchWithPreflightAbort, readJsonWithAbort } from "../stream-utils";
+import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type LlmMessage, type LlmMessagePart } from "../types";
 import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
+import {
+  appendGoogleSearchTool,
+  buildGoogleSearchTool,
+  GOOGLE_SEARCH_HANDLED_PARAMS,
+  GOOGLE_SEARCH_PARAMETERS,
+} from "./google-search";
+import { splitLeadingSystemMessagePrefix } from "../system-message-prefix";
+import { normalizeGoogleMediaMimeType } from "./google-media";
 
 const GEMINI_SCHEMA_FIELDS = new Set(["type","format","title","description","nullable","enum","maxItems","minItems","properties","required","minProperties","maxProperties","minLength","maxLength","pattern","example","anyOf","propertyOrdering","default","items","minimum","maximum"]);
 
@@ -34,6 +43,7 @@ export class GoogleProvider implements LlmProvider {
       top_p: COMMON_PARAMS.top_p,
       top_k: COMMON_PARAMS.top_k,
       stop: COMMON_PARAMS.stop,
+      ...GOOGLE_SEARCH_PARAMETERS,
     },
     requiresMaxTokens: false,
     supportsSystemRole: true,
@@ -66,43 +76,12 @@ export class GoogleProvider implements LlmProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "generate", res);
 
     const data = await readJsonWithAbort<any>(res, request.signal) as any;
-    const candidate = data.candidates?.[0];
-    const parts = candidate?.content?.parts || [];
-
-    // Separate thinking parts from regular text, and collect function calls
-    let content = "";
-    let reasoning = "";
-    const fnCalls: ToolCallResult[] = [];
-    for (const p of parts) {
-      if (p.thought) {
-        reasoning += p.text || "";
-      } else if (p.functionCall) {
-        fnCalls.push({ name: p.functionCall.name, args: p.functionCall.args ?? {}, call_id: crypto.randomUUID(), thought_signature: p.thoughtSignature });
-      } else {
-        content += p.text || "";
-      }
-    }
-
-    const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
-
-    return {
-      content,
-      reasoning: reasoning || undefined,
-      finish_reason: toolCalls ? "tool_calls" : (candidate?.finishReason || "STOP"),
-      tool_calls: toolCalls,
-      usage: data.usageMetadata
-        ? {
-            prompt_tokens: data.usageMetadata.promptTokenCount || 0,
-            completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
-            total_tokens: data.usageMetadata.totalTokenCount || 0,
-          }
-        : undefined,
-    };
+    return parseGoogleResponse(data, this.displayName, request.parameters?._replay_thought_signatures === true);
   }
 
   async *generateStream(
@@ -117,80 +96,11 @@ export class GoogleProvider implements LlmProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "stream", res);
 
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const maybeYield = createCooperativeYielder(64, request.signal);
-
-    let streamDoneNaturally = false;
-    try {
-    while (true) {
-      const { done, value } = await readWithAbort(reader, request.signal);
-      if (done) { streamDoneNaturally = !request.signal?.aborted; break; }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        await maybeYield();
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data: ")) continue;
-
-        try {
-          const data = JSON.parse(trimmed.slice(6));
-          const candidate = data.candidates?.[0];
-          const parts = candidate?.content?.parts || [];
-          const finishReason = candidate?.finishReason;
-
-          // Separate thinking parts (thought: true) from regular text parts, and collect function calls
-          let text = "";
-          let reasoning = "";
-          const fnCalls: ToolCallResult[] = [];
-          for (const p of parts) {
-            if (p.thought) {
-              reasoning += p.text || "";
-            } else if (p.functionCall) {
-              fnCalls.push({ name: p.functionCall.name, args: p.functionCall.args ?? {}, call_id: crypto.randomUUID(), thought_signature: p.thoughtSignature });
-            } else {
-              text += p.text || "";
-            }
-          }
-
-          // Capture usage metadata (Google includes it in the final streaming chunk)
-          const usage = data.usageMetadata
-            ? {
-                prompt_tokens: data.usageMetadata.promptTokenCount || 0,
-                completion_tokens: data.usageMetadata.candidatesTokenCount || 0,
-                total_tokens: data.usageMetadata.totalTokenCount || 0,
-              }
-            : undefined;
-
-          const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
-
-          if (text || reasoning || toolCalls) {
-            yield {
-              token: text,
-              reasoning: reasoning || undefined,
-              finish_reason: toolCalls ? "tool_calls" : (finishReason === "STOP" ? "stop" : undefined),
-              tool_calls: toolCalls,
-              usage,
-            };
-          } else if (finishReason || usage) {
-            yield { token: "", finish_reason: finishReason === "STOP" ? "stop" : (finishReason || undefined), usage };
-          }
-        } catch {
-          // Skip malformed SSE lines
-        }
-      }
-    }
-    } finally {
-      if (!streamDoneNaturally) await cancelStreamAndCloseConnection(reader, res);
-    }
+    yield* readGoogleStream(res, this.displayName, request.parameters?._replay_thought_signatures === true, request.signal);
   }
 
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {
@@ -220,15 +130,37 @@ export class GoogleProvider implements LlmProvider {
   }
 
   /** Format message content into Google Gemini parts array, handling multipart (vision/audio) content. */
-  private formatParts(m: LlmMessage, toolNameById: Map<string, string>): any[] {
-    if (typeof m.content === "string") return [{ text: m.content }];
-    return m.content.map((part: LlmMessagePart) => {
+  private formatParts(
+    m: LlmMessage,
+    toolNameById: Map<string, string>,
+    replayThoughtSignatures: boolean,
+  ): any[] {
+    if (typeof m.content === "string") {
+      return [{
+        text: m.content,
+        ...(m.role === "assistant" && replayThoughtSignatures && m.thought_signature
+          ? { thoughtSignature: m.thought_signature }
+          : {}),
+      }];
+    }
+    const formatted = m.content.map((part: LlmMessagePart) => {
       switch (part.type) {
         case "text":
-          return { text: part.text };
+          return {
+            text: part.text,
+            ...(m.role === "assistant" && replayThoughtSignatures && part.thought_signature
+              ? { thoughtSignature: part.thought_signature }
+              : {}),
+          };
         case "image":
         case "audio":
-          return { inlineData: { mimeType: part.mime_type, data: part.data } };
+        case "video":
+          return {
+            inlineData: {
+              mimeType: normalizeGoogleMediaMimeType(part.mime_type),
+              data: part.data,
+            },
+          };
         case "tool_use":
           return { functionCall: { name: part.name, args: part.input }, thoughtSignature: part.thought_signature || "context_engineering_is_the_way_to_go" };
         case "tool_result": {
@@ -243,6 +175,13 @@ export class GoogleProvider implements LlmProvider {
           return { text: "" };
       }
     });
+    if (m.role === "assistant" && replayThoughtSignatures && m.thought_signature) {
+      const target = [...formatted].reverse().find((part) =>
+        Object.hasOwn(part, "text") || Object.hasOwn(part, "inlineData"),
+      );
+      if (target) target.thoughtSignature = m.thought_signature;
+    }
+    return formatted;
   }
 
   private buildToolNameMap(messages: readonly LlmMessage[]): Map<string, string> {
@@ -257,26 +196,38 @@ export class GoogleProvider implements LlmProvider {
   }
 
   /** Keys that are internal to Lumiverse and should never be sent to any provider API. */
-  private static readonly INTERNAL_PARAMS = new Set(["max_context_length", "_include_usage", "_streaming"]);
+  private static readonly INTERNAL_PARAMS = new Set(["max_context_length", "_include_usage", "_streaming", "_replay_thought_signatures"]);
 
   /** Keys explicitly handled by Google's buildBody — excluded from passthrough. */
   private static readonly HANDLED_PARAMS = new Set([
     "temperature", "max_tokens", "top_p", "top_k", "stop", "thinkingConfig",
     "responseMimeType", "responseSchema", "responseJsonSchema",
+    ...GOOGLE_SEARCH_HANDLED_PARAMS,
   ]);
 
   private buildBody(request: GenerationRequest): any {
     const params = request.parameters || {};
 
-    // Google uses a different message format
-    const systemMessages = request.messages.filter((m) => m.role === "system");
-    const otherMessages = request.messages.filter((m) => m.role !== "system");
+    // Gemini has one top-level systemInstruction, so lift only the contiguous
+    // leading prefix. Later system messages are mapped to user-role contents
+    // at their assembled positions instead of being hoisted out of history.
+    const { prefix: systemMessages, remainder: otherMessages } =
+      splitLeadingSystemMessagePrefix(request.messages);
     const toolNameById = this.buildToolNameMap(request.messages);
+    const replayThoughtSignatures = params._replay_thought_signatures === true;
+    const functionTools = request.tools ?? [];
+    const hasFunctionDeclarations = functionTools.length > 0;
+    const googleSearchTool = buildGoogleSearchTool(
+      this.name,
+      request.model,
+      params,
+      hasFunctionDeclarations,
+    );
 
     const body: any = {
       contents: otherMessages.map((m) => ({
         role: m.role === "assistant" ? "model" : "user",
-        parts: this.formatParts(m, toolNameById),
+        parts: this.formatParts(m, toolNameById, replayThoughtSignatures),
       })),
     };
 
@@ -335,9 +286,9 @@ export class GoogleProvider implements LlmProvider {
     }
 
     // Inline council tools: pass as Google function calling format
-    if (request.tools && request.tools.length > 0) {
+    if (hasFunctionDeclarations) {
       body.tools = [{
-        functionDeclarations: request.tools.map((t) => ({
+        functionDeclarations: functionTools.map((t) => ({
           name: t.name,
           description: t.description,
           parameters: sanitizeGeminiSchema(t.parameters),
@@ -349,11 +300,15 @@ export class GoogleProvider implements LlmProvider {
       for (const entry of body.contents) {
         if (entry.role === "model") {
           for (const part of entry.parts) {
-            part.thoughtSignature = "context_engineering_is_the_way_to_go";
+            if (!part.thoughtSignature) {
+              part.thoughtSignature = "context_engineering_is_the_way_to_go";
+            }
           }
         }
       }
     }
+
+    appendGoogleSearchTool(this.name, body, googleSearchTool);
 
     return body;
   }

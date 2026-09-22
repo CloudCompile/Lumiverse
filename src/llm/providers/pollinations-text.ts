@@ -42,7 +42,7 @@ export class PollinationsTextProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "generate", res);
 
@@ -81,7 +81,7 @@ export class PollinationsTextProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers,
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "stream", res);
 

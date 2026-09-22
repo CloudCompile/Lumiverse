@@ -1,14 +1,36 @@
 import type { StateCreator } from 'zustand'
-import type { TtsConnectionsSlice } from '@/types/store'
+import type { AppStore, TtsConnectionsSlice } from '@/types/store'
+import type { TtsConnectionProfile } from '@/types/api'
+import { persistKey } from './settings'
+import { normalizeConnectionsOrder, reorderProfiles } from './connections-order-merge'
 
-export const createTtsConnectionsSlice: StateCreator<TtsConnectionsSlice> = (set) => ({
+export const createTtsConnectionsSlice: StateCreator<AppStore, [], [], TtsConnectionsSlice> = (set) => ({
   ttsProfiles: [],
   ttsProviders: [],
 
-  setTtsProfiles: (profiles) => set({ ttsProfiles: profiles }),
+  setTtsProfiles: (profiles) =>
+    set((state) => ({
+      ttsProfiles: reorderProfiles(profiles, normalizeConnectionsOrder(state.connectionsOrder).tts),
+    })),
 
-  addTtsProfile: (profile) =>
-    set((state) => ({ ttsProfiles: [...state.ttsProfiles, profile] })),
+  addTtsProfile: (profile) => {
+    let orderToPersist: AppStore['connectionsOrder'] | null = null
+    set((state) => {
+      const connectionsOrder = normalizeConnectionsOrder(state.connectionsOrder)
+      const order = connectionsOrder.tts
+      const existingIndex = state.ttsProfiles.findIndex((candidate) => candidate.id === profile.id)
+      const nextOrder = order.includes(profile.id) ? order : [profile.id, ...order]
+      const nextConnectionsOrder = { ...connectionsOrder, tts: nextOrder }
+      if (nextOrder !== order) orderToPersist = nextConnectionsOrder
+      return {
+        ttsProfiles: existingIndex === -1
+          ? [profile, ...state.ttsProfiles]
+          : state.ttsProfiles.map((candidate, index) => index === existingIndex ? profile : candidate),
+        connectionsOrder: nextConnectionsOrder,
+      }
+    })
+    if (orderToPersist) persistKey('connectionsOrder', orderToPersist, 'state-sync')
+  },
 
   updateTtsProfile: (id, updates) =>
     set((state) => ({
@@ -18,6 +40,13 @@ export const createTtsConnectionsSlice: StateCreator<TtsConnectionsSlice> = (set
   removeTtsProfile: (id) =>
     set((state) => ({
       ttsProfiles: state.ttsProfiles.filter((p) => p.id !== id),
+    })),
+
+  applyTtsProfileOrder: (orderedIds) =>
+    set((state) => ({
+      ttsProfiles: orderedIds
+        .map((id) => state.ttsProfiles.find((p) => p.id === id))
+        .filter((p): p is TtsConnectionProfile => Boolean(p)),
     })),
 
   setTtsProviders: (providers) => set({ ttsProviders: providers }),

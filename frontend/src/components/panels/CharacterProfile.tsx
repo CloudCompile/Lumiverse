@@ -15,7 +15,7 @@ import {
   Pencil, Settings2, ChevronRight,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { extractPalette, getSurfaceColor, type ImagePalette, type RGB } from '@/lib/colorExtraction'
+import { extractPalette, extractRenderedHeroTitleBand, type ImagePalette } from '@/lib/colorExtraction'
 import { deriveHeroTextVars } from '@/lib/characterTheme'
 import type { Character } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
@@ -49,10 +49,6 @@ function getCachedPalette(src: string): Promise<ImagePalette> {
   return rememberCacheEntry(heroPaletteCache, src, promise)
 }
 
-function surfaceKey(surface: RGB | null): string {
-  return surface ? `${surface.r},${surface.g},${surface.b}` : 'none'
-}
-
 function renderProfileMarkdown(text: string): string {
   const html = profileMarked.parse(text, { async: false }) as string
   return sanitizeRichHtml(html)
@@ -63,7 +59,6 @@ export default function CharacterProfile() {
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
-  const setDrawerTab = useStore((s) => s.setDrawerTab)
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
   const openModal = useStore((s) => s.openModal)
@@ -76,7 +71,6 @@ export default function CharacterProfile() {
         characters={characters}
         chatId={activeChatId}
         setEditingCharacterId={setEditingCharacterId}
-        setDrawerTab={setDrawerTab}
         openModal={openModal}
       />
     )
@@ -88,7 +82,6 @@ export default function CharacterProfile() {
       activeCharacterId={activeCharacterId}
       characters={characters}
       setEditingCharacterId={setEditingCharacterId}
-      setDrawerTab={setDrawerTab}
     />
   )
 }
@@ -100,13 +93,11 @@ function SingleCharacterProfile({
   activeCharacterId,
   characters,
   setEditingCharacterId,
-  setDrawerTab,
 }: {
   paramId?: string
   activeCharacterId: string | null
   characters: Character[]
   setEditingCharacterId: (id: string | null) => void
-  setDrawerTab: (tab: string) => void
 }) {
   const { t } = useTranslation('panels')
   const activePersonaId = useStore((s) => s.activePersonaId)
@@ -118,13 +109,13 @@ function SingleCharacterProfile({
   const [heroTextVars, setHeroTextVars] = useState<CSSProperties | undefined>(undefined)
   const [heroImageLoadedUrl, setHeroImageLoadedUrl] = useState<string | null>(null)
   const [activeView, setActiveView] = useState<ProfileViewMode>('profile')
-  const heroMetaRef = useRef<HTMLDivElement>(null)
+  const heroImageRef = useRef<HTMLDivElement>(null)
+  const heroNameRef = useRef<HTMLHeadingElement>(null)
 
   const handleEditCharacter = useCallback(() => {
     if (!charId) return
     setEditingCharacterId(charId)
-    setDrawerTab('characters')
-  }, [charId, setEditingCharacterId, setDrawerTab])
+  }, [charId, setEditingCharacterId])
 
   useEffect(() => {
     if (storedCharacter) setCharacter(storedCharacter)
@@ -140,7 +131,7 @@ function SingleCharacterProfile({
   }, [charId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const avatarUrl = getCharacterAvatarLargeUrl(character) ?? ''
-  // Stored images resolve to the large WebP thumbnail tier (`?size=lg`), which
+  // Stored images resolve to the configured large thumbnail tier (`?size=lg`), which
   // is plenty for palette sampling and avoids decoding original PNG cards.
   const heroSampleUrl = avatarUrl
 
@@ -173,51 +164,86 @@ function SingleCharacterProfile({
   }, [hasCreatorNotes, activeView])
 
   useEffect(() => {
-    if (!heroSampleUrl || heroImageLoadedUrl !== avatarUrl) {
+    if (activeView !== 'profile' || !heroSampleUrl || heroImageLoadedUrl !== avatarUrl) {
       setHeroTextVars(undefined)
       return
     }
 
     let cancelled = false
+    let animationFrame: number | null = null
+    let resizeObserver: ResizeObserver | null = null
+    let scheduleRenderedTitleSample: (() => void) | null = null
 
     const sampleHeroImage = async () => {
-      const surface = await new Promise<RGB | null>((resolve) => {
-        requestAnimationFrame(() => {
-          if (cancelled) {
-            resolve(null)
-            return
-          }
-          resolve(heroMetaRef.current ? getSurfaceColor(heroMetaRef.current) : null)
-        })
-      })
-
-      if (cancelled) return
-
-      const varsCacheKey = `${heroSampleUrl}|${surfaceKey(surface)}`
-      const cachedVars = heroTextVarsCache.get(varsCacheKey)
-      if (cachedVars) {
-        setHeroTextVars(cachedVars)
-        return
-      }
+      // Keep the palette-derived zone as an immediate, cacheable fallback.
+      // Once the image and title have been laid out, we replace only the name
+      // colors with a sample of the actual rendered title footprint.
+      const varsCacheKey = heroSampleUrl
 
       try {
         const palette = await getCachedPalette(heroSampleUrl)
         if (cancelled) return
 
-        const vars = rememberCacheEntry(
+        const baseVars = heroTextVarsCache.get(varsCacheKey) ?? rememberCacheEntry(
           heroTextVarsCache,
           varsCacheKey,
-          deriveHeroTextVars(palette, surface ?? undefined) as CSSProperties,
+          deriveHeroTextVars(palette) as CSSProperties,
         )
-        setHeroTextVars(vars)
+        setHeroTextVars(baseVars)
+
+        const applyRenderedTitleSample = () => {
+          animationFrame = null
+          if (cancelled) return
+
+          const image = heroImageRef.current?.querySelector('img')
+          const title = heroNameRef.current
+          if (!image || !title) return
+
+          const nameBand = extractRenderedHeroTitleBand(image, title)
+          if (!nameBand || nameBand.clusters.length === 0) return
+
+          const renderedVars = deriveHeroTextVars(palette, { nameBand })
+          setHeroTextVars({
+            ...baseVars,
+            '--hero-contrast-name-dark': renderedVars['--hero-contrast-name-dark'],
+            '--hero-contrast-name-light': renderedVars['--hero-contrast-name-light'],
+            '--hero-name-scrim-dark': renderedVars['--hero-name-scrim-dark'],
+            '--hero-name-scrim-light': renderedVars['--hero-name-scrim-light'],
+          } as CSSProperties)
+        }
+
+        scheduleRenderedTitleSample = () => {
+          if (cancelled) return
+          if (animationFrame !== null) cancelAnimationFrame(animationFrame)
+          animationFrame = requestAnimationFrame(applyRenderedTitleSample)
+        }
+
+        // A second frame lets the image paint and lets font/layout metrics
+        // settle before the DOM Range is read.
+        requestAnimationFrame(scheduleRenderedTitleSample)
+
+        if (typeof ResizeObserver !== 'undefined' && heroImageRef.current && heroNameRef.current) {
+          resizeObserver = new ResizeObserver(scheduleRenderedTitleSample)
+          resizeObserver.observe(heroImageRef.current)
+          resizeObserver.observe(heroNameRef.current)
+        }
+        window.addEventListener('resize', scheduleRenderedTitleSample)
+        void document.fonts?.ready.then(scheduleRenderedTitleSample)
       } catch {
         if (!cancelled) setHeroTextVars(undefined)
       }
     }
 
     sampleHeroImage()
-    return () => { cancelled = true }
-  }, [avatarUrl, heroSampleUrl, heroImageLoadedUrl])
+    return () => {
+      cancelled = true
+      if (animationFrame !== null) cancelAnimationFrame(animationFrame)
+      resizeObserver?.disconnect()
+      if (scheduleRenderedTitleSample) {
+        window.removeEventListener('resize', scheduleRenderedTitleSample)
+      }
+    }
+  }, [avatarUrl, heroSampleUrl, heroImageLoadedUrl, activeView, character?.name])
 
   if (!charId) {
     return (
@@ -300,7 +326,7 @@ function SingleCharacterProfile({
             >
               {/* Hero avatar */}
               <div className={styles.hero}>
-                <div className={styles.heroImage}>
+                <div className={styles.heroImage} ref={heroImageRef}>
                   <LazyImage
                     src={avatarUrl}
                     alt={character.name}
@@ -313,8 +339,8 @@ function SingleCharacterProfile({
                     }
                   />
                 </div>
-                <div className={styles.heroMeta} style={heroTextVars} ref={heroMetaRef}>
-                  <h2 className={styles.name}>{character.name}</h2>
+                <div className={styles.heroMeta} style={heroTextVars}>
+                  <h2 className={styles.name} ref={heroNameRef}>{character.name}</h2>
                   <button type="button" className={styles.editBtn} onClick={handleEditCharacter}>
                     <Pencil size={12} />
                     <span>{t('characterProfile.editCharacter')}</span>
@@ -380,14 +406,12 @@ function GroupProfile({
   characters,
   chatId,
   setEditingCharacterId,
-  setDrawerTab,
   openModal,
 }: {
   characterIds: string[]
   characters: Character[]
   chatId: string | null
   setEditingCharacterId: (id: string | null) => void
-  setDrawerTab: (tab: string) => void
   openModal: (modal: string, props?: any) => void
 }) {
   const { t } = useTranslation('panels')
@@ -430,8 +454,7 @@ function GroupProfile({
 
   const handleEditMember = useCallback((charId: string) => {
     setEditingCharacterId(charId)
-    setDrawerTab('characters')
-  }, [setEditingCharacterId, setDrawerTab])
+  }, [setEditingCharacterId])
 
   return (
     <PanelFadeIn>

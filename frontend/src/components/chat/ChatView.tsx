@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useParams } from 'react-router'
-import { UserRound, ListChecks } from 'lucide-react'
+import { ArrowUp, List, ListChecks, LoaderCircle, Pencil, UserRound, X } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
@@ -12,33 +12,62 @@ import { recoverPooledGeneration } from '@/lib/generation-recovery'
 import { charactersApi } from '@/api/characters'
 import { packsApi } from '@/api/packs'
 import { expressionsApi } from '@/api/expressions'
-import { personaToastName, resolveAutoPersonaBinding } from '@/store/slices/personas'
+import { personaToastName } from '@/store/slices/personas'
+import {
+  CHAT_PERSONA_METADATA_KEY,
+  resolveChatPersonaSelection,
+  setPersistedChatPersonaId,
+} from '@/lib/chatPersonaSelection'
 import type { WallpaperRef } from '@/types/store'
 import WallpaperLayer from '@/components/shared/WallpaperLayer'
 import useSwipeKeyboard from '@/hooks/useSwipeKeyboard'
 import useEditKeyboard from '@/hooks/useEditKeyboard'
 import useIsMobile from '@/hooks/useIsMobile'
+import { chatLoreDockMode, chatTopDockMode, effectiveQuickToolbarDockRequest } from '@/lib/chatSurfaceLayout'
+import { measureLayoutHeight } from '@/lib/uiScale'
 import { resolveCouncilForChat } from '@/hooks/useCouncilProfiles'
+import { CHAT_REVEAL_SETTLE_CAP_MS, getChatDisplaySettleDiagnostics } from '@/lib/chatDisplaySettle'
 import MessageList from './MessageList'
 import MessageSelectBar from './MessageSelectBar'
 import InputArea from './InputArea'
+import ChatFindBar, { type ChatFindNavigationTarget } from './ChatFindBar'
 import ScrollToBottom from './ScrollToBottom'
+import MessageNavigator from './MessageNavigator'
 import CouncilPill from './CouncilPill'
 import PortraitPanel from './PortraitPanel'
 import ExpressionDisplay from './expressions/ExpressionDisplay'
 import FloatingAvatarViewer from './FloatingAvatarViewer'
+import { QuickToolbar } from '../quick-toolbar/QuickToolbar'
+import {
+  isShowNativeBrowseMessages,
+  isShowNativeScrollToTop,
+  isShowNativeSelectMessages,
+  readQuickToolbarPlacement,
+} from '../quick-toolbar/quickToolbarDock'
+import { registerChatDockerActionOwners } from './chatDockerActionCatalog'
+import {
+  OLDEST_MESSAGE_ACTION_ID,
+  quickToolbarOwnsOldestMessage,
+  quickToolbarRendersOldestMessageAction,
+} from './chatNativeDockOwnership'
+import { keepDockEnabledWhenFloating } from '@/lib/uiProductivityDefaults'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
 import type { SpindlePreGenerationActivityPayload } from '@/types/ws-events'
 import styles from './ChatView.module.css'
 import clsx from 'clsx'
-
-interface CortexNotice {
-  variant: 'processing' | 'error'
-  title: string
-  detail: string
-  percent?: number
-}
+import { markLandingPageChatReturn, peekLandingPageSnapshot } from '@/lib/landingPageSnapshot'
+import { holdImagesForTransition } from '@/lib/imageDecodeCache'
+import { takeChatNavigationSnapshot } from '@/lib/chatNavigationSnapshot'
+import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
+import { resolveChatContentWidthPx } from '@/lib/chatContentWidth'
+import {
+  buildCortexNotice,
+  cortexErrorNoticeRemainingMs,
+  hideDismissedCortexError,
+  normalizeRebuildStatus,
+  type CortexRebuildStatus,
+} from './cortexNotice'
 
 interface SpindleNotice {
   variant: 'processing' | 'error'
@@ -51,109 +80,27 @@ const SPINDLE_NOTICE_HIDE_DELAY_MS = 280
 const SPINDLE_NOTICE_MIN_VISIBLE_MS = 700
 const WALLPAPER_TRANSITION_HALF_MS = 260
 const WALLPAPER_READY_FALLBACK_MS = 5000
-const CHAT_CHROME_ENTER_MS = 90
 const CHAT_CHROME_LEAVE_MS = 220
 
 function prefersReducedMotion(): boolean {
   return typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
 }
 
-interface CortexRebuildStatus {
-  chatId?: string
-  status: string
-  current?: number
-  total?: number
-  percent?: number
-  error?: string
-  source?: string
-}
-
-function formatChunkProgress(payload: CortexRebuildStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const current = payload.current ?? 0
-  const total = payload.total ?? 0
-  return total > 0 ? t('chatView.cortexChunks', { current, total }) : ''
-}
-
-function formatIngestionDetail(status: CortexIngestionStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const phaseDetail: Record<CortexIngestionStatus['phase'], string> = {
-    queued: t('chatView.cortexQueued'),
-    font: t('chatView.cortexFont'),
-    heuristics: t('chatView.cortexHeuristics'),
-    sidecar: t('chatView.cortexSidecar'),
-    persisting: t('chatView.cortexPersisting'),
-    complete: t('chatView.cortexComplete'),
-    error: status.error || t('chatView.cortexProcessingFailed'),
+function findExtensionChild(anchor: HTMLElement): Element | null {
+  for (const child of anchor.children) {
+    const marked = child.hasAttribute('data-spindle-extension-root') || child.hasAttribute('data-spindle-ext')
+    // A retained extension root can contain the canonical host-surface wrapper
+    // even when that surface intentionally renders no content. Inspect the
+    // surface's contents, not the wrapper itself, otherwise delegated
+    // chat_top_dock leaves an invisible host claiming the rail after reload.
+    const surface = child.querySelector<HTMLElement>('[data-surface-id]')
+    const contentRoot = surface ?? child
+    const hasMountedContent = contentRoot.children.length > 0 || Boolean(contentRoot.textContent?.trim())
+    if (marked && hasMountedContent) return child
   }
-
-  return phaseDetail[status.phase] + (status.pendingJobs > 1 ? t('chatView.cortexJobsPending', { count: status.pendingJobs }) : '')
-}
-
-function formatRebuildDetail(payload: CortexRebuildStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const action = payload.source === 'warmup'
-    ? t('chatView.cortexPreparingMemory')
-    : t('chatView.cortexRebuildingMemory')
-
-  return action + formatChunkProgress(payload, t)
-}
-
-function buildCortexNotice(
-  ingestionStatus: CortexIngestionStatus | null,
-  rebuildStatus: CortexRebuildStatus | null,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-): CortexNotice | null {
-  if (rebuildStatus?.status === 'error') {
-    return {
-      variant: 'error',
-      title: t('chatView.memory'),
-      detail: rebuildStatus.error || t('chatView.memoryRebuildFailed'),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (ingestionStatus?.status === 'error') {
-    return {
-      variant: 'error',
-      title: t('chatView.memory'),
-      detail: ingestionStatus.error || t('chatView.backgroundMemoryFailed'),
-    }
-  }
-
-  const rebuildProcessing = rebuildStatus?.status === 'processing'
-  const ingestionProcessing = ingestionStatus?.status === 'processing'
-
-  if (rebuildProcessing && ingestionProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: t('chatView.cortexCombined', { chunks: formatChunkProgress(rebuildStatus, t) }),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (rebuildProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: formatRebuildDetail(rebuildStatus, t),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (ingestionProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: formatIngestionDetail(ingestionStatus, t),
-    }
-  }
-
   return null
 }
 
-function normalizeRebuildStatus(payload: CortexRebuildStatus | null): CortexRebuildStatus | null {
-  if (!payload) return null
-  return payload.status === 'idle' || payload.status === 'complete' ? null : payload
-}
 
 function buildSpindleNotice(payload: SpindlePreGenerationActivityPayload, t: (key: string, opts?: Record<string, unknown>) => string): SpindleNotice {
   const phaseLabel: Record<SpindlePreGenerationActivityPayload['phase'], string> = {
@@ -181,7 +128,6 @@ export default function ChatView() {
   const { t } = useTranslation('chat')
   const { chatId } = useParams<{ chatId: string }>()
   const navigate = useNavigate()
-  const autoSwitchedPersonaIdRef = useRef<string | null>(null)
   const spindleActiveRef = useRef(new Map<string, SpindlePreGenerationActivityPayload>())
   const spindleLatestRef = useRef<SpindlePreGenerationActivityPayload | null>(null)
   const spindleShowTimerRef = useRef<number | null>(null)
@@ -189,17 +135,82 @@ export default function ChatView() {
   const spindleVisibleAtRef = useRef<number | null>(null)
   const [ingestionStatus, setIngestionStatus] = useState<CortexIngestionStatus | null>(null)
   const [rebuildStatus, setRebuildStatus] = useState<CortexRebuildStatus | null>(null)
+  const [dismissedCortexErrorKey, setDismissedCortexErrorKey] = useState<string | null>(null)
   const [spindleNotice, setSpindleNotice] = useState<SpindleNotice | null>(null)
+  const [chatFindOpen, setChatFindOpen] = useState(false)
+  const [chatFindFocusRequest, setChatFindFocusRequest] = useState(0)
+  const [chatFindQuery, setChatFindQuery] = useState('')
+  const [chatFindTarget, setChatFindTarget] = useState<ChatFindNavigationTarget | null>(null)
+  const [messageNavigatorOpen, setMessageNavigatorOpen] = useState(false)
+  const [loadingOldestMessage, setLoadingOldestMessage] = useState(false)
   const setActiveChat = useStore((s) => s.setActiveChat)
   const setMessages = useStore((s) => s.setMessages)
   const messages = useStore((s) => s.messages)
   const isStreaming = useStore((s) => s.isStreaming)
   const activeChatId = useStore((s) => s.activeChatId)
+  const messageEditDraft = useStore((s) => s.messageEditDraft)
+  const resumeMessageEdit = useStore((s) => s.resumeMessageEdit)
+  const totalChatLength = useStore((s) => s.totalChatLength)
   const portraitPanelOpen = useStore((s) => s.portraitPanelOpen)
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
+  const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
+  const [portraitSurfaceOccupied, setPortraitSurfaceOccupied] = useState(false)
+  const quickToolbarSettings = useStore((s) => s.quickToolbarSettings)
+  const nativeDockActionSide = suiteExtensionEnabled
+    ? (quickToolbarSettings?.nativeDockActionSide === 'left' ? 'left' : 'right')
+    : undefined
+  const quickToolbarPlacement = readQuickToolbarPlacement(quickToolbarSettings)
+  // Native chat-top visibility follows the persisted flags in both Suite states.
+  // Settings exposes these checkboxes with and without the Suite, so an absent
+  // Suite no longer has to force them on to stay reachable.
+  const showNativeSelectMessages = isShowNativeSelectMessages(quickToolbarSettings)
+  const showNativeScrollToTop = isShowNativeScrollToTop(quickToolbarSettings)
+  const showNativeBrowseMessages = isShowNativeBrowseMessages(quickToolbarSettings)
+  const dockQuickToolbar = suiteExtensionEnabled && quickToolbarPlacement === 'chat_top_dock'
+  const keepFloatingDockHost = suiteExtensionEnabled && quickToolbarPlacement === 'floating' && keepDockEnabledWhenFloating(quickToolbarSettings)
+  // Starts optimistic so the settings-derived answer still holds for server
+  // rendering and the first commit; the probe below corrects it from the DOM.
+  const [quickToolbarRendersOldestAction, setQuickToolbarRendersOldestAction] = useState(true)
+  const quickToolbarSettingsClaimOldestMessage = quickToolbarOwnsOldestMessage(
+    suiteExtensionEnabled,
+    quickToolbarSettings,
+  )
+  // Ownership must follow the action that is actually rendered. The persisted
+  // setting alone hands the oldest-message action to a toolbar that may not be
+  // mounted (floating host absent, hidden behind an overlay, replaced by an
+  // extension) or that normalizes/packs the action out of its rendered list,
+  // which left an eligible chat with no oldest-message control at all.
+  const quickToolbarOwnsOldestMessageAction = quickToolbarSettingsClaimOldestMessage
+    && quickToolbarRendersOldestAction
+  // Native controls own the top strip. QuickToolbar placement is a separate
+  // Suite concern and must not move or hide this native group.
+  const nativeDockRequest = 'strip' as const
+  const chatTopDockRequest = nativeDockRequest
+  useEffect(() => {
+    const readOccupied = () => {
+      // The extension root can survive a ChatView transition while its new mount
+      // anchor is being committed. Looking beneath only the first side anchor can
+      // therefore miss the live owner and briefly restore the native dock. The
+      // host-surface marker is unique to the extension-owned Portrait Dock, so it
+      // is the ownership authority regardless of which current anchor contains it.
+      setPortraitSurfaceOccupied(Boolean(
+        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"]'),
+      ))
+      // Same authority rule for the shared oldest-message action: the rendered
+      // control decides ownership, not the persisted toolbar setting. The
+      // native copy is excluded by its own marker, so this cannot oscillate.
+      setQuickToolbarRendersOldestAction(quickToolbarRendersOldestMessageAction(document))
+    }
+    readOccupied()
+    const Observer = document.defaultView?.MutationObserver
+    if (!Observer) return undefined
+    const observer = new Observer(readOccupied)
+    observer.observe(document.body, { childList: true, subtree: true })
+    return () => observer.disconnect()
+  }, [])
   const isMobile = useIsMobile()
-  const portraitBackdropVisible = isMobile && portraitPanelOpen && portraitPanelSide !== 'none'
+  const portraitBackdropVisible = !portraitSurfaceOccupied && isMobile && portraitPanelOpen && portraitPanelSide !== 'none'
   const sceneBackground = useStore((s) => s.sceneBackground)
   const imageGeneration = useStore((s) => s.imageGeneration)
   const wallpaper = useStore((s) => s.wallpaper)
@@ -207,16 +218,104 @@ export default function ChatView() {
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const chatColumnInnerRef = useRef<HTMLDivElement>(null)
+  const chatColumnTopRef = useRef<HTMLDivElement>(null)
+  const chatTopDockRef = useRef<HTMLDivElement>(null)
+  const chatComposerAboveRef = useRef<HTMLSpanElement>(null)
   const wallpaperTransitionTimeouts = useRef<number[]>([])
   const chromeEnterTimerRef = useRef<number | null>(null)
   const chromeLeaveTimerRef = useRef<number | null>(null)
-  const [chatChromeEntering, setChatChromeEntering] = useState(() => !prefersReducedMotion())
+  // Stabilization is independent of animation preference: reduced-motion
+  // users should still never see raw extension payloads before interceptors
+  // attach. CSS makes the eventual reveal instantaneous for them.
+  const [chatChromeEntering, setChatChromeEntering] = useState(true)
   const [chatChromeLeaving, setChatChromeLeaving] = useState(false)
   const messageSelectMode = useStore((s) => s.messageSelectMode)
   const setMessageSelectMode = useStore((s) => s.setMessageSelectMode)
+  const activeModal = useStore((s) => s.activeModal)
+  const commandPaletteOpen = useStore((s) => s.commandPaletteOpen)
   const toggleSelectMode = useCallback(() => {
     setMessageSelectMode(!messageSelectMode)
   }, [messageSelectMode, setMessageSelectMode])
+
+  const closeChatFind = useCallback(() => {
+    setChatFindOpen(false)
+    setChatFindQuery('')
+    setChatFindTarget(null)
+  }, [])
+
+  const openChatFind = useCallback(() => {
+    setChatFindOpen(true)
+    setChatFindFocusRequest((request) => request + 1)
+  }, [])
+
+  const clearChatFindTarget = useCallback(() => {
+    setChatFindTarget(null)
+  }, [])
+
+  const navigateToOldestMessage = useCallback(async () => {
+    if (!chatId || loadingOldestMessage) return
+    setLoadingOldestMessage(true)
+    try {
+      const page = await messagesApi.list(chatId, { limit: 1, offset: 0 })
+      const first = page.data[0]
+      if (!first) return
+      setChatFindTarget({
+        id: first.id,
+        index_in_chat: first.index_in_chat,
+        offset: 0,
+        messageTotal: page.total,
+        requestId: Date.now(),
+      })
+    } catch {
+      // Best-effort navigation: leave the current viewport untouched.
+    } finally {
+      setLoadingOldestMessage(false)
+    }
+  }, [chatId, loadingOldestMessage])
+
+  const returnToEditedMessage = useCallback(() => {
+    if (!chatId || !messageEditDraft || messageEditDraft.chatId !== chatId) return
+    resumeMessageEdit()
+    setChatFindTarget({
+      id: messageEditDraft.messageId,
+      index_in_chat: messageEditDraft.messageIndexInChat,
+      offset: messageEditDraft.messageOffset,
+      messageTotal: totalChatLength,
+      requestId: Date.now(),
+    })
+  }, [chatId, messageEditDraft, resumeMessageEdit, totalChatLength])
+
+  useEffect(() => {
+    return registerChatDockerActionOwners({
+      navigateToOldestMessage,
+      openMessageNavigator: () => setMessageNavigatorOpen(true),
+    })
+  }, [navigateToOldestMessage])
+
+  useEffect(() => {
+    const handleFindShortcut = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return
+      if (activeModal || commandPaletteOpen) return
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 'f') return
+
+      event.preventDefault()
+      openChatFind()
+    }
+
+    // Deliberately use the bubbling phase. ExpandedTextEditor owns its find
+    // shortcut from a capture listener and stops propagation, so its local
+    // Find remains authoritative when it is open above a chat.
+    document.addEventListener('keydown', handleFindShortcut)
+    return () => document.removeEventListener('keydown', handleFindShortcut)
+  }, [activeModal, commandPaletteOpen, openChatFind])
+
+  useEffect(() => {
+    setChatFindOpen(false)
+    setChatFindQuery('')
+    setChatFindTarget(null)
+    setMessageNavigatorOpen(false)
+  }, [chatId])
 
   useSwipeKeyboard()
   useEditKeyboard()
@@ -229,15 +328,11 @@ export default function ChatView() {
       chromeEnterTimerRef.current = null
     }
 
-    if (prefersReducedMotion()) {
-      setChatChromeEntering(false)
-      document.body.removeAttribute('data-chat-chrome-entering')
-      return
-    }
-
     setChatChromeEntering(true)
     document.body.setAttribute('data-chat-chrome-entering', 'true')
-    const handlePopulated = () => {
+    const handlePopulated = (event: Event) => {
+      const populatedChatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId
+      if (populatedChatId !== chatId) return
       setChatChromeEntering(false)
       document.body.removeAttribute('data-chat-chrome-entering')
       if (chromeEnterTimerRef.current !== null) {
@@ -245,14 +340,23 @@ export default function ChatView() {
         chromeEnterTimerRef.current = null
       }
     }
-    window.addEventListener('lumiverse:chat-items-populated', handlePopulated, { once: true })
+    window.addEventListener('lumiverse:chat-items-populated', handlePopulated)
 
-    // Fallback if virtualizer fails or is completely empty
+    // Fallback if virtualizer fails or is completely empty. Must exceed the
+    // MessageList settle gate (CHAT_REVEAL_SETTLE_CAP_MS) so a chat whose
+    // content is still resolving does not get revealed mid-pipeline by this
+    // timer racing the populated dispatch.
     chromeEnterTimerRef.current = window.setTimeout(() => {
       chromeEnterTimerRef.current = null
+      const detail = {
+        elapsedMs: CHAT_REVEAL_SETTLE_CAP_MS + 1500,
+        ...getChatDisplaySettleDiagnostics(chatId),
+      }
+      console.warn('[ChatDisplaySettle] ChatView fallback reveal', detail)
+      window.dispatchEvent(new CustomEvent('lumiverse:chat-display-fallback-timeout', { detail }))
       setChatChromeEntering(false)
       document.body.removeAttribute('data-chat-chrome-entering')
-    }, Math.max(CHAT_CHROME_ENTER_MS, 400))
+    }, CHAT_REVEAL_SETTLE_CAP_MS + 1500)
 
     return () => {
       window.removeEventListener('lumiverse:chat-items-populated', handlePopulated)
@@ -273,22 +377,57 @@ export default function ChatView() {
     }
   }, [])
 
+  const completeNavigateHome = useCallback(() => {
+    // Detach the visible chat before committing the route. In particular this
+    // cancels the closure-owned 32ms stream flush; leaving it for passive
+    // unmount cleanup gives that timer a window to write the streaming buffer
+    // into the newly mounted landing page.
+    const state = useStore.getState()
+    if (state.activeChatId === chatId) {
+      state.setActiveChat(null)
+      state.clearGroupChat()
+    }
+    markLandingPageChatReturn()
+    navigate('/')
+  }, [chatId, navigate])
+
   const handleNavigateHome = useCallback(() => {
     if (chromeLeaveTimerRef.current !== null) return
 
+    const landingImageUrls = peekLandingPageSnapshot()?.imageUrls ?? []
+    if (landingImageUrls.length > 0) holdImagesForTransition(landingImageUrls)
+
+    // Freeze the local stream on its newest frame before animating it out.
+    // Standalone WebKit can terminate the page when the opacity/transform
+    // transition and streaming subtree remeasurement run concurrently. The
+    // backend generation and chat head continue normally during this pause.
+    const state = useStore.getState()
+    const isActivelyStreamingThisChat = state.activeChatId === chatId && state.isStreaming
+    if (isActivelyStreamingThisChat) state.pauseStreamingForNavigation()
+
     if (prefersReducedMotion()) {
-      navigate('/')
+      completeNavigateHome()
       return
     }
 
     setChatChromeLeaving(true)
     chromeLeaveTimerRef.current = window.setTimeout(() => {
       chromeLeaveTimerRef.current = null
-      navigate('/')
+      completeNavigateHome()
     }, CHAT_CHROME_LEAVE_MS)
-  }, [navigate])
+  }, [chatId, completeNavigateHome])
 
   const cortexNotice = useMemo(() => buildCortexNotice(ingestionStatus, rebuildStatus, t), [ingestionStatus, rebuildStatus, t])
+  const visibleCortexNotice = hideDismissedCortexError(cortexNotice, dismissedCortexErrorKey)
+
+  useEffect(() => {
+    if (cortexNotice?.variant !== 'error' || !cortexNotice.errorKey) return
+    const errorKey = cortexNotice.errorKey
+    const timer = window.setTimeout(() => {
+      setDismissedCortexErrorKey(errorKey)
+    }, cortexErrorNoticeRemainingMs(cortexNotice))
+    return () => window.clearTimeout(timer)
+  }, [cortexNotice])
 
   useEffect(() => {
     if (!spindleNotice || spindleNotice.variant !== 'error') return
@@ -356,6 +495,7 @@ export default function ChatView() {
 
     setIngestionStatus(null)
     setRebuildStatus(null)
+    setDismissedCortexErrorKey(null)
     resetSpindleNotice()
 
     Promise.all([
@@ -367,6 +507,9 @@ export default function ChatView() {
       setRebuildStatus(normalizeRebuildStatus(rebuild))
     })
 
+    // This passive request may also queue ordinary LTCM embedding work. Do not
+    // synthesize a notice from its response: only actual Cortex progress events
+    // below represent heuristic or sidecar analysis.
     memoryCortexApi.warm(chatId).catch(() => {})
 
     const offIngestion = wsClient.on(EventType.CORTEX_INGESTION_PROGRESS, (payload: any) => {
@@ -443,22 +586,67 @@ export default function ChatView() {
       offGenerationProgress()
       offGenerationEnd()
     }
-  }, [chatId])
+  }, [chatId, t])
 
-  const innerStyle = useMemo(() => {
-    switch (chatWidthMode) {
-      case 'comfortable': return { '--lumiverse-chat-content-width': '1000px' } as React.CSSProperties
-      case 'compact': return { '--lumiverse-chat-content-width': '760px' } as React.CSSProperties
-      case 'custom': return { '--lumiverse-chat-content-width': `${chatContentMaxWidth}px` } as React.CSSProperties
-      default: return undefined
-    }
+  // Single source of truth for the chat content width. The resolver reports `null` for
+  // every unconstrained mode, which is exactly the set of modes that must publish no
+  // `--lumiverse-chat-content-width` variable at all.
+  const innerStyle = useMemo<React.CSSProperties | undefined>(() => {
+    const width = resolveChatContentWidthPx(chatWidthMode, chatContentMaxWidth)
+    return width === null
+      ? undefined
+      : ({ '--lumiverse-chat-content-width': `${width}px` } as React.CSSProperties)
   }, [chatWidthMode, chatContentMaxWidth])
+
+  // React Router reuses this component when only the chatId parameter changes.
+  // Reset the previous chat in a layout effect so its messages and streaming
+  // timer state cannot paint under the new route. Branch actions stage their
+  // freshly loaded tail so that reset can hydrate the target in the same store
+  // write instead of exposing an intermediate empty message list.
+  useLayoutEffect(() => {
+    if (!chatId || activeChatId === chatId) return
+
+    const state = useStore.getState()
+    const isHydratedMultiplayerPeer = !!state.mpRoomId
+      && !state.mpIsHost
+      && state.mpChatId === chatId
+    if (isHydratedMultiplayerPeer) return
+
+    const staged = takeChatNavigationSnapshot(chatId)
+    const metadata = staged?.chat.metadata ?? null
+    const wallpaper = metadata?.wallpaper as WallpaperRef | undefined
+    setActiveChat(chatId, staged?.chat.character_id ?? null, staged ? {
+      messages: staged.messagePage.data,
+      total: staged.messagePage.total,
+      displayOwner: staged.chat.character_display_owner ?? null,
+      name: staged.chat.name ?? null,
+      metadata,
+      wallpaper: wallpaper?.image_id ? wallpaper : null,
+    } : undefined)
+
+    if (staged) {
+      const next = useStore.getState()
+      const groupCharacterIds: string[] = metadata?.group === true
+        ? (metadata.character_ids || [])
+        : []
+      const mutedCharacterIds: string[] = metadata?.group === true
+        ? (metadata.muted_character_ids || [])
+        : []
+
+      if (metadata?.group === true && groupCharacterIds.length > 0) {
+        next.setGroupChat(true, groupCharacterIds, mutedCharacterIds)
+      } else {
+        next.clearGroupChat()
+      }
+    }
+  }, [activeChatId, chatId, setActiveChat])
 
   // Load chat and messages
   useEffect(() => {
     if (!chatId) return
 
     let cancelled = false
+    let stopPersonaResolution = () => {}
 
     const loadChat = async () => {
       // Multiplayer peers don't own this chat — the host's instance can't be
@@ -477,18 +665,28 @@ export default function ChatView() {
         ])
         if (cancelled) return
 
-        setActiveChat(chatId, chat.character_id)
+        const activeState = useStore.getState()
+        if (activeState.activeChatId !== chatId) {
+          setActiveChat(chatId, chat.character_id)
+        } else {
+          // The route-transition layout effect already performed the destructive
+          // chat reset. Only fill in the owner now, so a generation event that
+          // arrived during the fetch is not cleared a second time.
+          activeState.setActiveCharacter(chat.character_id)
+        }
         useStore.getState().setActiveChatDisplayOwner(chat.character_display_owner ?? null)
         useStore.getState().setActiveChatName(chat.name ?? null)
         setMessages(msgPage.data, msgPage.total)
 
         // Load leaderboard votes for thumbs up/down indicators
-        useStore.getState().loadVotesForChat(chatId)
+        useStore.getState().loadVotesForChat?.(chatId)
 
         if (msgPage.data.length === 0) {
           requestAnimationFrame(() => {
+            if (cancelled) return
             requestAnimationFrame(() => {
-              window.dispatchEvent(new CustomEvent('lumiverse:chat-items-populated'))
+              if (cancelled) return
+              window.dispatchEvent(new CustomEvent('lumiverse:chat-items-populated', { detail: { chatId } }))
             })
           })
         }
@@ -507,10 +705,6 @@ export default function ChatView() {
         if (wp?.image_id) {
           useStore.getState().setActiveChatWallpaper(wp)
         }
-
-        // Restore active avatar override from metadata
-        const avatarOverride = chat.metadata?.active_avatar_id as string | undefined
-        useStore.getState().setActiveChatAvatarId(avatarOverride || null)
 
         // Detect group chat and initialize group state
         const isGroup = chat.metadata?.group === true
@@ -544,6 +738,17 @@ export default function ChatView() {
         } else {
           useStore.getState().clearGroupChat()
           useStore.getState().clearGroupExpressions()
+        }
+
+        // Restore the visible sprite set for cards that represent multiple
+        // named characters. This is independent of Lumiverse group chats.
+        const savedMultiCharacterExprs = chat.metadata?.multi_character_expressions as
+          | Record<string, { label: string; imageId: string }>
+          | undefined
+        if (savedMultiCharacterExprs) {
+          useStore.getState().setMultiCharacterExpressions(savedMultiCharacterExprs)
+        } else {
+          useStore.getState().clearMultiCharacterExpressions()
         }
 
         // Restore active expression from chat metadata (async, fire-and-forget)
@@ -599,71 +804,86 @@ export default function ChatView() {
 
         const openedCharacter = await characterPromise
 
-        // Character bindings are temporary chat-context overrides. When a chat
-        // has no binding, fall back to the user's default persona instead of
-        // leaking the previous chat's bound persona into the new chat.
-        // Temporary chats are persona-less — leave the global persona alone.
+        // Resolve persona per chat: explicit chat selections win, then
+        // character/tag auto-bindings, then the default persona. Temporary
+        // chats are persona-less — leave the global persona alone.
         if (chat.metadata?.temporary !== true) {
-          const {
-            characterPersonaBindings,
-            personaTagBindings,
-            personas: allPersonas,
-            setActivePersona,
-            activePersonaId,
-          } = useStore.getState()
-          const defaultPersonaId = allPersonas.find((p) => p.is_default)?.id ?? null
-          const resolvedBinding = resolveAutoPersonaBinding({
-            characterId: chat.character_id,
-            characterTags: openedCharacter?.tags ?? [],
-            personas: allPersonas,
-            characterPersonaBindings,
-            personaTagBindings,
-          })
-          const boundPersona = resolvedBinding.personaId
-            ? allPersonas.find((p) => p.id === resolvedBinding.personaId) ?? null
-            : null
-
-          if (resolvedBinding.personaId && boundPersona) {
-            if (activePersonaId !== resolvedBinding.personaId) {
-              setActivePersona(resolvedBinding.personaId)
-              toast.info(t('chatView.switchedPersona', { name: personaToastName(boundPersona) }))
+          const resolvePersona = () => {
+            const state = useStore.getState()
+            if (cancelled || state.activeChatId !== chatId) {
+              stopPersonaResolution()
+              return
             }
-            autoSwitchedPersonaIdRef.current = resolvedBinding.personaId
+            if (!state.personasLoaded || !state.fullSettingsLoaded) return
+            stopPersonaResolution()
+            chat.metadata = state.activeChatMetadata ?? {}
+            if (chat.metadata.temporary === true) return
+            const {
+              characterPersonaBindings,
+              personaTagBindings,
+              personas: allPersonas,
+              setActivePersona,
+              activePersonaId,
+              setActiveChatMetadata,
+            } = useStore.getState()
+            const resolvedPersona = resolveChatPersonaSelection({
+              metadata: chat.metadata,
+              characterId: chat.character_id,
+              characterTags: openedCharacter?.tags ?? [],
+              personas: allPersonas,
+              characterPersonaBindings,
+              personaTagBindings,
+            })
+            const resolvedChatPersona = resolvedPersona.personaId
+              ? allPersonas.find((p) => p.id === resolvedPersona.personaId) ?? null
+              : null
 
-            // Apply the binding's add-on snapshot so the bound selections take
-            // effect and are visible in this chat. Seed only when the chat has
-            // no per-chat states for the persona yet, so a fresh chat picks up
-            // the binding while later in-chat tweaks are never clobbered.
-            if (
-              resolvedBinding.addonStates &&
-              Object.keys(resolvedBinding.addonStates).length > 0 &&
-              !cancelled
-            ) {
-              const existing = (chat.metadata?.persona_addon_states ?? {}) as Record<string, Record<string, boolean>>
-              if (!existing[resolvedBinding.personaId]) {
-                const nextStates = { ...existing, [resolvedBinding.personaId]: { ...resolvedBinding.addonStates } }
-                // Fold into chat.metadata and re-publish the snapshot (the
-                // canonical publish already happened alongside setMessages);
-                // persist for future opens.
-                chat.metadata = { ...(chat.metadata ?? {}), persona_addon_states: nextStates }
-                useStore.getState().setActiveChatMetadata(chat.metadata)
-                chatsApi.patchMetadata(chatId, { persona_addon_states: nextStates }).catch(() => {})
+            if (resolvedPersona.persistedPersonaStale) {
+              const nextMetadata = setPersistedChatPersonaId(chat.metadata, null)
+              chat.metadata = nextMetadata ?? {}
+              if (!cancelled) {
+                setActiveChatMetadata(nextMetadata)
+              }
+              chatsApi.patchMetadata(chatId, { [CHAT_PERSONA_METADATA_KEY]: null }).catch(() => {})
+            }
+
+            if (!cancelled && activePersonaId !== resolvedPersona.personaId) {
+              setActivePersona(resolvedPersona.personaId)
+              if (resolvedChatPersona && resolvedPersona.source !== 'default') {
+                toast.info(t('chatView.switchedPersona', { name: personaToastName(resolvedChatPersona) }))
               }
             }
 
-          } else {
-            const shouldRestoreDefault =
-              autoSwitchedPersonaIdRef.current !== null &&
-              defaultPersonaId !== null &&
-              activePersonaId !== defaultPersonaId &&
-              (activePersonaId === null || autoSwitchedPersonaIdRef.current === activePersonaId)
-
-            if (shouldRestoreDefault) {
-              setActivePersona(defaultPersonaId)
+            if (
+              (resolvedPersona.source === 'character' || resolvedPersona.source === 'tag') &&
+              resolvedChatPersona &&
+              resolvedPersona.addonStates &&
+              Object.keys(resolvedPersona.addonStates).length > 0 &&
+              !cancelled
+            ) {
+              // Apply the binding's add-on snapshot so the bound selections take
+              // effect and are visible in this chat. Seed only when the chat has
+              // no per-chat states for the persona yet, so a fresh chat picks up
+              // the binding while later in-chat tweaks are never clobbered.
+              if (
+                resolvedPersona.addonStates &&
+                Object.keys(resolvedPersona.addonStates).length > 0
+              ) {
+                const existing = (chat.metadata?.persona_addon_states ?? {}) as Record<string, Record<string, boolean>>
+                if (!existing[resolvedChatPersona.id]) {
+                  const nextStates = { ...existing, [resolvedChatPersona.id]: { ...resolvedPersona.addonStates } }
+                  // Fold into chat.metadata and re-publish the snapshot (the
+                  // canonical publish already happened alongside setMessages);
+                  // persist for future opens.
+                  chat.metadata = { ...(chat.metadata ?? {}), persona_addon_states: nextStates }
+                  useStore.getState().setActiveChatMetadata(chat.metadata)
+                  chatsApi.patchMetadata(chatId, { persona_addon_states: nextStates }).catch(() => {})
+                }
+              }
             }
-
-            autoSwitchedPersonaIdRef.current = null
           }
+          stopPersonaResolution = useStore.subscribe(resolvePersona)
+          resolvePersona()
         }
 
         // Auto-apply loadout if a binding exists for this chat/character
@@ -727,16 +947,22 @@ export default function ChatView() {
 
     return () => {
       cancelled = true
+      stopPersonaResolution()
     }
-  }, [chatId, setActiveChat, setMessages])
+  }, [chatId, setActiveChat, setMessages, t])
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      setActiveChat(null)
-      useStore.getState().clearGroupChat()
+      const state = useStore.getState()
+      // A home navigation now detaches synchronously. Avoid repeating that
+      // reset (or letting a stale cleanup clear a newer active chat).
+      if (state.activeChatId === chatId) {
+        state.setActiveChat(null)
+        state.clearGroupChat()
+      }
     }
-  }, [setActiveChat])
+  }, [chatId])
 
   const activeChatWallpaper = useStore((s) => s.activeChatWallpaper)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -766,12 +992,19 @@ export default function ChatView() {
   const pendingWallpaperReadyKeyRef = useRef<string | null>(null)
   const [wallpaperTransitioning, setWallpaperTransitioning] = useState(false)
   const hasAnyBackground = !!(sceneBackground || displayedWallpaper?.image_id || wallpaper.global?.image_id)
-
-  useEffect(() => {
-    if (displayedWallpaperKeyRef.current === effectiveWallpaperKey) return
-
+  const clearWallpaperTransitionTimers = useCallback(() => {
     wallpaperTransitionTimeouts.current.forEach(window.clearTimeout)
     wallpaperTransitionTimeouts.current = []
+  }, [])
+
+  useEffect(() => {
+    clearWallpaperTransitionTimers()
+    pendingWallpaperReadyKeyRef.current = null
+    if (displayedWallpaperKeyRef.current === effectiveWallpaperKey) {
+      setWallpaperTransitioning(false)
+      return clearWallpaperTransitionTimers
+    }
+
     setWallpaperTransitioning(true)
 
     const swapTimer = window.setTimeout(() => {
@@ -794,23 +1027,16 @@ export default function ChatView() {
     }, WALLPAPER_TRANSITION_HALF_MS)
 
     wallpaperTransitionTimeouts.current.push(swapTimer)
-  }, [effectiveWallpaper, effectiveWallpaperKey])
+    return clearWallpaperTransitionTimers
+  }, [clearWallpaperTransitionTimers, effectiveWallpaper, effectiveWallpaperKey])
 
-  useEffect(() => {
-    return () => {
-      wallpaperTransitionTimeouts.current.forEach(window.clearTimeout)
-      wallpaperTransitionTimeouts.current = []
-    }
-  }, [])
-
-  const handleWallpaperVisualReady = (wallpaperKey: string) => {
+  const handleWallpaperVisualReady = useCallback((wallpaperKey: string) => {
     if (pendingWallpaperReadyKeyRef.current !== wallpaperKey) return
     pendingWallpaperReadyKeyRef.current = null
-    wallpaperTransitionTimeouts.current.forEach(window.clearTimeout)
-    wallpaperTransitionTimeouts.current = []
+    clearWallpaperTransitionTimers()
     const revealTimer = window.setTimeout(() => setWallpaperTransitioning(false), 40)
     wallpaperTransitionTimeouts.current.push(revealTimer)
-  }
+  }, [clearWallpaperTransitionTimers])
 
   // Sync data-chat-bg on the root so message card CSS can skip backdrop-filter
   // when the background is a solid color (blur on solid = pure GPU waste).
@@ -824,7 +1050,7 @@ export default function ChatView() {
     return () => root.removeAttribute('data-chat-bg')
   }, [hasAnyBackground])
 
-  // Sync bubble opt-out attributes so CSS can suppress effects.
+  // Sync chat style opt-out attributes so message CSS can suppress effects.
   const bubbleDisableHover = useStore((s) => s.bubbleDisableHover)
   const bubbleHideAvatarBg = useStore((s) => s.bubbleHideAvatarBg)
   const bubbleOpacity = useStore((s) => s.bubbleOpacity ?? 1)
@@ -842,6 +1068,86 @@ export default function ChatView() {
       root.style.removeProperty('--lcs-bubble-opacity')
     }
   }, [bubbleDisableHover, bubbleHideAvatarBg, bubbleOpacity])
+
+  useLayoutEffect(() => {
+    const chatColumnInner = chatColumnInnerRef.current
+    const chatColumnTop = chatColumnTopRef.current
+    const chatTopDock = chatTopDockRef.current
+    if (!chatColumnInner || !chatColumnTop || !chatTopDock) return
+
+    const syncComposerAnchor = () => {
+      const composerAbove = chatColumnInner.querySelector<HTMLSpanElement>(
+        '[data-spindle-mount="chat_composer_above"]',
+      )
+      chatComposerAboveRef.current = composerAbove
+      return composerAbove
+    }
+
+    const syncOccupied = (anchor: HTMLElement) => {
+      const occupied = findExtensionChild(anchor) !== null
+      if (occupied) anchor.setAttribute('data-spindle-occupied', '')
+      else anchor.removeAttribute('data-spindle-occupied')
+    }
+
+    const syncDockRequest = (anchor: HTMLElement, resolve: (request: unknown) => string, defaultRequest: string | null = null, resolveChild: (request: unknown) => string = resolve) => {
+      const child = findExtensionChild(anchor)
+      const requested = child?.getAttribute('data-dock-request') ?? defaultRequest
+      const request = resolve(requested)
+      const childRequest = child ? resolveChild(requested) : null
+      if (anchor.getAttribute('data-dock-request') !== request) anchor.setAttribute('data-dock-request', request)
+      if (child && childRequest !== null && child.getAttribute('data-dock-request') !== childRequest) child.setAttribute('data-dock-request', childRequest)
+    }
+
+    const syncTopDockHeight = () => {
+      const height = measureLayoutHeight(chatTopDock)
+      chatColumnInner.style.setProperty('--lcs-top-dock-height', `${height}px`)
+    }
+
+    const sync = () => {
+      const composerAbove = syncComposerAnchor()
+      syncOccupied(chatColumnTop)
+      syncOccupied(chatTopDock)
+      if (composerAbove) syncOccupied(composerAbove)
+      syncDockRequest(chatColumnTop, (request) => effectiveQuickToolbarDockRequest(request, quickToolbarSettings))
+      syncDockRequest(chatTopDock, () => nativeDockRequest, nativeDockRequest, (request) => effectiveQuickToolbarDockRequest(request, quickToolbarSettings))
+      if (composerAbove) syncDockRequest(composerAbove, chatLoreDockMode)
+      syncTopDockHeight()
+    }
+
+    const mutationObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(sync)
+    mutationObserver?.observe(chatColumnInner, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['data-dock-request'],
+    })
+    mutationObserver?.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['style'],
+    })
+    const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncTopDockHeight)
+    resizeObserver?.observe(chatTopDock)
+    window.addEventListener('resize', sync)
+    window.visualViewport?.addEventListener('resize', sync)
+    window.visualViewport?.addEventListener('scroll', sync)
+    sync()
+
+    return () => {
+      mutationObserver?.disconnect()
+      resizeObserver?.disconnect()
+      window.removeEventListener('resize', sync)
+      window.visualViewport?.removeEventListener('resize', sync)
+      window.visualViewport?.removeEventListener('scroll', sync)
+      chatColumnTop.removeAttribute('data-spindle-occupied')
+      chatTopDock.removeAttribute('data-spindle-occupied')
+      chatComposerAboveRef.current?.removeAttribute('data-spindle-occupied')
+      chatColumnTop.removeAttribute('data-dock-request')
+      chatTopDock.removeAttribute('data-dock-request')
+      chatComposerAboveRef.current?.removeAttribute('data-dock-request')
+      chatColumnInner.style.removeProperty('--lcs-top-dock-height')
+      chatComposerAboveRef.current = null
+    }
+  }, [chatId, dockQuickToolbar, keepFloatingDockHost, quickToolbarSettings])
 
   if (!chatId) return null
 
@@ -882,10 +1188,11 @@ export default function ChatView() {
         }}
       />
       <div className={clsx(styles.wallpaperTransitionLayer, wallpaperTransitioning && !sceneBackground && styles.wallpaperTransitionLayerActive)} />
-      <div className={styles.body} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
-        {portraitPanelSide !== 'none' && portraitPanelSide === 'left' && (
+      <div className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
+        <div data-spindle-mount="chat_sidebar_left" data-spindle-scope={`chat:${chatId}:sidebar-left`} style={{ display: 'contents' }} />
+        {!portraitSurfaceOccupied && portraitPanelSide !== 'none' && portraitPanelSide === 'left' && (
           <div className={clsx(styles.portraitSide, styles.portraitSideLeft, portraitPanelOpen && styles.portraitSideOpen)}>
-            {!isMobile && <PortraitPanel side="left" />}
+            {!isMobile && !portraitSurfaceOccupied && <PortraitPanel side="left" />}
             <button
               type="button"
               className={clsx(styles.portraitTab, styles.portraitTabLeft, portraitPanelOpen && styles.portraitTabActive)}
@@ -897,8 +1204,8 @@ export default function ChatView() {
           </div>
         )}
 
-        <div className={styles.chatColumn}>
-          {(spindleNotice || cortexNotice) && (
+        <div className={styles.chatColumn} data-lumiverse-surface="chat-column">
+          {(spindleNotice || visibleCortexNotice) && (
             <div className={styles.noticeDock} aria-live="polite" aria-atomic="true">
               {spindleNotice && (
                 <div className={clsx(styles.cortexNotice, styles.spindleNotice, spindleNotice.variant === 'error' && styles.cortexNoticeError)}>
@@ -912,16 +1219,27 @@ export default function ChatView() {
                   </span>
                 </div>
               )}
-              {cortexNotice && (
-                <div className={clsx(styles.cortexNotice, cortexNotice.variant === 'error' && styles.cortexNoticeError)}>
+              {visibleCortexNotice && (
+                <div className={clsx(styles.cortexNotice, visibleCortexNotice.variant === 'error' && styles.cortexNoticeError)}>
                   <span className={styles.cortexNoticeStatus} aria-hidden="true" />
-                  <span className={styles.cortexNoticeTitle}>{cortexNotice.title}</span>
+                  <span className={styles.cortexNoticeTitle}>{visibleCortexNotice.title}</span>
                   <span className={styles.cortexNoticeSeparator} aria-hidden="true">•</span>
-                  <span className={styles.cortexNoticeDetail}>{cortexNotice.detail}</span>
-                  <span className={styles.cortexNoticePercent}>{typeof cortexNotice.percent === 'number' ? `${cortexNotice.percent}%` : ''}</span>
-                  {typeof cortexNotice.percent === 'number' && (
+                  <span className={styles.cortexNoticeDetail}>{visibleCortexNotice.detail}</span>
+                  <span className={styles.cortexNoticePercent}>{typeof visibleCortexNotice.percent === 'number' ? `${visibleCortexNotice.percent}%` : ''}</span>
+                  {visibleCortexNotice.variant === 'error' && visibleCortexNotice.errorKey && (
+                    <button
+                      type="button"
+                      className={styles.cortexNoticeDismiss}
+                      onClick={() => setDismissedCortexErrorKey(visibleCortexNotice.errorKey ?? null)}
+                      aria-label={t('chatView.dismissMemoryNotice')}
+                      title={t('chatView.dismissMemoryNotice')}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  )}
+                  {typeof visibleCortexNotice.percent === 'number' && (
                     <span className={styles.cortexNoticeBar} aria-hidden="true">
-                      <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, cortexNotice.percent / 100))})` }} />
+                      <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, visibleCortexNotice.percent / 100))})` }} />
                     </span>
                   )}
                 </div>
@@ -929,31 +1247,74 @@ export default function ChatView() {
             </div>
           )}
           <div
+            ref={chatColumnInnerRef}
             className={styles.chatColumnInner}
+            data-lumiverse-surface="chat-column-inner"
             style={innerStyle}
             data-select-mode={messageSelectMode || undefined}
             data-chat-chrome-entering={chatChromeEntering || undefined}
             data-chat-chrome-leaving={(wallpaperTransitioning || chatChromeLeaving) || undefined}
           >
-            <div className={styles.chatToolbar}>
-              <button
-                type="button"
-                className={clsx(styles.toolbarBtn, messageSelectMode && styles.toolbarBtnActive)}
-                onClick={toggleSelectMode}
-                title={messageSelectMode ? t('chatView.exitSelectionMode') : t('chatView.selectMessages')}
-              >
-                <ListChecks size={14} />
-              </button>
+            <div ref={chatColumnTopRef} data-spindle-mount="chat_column_top" />
+            <div data-spindle-mount="chat_header_left" data-spindle-scope={`chat:${chatId}:header-left`} style={{ display: 'contents' }} />
+            <div data-spindle-mount="chat_header_center" data-spindle-scope={`chat:${chatId}:header-center`} style={{ display: 'contents' }} />
+            <div data-spindle-mount="chat_header_right" data-spindle-scope={`chat:${chatId}:header-right`} style={{ display: 'contents' }} />
+            <div ref={chatTopDockRef} className={styles.chatToolbar} data-spindle-mount="chat_top_dock" data-spindle-scope={`chat:${chatId}:top-dock`} data-dock-request={chatTopDockRequest} data-native-action-side={nativeDockActionSide}>
+              <div className={styles.nativeDockActions}>
+                {showNativeSelectMessages && (
+                  <button type="button" className={clsx(styles.toolbarBtn, messageSelectMode && styles.toolbarBtnActive)} onClick={toggleSelectMode} title={messageSelectMode ? t('chatView.exitSelectionMode') : t('chatView.selectMessages')} aria-label={messageSelectMode ? t('chatView.exitSelectionMode') : t('chatView.selectMessages')} aria-pressed={messageSelectMode}>
+                    <ListChecks size={14} />
+                  </button>
+                )}
+                {!quickToolbarOwnsOldestMessageAction && showNativeScrollToTop && totalChatLength > 1 && (
+                  <button type="button" className={styles.toolbarBtn} data-toolbar-action={OLDEST_MESSAGE_ACTION_ID} data-native-dock-action={OLDEST_MESSAGE_ACTION_ID} onClick={() => void navigateToOldestMessage()} disabled={loadingOldestMessage} title={t('scrollToTop')} aria-label={t('scrollToTop')}>
+                    {loadingOldestMessage ? <LoaderCircle size={14} className={styles.toolbarSpinner} /> : <ArrowUp size={14} />}
+                  </button>
+                )}
+                {showNativeBrowseMessages && totalChatLength > 0 && (
+                  <button type="button" className={styles.toolbarBtn} onClick={() => setMessageNavigatorOpen(true)} title={t('messageNavigator.open')} aria-label={t('messageNavigator.open')}>
+                    <List size={14} />
+                  </button>
+                )}
+                {messageEditDraft?.chatId === chatId && (
+                  <button type="button" className={clsx(styles.toolbarBtn, styles.toolbarBtnActive)} onClick={returnToEditedMessage} title={t('messageNavigator.returnToEdit')} aria-label={t('messageNavigator.returnToEdit')}>
+                    <Pencil size={14} />
+                  </button>
+                )}
+              </div>
+              {dockQuickToolbar && <QuickToolbar />}
             </div>
-            <MessageList messages={messages} chatId={chatId} isStreaming={isStreaming} />
-            <ScrollToBottom />
+            <ChatFindBar
+              chatId={chatId}
+              open={chatFindOpen}
+              focusRequest={chatFindFocusRequest}
+              onClose={closeChatFind}
+              onNavigate={setChatFindTarget}
+              onClearTarget={clearChatFindTarget}
+              onQueryChange={setChatFindQuery}
+            />
+            <MessageNavigator
+              chatId={chatId}
+              open={messageNavigatorOpen}
+              onClose={() => setMessageNavigatorOpen(false)}
+              onNavigate={setChatFindTarget}
+            />
+            <MessageList
+              messages={messages}
+              chatId={chatId}
+              isStreaming={isStreaming}
+              findTarget={chatFindTarget}
+              findQuery={chatFindQuery}
+            />
+            <ScrollToBottom key={chatId} displayReady={!chatChromeEntering} />
             <CouncilPill />
             {messageSelectMode && <MessageSelectBar chatId={chatId} />}
-            <InputArea chatId={chatId} onNavigateHome={handleNavigateHome} />
+            <div data-spindle-mount="chat_bottom_dock" data-spindle-scope={`chat:${chatId}:bottom-dock`} data-dock-request="strip" />
+            <InputArea chatId={chatId} onNavigateHome={handleNavigateHome} onOpenChatFind={openChatFind} />
           </div>
         </div>
 
-        {portraitPanelSide !== 'none' && portraitPanelSide === 'right' && (
+        {!portraitSurfaceOccupied && portraitPanelSide !== 'none' && portraitPanelSide === 'right' && (
           <div className={clsx(styles.portraitSide, styles.portraitSideRight, portraitPanelOpen && styles.portraitSideOpen)}>
             <button
               type="button"
@@ -963,11 +1324,14 @@ export default function ChatView() {
             >
               <UserRound size={14} />
             </button>
-            {!isMobile && <PortraitPanel side="right" />}
+            {!isMobile && !portraitSurfaceOccupied && <PortraitPanel side="right" />}
           </div>
         )}
+        <div data-spindle-mount="chat_sidebar_right" data-spindle-scope={`chat:${chatId}:sidebar-right`} style={{ display: 'contents' }} />
+        <div data-spindle-mount="lorebook_half_workspace" data-spindle-scope={`chat:${chatId}:lorebook-half-workspace`} />
+        <div data-spindle-mount="chat_surface_side" data-spindle-scope={`chat:${chatId}:surface-side`} />
       </div>
-      {isMobile && portraitPanelSide !== 'none' && (
+      {isMobile && !portraitSurfaceOccupied && portraitPanelSide !== 'none' && (
         <PortraitPanel
           side={portraitPanelSide}
           mobileDrawer

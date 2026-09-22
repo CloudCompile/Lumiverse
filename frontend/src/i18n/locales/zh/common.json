@@ -1,6 +1,11 @@
 {
   "appName": "Lumiverse",
   "home": "首页",
+  "safeTheme": {
+    "url": "此浏览器会话已启用安全主题模式。自定义 CSS 和组件覆盖已暂时停用；请移除 ?safe-theme=1 后重新加载以恢复。",
+    "server": "此服务器已启用安全主题模式。自定义 CSS 和组件覆盖已暂时停用；请取消 LUMIVERSE_SAFE_THEME 并重启以恢复。",
+    "both": "URL 和服务器均已启用安全主题模式。自定义 CSS 和组件覆盖已暂时停用。"
+  },
   "actions": {
     "save": "保存",
     "cancel": "取消",
@@ -51,9 +56,17 @@
     "px": "{{count}}px"
   },
   "toast": {
+    "desktopDownloadTitle": "正在保存下载",
+    "desktopDownloadStarted": "正在保存 {{fileName}}…",
+    "desktopDownloadComplete": "已保存 {{fileName}}",
+    "desktopDownloadFailed": "无法保存 {{fileName}}",
     "operatorUpdateTitle": "有可用更新",
     "operatorUpdatesAvailable": "{{count}} 个更新可用{{suffix}}",
     "operatorUpdatesAvailable_plural": "{{count}} 个更新可用{{suffix}}",
+    "extensionUpdateTitle": "有可用扩展更新",
+    "extensionUpdatesAvailable": "{{count}} 个扩展更新可用{{suffix}}",
+    "extensionUpdatesAvailable_plural": "{{count}} 个扩展更新可用{{suffix}}",
+    "viewExtensions": "查看扩展",
     "extensionErrorTitle": "扩展错误",
     "extensionsNoneToUpdate": "没有可更新的扩展",
     "extensionsUpdated": "已更新 {{count}} 个扩展",

@@ -158,6 +158,11 @@ export class EmbeddingCache {
     this.clearDisk();
   }
 
+  /** Drop only the in-memory tier while preserving the reusable SQLite cache. */
+  clearMemory(): void {
+    this.map.clear();
+  }
+
   get size(): number {
     return this.map.size;
   }

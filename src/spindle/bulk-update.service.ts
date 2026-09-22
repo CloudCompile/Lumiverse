@@ -21,7 +21,7 @@
  * Crash-avoidance structure (Bun 1.3.x):
  *   The run is split into three phases — stop-all, update-all, start-all —
  *   instead of stop/update/start per extension. Interleaving Worker
- *   teardown with `git pull` / `bun install` / `bun build` subprocess
+ *   teardown with Git sync / `bun install` / `bun build` subprocess
  *   spawns has been observed to trigger a null-pointer segfault in Bun's
  *   subprocess/worker cleanup path. Batching the Worker lifecycle bursts
  *   on either side of the pure-subprocess phase gives JSC time to
@@ -33,6 +33,7 @@ import * as lifecycle from "./lifecycle";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import type { ExtensionInfo } from "lumiverse-spindle-types";
+import { clearCachedExtensionUpdate } from "./update-check.service";
 
 let bulkUpdateInProgress = false;
 
@@ -64,6 +65,7 @@ export async function updateAllExtensions(opts: {
     opts.isPrivileged ? "owner" : "user"
   );
   const targets = all.filter((ext) =>
+    !ext.metadata?.illarin &&
     managerSvc.canManageExtension(
       ext,
       opts.userId,
@@ -103,32 +105,11 @@ export function isBulkUpdateInProgress(): boolean {
   return bulkUpdateInProgress;
 }
 
-/**
- * Sleep helper used to give Bun breathing room between phases.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Best-effort GC hint between phases. Bun exposes `Bun.gc(true)` which
- * runs a synchronous full collection; this helps finalize terminated
- * Workers and drain subprocess pipe handles before we move on. Wrapped
- * in a try/catch so older Bun builds don't blow up the bulk run.
- */
-function maybeGc(): void {
-  try {
-    (globalThis as any).Bun?.gc?.(true);
-  } catch {
-    // ignore
-  }
-}
-
 interface BulkPlanEntry {
   ext: ExtensionInfo;
   wasRunning: boolean;
   wasEnabled: boolean;
-  /** Set when the update (git pull / bun install / bun build) succeeded. */
+  /** Set when the update (remote reset / bun install / bun build) succeeded. */
   updated: boolean;
   /** Set when the update failed so we can decide whether to attempt restart. */
   updateError: string | null;
@@ -182,8 +163,7 @@ async function runBulkUpdate(
   // Let JSC finalize the terminated Worker state before we start spawning
   // git/bun subprocesses. This is the specific interleaving that has
   // triggered segfaults on Bun 1.3.x.
-  await sleep(500);
-  maybeGc();
+  await lifecycle.settleRuntimeBoundary();
 
   // ─── Phase 2: update every extension (no Worker activity) ─────────────
   let completed = 0;
@@ -212,6 +192,7 @@ async function runBulkUpdate(
 
     try {
       await managerSvc.update(ext.identifier);
+      clearCachedExtensionUpdate(ext.id);
       entry.updated = true;
       completed++;
       eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
@@ -235,14 +216,12 @@ async function runBulkUpdate(
     // Small breather between subprocess bursts so pipe handles and
     // child-process zombies can be reaped before the next extension's
     // git + bun install + bun build chain fires.
-    await sleep(150);
-    maybeGc();
+    await lifecycle.settleRuntimeBoundary(150);
   }
 
   // Let the last extension's build subprocesses fully drain before we
   // start spinning up new Workers.
-  await sleep(500);
-  maybeGc();
+  await lifecycle.settleRuntimeBoundary();
 
   // ─── Phase 3: start previously-running extensions ─────────────────────
   // Only restart extensions that were enabled before the bulk run started.
@@ -278,7 +257,7 @@ async function runBulkUpdate(
 
     // Pace worker startups so we don't stack N Worker() constructors
     // inside the same tick.
-    await sleep(250);
+    await lifecycle.settleRuntimeBoundary(250);
   }
 
   // "updated" = Phase 2 succeeded AND Phase 3 restart (if attempted) succeeded.

@@ -20,36 +20,61 @@ An embedding is a numerical representation of text — a list of numbers that ca
 
 ## Setting Up
 
-Open **Settings > Embeddings** and follow the setup checklist:
+First open the **Connections** drawer. Under **Embedding Models**, create a connection for each embedding endpoint you want to use. Then open **Settings > Embeddings** and follow the setup checklist:
 
 ### 1. Enable Embeddings
 
 Toggle the master switch on.
 
-### 2. Select a Provider
+### 2. Select a Connection
+
+Choose one of your saved **embedding connections** as the primary connection. Chat/LLM connections are intentionally not offered here, even when they use an OpenAI-compatible endpoint.
+
+Existing embedding setups are migrated automatically. If you selected an OpenAI-compatible chat connection during the previous shared-profile workflow, Lumiverse preserves its embedding endpoint and copies its key into the dedicated embedding connection without removing the key from the chat connection.
+
+The available providers include Lumiverse's built-ins and any embedding providers contributed by enabled [Spindle extensions](../extensions/index.md#extension-provided-ai-providers).
+
+### 3. Choose a Provider and Model
 
 | Provider | Notes |
 |----------|-------|
 | **OpenAI** | Official OpenAI API (`text-embedding-3-small` recommended) |
 | **OpenAI Compatible** | Any service implementing the OpenAI embeddings API (local models, self-hosted) |
+| **Mistral** | Native Mistral embeddings API. Defaults to `mistral-embed`; model browsing uses Mistral's model catalogue. |
+| **Cohere** | Native Cohere v2 Embed API. Defaults to `embed-v4.0`; Lumiverse automatically sends document/query input types. |
 | **OpenRouter** | Aggregation service |
 | **ElectronHub** | Model aggregator |
 | **BananaBread** | Lumiverse's local embedding server. Defaults to `http://localhost:8008/v1/embeddings` and pulls its model list from `/v1/models`. |
 | **Nano-GPT** | Pay-per-token aggregator |
+| **Spindle extension** | An enabled extension may contribute an embedding provider. Availability and model options depend on that extension. |
 
-### 3. Configure the Connection
+### 4. Configure the Connection
 
 | Field | Description |
 |-------|-------------|
+| **Connection** | Dedicated embedding connection selected from **Connections > Embedding Models**. |
 | **API URL** | Base URL for the provider. Auto-appends `/v1/embeddings` if no path is specified. |
 | **Embedding Model** | Model name (e.g., `text-embedding-3-small`) |
 | **API Key** | Your provider's authentication key |
 | **Dimensions** | Vector size — auto-detected when you run a test |
 | **Send Dimensions** | Whether to include the dimension value in API requests (some providers require it, others reject it) |
 
-### 4. Test the API
+For Mistral and Cohere, Lumiverse translates **Send Dimensions** to each native API's `output_dimension` field. Cohere requests are also split automatically when a batch exceeds its 96-text API limit.
+
+### 5. Add Fallback Connections (Optional)
+
+Under **Primary and fallback connections**, add backup embedding connections in the order Lumiverse should try them. If the primary request fails or times out, Lumiverse advances through this chain without sharing one profile's API key with another profile.
+
+Every endpoint in a fallback chain must produce vectors with the same dimensions as the primary endpoint. Set a fallback's **Dimensions** when Lumiverse cannot determine it automatically. A known dimension mismatch is skipped instead of mixing incompatible vectors in the same index.
+
+!!! warning "Changing dimensions requires reindexing"
+    Existing vectors cannot be compared with vectors of another size. If you intentionally move to a provider or model with different dimensions, rebuild the affected embeddings after saving the new configuration.
+
+### 6. Test the API
 
 Click **Test API** to verify your setup. A successful test auto-detects the model's native dimensions and applies them.
+
+Test the primary and every fallback before relying on the chain. The displayed **Fallback chain** shows the order Lumiverse will use.
 
 ---
 
@@ -138,3 +163,6 @@ Controls the balance between traditional keyword matching and semantic vector se
 
 !!! tip "Test after setup"
     Always click Test API after configuration. This verifies your credentials work and auto-detects the correct dimensions — getting dimensions wrong produces garbage results.
+
+!!! tip "Use genuinely independent fallbacks"
+    A second profile pointing to the same upstream may fail during the same outage. For resilience, choose another provider or independently hosted endpoint with a dimension-compatible model.

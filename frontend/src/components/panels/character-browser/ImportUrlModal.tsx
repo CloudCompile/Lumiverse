@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { Spinner } from '@/components/shared/Spinner'
 import { CloseButton } from '@/components/shared/CloseButton'
+import { useStore } from '@/store'
 import styles from './ImportUrlModal.module.css'
 
 interface ImportUrlModalProps {
@@ -21,6 +22,8 @@ export default function ImportUrlModal({
   error,
 }: ImportUrlModalProps) {
   const { t } = useTranslation('panels')
+  const importChubExpressions = useStore((state) => state.importChubExpressions)
+  const setSetting = useStore((state) => state.setSetting)
   const [urls, setUrls] = useState('')
   const mouseDownTargetRef = useRef<EventTarget | null>(null)
 
@@ -58,6 +61,21 @@ export default function ImportUrlModal({
             disabled={loading}
             rows={5}
           />
+          {/* Surfaced here rather than in Settings: the size cost only means
+              something next to the URLs being imported, and the choice sticks
+              as the default for next time. */}
+          <label className={styles.optionRow}>
+            <input
+              type="checkbox"
+              checked={importChubExpressions}
+              disabled={loading}
+              onChange={(e) => setSetting('importChubExpressions', e.target.checked)}
+            />
+            <span className={styles.optionText}>
+              {t('characterBrowser.importExpressionsLabel')}
+              <span className={styles.optionHint}>{t('characterBrowser.importExpressionsHint')}</span>
+            </span>
+          </label>
           {error && <div className={styles.error}>{error}</div>}
           <div className={styles.actions}>
             <button type="button" className={styles.cancelBtn} onClick={onClose} disabled={loading}>

@@ -6,6 +6,8 @@ The full stack suite for Lumiverse, a full-featured AI chat application. Provide
 
 Join the conversation on [Discord](https://discord.gg/28rBWVFfCu) for help, updates, and discussion.
 
+Please also review the [Code of Conduct](CODE_OF_CONDUCT.md).
+
 ## Documentation
 
 - [User guides](https://lumiverse.chat/guides)
@@ -13,7 +15,10 @@ Join the conversation on [Discord](https://discord.gg/28rBWVFfCu) for help, upda
 
 ## Get the Repository
 
-Clone the repo from GitHub. Do **not** use the GitHub **Releases** tab or download a release archive there; those builds are outdated.
+Clone the repo from GitHub. Do **not** use a general-release source archive as
+the server checkout; those archives are not the supported update path. The
+separately tagged `desktop-v*` releases contain prebuilt desktop installers,
+but the desktop companion still needs this checkout to run the local server.
 
 ```bash
 git clone https://github.com/prolix-oc/Lumiverse.git
@@ -57,9 +62,10 @@ All commands below assume you have already cloned the repo and are working from 
 
 The launcher will:
 1. Install Bun if not found
-2. Run the **first-time setup wizard** (admin account, port, extension storage)
-3. Install backend dependencies and serve the existing frontend build if one is available
-4. Start the backend with the runner and IPC bridge when launched interactively
+2. Upgrade unsupported Bun versions to the latest stable release (minimum 1.4.2)
+3. Run the **first-time setup wizard** (admin account, port, extension storage, optional SMART disk monitoring)
+4. Install backend dependencies and serve the existing frontend build if one is available
+5. Start the backend with the runner and IPC bridge when launched interactively
 
 Use `./start.sh --build` on macOS/Linux or `.\start.ps1 -Build` on Windows if you want to rebuild the frontend before starting.
 
@@ -114,7 +120,7 @@ In your Space's **Settings → Persistent storage**, attach a storage bucket and
 In the **Files** tab of your Space, create a file named `Dockerfile` with the following contents:
 
 ```dockerfile
-FROM oven/bun:1-slim
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -182,11 +188,22 @@ On first launch, the setup wizard walks you through:
 1. **Admin account** — username and password for the owner account
 2. **Server port** — defaults to `7860`
 3. **Extension storage** — disk budget for Spindle extension data pools
-4. **Identity file** — auto-generated encryption identity (`data/lumiverse.identity`)
+4. **Disk health monitoring** — installs smartmontools through the detected system package manager when possible
+5. **Identity file** — auto-generated encryption identity (`data/lumiverse.identity`)
 
 The wizard produces a `.env` file and the identity file. Both are required to run the server.
 
 > **Important:** Keep `data/lumiverse.identity` safe. It holds the encryption key for all secrets. If lost, encrypted data cannot be recovered.
+
+### SMART disk health
+
+Lumiverse checks physical-drive SMART health with the optional `smartctl` binary. The setup wizard installs it by default on supported package managers; existing installations can run `bun run install:smartctl`. The owner/admin Operator API exposes `GET /api/v1/operator/smartctl` and `POST /api/v1/operator/smartctl/install`.
+
+The Operator panel recognizes NVMe and SATA SSDs and shows the fields their controller actually exposes: endurance used/remaining, spare capacity, data written, power-on hours/cycles, media errors, unsafe shutdowns, wear-leveling, reserved blocks, and program/erase failures. Rotating HDDs additionally show power-on hours, power cycles, start/stop cycles, and load/unload cycles. ATA SMART attributes are vendor-specific, so unavailable values are omitted rather than guessed. Exhausted endurance, depleted NVMe spare capacity, integrity errors, or program/erase failures raise a warning.
+
+When a periodic SMART check finds a failed or pre-fail condition, connected owners and admins receive one Disk Health toast per browser page load. The alert names the affected drive and the actual SMART evidence; later checks re-emit it for operators who connect after startup.
+
+On Linux, disk access and installation normally require local administrator permission. Docker images include smartmontools, but you must explicitly map the host block devices you intend to monitor; a container without device access will report SMART as unavailable. The monitor skips standby drives to avoid waking them and can be disabled with `LUMIVERSE_SMART_MONITOR=false`.
 
 ### Encryption & Auth Keys
 
@@ -205,6 +222,7 @@ The wizard produces a `.env` file and the identity file. Both are required to ru
 | `./start.sh --backend-only` | `.\start.ps1 -Mode backend-only` | Start the backend only, skip frontend serving |
 | `./start.sh --dev` | `.\start.ps1 -Mode dev` | Start the backend in watch mode |
 | `./start.sh --setup` | `.\start.ps1 -Mode setup` | Run the setup wizard only |
+| `./start.sh --install-desktop` | `.\start.ps1 -InstallDesktop` | Build and install the Tauri desktop app, including launcher shortcuts |
 | `./start.sh --no-runner` | `.\start.ps1 -NoRunner` | Start directly without runner IPC or Operator Panel control hooks |
 
 ### Runner & Operator Panel
@@ -227,6 +245,24 @@ Most operational controls now live in the owner-only `Settings -> Operator Panel
 
 If you start Lumiverse with `--no-runner`, `-NoRunner`, `bun run start`, or `bun run dev`, the Operator Panel still loads but runner-backed controls will be unavailable.
 
+### Experimental Lumiverse Desktop
+
+[`desktop/`](desktop/) contains an optional experimental Tauri v2 desktop app
+with Lumiverse's integrated browser as its primary interface and a macOS menu
+bar / Windows system tray / Linux StatusNotifier icon for controls. It starts
+and stops a local server, shows serving stats, opens the same address in your
+default browser on request, and applies updates through the runner. See
+[desktop/README.md](desktop/README.md) for prebuilt Linux AppImage help and
+development instructions. Prebuilt installers are attached to `desktop-v*`
+releases. To build the companion from this checkout instead, use
+`./start.sh --install-desktop` on macOS/Linux or `.\start.ps1 -InstallDesktop`
+on Windows; this checks prerequisites, builds it, and sets up its application
+launcher plus a desktop shortcut when that folder is available. On Windows the
+install also bootstraps the minimal stable Rust toolchain automatically when
+`cargo` is missing. The shorter `--desktop`/`-Desktop` aliases are also
+accepted. Run `bun run desktop:doctor` to check the source-build toolchain
+without installing anything.
+
 ## Configuration
 
 Configuration is managed through `.env` (see `.env.example` for all options). Sensitive credentials are stored securely in the `data/` directory — no plaintext passwords in `.env`:
@@ -236,8 +272,14 @@ Configuration is managed through `.env` (see `.env.example` for all options). Se
 | `PORT` | No | `7860` | Server port |
 | `OWNER_USERNAME` | No | `admin` | Admin account display name |
 | `AUTH_SECRET` | No | *derived* | Session signing secret (auto-derived from identity file) |
+| `AUTH_BASE_URL` | No | *request origin* | Optional single-origin override for auth/OAuth. Normally the request must match **Settings → Operator → Trusted Hostnames**. |
+| `LUMIVERSE_TLS_CERT_FILE` | No | — | PEM certificate/full-chain file for direct HTTPS. Set with `LUMIVERSE_TLS_KEY_FILE`; the certificate may cover multiple SANs. |
+| `LUMIVERSE_TLS_KEY_FILE` | No | — | PEM private-key file paired with `LUMIVERSE_TLS_CERT_FILE`. |
+| `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | No | — | Optional file containing the encrypted private key's passphrase. |
+| `LUMIVERSE_TLS_CONFIG_FILE` | No | — | JSON certificate manifest for multi-certificate SNI. Cannot be combined with the direct certificate/key variables. |
 | `FRONTEND_DIR` | No | — | Path to built frontend dist for static serving |
 | `TRUSTED_ORIGINS` | No | `localhost` | Comma-separated CORS origins |
+| `TRUSTED_PROXIES` | No | — | Proxy IPs/CIDRs allowed to supply external host/protocol headers for dynamic auth origins and client-IP headers. Host/protocol forwarding requires this explicit list. |
 
 Owner password is stored hashed in `data/owner.credentials` (created by the setup wizard). To reset: `bun run reset-password`.
 
@@ -339,4 +381,4 @@ scripts/
 
 ## License
 
-[Lumiverse Community License v2.0](LICENSE.md) — source-available for personal, academic, and non-profit use. See the license for full terms.
+[Lumiverse Community License v2.1](LICENSE.md) — source-available for personal, academic, and non-profit use. See the license for full terms.

@@ -20,12 +20,15 @@ const CUSTOM_CONTROL_PREFIX = 'custom:'
 const SEMANTIC_ORDER: ComfyUIMappedFieldSemantic[] = [
   'positive_prompt',
   'negative_prompt',
+  'init_image',
   'seed',
   'steps',
   'cfg',
+  'denoise',
   'width',
   'height',
   'checkpoint',
+  'unet',
   'sampler_name',
   'scheduler',
 ]
@@ -33,14 +36,17 @@ const SEMANTIC_ORDER: ComfyUIMappedFieldSemantic[] = [
 const SEMANTIC_LABELS: Record<Exclude<ComfyUIMappedFieldSemantic, 'custom'>, string> = {
   positive_prompt: 'Positive Prompt',
   negative_prompt: 'Negative Prompt',
+  init_image: 'Initial / Reference Image',
   seed: 'Seed',
   steps: 'Steps',
   cfg: 'CFG',
+  denoise: 'Denoise',
   sampler_name: 'Sampler',
   scheduler: 'Scheduler',
   width: 'Width',
   height: 'Height',
   checkpoint: 'Checkpoint',
+  unet: 'UNet',
 }
 
 function formatLabel(value: string): string {
@@ -72,6 +78,8 @@ function getSemanticOptions(
   switch (semantic) {
     case 'checkpoint':
       return capabilities?.checkpoints ?? []
+    case 'unet':
+      return capabilities?.unets ?? []
     case 'sampler_name':
       return capabilities?.samplers ?? []
     case 'scheduler':

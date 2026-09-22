@@ -120,6 +120,7 @@ async function generateWithOptionalStreaming(
     }),
   );
 
+  buildResult.request.connectionOptions = input.connection.metadata;
   if (input.signal) {
     buildResult.request.signal = input.signal;
   }

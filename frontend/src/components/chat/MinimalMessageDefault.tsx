@@ -5,9 +5,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import { Copy, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square } from 'lucide-react'
+import { Copy, Pencil, Trash2, EyeOff, Eye, BarChart3, Volume2, Square, Anchor } from 'lucide-react'
 import { IconGitFork } from '@tabler/icons-react'
 import { useStore } from '@/store'
+import { requestHostIntent } from '@/lib/hostIntents'
 import { useLongPress } from '@/hooks/useLongPress'
 import { useMessagePlayback } from '@/hooks/useMessagePlayback'
 import useSwipeAction from '@/hooks/useSwipeAction'
@@ -39,6 +40,7 @@ export interface MinimalMessageDefaultProps {
   isSelectMode: boolean
   isSelected: boolean
   onToggleSelect?: (e: React.MouseEvent) => void
+  findQuery: string
   // Pre-computed from useMessageCard
   isEditing: boolean
   editContent: string
@@ -60,11 +62,15 @@ export interface MinimalMessageDefaultProps {
   displayName: string
   macroUserName: string
   isHidden: boolean
+  isContextAnchor: boolean
   handleEdit: () => void
   handleSaveEdit: () => void
+  handleEditAndSend: () => void
+  editAndSendPending: boolean
   handleCancelEdit: () => void
   handleDelete: () => void
   handleToggleHidden: () => void
+  handleToggleContextAnchor: () => void
   handleFork: () => void
   handlePromptBreakdown: () => void
 }
@@ -99,6 +105,8 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
     || generationMetrics.tps != null
     || !!generationMetrics.model
     || !!generationMetrics.provider
+    || !!generationMetrics.presetName
+    || !!generationMetrics.presetId
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -152,6 +160,14 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
               <span className={styles.tooltipValue}>{generationMetrics!.provider}</span>
             </span>
           )}
+          {(generationMetrics!.presetName || generationMetrics!.presetId) && (
+            <span className={styles.tooltipRow}>
+              <span className={styles.tooltipLabel}>{t('messageMeta.preset')}</span>
+              <span className={styles.tooltipValue}>
+                {generationMetrics!.presetName || generationMetrics!.presetId}
+              </span>
+            </span>
+          )}
           {generationMetrics!.ttft != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.firstToken')}</span>
@@ -173,11 +189,12 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
 
 export default function MinimalMessageDefault({
   message, chatId, depth, isSelectMode, isSelected, onToggleSelect,
+  findQuery,
   isEditing, editContent, setEditContent, editReasoning, setEditReasoning, showReasoningEditor,
   isUser, isActivelyStreaming, displayContent, reasoning, reasoningDuration, reasoningStartedAt,
-  tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden,
-  handleEdit, handleSaveEdit, handleCancelEdit, handleDelete, handleToggleHidden,
-  handleFork, handlePromptBreakdown,
+  tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden, isContextAnchor,
+  handleEdit, handleSaveEdit, handleEditAndSend, handleCancelEdit, handleDelete, handleToggleHidden, handleToggleContextAnchor,
+  handleFork, handlePromptBreakdown, editAndSendPending,
 }: MinimalMessageDefaultProps) {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('common')
@@ -185,8 +202,8 @@ export default function MinimalMessageDefault({
   const swipeGesturesEnabled = useStore((s) => s.swipeGesturesEnabled)
   const showMessageTokenCount = useStore((s) => s.showMessageTokenCount ?? true)
   const messageContextMenuEnabled = useStore((s) => s.messageContextMenuEnabled ?? true)
-  // Keep a MessageAudioSlot wrapper mounted on every assistant bubble
-  // when TTS is enabled, OR whenever an audio attachment already exists.
+  // Keep a MessageAudioSlot wrapper mounted on every assistant bubble when
+  // TTS is enabled, and on either side whenever an audio attachment exists.
   // See BubbleMessageDefault for the full rationale.
   const ttsEnabled = useStore((s) => s.voiceSettings.ttsEnabled)
   // Audio is per-swipe: see BubbleMessageDefault for the full rationale.
@@ -196,7 +213,7 @@ export default function MinimalMessageDefault({
       a && a.type === 'audio' && (a.swipe_id === undefined || a.swipe_id === message.swipe_id),
     ) ?? null
   }, [message.extra?.attachments, message.swipe_id])
-  const renderAudioSlot = !isEditing && (ttsEnabled || !!audioAttachment) && !message.is_user
+  const renderAudioSlot = !isEditing && (!!audioAttachment || (ttsEnabled && !message.is_user))
   const isHighlighted = useStore((s) => s.highlightedMessageId === message.id)
 
   const cardRef = useRef<HTMLDivElement>(null)
@@ -227,6 +244,9 @@ export default function MinimalMessageDefault({
     confirmDelete,
     cancelDelete,
   } = useMessagePlayback(message.id, message.content, message.name, message.is_user)
+  // Uploaded user audio owns its own inline player. Keep the TTS action from
+  // treating that recording as generated speech that can be regenerated.
+  const canUseTtsAction = canPlay && (!isUser || !audioAttachment)
   const canOpenContextMenu = !isEditing && !isSelectMode && messageContextMenuEnabled
 
   const closeContextMenu = useCallback(() => setContextMenuPos(null), [])
@@ -247,10 +267,30 @@ export default function MinimalMessageDefault({
     },
   })
 
+  const isRegexActionEvent = useCallback((e: React.SyntheticEvent) => {
+    const path = typeof e.nativeEvent.composedPath === 'function'
+      ? e.nativeEvent.composedPath()
+      : [e.target]
+
+    return path.some((node) => (
+      node instanceof Element
+      && node.hasAttribute('data-lumiverse-regex-action')
+    ))
+  }, [])
+
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     if (!canOpenContextMenu) return
+    if (isRegexActionEvent(e)) {
+      e.preventDefault()
+      return
+    }
     longPress.onContextMenu(e)
-  }, [canOpenContextMenu, longPress])
+  }, [canOpenContextMenu, isRegexActionEvent, longPress])
+
+  const handleTouchStart = useCallback((e: React.TouchEvent) => {
+    if (!canOpenContextMenu || isRegexActionEvent(e)) return
+    longPress.onTouchStart(e)
+  }, [canOpenContextMenu, isRegexActionEvent, longPress])
 
   const contextMenuItems: ContextMenuEntry[] = useMemo(() => [
     {
@@ -265,7 +305,7 @@ export default function MinimalMessageDefault({
       icon: <Pencil size={14} />,
       onClick: () => contextAction(handleEdit),
     },
-    ...(canPlay ? [{
+    ...(canUseTtsAction ? [{
       key: 'play',
       label: isGenerating
         ? t('messageActions.cancelTtsGeneration')
@@ -284,6 +324,13 @@ export default function MinimalMessageDefault({
       active: isHidden,
       onClick: () => contextAction(handleToggleHidden),
     },
+    ...(!isHidden ? [{
+      key: 'toggle-context-anchor',
+      label: isContextAnchor ? t('messageActions.clearContextAnchor') : t('messageActions.setContextAnchor'),
+      icon: <Anchor size={14} />,
+      active: isContextAnchor,
+      onClick: () => contextAction(handleToggleContextAnchor),
+    }] satisfies ContextMenuEntry[] : []),
     {
       key: 'fork',
       label: t('messageActions.fork'),
@@ -305,8 +352,8 @@ export default function MinimalMessageDefault({
       onClick: () => contextAction(handleDelete),
     },
   ], [
-    canPlay, contextAction, handleCopy, handleDelete, handleEdit, handleFork,
-    handlePromptBreakdown, handleToggleHidden, hasSavedAudio, isGenerating, isHidden, isPlaying, isUser,
+    canUseTtsAction, contextAction, handleCopy, handleDelete, handleEdit, handleFork,
+    handlePromptBreakdown, handleToggleHidden, handleToggleContextAnchor, hasSavedAudio, isGenerating, isHidden, isContextAnchor, isPlaying, isUser,
     togglePlayback, t, tc,
   ])
 
@@ -320,7 +367,7 @@ export default function MinimalMessageDefault({
     <div
       ref={cardRef}
       data-component="MinimalMessage"
-      data-part={isUser ? 'user' : 'character'}
+      data-part={isUser ? 'user' : isActivelyStreaming ? 'streaming' : 'character'}
       className={clsx(
         styles.card,
         isUser ? styles.user : styles.character,
@@ -333,7 +380,7 @@ export default function MinimalMessageDefault({
       data-message-id={message.id}
       onClick={isSelectMode ? onToggleSelect : undefined}
       onContextMenu={handleContextMenu}
-      onTouchStart={canOpenContextMenu ? longPress.onTouchStart : undefined}
+      onTouchStart={canOpenContextMenu ? handleTouchStart : undefined}
       onTouchMove={canOpenContextMenu ? longPress.onTouchMove : undefined}
       onTouchEnd={canOpenContextMenu ? longPress.onTouchEnd : undefined}
     >
@@ -341,7 +388,12 @@ export default function MinimalMessageDefault({
       <div
         className={styles.avatar}
         style={fullAvatarUrl ? { cursor: 'pointer' } : undefined}
-        onClick={fullAvatarUrl ? (e) => { e.stopPropagation(); openFloatingAvatar(fullAvatarUrl, displayName) } : undefined}
+        onClick={fullAvatarUrl ? (e) => {
+          e.stopPropagation()
+          if (!requestHostIntent('image-preview', { imageUrl: fullAvatarUrl, caption: displayName, source: 'minimal-message-avatar' })) {
+            openFloatingAvatar(fullAvatarUrl, displayName)
+          }
+        } : undefined}
       >
         <LazyImage
           src={displayAvatarUrl}
@@ -369,6 +421,7 @@ export default function MinimalMessageDefault({
             generationMetrics={generationMetrics}
             showTokenCount={showMessageTokenCount}
           />
+          <span data-spindle-mount="message_header" data-spindle-scope={`message:${message.id}:minimal:header`} style={{ display: 'contents' }} />
         </div>
 
         {/* Reasoning block — hidden during editing since the edit area shows it inline */}
@@ -387,12 +440,16 @@ export default function MinimalMessageDefault({
         )}
 
         {/* Content */}
+        <span data-spindle-mount="message_body_before" data-spindle-scope={`message:${message.id}:minimal:body-before`} style={{ display: 'contents' }} />
         {isEditing ? (
           <MessageEditArea
             editContent={editContent}
             onChangeContent={setEditContent}
             onSave={handleSaveEdit}
             onCancel={handleCancelEdit}
+            onEditAndSend={isUser ? handleEditAndSend : undefined}
+            messageId={message.id}
+            editAndSendDisabled={editAndSendPending}
             editReasoning={showReasoningEditor ? editReasoning : undefined}
             onChangeReasoning={showReasoningEditor ? setEditReasoning : undefined}
           />
@@ -405,10 +462,12 @@ export default function MinimalMessageDefault({
             messageId={message.id}
             chatId={chatId}
             depth={depth}
+            findQuery={findQuery}
           />
         ) : isActivelyStreaming ? (
           <StreamingIndicator />
         ) : null}
+        <span data-spindle-mount="message_body_after" data-spindle-scope={`message:${message.id}:minimal:body-after`} style={{ display: 'contents' }} />
 
         {/* User attachments render after content */}
         {isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
@@ -433,11 +492,13 @@ export default function MinimalMessageDefault({
         {!isUser && !isEditing && message.index_in_chat !== 0 && (
           <SwipeControls message={message} chatId={chatId} />
         )}
+        <span data-spindle-mount="message_swipe_indicators" data-spindle-scope={`message:${message.id}:minimal:swipe-indicators`} style={{ display: 'contents' }} />
 
         {/* Greeting navigator for first message */}
         {message.index_in_chat === 0 && !isUser && !isEditing && (
           <GreetingNav message={message} chatId={chatId} />
         )}
+        <span data-spindle-mount="message_footer" data-spindle-scope={`message:${message.id}:minimal:footer`} style={{ display: 'contents' }} />
       </div>
 
       {/* Actions (hidden in select mode) */}
@@ -447,14 +508,16 @@ export default function MinimalMessageDefault({
             onEdit={handleEdit}
             onDelete={handleDelete}
             onToggleHidden={handleToggleHidden}
+            onToggleContextAnchor={handleToggleContextAnchor}
             onFork={handleFork}
             onPromptBreakdown={!isUser ? handlePromptBreakdown : undefined}
-            onPlay={canPlay ? togglePlayback : undefined}
+            onPlay={canUseTtsAction ? togglePlayback : undefined}
             isPlaying={isPlaying}
             isGenerating={isGenerating}
             hasSavedAudio={hasSavedAudio}
             isUser={isUser}
             isHidden={isHidden}
+            isContextAnchor={isContextAnchor}
             content={message.content}
           >
             {!isUser && (

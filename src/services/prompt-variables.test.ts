@@ -4,7 +4,8 @@ import { registry } from "../macros/MacroRegistry";
 import { initMacros } from "../macros";
 import type { MacroEnv } from "../macros/types";
 import type { Preset, PromptBlock, PromptVariableDef } from "../types/preset";
-import { coercePromptVariable, resolvePromptVariables } from "./prompt-assembly.service";
+import { withPromptBlockContext } from "../macros/MacroEnv";
+import { coercePromptVariable, resolvePromptBlockPlacements, resolvePromptVariables } from "./prompt-assembly.service";
 
 // ---------------------------------------------------------------------------
 // Minimal env factory — only the fields {{var}} touches matter here.
@@ -26,7 +27,7 @@ function makeEnv(overrides: {
     character: {
       name: "", description: "", personality: "", scenario: "", persona: "",
       personaSubjectivePronoun: "", personaObjectivePronoun: "",
-      personaPossessivePronoun: "", mesExamples: "", mesExamplesRaw: "",
+      personaPossessivePronoun: "", personaReflexivePronoun: "", personaPossessivePronounStandalone: "", mesExamples: "", mesExamplesRaw: "",
       systemPrompt: "", postHistoryInstructions: "", depthPrompt: "",
       creatorNotes: "", version: "", creator: "", firstMessage: "",
     },
@@ -184,6 +185,85 @@ describe("coercePromptVariable — multiselect", () => {
   });
 });
 
+describe("resolvePromptBlockPlacements", () => {
+  const selector: PromptVariableDef = {
+    id: "placement-target",
+    name: "adherence_target",
+    label: "Adherence target",
+    type: "select",
+    defaultValue: "baseline",
+    options: [
+      { id: "baseline", label: "Balanced", value: "Balanced" },
+      { id: "frontier", label: "Frontier", value: "Frontier" },
+    ],
+  };
+  const block: PromptBlock = {
+    id: "placement-block",
+    name: "Placement-aware prompt",
+    content: "{{promptBlockRole}}/{{promptBlockPosition}}/{{promptBlockDepth}}",
+    role: "system",
+    enabled: true,
+    position: "pre_history",
+    depth: 0,
+    marker: null,
+    isLocked: false,
+    color: null,
+    injectionTrigger: [],
+    group: null,
+    variables: [selector],
+    placementBinding: {
+      variableId: selector.id,
+      options: {
+        baseline: { role: "system", position: "pre_history", depth: 0 },
+        frontier: { role: "user", position: "in_history", depth: 3 },
+      },
+    },
+  };
+
+  test("projects the saved select option into an effective placement without mutating the stored block", () => {
+    const resolved = resolvePromptBlockPlacements([block], {
+      metadata: { promptVariables: { "placement-block": { adherence_target: "frontier" } } },
+    });
+
+    expect(resolved[0]).toMatchObject({ role: "user", position: "in_history", depth: 3 });
+    expect(block).toMatchObject({ role: "system", position: "pre_history", depth: 0 });
+  });
+
+  test("uses the select default and leaves the block unchanged when its chosen option has no placement mapping", () => {
+    const defaultResolved = resolvePromptBlockPlacements([block], { metadata: { promptVariables: {} } });
+    expect(defaultResolved[0]).toMatchObject({ role: "system", position: "pre_history", depth: 0 });
+
+    const unmapped = {
+      ...block,
+      placementBinding: { variableId: selector.id, options: {} },
+    };
+    const unchanged = resolvePromptBlockPlacements([unmapped], {
+      metadata: { promptVariables: { "placement-block": { adherence_target: "frontier" } } },
+    });
+    expect(unchanged[0]).toBe(unmapped);
+  });
+
+  test("uses a profile selection over the preset's shared placement selection", () => {
+    const resolved = resolvePromptBlockPlacements(
+      [block],
+      { metadata: { promptVariables: { "placement-block": { adherence_target: "baseline" } } } },
+      { "placement-block": { adherence_target: "frontier" } },
+    );
+
+    expect(resolved[0]).toMatchObject({ role: "user", position: "in_history", depth: 3 });
+  });
+
+  test("inherits the preset placement when an active profile has no saved placement value", () => {
+    const resolved = resolvePromptBlockPlacements(
+      [block],
+      { metadata: { promptVariables: { "placement-block": { adherence_target: "frontier" } } } },
+      {},
+    );
+
+    expect(resolved[0]).toMatchObject({ role: "user", position: "in_history", depth: 3 });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // {{var::name::ison::keys}} — multiselect AND-query
 // ---------------------------------------------------------------------------
@@ -318,5 +398,117 @@ describe("resolvePromptVariables", () => {
     resolvePromptVariables(env, blocks, preset);
 
     expect(await ev("{{var::tone}}", env)).toBe("");
+  });
+
+  test("overlays a profile snapshot over shared preset values", async () => {
+    const env = makeEnv();
+    const blocks: PromptBlock[] = [{
+      id: "block-1", name: "Style", content: "{{var::tone}}", role: "system",
+      enabled: true, position: "pre_history", depth: 0, marker: null, isLocked: false,
+      color: null, injectionTrigger: [], group: null,
+      variables: [
+        { id: "var-1", name: "tone", label: "Tone", type: "text", defaultValue: "default tone" },
+        { id: "var-2", name: "length", label: "Length", type: "text", defaultValue: "default length" },
+      ],
+    }];
+    const preset = {
+      id: "preset-1", name: "Preset", provider: "test", engine: "test", parameters: {},
+      prompt_order: blocks, prompts: {},
+      metadata: { promptVariables: { "block-1": { tone: "outside chat", length: "preset length" } } },
+      created_at: 0, updated_at: 0,
+    } satisfies Preset;
+
+    resolvePromptVariables(env, blocks, preset, { "block-1": { tone: "chat-specific" } });
+
+    expect(await ev("{{var::tone}} / {{var::length}}", env)).toBe("chat-specific / preset length");
+  });
+
+  test("inherits preset values when an active profile has no saved overrides", async () => {
+    const env = makeEnv();
+    const blocks: PromptBlock[] = [{
+      id: "block-1", name: "Style", content: "{{var::tone}}", role: "system",
+      enabled: true, position: "pre_history", depth: 0, marker: null, isLocked: false,
+      color: null, injectionTrigger: [], group: null,
+      variables: [{ id: "var-1", name: "tone", label: "Tone", type: "text", defaultValue: "default tone" }],
+    }];
+    const preset = {
+      id: "preset-1", name: "Preset", provider: "test", engine: "test", parameters: {},
+      prompt_order: blocks, prompts: {},
+      metadata: { promptVariables: { "block-1": { tone: "outside chat" } } },
+      created_at: 0, updated_at: 0,
+    } satisfies Preset;
+
+    resolvePromptVariables(env, blocks, preset, {});
+
+    expect(await ev("{{var::tone}}", env)).toBe("outside chat");
+  });
+
+  test("keeps same-named prompt variables scoped to their defining block", async () => {
+    const env = makeEnv();
+    const first: PromptBlock = {
+      id: "preset-block", name: "Preset block", content: "", role: "system",
+      enabled: true, position: "pre_history", depth: 0, marker: null, isLocked: false,
+      color: null, injectionTrigger: [], group: null,
+      variables: [{ id: "preset-tone", name: "tone", label: "Tone", type: "text", defaultValue: "preset default" }],
+    };
+    const later: PromptBlock = {
+      ...first,
+      id: "extension-block",
+      name: "Later extension block",
+      variables: [{ id: "extension-tone", name: "tone", label: "Tone", type: "text", defaultValue: "extension default" }],
+    };
+    const blocks = [first, later];
+    const preset = {
+      id: "preset-1", name: "Preset", provider: "test", engine: "test", parameters: {},
+      prompt_order: blocks, prompts: {},
+      metadata: {
+        promptVariables: {
+          "preset-block": { tone: "preset instance" },
+          "extension-block": { tone: "extension instance" },
+        },
+      },
+      created_at: 0, updated_at: 0,
+    } satisfies Preset;
+
+    resolvePromptVariables(env, blocks, preset);
+
+    // The compatibility-wide flat view still has deterministic last-block
+    // semantics outside a block render.
+    expect(await ev("{{var::tone}}/{{.tone}}", env)).toBe("extension instance/extension instance");
+
+    const firstRendered = await withPromptBlockContext(env, first, () =>
+      ev("{{var::tone}}/{{.tone}}", env),
+    );
+    const laterRendered = await withPromptBlockContext(env, later, () =>
+      ev("{{var::tone}}/{{.tone}}", env),
+    );
+
+    expect(firstRendered).toBe("preset instance/preset instance");
+    expect(laterRendered).toBe("extension instance/extension instance");
+    expect(await ev("{{var::tone}}/{{.tone}}", env)).toBe("extension instance/extension instance");
+  });
+
+  test("allows block-local setvar writes without leaking them into another block", async () => {
+    const env = makeEnv();
+    const block: PromptBlock = {
+      id: "preset-block", name: "Preset block", content: "", role: "system",
+      enabled: true, position: "pre_history", depth: 0, marker: null, isLocked: false,
+      color: null, injectionTrigger: [], group: null,
+      variables: [{ id: "preset-tone", name: "tone", label: "Tone", type: "text", defaultValue: "preset default" }],
+    };
+    const preset = {
+      id: "preset-1", name: "Preset", provider: "test", engine: "test", parameters: {},
+      prompt_order: [block], prompts: {},
+      metadata: { promptVariables: { "preset-block": { tone: "preset instance" } } },
+      created_at: 0, updated_at: 0,
+    } satisfies Preset;
+
+    resolvePromptVariables(env, [block], preset);
+    const rendered = await withPromptBlockContext(env, block, () =>
+      ev("{{setvar::tone::runtime}}{{var::tone}}/{{.tone}}", env),
+    );
+
+    expect(rendered).toBe("runtime/runtime");
+    expect(await ev("{{var::tone}}/{{.tone}}", env)).toBe("preset instance/preset instance");
   });
 });

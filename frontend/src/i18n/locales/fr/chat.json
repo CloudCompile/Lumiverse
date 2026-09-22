@@ -43,7 +43,7 @@
     "backHome": "Retour à l'accueil",
     "regenerate": "Régénérer",
     "continue": "Continuer",
-    "sendAsPersona": "Envoyer le message suivant en tant que persona",
+    "sendAsPersona": "Changer de persona pour ce chat",
     "personaAddons": "Modules complémentaires Persona",
     "personaAddonsCustomized": "Modules complémentaires Persona — personnalisés pour ce chat",
     "guidedGenerations": "Générations guidées",
@@ -57,7 +57,7 @@
     "switchConnectionActive": "Connexion : {{name}}",
     "attachFiles": "Joindre des fichiers",
     "attachFile": "Joindre un fichier",
-    "attachImageOrAudio": "Joindre une image ou audio",
+    "attachImageOrAudio": "Joindre une image, un fichier audio ou une vidéo",
     "removeAttachment": "Supprimer la pièce jointe",
     "message": "Message",
     "stopGeneration": "Arrêter la génération",
@@ -86,12 +86,25 @@
     "modCmd": "Commande",
     "modCtrl": "Ctrl"
   },
+  "findInChat": {
+    "open": "Rechercher dans le chat",
+    "placeholder": "Rechercher dans le chat…",
+    "clear": "Effacer le texte de recherche",
+    "previous": "Résultat précédent",
+    "next": "Résultat suivant",
+    "close": "Fermer la recherche",
+    "matchCount": "{{current}} sur {{total}}",
+    "noMatches": "Aucun résultat",
+    "loading": "Recherche…",
+    "searchFailed": "Impossible de rechercher dans ce chat"
+  },
   "quickMenu": {
     "noGuidedGenerations": "Aucune génération guidée configurée.",
+    "disableAllGuidedGenerations": "Désactiver toutes les générations guidées",
     "manageInSettings": "Gérer dans les paramètres",
     "noQuickReplySets": "Aucun jeu de réponses rapides activé.",
     "untitledReply": "Réponse sans titre",
-    "clearOneShotPersona": "Effacer le personnage unique",
+    "clearOneShotPersona": "Effacer la persona du chat",
     "noPersonas": "Aucun personnage disponible.",
     "manageChats": "Gérer les discussions",
     "manageConnections": "Gérer les connexions",
@@ -107,6 +120,8 @@
     "restoreLastInput": "Restaurer la dernière entrée",
     "presetPrompts": "Invites prédéfinies",
     "presetPromptsDesc": "Assemblage complet avec Blocs déclenchés par l'usurpation d'identité",
+    "impersonationPreset": "Préréglage d'usurpation d'identité",
+    "impersonationPresetDesc": "Préréglage configuré complet + historique + instruction d'usurpation",
     "oneLiner": "Une seule ligne",
     "oneLinerDesc": "Historique des discussions + emprunt d'identité uniquement",
     "comingSoon": "Bientôt disponible",
@@ -164,6 +179,7 @@
     "creatingChatCortex": "Création du chat et préparation du Cortex mémoire en arrière-plan…",
     "failedCreateChat": "Échec de la création du chat",
     "failedStartNewChat": "Échec du démarrage d'un nouveau chat",
+    "failedDeleteChat": "Impossible de supprimer ce chat",
     "failedOpenChat": "Échec de l'ouverture du chat",
     "characterImported": "\"{{name}}\" était importé",
     "importFailed": "Échec de l'importation",
@@ -199,7 +215,8 @@
     "noMemoryRebuildNeeded": "Aucune reconstruction de mémoire n'a été nécessaire pour cette discussion.",
     "failedRecompileMemories": "Échec de la recompilation des souvenirs",
     "chatDocuments": "Documents de discussion",
-    "chatDocumentsNamed": "{{name}} Bavarder"
+    "chatDocumentsNamed": "{{name}} Bavarder",
+    "failedSaveChatPersona": "Impossible d’enregistrer la persona pour ce chat"
   },
   "addGroupMember": {
     "title": "Ajouter un membre du groupe",
@@ -220,7 +237,8 @@
     "active": "· Actif",
     "ariaLabel": "Note de l'auteur",
     "placeholder": "Écrire des instructions ou un contexte pour l'IA...",
-    "depth": "Profondeur",
+    "depth": "Profondeur depuis le dernier message",
+    "depthHint": "0 = après le dernier message ; 1 = avant. Une valeur plus élevée place la note plus loin dans l’historique de la conversation.",
     "role": "Rôle",
     "roleAria": "Rôle"
   },
@@ -235,7 +253,7 @@
     "exitSelectionMode": "Quitter le mode de sélection",
     "selectMessages": "Sélectionner les messages",
     "memory": "Mémoire",
-    "memoryRebuildFailed": "Échec de la reconstruction de la mémoire de discussion.",
+    "memoryRebuildFailed": "Échec de la reconstruction du Cortex mémoire.",
     "switchedPersona": "Passer au personnage : {{name}}",
     "appliedLoadout": "Chargement appliqué : {{name}}",
     "cortexQueued": "En file d'attente pour le traitement",
@@ -247,10 +265,11 @@
     "cortexProcessingFailed": "Échec du traitement",
     "cortexJobsPending": ", {{count}} tâches en attente",
     "cortexChunks": ", {{current}}/{{total}} morceaux",
-    "cortexPreparingMemory": "Préparer la mémoire de discussion à long terme",
-    "cortexRebuildingMemory": "Reconstruction de la mémoire de conversation à long terme",
-    "backgroundMemoryFailed": "Le traitement de la mémoire d'arrière-plan a échoué.",
-    "cortexCombined": "Préparation de la mémoire de conversation à long terme + Cortex{{chunks}}",
+    "cortexPreparingMemory": "Préparation du Cortex mémoire",
+    "cortexRebuildingMemory": "Reconstruction du Cortex mémoire",
+    "backgroundMemoryFailed": "Échec du traitement du Cortex mémoire.",
+    "cortexCombined": "Préparation du Cortex mémoire et traitement des mises à jour{{chunks}}",
+    "dismissMemoryNotice": "Ignorer la notification de mémoire",
     "spindleProcessingMessage": "traitement de votre message",
     "spindleProcessingContext": "préparation du contexte de génération",
     "spindleProcessingInterceptor": "l'exécution d'un intercepteur d'invite",
@@ -325,12 +344,15 @@
     "copyCode": "Copier le code",
     "copy": "Copie",
     "copied": "Copié !",
+    "readMore": "Lire la suite",
+    "showLess": "Afficher moins",
     "youtubeVideo": "Vidéo YouTube"
   },
   "messageMeta": {
     "hidden": "Caché",
     "model": "Modèle",
     "provider": "Fournisseur",
+    "preset": "Préréglage",
     "firstToken": "Premier jeton",
     "speed": "Vitesse",
     "tokPerSec": "{{count}} jetons/s"
@@ -349,7 +371,11 @@
     "next": "Swipe suivant"
   },
   "portrait": {
-    "setChatBackground": "Définir comme Chat Arrière-plan"
+    "setChatBackground": "Définir comme Chat Arrière-plan",
+    "copyImageReference": "Copier la référence de l’image",
+    "imageReferenceCopied": "Référence d’image copiée",
+    "imageReferenceCopyFailed": "Impossible de copier la référence de l’image",
+    "galleryImage": "Image de la galerie"
   },
   "attachments": {
     "removeImage": "Supprimer l'image",
@@ -367,7 +393,9 @@
     "fork": {
       "title": "Bavarder",
       "message": "Créer une nouvelle branche de chat à ce message ? Tous les messages jusqu'à présent seront copiés.",
-      "confirm": "Fourchette"
+      "confirm": "Fourchette",
+      "nameLabel": "Nom du chat (facultatif)",
+      "namePlaceholder": "Laissez vide pour utiliser un nom automatique"
     },
     "delete": {
       "title": "Supprimer",
@@ -380,5 +408,11 @@
       "message": "Cela supprimera définitivement ce message du chat.",
       "confirm": "Supprimer"
     }
+  },
+  "newChatConfirm": {
+    "title": "Démarrer un nouveau chat",
+    "message": "Voulez-vous vraiment démarrer un nouveau chat ?",
+    "confirm": "Démarrer le chat",
+    "deleteThisChat": "Supprimer ce chat"
   }
 }

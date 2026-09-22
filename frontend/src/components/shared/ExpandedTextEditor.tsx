@@ -5,18 +5,31 @@ import {
   useMemo,
   useCallback,
   useLayoutEffect,
+  forwardRef,
   type ChangeEvent,
   type CompositionEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  type Ref,
+  type RefObject,
   type ReactNode,
   type SyntheticEvent,
+  type TextareaHTMLAttributes,
 } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import { Minimize2, Maximize2, Hash, Search } from 'lucide-react'
+import { Minimize2, Maximize2, Hash, Search, Replace as ReplaceIcon, ChevronUp, ChevronDown, X, Eye, Pencil } from 'lucide-react'
 import { getMacroCatalog } from '@/api/macros'
 import { getAvailableMacros } from '@/lib/loom/service'
 import type { MacroGroup } from '@/lib/loom/types'
+import MessageContent from '@/components/chat/MessageContent'
+import { useStore } from '@/store'
+import { installExpandedEditorCaretReveal } from '@/lib/expandedEditorCaret'
+import {
+  findExpandedTextMatches,
+  replaceAllExpandedTextMatches,
+  replaceExpandedTextMatch,
+  type ExpandedTextMatch,
+} from '@/lib/expandedTextSearch'
 import s from './ExpandedTextEditor.module.css'
 
 // ============================================================================
@@ -162,6 +175,32 @@ function highlightSyntax(text: string): ReactNode[] {
   return result
 }
 
+function highlightFindMatches(
+  text: string,
+  matches: ExpandedTextMatch[],
+  currentIndex: number,
+): ReactNode[] {
+  if (matches.length === 0) return [text]
+  const nodes: ReactNode[] = []
+  let offset = 0
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]
+    if (match.start > offset) nodes.push(text.slice(offset, match.start))
+    nodes.push(
+      <mark
+        key={`${match.start}-${match.end}`}
+        className={index === currentIndex ? s.findMatchCurrent : s.findMatch}
+        data-find-current={index === currentIndex ? 'true' : undefined}
+      >
+        {text.slice(match.start, match.end)}
+      </mark>,
+    )
+    offset = match.end
+  }
+  if (offset < text.length) nodes.push(text.slice(offset))
+  return nodes
+}
+
 // ============================================================================
 // EXPANDED TEXT EDITOR MODAL
 // ============================================================================
@@ -182,6 +221,8 @@ interface ExpandedTextEditorProps {
    * isn't a prompt template — e.g. databank document bodies.
    */
   markdownOnly?: boolean
+  /** The compact field that launched this modal. Hidden visually while open. */
+  sourceRef?: RefObject<HTMLTextAreaElement | null>
 }
 
 type TextSelectionDirection = 'forward' | 'backward' | 'none'
@@ -190,6 +231,10 @@ interface TextSelectionSnapshot {
   start: number
   end: number
   direction: TextSelectionDirection
+}
+
+interface TextSelectionRequest extends TextSelectionSnapshot {
+  focus: boolean
 }
 
 function normalizeSelectionDirection(direction: HTMLTextAreaElement['selectionDirection']): TextSelectionDirection {
@@ -204,6 +249,27 @@ function clampSelection(selection: TextSelectionSnapshot, valueLength: number): 
     : { start: end, end: start, direction: selection.direction }
 }
 
+function shouldAutoFocusExpandedEditor(): boolean {
+  // On touch-only devices, opening the editor should remain a navigation
+  // action: let the user scroll/read first and summon the keyboard only after
+  // they tap the exact place they want to edit. Pointer/desktop users retain
+  // immediate keyboard focus.
+  return !window.matchMedia?.('(any-hover: none)').matches
+}
+
+function maskSourceTextarea(source: HTMLTextAreaElement): () => void {
+  const visibility = source.style.visibility
+  const ariaHidden = source.getAttribute('aria-hidden')
+  source.style.visibility = 'hidden'
+  source.setAttribute('aria-hidden', 'true')
+
+  return () => {
+    source.style.visibility = visibility
+    if (ariaHidden == null) source.removeAttribute('aria-hidden')
+    else source.setAttribute('aria-hidden', ariaHidden)
+  }
+}
+
 export default function ExpandedTextEditor({
   value,
   onChange,
@@ -215,26 +281,60 @@ export default function ExpandedTextEditor({
   onRefreshMacros,
   inline,
   markdownOnly,
+  sourceRef,
 }: ExpandedTextEditorProps) {
   const { t } = useTranslation('shared', { keyPrefix: 'expandedTextEditor' })
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const highlightRef = useRef<HTMLPreElement>(null)
+  const findInputRef = useRef<HTMLInputElement>(null)
   const overlayMouseDownRef = useRef<EventTarget | null>(null)
   const onCloseRef = useRef(onClose)
   const selectionRef = useRef<TextSelectionSnapshot | null>(null)
+  // Native select events may arrive during a programmatic edit's keydown.
+  // Keep the requested post-edit caret separate from observed DOM selection.
+  const pendingSelectionRef = useRef<TextSelectionRequest | null>(null)
   const hasInitializedSelectionRef = useRef(false)
-  const shouldRestoreSelectionRef = useRef(true)
-  const shouldFocusSelectionRef = useRef(true)
   const isComposingRef = useRef(false)
+  const findModeRef = useRef<'find' | 'replace' | null>(null)
+  const findQueryRef = useRef('')
+  const lastScrolledMatchNavigationRequestRef = useRef(0)
+  const macroSearchRef = useRef('')
+  const showMacrosRef = useRef(false)
+  const showMarkdownPreviewRef = useRef(false)
+  const [showMarkdownPreview, setShowMarkdownPreview] = useState(false)
+  const previewUserName = useStore((state) => state.user?.name ?? state.user?.username ?? '')
   onCloseRef.current = onClose
 
   const [showMacros, setShowMacros] = useState(false)
   const [macroSearch, setMacroSearch] = useState('')
+  const [findMode, setFindMode] = useState<'find' | 'replace' | null>(null)
+  const [findQuery, setFindQuery] = useState('')
+  const [replacement, setReplacement] = useState('')
+  const [currentMatchIndex, setCurrentMatchIndex] = useState(0)
+  const [matchNavigationRequest, setMatchNavigationRequest] = useState(0)
   const [selfLoadedMacros, setSelfLoadedMacros] = useState<MacroGroup[] | null>(
     () => (macros || markdownOnly) ? null : getAvailableMacros(),
   )
 
   // Use caller-provided macros, or eagerly-loaded local catalog
-  const resolvedMacros = macros ?? selfLoadedMacros ?? []
+  const resolvedMacros = useMemo(() => macros ?? selfLoadedMacros ?? [], [macros, selfLoadedMacros])
+  findModeRef.current = findMode
+  findQueryRef.current = findQuery
+  macroSearchRef.current = macroSearch
+  showMacrosRef.current = showMacros
+  showMarkdownPreviewRef.current = showMarkdownPreview
+
+  const findMatches = useMemo(
+    () => findExpandedTextMatches(value, findQuery),
+    [findQuery, value],
+  )
+
+  useLayoutEffect(() => {
+    if (inline) return
+    const source = sourceRef?.current
+    if (!source) return
+    return maskSourceTextarea(source)
+  }, [inline, sourceRef])
 
   const loadMacros = useCallback(() => {
     if (macros) { onRefreshMacros?.(); return }
@@ -275,17 +375,29 @@ export default function ExpandedTextEditor({
     }
   }, [])
 
+  // The native textarea alone owns scrolling and caret visibility. The inert
+  // highlight layer follows it, never the other way around (including IMEs,
+  // selection dragging, keyboard navigation, and viewport resizing).
+  const syncHighlightScroll = useCallback(() => {
+    const textarea = textareaRef.current
+    const highlight = highlightRef.current
+    if (!textarea || !highlight) return
+    highlight.scrollTop = textarea.scrollTop
+    highlight.scrollLeft = textarea.scrollLeft
+  }, [])
+
   const restoreSelection = useCallback(() => {
     const textarea = textareaRef.current
-    const selection = selectionRef.current
+    const selection = pendingSelectionRef.current
     if (!textarea || !selection || isComposingRef.current) return
-    if (document.activeElement !== textarea && !shouldFocusSelectionRef.current) return
 
     const nextSelection = clampSelection(selection, textarea.value.length)
-    selectionRef.current = nextSelection
-
-    if (shouldFocusSelectionRef.current && document.activeElement !== textarea) {
-      textarea.focus()
+    if (selection.focus && document.activeElement !== textarea) {
+      // Focusing an off-screen selection is allowed to scroll every ancestor
+      // (including the document) unless preventScroll is explicit. Mobile
+      // browsers do that scroll while also resizing for the keyboard, which
+      // used to move the entire expanded editor away from the tapped position.
+      textarea.focus({ preventScroll: true })
     }
 
     const currentDirection = normalizeSelectionDirection(textarea.selectionDirection)
@@ -297,48 +409,163 @@ export default function ExpandedTextEditor({
       textarea.setSelectionRange(nextSelection.start, nextSelection.end, nextSelection.direction)
     }
 
-    shouldRestoreSelectionRef.current = false
-    shouldFocusSelectionRef.current = false
+    selectionRef.current = nextSelection
+    pendingSelectionRef.current = null
   }, [])
+
+  const applyEdit = useCallback((nextValue: string, selection: TextSelectionRequest) => {
+    pendingSelectionRef.current = selection
+    // Replacing a match with identical text does not trigger a value commit.
+    // Consume its selection now so it cannot leak into the next keystroke.
+    if (nextValue === value) restoreSelection()
+    onChange(nextValue)
+  }, [onChange, restoreSelection, value])
+
+  const setMatchSelection = useCallback((match: ExpandedTextMatch | undefined) => {
+    if (!match) return
+    selectionRef.current = { start: match.start, end: match.end, direction: 'forward' }
+    const textarea = textareaRef.current
+    if (textarea) {
+      textarea.setSelectionRange(match.start, match.end, 'forward')
+    }
+  }, [])
+
+  const goToMatch = useCallback((nextIndex: number) => {
+    if (findMatches.length === 0) return
+    const normalized = (nextIndex + findMatches.length) % findMatches.length
+    setCurrentMatchIndex(normalized)
+    setMatchNavigationRequest((request) => request + 1)
+    setMatchSelection(findMatches[normalized])
+  }, [findMatches, setMatchSelection])
+
+  const replaceCurrentMatch = useCallback(() => {
+    const match = findMatches[currentMatchIndex]
+    if (!match) return
+    const nextValue = replaceExpandedTextMatch(value, match, replacement)
+    const nextMatches = findExpandedTextMatches(nextValue, findQuery)
+    const nextOffset = match.start + replacement.length
+    let nextIndex = nextMatches.findIndex((candidate) => candidate.start >= nextOffset)
+    if (nextIndex === -1) nextIndex = 0
+    setCurrentMatchIndex(nextIndex)
+    applyEdit(nextValue, nextMatches[nextIndex]
+      ? { ...nextMatches[nextIndex], direction: 'forward', focus: false }
+      : { start: nextOffset, end: nextOffset, direction: 'none', focus: false })
+  }, [applyEdit, currentMatchIndex, findMatches, findQuery, replacement, value])
+
+  const replaceAllMatches = useCallback(() => {
+    if (findMatches.length === 0) return
+    const nextValue = replaceAllExpandedTextMatches(value, findMatches, replacement)
+    setCurrentMatchIndex(0)
+    applyEdit(nextValue, { start: 0, end: 0, direction: 'none', focus: false })
+  }, [applyEdit, findMatches, replacement, value])
+
+  useEffect(() => {
+    if (!findMode) return
+    const frame = requestAnimationFrame(() => {
+      findInputRef.current?.focus({ preventScroll: true })
+      findInputRef.current?.select()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [findMode])
+
+  useEffect(() => {
+    setCurrentMatchIndex((index) => findMatches.length === 0 ? 0 : Math.min(index, findMatches.length - 1))
+  }, [findMatches.length])
+
+  useEffect(() => {
+    // Editing text or the query recalculates the matches. Keep the viewport in
+    // place for those updates; only an explicit next/previous navigation moves it.
+    if (matchNavigationRequest === lastScrolledMatchNavigationRequestRef.current) return
+    lastScrolledMatchNavigationRequestRef.current = matchNavigationRequest
+    if (findMatches.length === 0) return
+    const frame = requestAnimationFrame(() => {
+      const textarea = textareaRef.current
+      const highlight = highlightRef.current
+      const match = highlight?.querySelector<HTMLElement>('[data-find-current="true"]')
+      if (!textarea || !highlight || !match) return
+      const rect = highlight.getBoundingClientRect()
+      const scale = highlight.offsetHeight > 0 ? rect.height / highlight.offsetHeight : 1
+      if (scale <= 0) return
+      const matchRect = match.getBoundingClientRect()
+      // Explicit find navigation moves only the editor, never modal/page
+      // ancestors. Convert rendered pixels back to scroll units under UI zoom.
+      textarea.scrollTop = highlight.scrollTop + (matchRect.top + matchRect.height / 2 - rect.top - rect.height / 2) / scale
+      syncHighlightScroll()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [currentMatchIndex, findMatches, matchNavigationRequest, syncHighlightScroll])
 
   useLayoutEffect(() => {
     const textarea = textareaRef.current
     if (!textarea) return
 
     if (!hasInitializedSelectionRef.current) {
+      const autoFocus = shouldAutoFocusExpandedEditor()
       const initialPos = Math.max(0, Math.min(initialCursorPos ?? textarea.value.length, textarea.value.length))
       selectionRef.current = { start: initialPos, end: initialPos, direction: 'none' }
       hasInitializedSelectionRef.current = true
-      shouldRestoreSelectionRef.current = true
-      shouldFocusSelectionRef.current = true
-    } else if (document.activeElement === textarea || shouldFocusSelectionRef.current) {
-      shouldRestoreSelectionRef.current = true
+      // A touch editor opens for reading. Do not pre-position an unfocused
+      // caret at the end before the user's first tap/keyboard presentation.
+      if (autoFocus) pendingSelectionRef.current = { ...selectionRef.current, focus: true }
     }
-
-    if (!shouldRestoreSelectionRef.current || isComposingRef.current) return
     restoreSelection()
-  }, [initialCursorPos, restoreSelection, value])
+  }, [initialCursorPos, restoreSelection, showMarkdownPreview, value])
 
   useEffect(() => {
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+    const handleEditorShortcut = (e: KeyboardEvent) => {
+      const key = e.key.toLowerCase()
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && key === 'f' && !showMarkdownPreviewRef.current) {
+        e.preventDefault()
         e.stopPropagation()
+        if (findModeRef.current === 'find') {
+          findInputRef.current?.focus({ preventScroll: true })
+          findInputRef.current?.select()
+        } else {
+          setFindMode('find')
+        }
+        return
+      }
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && key === 'h' && !showMarkdownPreviewRef.current) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (findModeRef.current === 'replace') {
+          findInputRef.current?.focus({ preventScroll: true })
+          findInputRef.current?.select()
+        } else {
+          setFindMode('replace')
+        }
+        return
+      }
+      if (e.key !== 'Escape') return
+
+      e.preventDefault()
+      e.stopPropagation()
+      if (findModeRef.current && findQueryRef.current) {
+        setFindQuery('')
+        setCurrentMatchIndex(0)
+      } else if (findModeRef.current) {
+        setFindMode(null)
+      } else if (showMacrosRef.current && macroSearchRef.current) {
+        setMacroSearch('')
+      } else {
         onCloseRef.current()
       }
     }
     // Capture phase so we intercept before parent modal escape handlers
-    document.addEventListener('keydown', handleEscape, true)
-    if (!inline) document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', handleEditorShortcut, true)
 
     return () => {
-      document.removeEventListener('keydown', handleEscape, true)
-      if (!inline) document.body.style.overflow = ''
+      document.removeEventListener('keydown', handleEditorShortcut, true)
     }
   }, [])
 
   const handleTextareaChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
+    pendingSelectionRef.current = null
     captureSelection(e.currentTarget)
-    shouldRestoreSelectionRef.current = true
+    // Native typing has already placed the caret correctly. Reapplying the
+    // selection after React commits the controlled value can race mobile IMEs
+    // and make the cursor land beside the wrong character. Reserve explicit
+    // restoration for programmatic edits (macro insertion and replace).
     onChange(e.currentTarget.value)
   }, [captureSelection, onChange])
 
@@ -354,7 +581,6 @@ export default function ExpandedTextEditor({
   const handleCompositionEnd = useCallback((e: CompositionEvent<HTMLTextAreaElement>) => {
     isComposingRef.current = false
     captureSelection(e.currentTarget)
-    shouldRestoreSelectionRef.current = true
   }, [captureSelection])
 
   const replaceSelection = useCallback((
@@ -362,35 +588,21 @@ export default function ExpandedTextEditor({
     opts?: {
       target?: HTMLTextAreaElement | null
       focus?: boolean
-      appendIfMissing?: boolean
     },
   ) => {
     const target = opts?.target ?? textareaRef.current
-    if (!target) {
-      const nextValue = opts?.appendIfMissing === false ? value : value + insertedText
-      selectionRef.current = {
-        start: nextValue.length,
-        end: nextValue.length,
-        direction: 'none',
-      }
-      shouldRestoreSelectionRef.current = true
-      shouldFocusSelectionRef.current = opts?.focus ?? true
-      onChange(nextValue)
-      return
-    }
+    if (!target) return
 
     const start = target.selectionStart
     const end = target.selectionEnd
     const nextValue = value.substring(0, start) + insertedText + value.substring(end)
-    selectionRef.current = {
+    applyEdit(nextValue, {
       start: start + insertedText.length,
       end: start + insertedText.length,
       direction: 'none',
-    }
-    shouldRestoreSelectionRef.current = true
-    shouldFocusSelectionRef.current = opts?.focus ?? document.activeElement !== target
-    onChange(nextValue)
-  }, [onChange, value])
+      focus: opts?.focus ?? document.activeElement !== target,
+    })
+  }, [applyEdit, value])
 
   const handleTextareaKeyDown = useCallback((e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (
@@ -413,34 +625,206 @@ export default function ExpandedTextEditor({
     setShowMacros(false)
   }, [replaceSelection])
 
+  const closeFindPanel = useCallback(() => {
+    setFindMode(null)
+    setFindQuery('')
+    setCurrentMatchIndex(0)
+  }, [])
+
+  const toggleFindPanel = useCallback((mode: 'find' | 'replace') => {
+    if (findMode === mode) closeFindPanel()
+    else setFindMode(mode)
+  }, [closeFindPanel, findMode])
+
+  const toggleMarkdownPreview = useCallback(() => {
+    if (showMarkdownPreview) {
+      const selection = selectionRef.current
+      if (selection) pendingSelectionRef.current = { ...selection, focus: shouldAutoFocusExpandedEditor() }
+    } else {
+      captureSelection(textareaRef.current)
+      setShowMacros(false)
+      closeFindPanel()
+    }
+    setShowMarkdownPreview(!showMarkdownPreview)
+  }, [captureSelection, closeFindPanel, showMarkdownPreview])
+
   const hasMacros = resolvedMacros.length > 0
-  const showHighlight = hasMacros || !!markdownOnly
+  const showHighlight = hasMacros || !!markdownOnly || !!findQuery
   const highlightNodes = useMemo(
-    () => showHighlight ? highlightSyntax(value) : null,
-    [value, showHighlight],
+    () => !showHighlight
+      ? null
+      : findQuery
+        ? highlightFindMatches(value, findMatches, currentMatchIndex)
+        : highlightSyntax(value),
+    [currentMatchIndex, findMatches, findQuery, showHighlight, value],
   )
+
+  useLayoutEffect(syncHighlightScroll, [highlightNodes, showMarkdownPreview, syncHighlightScroll])
+
+  useEffect(() => {
+    const textarea = textareaRef.current
+    const mirror = highlightRef.current
+    if (!textarea || !mirror) return
+    return installExpandedEditorCaretReveal(textarea, mirror)
+  }, [])
 
   const editorContent = (
     <div className={inline ? s.inlineDialog : s.dialog} onClick={e => e.stopPropagation()}>
       <div className={s.header}>
         <div className={s.headerContent}>
           <h3 className={s.title}>{title}</h3>
-          {!markdownOnly && (
+          <div className={s.toolbar}>
+            {!markdownOnly && !showMarkdownPreview && (
+              <button
+                className={s.toolbarBtn}
+                onClick={() => { if (!showMacros) loadMacros(); setShowMacros(!showMacros) }}
+                type="button"
+              >
+                <Hash size={12} /> {showMacros ? t('hideMacros') : t('insertMacro')}
+              </button>
+            )}
+            {!showMarkdownPreview && (
+              <>
+                <button
+                  className={`${s.toolbarBtn} ${findMode === 'find' ? s.toolbarBtnActive : ''}`}
+                  onClick={() => toggleFindPanel('find')}
+                  type="button"
+                  aria-expanded={findMode === 'find'}
+                >
+                  <Search size={12} /> {t('find')}
+                </button>
+                <button
+                  className={`${s.toolbarBtn} ${findMode === 'replace' ? s.toolbarBtnActive : ''}`}
+                  onClick={() => toggleFindPanel('replace')}
+                  type="button"
+                  aria-expanded={findMode === 'replace'}
+                >
+                  <ReplaceIcon size={12} /> {t('findAndReplace')}
+                </button>
+              </>
+            )}
             <button
-              className={s.macroToggle}
-              onClick={() => { if (!showMacros) loadMacros(); setShowMacros(!showMacros) }}
+              className={`${s.toolbarBtn} ${showMarkdownPreview ? s.toolbarBtnActive : ''}`}
+              onClick={toggleMarkdownPreview}
               type="button"
+              aria-pressed={showMarkdownPreview}
             >
-              <Hash size={12} /> {showMacros ? t('hideMacros') : t('insertMacro')}
+              {showMarkdownPreview ? <Pencil size={12} /> : <Eye size={12} />}
+              {showMarkdownPreview ? t('editMarkdown') : t('previewMarkdown')}
             </button>
-          )}
+          </div>
         </div>
         <button className={s.closeBtn} onClick={onClose} title={t('collapseEditor')} type="button">
           <Minimize2 size={18} />
         </button>
       </div>
+      {findMode && !showMarkdownPreview && (
+        <div className={s.findPanel}>
+          <div className={s.findRow}>
+            <Search size={13} className={s.findIcon} />
+            <input
+              ref={findInputRef}
+              className={s.findInput}
+              value={findQuery}
+              onChange={(event) => {
+                setFindQuery(event.target.value)
+                setCurrentMatchIndex(0)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  goToMatch(currentMatchIndex + (event.shiftKey ? -1 : 1))
+                }
+              }}
+              placeholder={t('findPlaceholder')}
+              aria-label={t('find')}
+            />
+            {findQuery && (
+              <button
+                type="button"
+                className={s.findIconBtn}
+                onClick={() => {
+                  setFindQuery('')
+                  setCurrentMatchIndex(0)
+                  findInputRef.current?.focus({ preventScroll: true })
+                }}
+                title={t('clearFind')}
+                aria-label={t('clearFind')}
+              >
+                <X size={12} />
+              </button>
+            )}
+            <span className={s.matchCount} aria-live="polite">
+              {findMatches.length === 0 ? '0/0' : `${currentMatchIndex + 1}/${findMatches.length}`}
+            </span>
+            <button
+              type="button"
+              className={s.findIconBtn}
+              onClick={() => goToMatch(currentMatchIndex - 1)}
+              disabled={findMatches.length === 0}
+              title={t('previousMatch')}
+              aria-label={t('previousMatch')}
+            >
+              <ChevronUp size={13} />
+            </button>
+            <button
+              type="button"
+              className={s.findIconBtn}
+              onClick={() => goToMatch(currentMatchIndex + 1)}
+              disabled={findMatches.length === 0}
+              title={t('nextMatch')}
+              aria-label={t('nextMatch')}
+            >
+              <ChevronDown size={13} />
+            </button>
+            <button
+              type="button"
+              className={s.findIconBtn}
+              onClick={closeFindPanel}
+              title={t('closeFind')}
+              aria-label={t('closeFind')}
+            >
+              <X size={13} />
+            </button>
+          </div>
+          {findMode === 'replace' && (
+            <div className={s.replaceRow}>
+              <ReplaceIcon size={13} className={s.findIcon} />
+              <input
+                className={s.findInput}
+                value={replacement}
+                onChange={(event) => setReplacement(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    replaceCurrentMatch()
+                  }
+                }}
+                placeholder={t('replacePlaceholder')}
+                aria-label={t('replaceWith')}
+              />
+              <button
+                type="button"
+                className={s.replaceBtn}
+                onClick={replaceCurrentMatch}
+                disabled={findMatches.length === 0}
+              >
+                {t('replace')}
+              </button>
+              <button
+                type="button"
+                className={s.replaceBtn}
+                onClick={replaceAllMatches}
+                disabled={findMatches.length === 0}
+              >
+                {t('replaceAll')}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <div className={s.body}>
-        {showMacros && (
+        {showMacros && !showMarkdownPreview && (
           <div className={s.macroSidebar}>
             <div className={s.macroSearch}>
               <div className={s.macroSearchInner}>
@@ -452,6 +836,16 @@ export default function ExpandedTextEditor({
                   onChange={e => setMacroSearch(e.target.value)}
                   autoFocus
                 />
+                {macroSearch && (
+                  <button
+                    type="button"
+                    className={s.macroSearchClear}
+                    onClick={() => setMacroSearch('')}
+                    aria-label={t('clearMacroSearch')}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
               </div>
             </div>
             <div className={s.macroList}>
@@ -470,37 +864,38 @@ export default function ExpandedTextEditor({
           </div>
         )}
         <div className={s.editorArea}>
-          {showHighlight ? (
-            <div className={s.highlightContainer}>
-              <div className={s.highlightInner}>
-                <pre className={s.highlightPre} aria-hidden="true">{highlightNodes}{'\n'}</pre>
-                <textarea
-                  ref={textareaRef}
-                  className={s.textareaHighlighted}
-                  value={value}
-                  onChange={handleTextareaChange}
-                  onSelect={handleTextareaSelect}
-                  onKeyDown={handleTextareaKeyDown}
-                  onCompositionStart={handleCompositionStart}
-                  onCompositionEnd={handleCompositionEnd}
-                  placeholder={placeholder}
-                  spellCheck={false}
-                />
-              </div>
+          {showMarkdownPreview && (
+            <div className={s.markdownPreview}>
+              <MessageContent
+                content={value}
+                isUser={false}
+                userName={previewUserName}
+                disableInterceptors
+              />
             </div>
-          ) : (
-            <textarea
-              ref={textareaRef}
-              className={s.textarea}
-              value={value}
-              onChange={handleTextareaChange}
-              onSelect={handleTextareaSelect}
-              onKeyDown={handleTextareaKeyDown}
-              onCompositionStart={handleCompositionStart}
-              onCompositionEnd={handleCompositionEnd}
-              placeholder={placeholder}
-            />
           )}
+          <div className={s.highlightContainer} hidden={showMarkdownPreview}>
+            <div className={s.highlightInner}>
+              <pre
+                ref={highlightRef}
+                className={`${s.highlightPre} ${showHighlight ? '' : s.highlightPlain}`}
+                aria-hidden="true"
+              >{highlightNodes ?? value}{'\u200b'}</pre>
+              <textarea
+                ref={textareaRef}
+                className={showHighlight ? s.textareaHighlighted : s.textarea}
+                value={value}
+                onChange={handleTextareaChange}
+                onSelect={handleTextareaSelect}
+                onScroll={syncHighlightScroll}
+                onKeyDown={handleTextareaKeyDown}
+                onCompositionStart={handleCompositionStart}
+                onCompositionEnd={handleCompositionEnd}
+                placeholder={placeholder}
+                spellCheck={showHighlight ? false : undefined}
+              />
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -528,18 +923,7 @@ export default function ExpandedTextEditor({
  * Drop-in wrapper: renders the original textarea with an expand button overlay.
  * When expanded, opens a full-screen ExpandedTextEditor modal.
  */
-export function ExpandableTextarea({
-  value,
-  onChange,
-  title,
-  placeholder,
-  className,
-  rows,
-  spellCheck,
-  macros,
-  onRefreshMacros,
-  markdownOnly,
-}: {
+interface ExpandableTextareaProps extends Pick<TextareaHTMLAttributes<HTMLTextAreaElement>, 'name' | 'aria-label' | 'disabled'> {
   value: string
   onChange: (value: string) => void
   title: string
@@ -551,11 +935,41 @@ export function ExpandableTextarea({
   onRefreshMacros?: () => void
   /** Forwarded to the full-screen editor. See ExpandedTextEditor.markdownOnly. */
   markdownOnly?: boolean
-}) {
+}
+
+function assignTextareaRef(ref: Ref<HTMLTextAreaElement> | undefined, node: HTMLTextAreaElement | null) {
+  if (!ref) return
+  if (typeof ref === 'function') {
+    ref(node)
+    return
+  }
+  ref.current = node
+}
+
+export const ExpandableTextarea = forwardRef<HTMLTextAreaElement, ExpandableTextareaProps>(function ExpandableTextarea({
+  value,
+  onChange,
+  title,
+  placeholder,
+  className,
+  rows,
+  spellCheck,
+  macros,
+  onRefreshMacros,
+  markdownOnly,
+  name,
+  'aria-label': ariaLabel,
+  disabled,
+}, forwardedRef) {
   const { t } = useTranslation('shared', { keyPrefix: 'expandedTextEditor' })
   const [expanded, setExpanded] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const cursorPosRef = useRef<number | null>(null)
+
+  const setTextareaRef = useCallback((node: HTMLTextAreaElement | null) => {
+    textareaRef.current = node
+    assignTextareaRef(forwardedRef, node)
+  }, [forwardedRef])
 
   // Track cursor position continuously so it's correct even after
   // the expand button steals focus via mousedown before click fires
@@ -575,7 +989,7 @@ export function ExpandableTextarea({
   return (
     <div className={s.textareaWrapper}>
       <textarea
-        ref={textareaRef}
+        ref={setTextareaRef}
         className={className}
         value={value}
         onChange={handleTextareaChange}
@@ -583,11 +997,16 @@ export function ExpandableTextarea({
         placeholder={placeholder}
         rows={rows}
         spellCheck={spellCheck}
+        name={name}
+        aria-label={ariaLabel}
+        disabled={disabled}
       />
       <button
         className={s.expandBtn}
         onClick={handleExpand}
         title={t('expandEditor')}
+        aria-label={t('expandEditor')}
+        disabled={disabled}
         type="button"
       >
         <Maximize2 size={13} />
@@ -603,8 +1022,9 @@ export function ExpandableTextarea({
           macros={macros}
           onRefreshMacros={onRefreshMacros}
           markdownOnly={markdownOnly}
+          sourceRef={textareaRef}
         />
       )}
     </div>
   )
-}
+})

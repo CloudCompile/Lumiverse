@@ -26,6 +26,7 @@ Lumiverse's interface is built around a central chat view with a tabbed drawer t
 - **Input Area** — Where you type messages. Includes action buttons for attachments, persona switching, quick replies, add-on toggles, and dry runs.
 - **Drawer** — A single docked drawer that hosts every panel as a tab. Pinned tabs appear on the visible edge so you can switch with one click; the rest live behind an overflow menu.
 - **Chat Heads (optional)** — Floating circular avatars that follow the screen edge and act as quick-switchers between recent chats.
+- **Quick Toolbar (optional)** — A floating or chat-top action strip supplied by Lumiverse Suite. Its placement, appearance, and actions are configurable under [Productivity settings](../customization/productivity.md).
 
 Drawer panels can be docked to the opposite edge using the [Spindle](../extensions/index.md) **dockPanels** system, and on mobile the drawer slides in as a sheet.
 
@@ -53,7 +54,7 @@ The drawer hosts every workspace panel as a tab. You can reorder them with drag-
 | **Reasoning** | Configure chain-of-thought, reasoning effort, prompt prefix/suffix, and start-reply-with |
 | **Loom** | Configure narrative structure, story beats, pacing, Sovereign Hand, and director cues |
 | **Composition** | Pick which Lumia/Loom content is active, set context filters, and tune prompt assembly |
-| **Connections** | Manage LLM, Image, Speech-to-Text, and Text-to-Speech API connections |
+| **Connections** | Manage LLM, Embedding Model, Image, Speech-to-Text, and Text-to-Speech API connections |
 | **Council** | Configure the Lumia Council, tool functions, and sidecar agents |
 | **Summary** | Configure context summarization and truncation |
 
@@ -98,6 +99,7 @@ Inside an active chat, each message exposes:
 - **Edit** — Click on any message to edit its content in place
 - **Branch** — Fork the conversation at any message into a separate timeline
 - **Author's Note** — Inject a system-level instruction at a configurable depth
+- **Select messages** — Enter bulk-selection mode to hide, unhide, or delete several messages together
 
 ---
 
@@ -112,6 +114,7 @@ The input area exposes several actions beyond just sending messages:
 - **Add-ons (Puzzle icon)** — Toggle [persona add-on](../personas/bindings-and-addons.md#persona-add-ons) blocks on and off, including global add-ons attached to the active persona
 - **Dry Run** — Preview the exact prompt the AI will see without sending a real request
 - **Voice input** — Dictate via the configured Speech-to-Text connection
+- **Customize composer** — Reorder or hide composer icons and add compatible Quick Toolbar actions when Lumiverse Suite is enabled
 
 Per-chat toggle state for add-ons is remembered, so flipping a block off in one chat doesn't affect another.
 
@@ -145,6 +148,7 @@ Click the gear icon (or open the Command Palette and search "Settings") to open 
 |---------|---------------|
 | **Account** | Username, password, avatar |
 | **Display** | Modal sizing, pagination, toast positions, landing layout, chat heads |
+| **Productivity** | (Lumiverse Suite) Quick Toolbar, composer actions, connection picker, and optional advanced surfaces |
 | **Chat** | Message-per-page, enter-to-send, draft saving, message render options |
 | **Notifications** | Push notification preferences |
 

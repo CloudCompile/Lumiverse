@@ -63,6 +63,7 @@ import type {
   CortexResultDTO,
   CortexUsageStatsDTO,
   LinkedCortexResultDTO,
+  AssemblyBreakdownEntryDTO,
   MemoryConsolidationDTO,
   MemoryCortexConfigDTO,
   MemoryEntityDTO,
@@ -76,6 +77,19 @@ import type {
   VaultDTO,
   VaultReindexResultDTO,
   VaultWithContentsDTO,
+  BoundAssembleRequestDTO,
+  BoundAssemblyOutcomeDTO,
+  ConnectionDispatchDescriptorDTO,
+  ImageGenStreamEventDTO,
+  ImageGenStreamRequestDTO,
+  InterceptorContextDTO,
+  InterceptorDisposer,
+  InterceptorHandler,
+  InterceptorRegistrationMatchOptions,
+  InterceptorRegistrationOptions,
+  QuietTrackedRequestDTO,
+  QuietTrackedResultDTO,
+  SpindleHostDescriptorV1,
 } from "lumiverse-spindle-types";
 import type {
   MediaConvertAudioRequestDTO,
@@ -87,12 +101,22 @@ import type {
   MediaTransformResultDTO,
 } from "../services/media.service";
 import { initializeSandbox } from "./worker-runtime-sandbox";
+import { deserializeWorkerResponseError } from "./worker-response-error";
+import { deriveCharacterOverlay } from "../utils/color-engine";
 import {
   assertValidSharedRpcEndpoint,
   normalizeOwnedSharedRpcEndpoint,
 } from "./shared-rpc";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Preset, CreatePresetInput, UpdatePresetInput, PromptBlock } from "../types/preset";
+import type { LumiaDlcCatalog } from "../types/pack";
+import type {
+  McpDiscoveredTool,
+  McpServerStatus,
+  SpindleMcpServerCreateDTO,
+  SpindleMcpServerDTO,
+  SpindleMcpToolCallOptionsDTO,
+} from "../types/mcp-server";
 
 const nativeProcessExit = process.exit.bind(process);
 
@@ -107,9 +131,44 @@ type TokenCountResult = {
   approximate: boolean;
 };
 
+type TokenCountBatchResult = TokenCountResult & { index: number };
+
+type SpindleBatchJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | SpindleBatchJsonValue[]
+  | { [key: string]: SpindleBatchJsonValue };
+
+type SpindleBatchOperation = {
+  domain: string;
+  op: string;
+  args: SpindleBatchJsonValue;
+};
+
+type SpindleBatchResult =
+  | { ok: true; result: SpindleBatchJsonValue }
+  | { ok: false; error: string };
+
 type PromptBlockCategoryGroup = {
   categoryBlock: PromptBlock | null;
   children: PromptBlock[];
+};
+
+type AssembleRequest = {
+  blocks: PromptBlock[];
+  chatId: string;
+  connectionId?: string;
+  personaId?: string;
+  generationType?: string;
+  promptVariables?: Record<string, Record<string, string | number | string[]>>;
+  signal?: AbortSignal;
+};
+
+type AssembleResult = {
+  messages: LlmMessageDTO[];
+  breakdown: AssemblyBreakdownEntryDTO[];
 };
 
 type FrontendProcessState =
@@ -239,7 +298,23 @@ type ChatAppendMessageOptions =
 type SpindleUserRole = "operator" | "admin" | "user";
 
 type RuntimeWorkerToHost =
+  | { type: 'context_handler_result'; requestId: string; context: unknown; error?: string }
+  | { type: 'frontend_message'; payload: unknown; userId?: string; frontendSessionId?: string }
+  | { type: 'runtime_state_read'; requestId: string; chatId: string; characterId: string; userId?: string }
+  | { type: 'runtime_state_write'; requestId: string; chatId: string; command: import('./runtime-state').RuntimeStateCommand; userId?: string; mutationId?: string }
+  | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorRegistrationMatchOptions['match']; required?: boolean }
+  | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string }
   | WorkerToHost
+  | { type: "register_frontend_runtime_capability"; capability: "message_tag_interceptor" }
+  | { type: "unregister_frontend_runtime_capability"; capability: "message_tag_interceptor" }
+  | { type: "dlc_get_catalog"; requestId: string; userId?: string }
+  | {
+      type: "assemble_prompt";
+      requestId: string;
+      input: Omit<AssembleRequest, "signal">;
+      userId?: string;
+    }
+  | { type: "register_context_handler"; priority?: number; timeoutMs?: number; required?: boolean }
   | {
       type: "chat_append_message";
       requestId: string;
@@ -264,6 +339,7 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
+  | { type: "image_gen_generate_native"; requestId: string; input: any }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -287,6 +363,7 @@ type RuntimeWorkerToHost =
   | { type: "preset_blocks_delete"; requestId: string; presetId: string; blockId: string; userId?: string }
   | { type: "preset_categories_list"; requestId: string; presetId: string; userId?: string }
   | { type: "uploads_get"; requestId: string; uploadId: string; userId?: string }
+  | { type: "uploads_read_chunk"; requestId: string; uploadId: string; offset: number; userId?: string }
   | { type: "uploads_delete"; requestId: string; uploadId: string; userId?: string }
   | {
       type: "tokens_count_text";
@@ -294,6 +371,31 @@ type RuntimeWorkerToHost =
       text: string;
       model?: string;
       modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "tokens_count_text_batch";
+      requestId: string;
+      texts: string[];
+      model?: string;
+      modelSource?: TokenModelSource;
+      userId?: string;
+    }
+  | {
+      type: "spindle_batch";
+      requestId: string;
+      ops: SpindleBatchOperation[];
+      options?: { expected_revisions?: Record<string, number> };
+      userId?: string;
+    }
+  | {
+      type: "world_books_entry_set_extension";
+      requestId: string;
+      entity: "world_book_entry" | "character" | "preset";
+      entityId: string;
+      entryId?: string;
+      namespace: string;
+      value: SpindleBatchJsonValue | null;
       userId?: string;
     }
   | {
@@ -354,8 +456,18 @@ type RuntimeWorkerToHost =
   | { type: "images_list"; requestId: string; limit?: number; offset?: number; userId?: string }
   | { type: "images_get"; requestId: string; imageId: string; userId?: string }
   | { type: "images_upload"; requestId: string; input: ImageUploadDTO; userId?: string }
-  | { type: "images_upload_from_data_url"; requestId: string; dataUrl: string; originalFilename?: string; userId?: string }
+  | {
+      type: "images_upload_from_data_url";
+      requestId: string;
+      dataUrl: string;
+      originalFilename?: string;
+      owner_character_id?: string;
+      owner_chat_id?: string;
+      skip_thumbnail_processing?: boolean;
+      userId?: string;
+    }
   | { type: "images_delete"; requestId: string; imageId: string; userId?: string }
+  | { type: "images_delete_many"; requestId: string; imageIds: string[]; userId?: string }
   | { type: "media_audio_convert"; requestId: string; input: MediaConvertAudioRequestDTO }
   | { type: "media_video_convert"; requestId: string; input: MediaConvertVideoRequestDTO }
   | { type: "media_video_transcode"; requestId: string; input: MediaTranscodeVideoRequestDTO }
@@ -368,7 +480,7 @@ type RuntimeWorkerToHost =
       requestId: string;
       result: unknown;
     }
-  | { type: "register_macro_interceptor"; priority?: number }
+  | { type: "register_macro_interceptor"; priority?: number; handlesOwnedSources?: boolean }
   | {
       type: "macro_interceptor_result";
       requestId: string;
@@ -460,9 +572,45 @@ type RuntimeWorkerToHost =
       tabId?: string;
       viewId?: string;
       userId?: string;
+    }
+  | { type: "image_gen_generate_stream"; requestId: string; input: Record<string, unknown> }
+  | { type: "image_gen_cancel_stream"; requestId: string }
+  | { type: "mcp_servers_list"; requestId: string; limit?: number; offset?: number; userId?: string }
+  | { type: "mcp_servers_get"; requestId: string; serverId: string; userId?: string }
+  | { type: "mcp_servers_create"; requestId: string; input: SpindleMcpServerCreateDTO; userId?: string }
+  | { type: "mcp_servers_connect"; requestId: string; serverId: string; userId?: string }
+  | { type: "mcp_servers_status"; requestId: string; serverId: string; userId?: string }
+  | { type: "mcp_tools_list"; requestId: string; serverId: string; userId?: string }
+  | { type: "mcp_tools_call"; requestId: string; serverId: string; toolName: string; args: Record<string, unknown>; timeoutMs?: number; userId?: string }
+  | {
+      type: "provider_register";
+      phase: "register";
+      kind: string;
+      id: string;
+      description?: unknown;
+      broker?: {
+        url: string;
+        method?: string;
+        secretKey?: string;
+        headers?: Record<string, string>;
+        kind?: "embedding" | "tts" | "stt" | "sidecar";
+      };
+      generation?: number;
+      revision?: number;
+    }
+  | { type: "provider_unregister"; phase: "unregister"; kind: string; id: string }
+  | {
+      type: "provider_result";
+      phase: "result";
+      correlationId: string;
+      round?: number;
+      result?: unknown;
+      error?: string;
     };
 
 type RuntimeHostToWorker =
+  | { type: 'context_handler_abort'; requestId: string; reason: string }
+  | { type: 'frontend_message'; payload: unknown; userId: string; frontendSessionId?: string }
   | HostToWorker
   | {
       type: "rpc_pool_request";
@@ -497,14 +645,128 @@ type RuntimeHostToWorker =
   | { type: "frontend_process_lifecycle"; event: FrontendProcessLifecycleEvent }
   | { type: "frontend_process_message"; processId: string; payload: unknown; userId: string }
   | { type: "backend_process_lifecycle"; event: BackendProcessLifecycleEvent }
-  | { type: "backend_process_message"; processId: string; payload: unknown; userId: string };
+  | { type: "backend_process_message"; processId: string; payload: unknown; userId: string }
+  | { type: "image_gen_stream_chunk"; requestId: string; event: ImageGenStreamEvent }
+  | { type: "image_gen_stream_error"; requestId: string; error: string }
+  | {
+      type: "provider_invoke";
+      phase: "invoke";
+      correlationId: string;
+      round: number;
+      key: {
+        effectiveScope: string;
+        installationId: string;
+        kind: string;
+        id: string;
+      };
+      request: unknown;
+    }
+  | {
+      type: "provider_abort";
+      phase: "abort";
+      correlationId: string;
+      round: number;
+      reason?: string;
+    }
+  | {
+      type: "provider_changed";
+      phase: "changed";
+      action: "registered" | "unregistered" | "updated";
+      key: {
+        effectiveScope: string;
+        installationId: string;
+        kind: string;
+        id: string;
+      };
+    };
+
+type ImageGenStreamEvent = ImageGenStreamEventDTO;
+type ImageGenStreamInput = ImageGenStreamRequestDTO;
+
+type RuntimeWorldBookEntryDTO = WorldBookEntryDTO & { revision: number };
+type RuntimeWorldBookEntryUpdateDTO = WorldBookEntryUpdateDTO & { expected_revision?: number };
+type RuntimeEntityExtensionEntity = "world_book_entry" | "character" | "preset";
+type RuntimeEntityExtensionsAPI = {
+  setNamespace(
+    entity: RuntimeEntityExtensionEntity,
+    entityId: string,
+    namespace: string,
+    value: SpindleBatchJsonValue | null,
+    userId?: string,
+  ): Promise<SpindleBatchJsonValue>;
+};
+type RuntimeWorldBooksAPI = Omit<SpindleAPI["world_books"], "entries"> & {
+  entries: {
+    list(worldBookId: string, options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: RuntimeWorldBookEntryDTO[]; total: number }>;
+    get(entryId: string, userId?: string): Promise<RuntimeWorldBookEntryDTO | null>;
+    create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<RuntimeWorldBookEntryDTO>;
+    update(entryId: string, input: RuntimeWorldBookEntryUpdateDTO, userId?: string): Promise<RuntimeWorldBookEntryDTO>;
+    delete(entryId: string, userId?: string): Promise<boolean>;
+    setExtension(entryId: string, namespace: string, value: SpindleBatchJsonValue | null, userId?: string): Promise<SpindleBatchJsonValue>;
+  };
+};
 
 // `presets` is replaced wholesale (not intersected) because the local
-// PromptBlock type adds variants (select, switch, multiselect) that the
-// published PromptBlockDTO doesn't carry. Intersection would require the
-// implementation to satisfy both shapes — which is impossible since the
-// local type is strictly broader.
-type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
+// PromptBlock type also carries host-only sealed-block provenance. Keeping the
+// runtime CRUD surface on the native type avoids narrowing data returned by
+// newer hosts when the installed public type package lags a release.
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books" | "runtimeState"> & {
+  runtimeState: {
+    read(chatId: string, characterId: string, userId?: string): Promise<unknown>;
+    write(chatId: string, command: import('./runtime-state').RuntimeStateCommand, userId?: string, mutationId?: string): Promise<unknown>;
+  };
+  frontendCapabilities: {
+    declare(capability: "message_tag_interceptor"): () => void;
+  };
+  /** Read-only Lumia DLC catalog. Public extension types expose this as `spindle.dlc`. */
+  dlc: {
+    getCatalog(options?: { userId?: string }): Promise<LumiaDlcCatalog>;
+  };
+  theme: SpindleAPI["theme"] & {
+    deriveOverlay(palette: {
+      palette: Array<{ r: number; g: number; b: number }>;
+      ui: {
+        dark: { surface: { r: number; g: number; b: number }; text: { r: number; g: number; b: number }; mutedText: { r: number; g: number; b: number }; accent: { r: number; g: number; b: number }; accentText: { r: number; g: number; b: number } };
+        light: { surface: { r: number; g: number; b: number }; text: { r: number; g: number; b: number }; mutedText: { r: number; g: number; b: number }; accent: { r: number; g: number; b: number }; accentText: { r: number; g: number; b: number } };
+      };
+    }): Promise<any>;
+  };
+  assemble(input: AssembleRequest, userId?: string): Promise<AssembleResult>;
+  batch(
+    ops: SpindleBatchOperation[],
+    options?: { expected_revisions?: Record<string, number>; userId?: string },
+  ): Promise<SpindleBatchResult[]>;
+  world_books: RuntimeWorldBooksAPI;
+  entityExtensions: RuntimeEntityExtensionsAPI;
+  imageGen: SpindleAPI["imageGen"] & {
+    /** Native Lumiverse image pipeline; public types are released separately. */
+    generateNative(input: any): Promise<any>;
+    /**
+     * Generate through a provider that explicitly supports WebSocket preview
+     * images and status updates. The terminal `done` event contains the saved
+     * image result. Breaking out of the iterator aborts the upstream job.
+     */
+    generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void>;
+  };
+  mcp: {
+    servers: {
+      list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: SpindleMcpServerDTO[]; total: number }>;
+      get(serverId: string, userId?: string): Promise<SpindleMcpServerDTO | null>;
+      create(input: SpindleMcpServerCreateDTO, userId?: string): Promise<SpindleMcpServerDTO>;
+      connect(serverId: string, userId?: string): Promise<McpServerStatus>;
+      status(serverId: string, userId?: string): Promise<McpServerStatus>;
+    };
+    tools: {
+      list(serverId: string, userId?: string): Promise<McpDiscoveredTool[]>;
+      call(serverId: string, toolName: string, args?: Record<string, unknown>, options?: SpindleMcpToolCallOptionsDTO): Promise<string>;
+    };
+  };
+  contracts: Readonly<Record<string, number>>;
+  registerContextHandler(
+    handler: (context: unknown) => Promise<unknown>,
+    priority?: number,
+    opts?: { timeoutMs?: number }
+  ): void;
   registerMessageContentProcessor(
     handler: (ctx: {
       chatId: string;
@@ -535,9 +797,19 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
       commit: boolean;
       phase: "prompt" | "display" | "response" | "other";
       sourceHint?: string;
+      sourceOwner?: { extensionIdentifier: string };
       userId?: string;
-    }) => Promise<string | void>,
-    priority?: number
+    }) => Promise<
+      | string
+      | {
+          text: string;
+          touchedVars?: readonly string[];
+          volatile?: boolean;
+        }
+      | void
+    >,
+    priority?: number,
+    opts?: { handlesOwnedSources?: boolean }
   ): void;
   registerWorldInfoInterceptor(
     handler: (ctx: {
@@ -610,6 +882,13 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
   };
   uploads: {
     get(uploadId: string, userId?: string): Promise<{ fileName: string; size: number; data: Uint8Array } | null>;
+    readChunk(uploadId: string, offset: number, userId?: string): Promise<{
+      fileName: string;
+      size: number;
+      offset: number;
+      data: Uint8Array;
+      eof: boolean;
+    } | null>;
     delete(uploadId: string, userId?: string): Promise<boolean>;
   };
   media: {
@@ -622,6 +901,7 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
   };
   tokens: {
     countText(text: string, options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountResult>;
+    countTextBatch(texts: string[], options?: { model?: string; modelSource?: TokenModelSource; userId?: string }): Promise<TokenCountBatchResult[]>;
     countMessages(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
       options?: { model?: string; modelSource?: TokenModelSource; userId?: string }
@@ -732,12 +1012,47 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets"> & {
     openCommandPalette(options?: { userId?: string }): Promise<void>;
     closeCommandPalette(options?: { userId?: string }): Promise<void>;
   };
+  providers: {
+    register(input: {
+      kind: string;
+      id: string;
+      description?: unknown;
+      broker?: {
+        url: string;
+        method?: string;
+        secretKey?: string;
+        headers?: Record<string, string>;
+        kind?: "embedding" | "tts" | "stt" | "sidecar";
+      };
+      generation?: number;
+      revision?: number;
+    }): void;
+    unregister(kind: string, id: string): void;
+    handle(
+      kind: string,
+      id: string,
+      handler: (req: {
+        correlationId: string;
+        round: number;
+        key: { effectiveScope: string; installationId: string; kind: string; id: string };
+        request: unknown;
+        signal: AbortSignal;
+      }) => unknown | Promise<unknown>,
+    ): () => void;
+    onChanged(
+      handler: (event: {
+        action: "registered" | "unregistered" | "updated";
+        key: { effectiveScope: string; installationId: string; kind: string; id: string };
+      }) => void,
+    ): () => void;
+  };
 };
 
 // ─── State ───────────────────────────────────────────────────────────────
 
 let manifest: SpindleManifest;
 let storagePath: string;
+let hostDescriptor: SpindleHostDescriptorV1 | null = null;
 
 const eventHandlers = new Map<string, Set<(payload: unknown, userId?: string) => void>>();
 const pendingResponses = new Map<
@@ -748,13 +1063,32 @@ const streamingGenerations = new Map<
   string,
   { push: (chunk: StreamChunkDTO) => void; fail: (reason: unknown) => void }
 >();
+const streamingImageGenerations = new Map<
+  string,
+  { push: (event: ImageGenStreamEvent) => void; fail: (reason: unknown) => void }
+>();
+const interceptorAbortControllers = new Map<string, AbortController>();
+const providerHandlers = new Map<
+  string,
+  (req: {
+    correlationId: string;
+    round: number;
+    key: { effectiveScope: string; installationId: string; kind: string; id: string };
+    request: unknown;
+    signal: AbortSignal;
+  }) => unknown | Promise<unknown>
+>();
+const providerAbortControllers = new Map<string, AbortController>();
+const providerChangedHandlers = new Set<(event: {
+  action: "registered" | "unregistered" | "updated";
+  key: { effectiveScope: string; installationId: string; kind: string; id: string };
+}) => void>();
 let interceptHandler:
-  | ((
-      messages: LlmMessageDTO[],
-      context: unknown
-    ) => Promise<LlmMessageDTO[] | InterceptorResultDTO>)
+  | InterceptorHandler
   | null = null;
-let contextHandlerFn: ((context: unknown) => Promise<unknown>) | null = null;
+let interceptRegistrationId: string | null = null;
+let contextHandlerFn: ((context: unknown, signal?: AbortSignal) => Promise<unknown>) | null = null;
+const contextAbortControllers = new Map<string, AbortController>();
 let messageContentProcessorFn:
   | ((ctx: unknown) => Promise<unknown>)
   | null = null;
@@ -767,7 +1101,8 @@ let worldInfoInterceptorFn:
 let oauthCallbackHandler:
   | ((params: Record<string, string>) => Promise<{ html?: string } | void>)
   | null = null;
-const frontendMessageHandlers = new Set<(payload: unknown, userId: string) => void>();
+const frontendMessageHandlers = new Set<(payload: unknown, userId: string, frontendSessionId?: string) => void>();
+const frontendRuntimeCapabilityRefCounts = new Map<"message_tag_interceptor", number>();
 const commandInvokedHandlers = new Set<(commandId: string, context: any) => void | Promise<void>>();
 const permissionDeniedHandlers = new Set<(detail: PermissionDeniedDetail) => void>();
 const permissionChangedHandlers = new Set<(detail: PermissionChangedDetail) => void>();
@@ -952,6 +1287,65 @@ function requestGeneration(input: any): Promise<unknown> {
   });
 }
 
+/** Assembly uses the generation cancellation channel but never invokes a provider. */
+function requestAssembly(input: AssembleRequest, userId?: string): Promise<AssembleResult> {
+  const signal = input?.signal;
+  const { signal: _omit, ...payload } = input ?? {};
+  void _omit;
+
+  if (signal?.aborted) {
+    return Promise.reject(makeAbortError((signal.reason as any)?.message ?? "Assembly aborted"));
+  }
+
+  const requestId = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => post({ type: "cancel_generation", requestId });
+    pendingResponses.set(requestId, {
+      resolve: (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(value as AssembleResult);
+      },
+      reject: (reason) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(reason);
+      },
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    post({ type: "assemble_prompt", requestId, input: payload, userId });
+  });
+}
+
+/** Issue an RPC whose authority is bound to the currently active interceptor. */
+function requestBoundGeneration<T>(
+  type: "generate_assemble" | "generate_quiet_tracked",
+  input: BoundAssembleRequestDTO | QuietTrackedRequestDTO,
+): Promise<T> {
+  const signal = input.signal;
+  const { signal: _omit, ...payload } = input;
+  void _omit;
+
+  if (signal?.aborted) {
+    return Promise.reject(makeAbortError((signal.reason as Error | undefined)?.message));
+  }
+
+  const requestId = crypto.randomUUID();
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => post({ type: "cancel_generation", requestId });
+    pendingResponses.set(requestId, {
+      resolve: (value) => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve(value as T);
+      },
+      reject: (reason) => {
+        signal?.removeEventListener("abort", onAbort);
+        reject(reason);
+      },
+    });
+    signal?.addEventListener("abort", onAbort, { once: true });
+    post({ type, requestId, input: payload } as RuntimeWorkerToHost);
+  });
+}
+
 /**
  * Issue a `request_generation_stream` RPC and return an `AsyncGenerator`
  * that yields `StreamChunkDTO` values as the host forwards them. The
@@ -1043,9 +1437,119 @@ function requestGenerationStream(input: any): AsyncGenerator<StreamChunkDTO, voi
   })();
 }
 
+/**
+ * Start an image generation that exposes its provider WebSocket status and
+ * preview frames. The host rejects providers that did not opt into this
+ * capability, so extensions never receive a misleading partial stream.
+ */
+function requestImageGenStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void> {
+  const signal = input?.signal;
+  const { signal: _omit, ...payload } = input ?? {};
+  void _omit;
+
+  if (signal?.aborted) {
+    const err = makeAbortError((signal.reason as any)?.message);
+    return (async function* (): AsyncGenerator<ImageGenStreamEvent, void, void> {
+      throw err;
+    })();
+  }
+
+  const requestId = crypto.randomUUID();
+  type QueueItem =
+    | { kind: "event"; event: ImageGenStreamEvent }
+    | { kind: "error"; error: unknown };
+
+  const queue: QueueItem[] = [];
+  let waiter: ((item: QueueItem) => void) | null = null;
+  let terminated = false;
+
+  const push = (event: ImageGenStreamEvent) => {
+    if (terminated) return;
+    if (event.type === "done") terminated = true;
+    if (waiter) {
+      const resolve = waiter;
+      waiter = null;
+      resolve({ kind: "event", event });
+    } else {
+      queue.push({ kind: "event", event });
+    }
+  };
+  const fail = (error: unknown) => {
+    if (terminated) return;
+    terminated = true;
+    if (waiter) {
+      const resolve = waiter;
+      waiter = null;
+      resolve({ kind: "error", error });
+    } else {
+      queue.push({ kind: "error", error });
+    }
+  };
+
+  streamingImageGenerations.set(requestId, { push, fail });
+  const onAbort = () => post({ type: "image_gen_cancel_stream", requestId });
+  signal?.addEventListener("abort", onAbort, { once: true });
+  post({ type: "image_gen_generate_stream", requestId, input: payload });
+
+  return (async function* (): AsyncGenerator<ImageGenStreamEvent, void, void> {
+    try {
+      while (true) {
+        const item = queue.length > 0
+          ? queue.shift()!
+          : await new Promise<QueueItem>((resolve) => { waiter = resolve; });
+        if (item.kind === "error") throw item.error;
+        yield item.event;
+        if (item.event.type === "done") return;
+      }
+    } finally {
+      streamingImageGenerations.delete(requestId);
+      signal?.removeEventListener("abort", onAbort);
+      if (!terminated) post({ type: "image_gen_cancel_stream", requestId });
+    }
+  })();
+}
+
 // ─── Spindle API (exposed to extensions as globalThis.spindle) ───────────
 
 const spindleApi: RuntimeSpindleAPI = {
+  runtimeState: {
+    read(chatId, characterId, userId) { return request({ type: 'runtime_state_read', requestId: crypto.randomUUID(), chatId, characterId, userId }); },
+    write(chatId, command, userId, mutationId) {
+      assertMutationAllowed('spindle.runtimeState.write()');
+      return request({ type: 'runtime_state_write', requestId: crypto.randomUUID(), chatId, command, userId, mutationId });
+    },
+  },
+  get host(): SpindleHostDescriptorV1 {
+    if (!hostDescriptor) throw new Error("Spindle host descriptor is not initialized");
+    return hostDescriptor;
+  },
+
+  frontendCapabilities: {
+    declare(capability) {
+      assertMutationAllowed("spindle.frontendCapabilities.declare()");
+      if (capability !== "message_tag_interceptor") {
+        throw new Error(`Unsupported frontend runtime capability: ${String(capability)}`);
+      }
+      const count = frontendRuntimeCapabilityRefCounts.get(capability) ?? 0;
+      frontendRuntimeCapabilityRefCounts.set(capability, count + 1);
+      if (count === 0) {
+        post({ type: "register_frontend_runtime_capability", capability });
+      }
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        const current = frontendRuntimeCapabilityRefCounts.get(capability) ?? 0;
+        if (current <= 1) {
+          frontendRuntimeCapabilityRefCounts.delete(capability);
+          post({ type: "unregister_frontend_runtime_capability", capability });
+        } else {
+          frontendRuntimeCapabilityRefCounts.set(capability, current - 1);
+        }
+      };
+    },
+  },
+
   on(event: string, handler: (payload: any) => void): () => void {
     if (!eventHandlers.has(event)) {
       eventHandlers.set(event, new Set());
@@ -1112,10 +1616,44 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "update_macro_value", name, value: String(value ?? "") });
   },
 
-  registerInterceptor(handler, priority?): void {
+  registerInterceptor(
+    handler: InterceptorHandler,
+    priorityOrOptions?: number | (InterceptorRegistrationOptions & { required?: boolean }),
+    options?: InterceptorRegistrationMatchOptions & { required?: boolean },
+  ): InterceptorDisposer {
     assertMutationAllowed("spindle.registerInterceptor()");
+    const registrationId = crypto.randomUUID();
+    const priority = typeof priorityOrOptions === "number"
+      ? priorityOrOptions
+      : priorityOrOptions?.priority;
+    const match = typeof priorityOrOptions === "number"
+      ? options?.match
+      : priorityOrOptions?.match;
+    const required = (typeof priorityOrOptions === 'number' ? options : priorityOrOptions)?.required === true;
     interceptHandler = handler;
-    post({ type: "register_interceptor", priority });
+    interceptRegistrationId = registrationId;
+    post({ type: "register_interceptor", registrationId, priority, required, ...(match ? { match } : {}) });
+    return () => {
+      if (interceptRegistrationId !== registrationId) return;
+      interceptHandler = null;
+      interceptRegistrationId = null;
+      post({ type: "unregister_interceptor", registrationId });
+    };
+  },
+
+  assemble(input, userId?: string) {
+    return requestAssembly(input, userId);
+  },
+
+  async batch(
+    ops: SpindleBatchOperation[],
+    options?: { expected_revisions?: Record<string, number>; userId?: string },
+  ): Promise<SpindleBatchResult[]> {
+    assertMutationAllowed("spindle.batch()");
+    const requestId = crypto.randomUUID();
+    const { userId, ...batchOptions } = options || {};
+    const result = await request({ type: "spindle_batch", requestId, ops, options: batchOptions, userId });
+    return result as SpindleBatchResult[];
   },
 
   registerTool(tool): void {
@@ -1128,7 +1666,46 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "unregister_tool", name });
   },
 
+  providers: {
+    register(input) {
+      assertMutationAllowed("spindle.providers.register()");
+      post({
+        type: "provider_register",
+        phase: "register",
+        kind: input.kind,
+        id: input.id,
+        description: input.description,
+        broker: input.broker,
+        generation: input.generation,
+        revision: input.revision,
+      });
+    },
+    unregister(kind, id) {
+      assertMutationAllowed("spindle.providers.unregister()");
+      post({ type: "provider_unregister", phase: "unregister", kind, id });
+    },
+    handle(kind, id, handler) {
+      const key = `${kind}\0${id}`;
+      providerHandlers.set(key, handler);
+      return () => {
+        if (providerHandlers.get(key) === handler) providerHandlers.delete(key);
+      };
+    },
+    onChanged(handler) {
+      providerChangedHandlers.add(handler);
+      return () => {
+        providerChangedHandlers.delete(handler);
+      };
+    },
+  },
+
   generate: {
+    assemble(input: BoundAssembleRequestDTO): Promise<BoundAssemblyOutcomeDTO> {
+      return requestBoundGeneration<BoundAssemblyOutcomeDTO>("generate_assemble", input);
+    },
+    quietTracked(input: QuietTrackedRequestDTO): Promise<QuietTrackedResultDTO> {
+      return requestBoundGeneration<QuietTrackedResultDTO>("generate_quiet_tracked", input);
+    },
     async raw(input) {
       return requestGeneration({ ...input, type: "raw" });
     },
@@ -1744,6 +2321,11 @@ const spindleApi: RuntimeSpindleAPI = {
       const result = await request({ type: "connections_get", requestId, connectionId, userId });
       return result as ConnectionProfileDTO | null;
     },
+    async resolveDispatch(connectionId: string): Promise<ConnectionDispatchDescriptorDTO | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "connections_resolve_dispatch", requestId, connectionId });
+      return result as ConnectionDispatchDescriptorDTO | null;
+    },
   },
 
   uploads: {
@@ -1752,6 +2334,22 @@ const spindleApi: RuntimeSpindleAPI = {
       return (await request({ type: "uploads_get", requestId, uploadId, userId })) as
         | { fileName: string; size: number; data: Uint8Array }
         | null;
+    },
+    async readChunk(uploadId: string, offset: number, userId?: string): Promise<{
+      fileName: string;
+      size: number;
+      offset: number;
+      data: Uint8Array;
+      eof: boolean;
+    } | null> {
+      const requestId = crypto.randomUUID();
+      return (await request({ type: "uploads_read_chunk", requestId, uploadId, offset, userId })) as {
+        fileName: string;
+        size: number;
+        offset: number;
+        data: Uint8Array;
+        eof: boolean;
+      } | null;
     },
     async delete(uploadId: string, userId?: string): Promise<boolean> {
       const requestId = crypto.randomUUID();
@@ -1771,6 +2369,21 @@ const spindleApi: RuntimeSpindleAPI = {
         userId: options?.userId,
       });
       return result as TokenCountResult;
+    },
+    async countTextBatch(
+      texts: string[],
+      options?: { model?: string; modelSource?: TokenModelSource; userId?: string }
+    ): Promise<TokenCountBatchResult[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "tokens_count_text_batch",
+        requestId,
+        texts,
+        model: options?.model,
+        modelSource: options?.modelSource,
+        userId: options?.userId,
+      });
+      return result as TokenCountBatchResult[];
     },
     async countMessages(
       messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
@@ -1805,6 +2418,13 @@ const spindleApi: RuntimeSpindleAPI = {
     async generate(input: any): Promise<any> {
       const requestId = crypto.randomUUID();
       return request({ type: "image_gen_generate", requestId, input });
+    },
+    async generateNative(input: any): Promise<any> {
+      const requestId = crypto.randomUUID();
+      return request({ type: "image_gen_generate_native", requestId, input });
+    },
+    generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void> {
+      return requestImageGenStream(input);
     },
     async getProviders(userId?: string): Promise<any[]> {
       const requestId = crypto.randomUUID();
@@ -1856,6 +2476,17 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "color_extract", requestId, imageId, userId });
       return result;
+    },
+    async deriveOverlay(palette: {
+      palette: Array<{ r: number; g: number; b: number }>;
+      ui: {
+        dark: { surface: { r: number; g: number; b: number }; text: { r: number; g: number; b: number }; mutedText: { r: number; g: number; b: number }; accent: { r: number; g: number; b: number }; accentText: { r: number; g: number; b: number } };
+        light: { surface: { r: number; g: number; b: number }; text: { r: number; g: number; b: number }; mutedText: { r: number; g: number; b: number }; accent: { r: number; g: number; b: number }; accentText: { r: number; g: number; b: number } };
+      };
+    }): Promise<any> {
+      // Pure computation: derive the character-aware overlay locally without a
+      // host round-trip. This keeps palette → overlay fast for extensions.
+      return deriveCharacterOverlay(palette.palette, palette.ui);
     },
     async generateVariables(config: {
       accent: { h: number; s: number; l: number };
@@ -1947,12 +2578,14 @@ const spindleApi: RuntimeSpindleAPI = {
       userId?: string,
     ): Promise<ImageDTO> {
       assertMutationAllowed("spindle.images.uploadFromDataUrl()");
-      const options = typeof originalFilenameOrOptions === "string" || typeof originalFilenameOrOptions === "undefined"
+      const options = (typeof originalFilenameOrOptions === "string" || typeof originalFilenameOrOptions === "undefined"
         ? {
             originalFilename: originalFilenameOrOptions,
             userId,
           }
-        : originalFilenameOrOptions;
+        : originalFilenameOrOptions) as ImageUploadFromDataUrlOptionsDTO & {
+          skip_thumbnail_processing?: boolean;
+        };
       const requestId = crypto.randomUUID();
       const result = await request({
         type: "images_upload_from_data_url",
@@ -1961,6 +2594,7 @@ const spindleApi: RuntimeSpindleAPI = {
         originalFilename: options?.originalFilename,
         owner_character_id: options?.owner_character_id,
         owner_chat_id: options?.owner_chat_id,
+        skip_thumbnail_processing: options?.skip_thumbnail_processing,
         userId: options?.userId,
       });
       return result as ImageDTO;
@@ -1970,6 +2604,17 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "images_delete", requestId, imageId, userId });
       return result as boolean;
+    },
+    async deleteMany(imageIds: string[], options?: { userId?: string }): Promise<number> {
+      assertMutationAllowed("spindle.images.deleteMany()");
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "images_delete_many",
+        requestId,
+        imageIds,
+        userId: options?.userId,
+      });
+      return result as number;
     },
   },
 
@@ -2304,7 +2949,7 @@ const spindleApi: RuntimeSpindleAPI = {
       return result as boolean;
     },
     entries: {
-      async list(worldBookId: string, options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: WorldBookEntryDTO[]; total: number }> {
+      async list(worldBookId: string, options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: RuntimeWorldBookEntryDTO[]; total: number }> {
         const requestId = crypto.randomUUID();
         const result = await request({
           type: "world_book_entries_list",
@@ -2314,24 +2959,43 @@ const spindleApi: RuntimeSpindleAPI = {
           offset: options?.offset,
           userId: options?.userId,
         });
-        return result as { data: WorldBookEntryDTO[]; total: number };
+        return result as { data: RuntimeWorldBookEntryDTO[]; total: number };
       },
-      async get(entryId: string, userId?: string): Promise<WorldBookEntryDTO | null> {
+      async get(entryId: string, userId?: string): Promise<RuntimeWorldBookEntryDTO | null> {
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_get", requestId, entryId, userId });
-        return result as WorldBookEntryDTO | null;
+        return result as RuntimeWorldBookEntryDTO | null;
       },
-      async create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+      async create(worldBookId: string, input: WorldBookEntryCreateDTO, userId?: string): Promise<RuntimeWorldBookEntryDTO> {
         assertMutationAllowed("spindle.world_books.entries.create()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_create", requestId, worldBookId, input, userId });
-        return result as WorldBookEntryDTO;
+        return result as RuntimeWorldBookEntryDTO;
       },
-      async update(entryId: string, input: WorldBookEntryUpdateDTO, userId?: string): Promise<WorldBookEntryDTO> {
+      async update(entryId: string, input: RuntimeWorldBookEntryUpdateDTO, userId?: string): Promise<RuntimeWorldBookEntryDTO> {
         assertMutationAllowed("spindle.world_books.entries.update()");
         const requestId = crypto.randomUUID();
         const result = await request({ type: "world_book_entries_update", requestId, entryId, input, userId });
-        return result as WorldBookEntryDTO;
+        return result as RuntimeWorldBookEntryDTO;
+      },
+      async setExtension(
+        entryId: string,
+        namespace: string,
+        value: SpindleBatchJsonValue | null,
+        userId?: string,
+      ): Promise<SpindleBatchJsonValue> {
+        assertMutationAllowed("spindle.world_books.entries.setExtension()");
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "world_books_entry_set_extension",
+          requestId,
+          entity: "world_book_entry",
+          entityId: entryId,
+          namespace,
+          value,
+          userId,
+        });
+        return result as SpindleBatchJsonValue;
       },
       async delete(entryId: string, userId?: string): Promise<boolean> {
         assertMutationAllowed("spindle.world_books.entries.delete()");
@@ -2372,6 +3036,29 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "world_books_deactivate_global", requestId, worldBookId, userId });
       return result as string[];
+    },
+  },
+
+  entityExtensions: {
+    async setNamespace(
+      entity: RuntimeEntityExtensionEntity,
+      entityId: string,
+      namespace: string,
+      value: SpindleBatchJsonValue | null,
+      userId?: string,
+    ): Promise<SpindleBatchJsonValue> {
+      assertMutationAllowed("spindle.entityExtensions.setNamespace()");
+      const requestId = crypto.randomUUID();
+      const result = await request({
+        type: "world_books_entry_set_extension",
+        requestId,
+        entity,
+        entityId,
+        namespace,
+        value,
+        userId,
+      });
+      return result as SpindleBatchJsonValue;
     },
   },
 
@@ -3028,6 +3715,72 @@ const spindleApi: RuntimeSpindleAPI = {
     },
   },
 
+  dlc: {
+    async getCatalog(options?: { userId?: string }): Promise<LumiaDlcCatalog> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "dlc_get_catalog", requestId, userId: options?.userId });
+      return result as LumiaDlcCatalog;
+    },
+  },
+
+  mcp: {
+    servers: {
+      async list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: SpindleMcpServerDTO[]; total: number }> {
+        const requestId = crypto.randomUUID();
+        const result = await request({
+          type: "mcp_servers_list",
+          requestId,
+          limit: options?.limit,
+          offset: options?.offset,
+          userId: options?.userId,
+        });
+        return result as { data: SpindleMcpServerDTO[]; total: number };
+      },
+      async get(serverId: string, userId?: string): Promise<SpindleMcpServerDTO | null> {
+        const requestId = crypto.randomUUID();
+        return await request({ type: "mcp_servers_get", requestId, serverId, userId }) as SpindleMcpServerDTO | null;
+      },
+      async create(input: SpindleMcpServerCreateDTO, userId?: string): Promise<SpindleMcpServerDTO> {
+        assertMutationAllowed("spindle.mcp.servers.create()");
+        const requestId = crypto.randomUUID();
+        return await request({ type: "mcp_servers_create", requestId, input, userId }) as SpindleMcpServerDTO;
+      },
+      async connect(serverId: string, userId?: string): Promise<McpServerStatus> {
+        assertMutationAllowed("spindle.mcp.servers.connect()");
+        const requestId = crypto.randomUUID();
+        return await request({ type: "mcp_servers_connect", requestId, serverId, userId }) as McpServerStatus;
+      },
+      async status(serverId: string, userId?: string): Promise<McpServerStatus> {
+        const requestId = crypto.randomUUID();
+        return await request({ type: "mcp_servers_status", requestId, serverId, userId }) as McpServerStatus;
+      },
+    },
+    tools: {
+      async list(serverId: string, userId?: string): Promise<McpDiscoveredTool[]> {
+        const requestId = crypto.randomUUID();
+        return await request({ type: "mcp_tools_list", requestId, serverId, userId }) as McpDiscoveredTool[];
+      },
+      async call(
+        serverId: string,
+        toolName: string,
+        args: Record<string, unknown> = {},
+        options?: SpindleMcpToolCallOptionsDTO,
+      ): Promise<string> {
+        assertMutationAllowed("spindle.mcp.tools.call()");
+        const requestId = crypto.randomUUID();
+        return await request({
+          type: "mcp_tools_call",
+          requestId,
+          serverId,
+          toolName,
+          args,
+          timeoutMs: options?.timeoutMs,
+          userId: options?.userId,
+        }) as string;
+      },
+    },
+  },
+
   permissions: {
     async getGranted(): Promise<string[]> {
       const scope = sharedRpcPermissionScope.getStore();
@@ -3174,6 +3927,10 @@ const spindleApi: RuntimeSpindleAPI = {
       } as any);
       return result as { text: string; cancelled: boolean };
     },
+    async close(_editorRequestId: string, _userId?: string): Promise<void> {
+      // The current host transport only exposes user-settled editor results;
+      // unknown close identities are intentionally accepted as no-ops.
+    },
   },
 
   macros: {
@@ -3248,10 +4005,21 @@ const spindleApi: RuntimeSpindleAPI = {
     });
   },
 
-  registerContextHandler(handler, priority?): void {
+  contracts: Object.freeze({
+    preAssemblyGenerationContext: 1,
+    worldInfoActivationCapture: 1,
+    worldInfoRuntimePlacement: 1,
+    worldInfoOutputOrdering: 1,
+  }),
+
+  registerContextHandler(
+    handler: (context: unknown, signal?: AbortSignal) => Promise<unknown>,
+    priority?: number,
+    opts?: { timeoutMs?: number; required?: boolean },
+  ): void {
     assertMutationAllowed("spindle.registerContextHandler()");
     contextHandlerFn = handler;
-    post({ type: "register_context_handler", priority });
+    post({ type: "register_context_handler", priority, timeoutMs: opts?.timeoutMs, required: opts?.required });
   },
 
   registerMessageContentProcessor(handler, priority?): void {
@@ -3260,10 +4028,10 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_message_content_processor", priority });
   },
 
-  registerMacroInterceptor(handler, priority?): void {
+  registerMacroInterceptor(handler, priority?, opts?: { handlesOwnedSources?: boolean }): void {
     assertMutationAllowed("spindle.registerMacroInterceptor()");
     macroInterceptorFn = handler as (ctx: unknown) => Promise<unknown>;
-    post({ type: "register_macro_interceptor", priority });
+    post({ type: "register_macro_interceptor", priority, handlesOwnedSources: opts?.handlesOwnedSources });
   },
 
   registerWorldInfoInterceptor(handler, priority?): void {
@@ -3272,11 +4040,11 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_world_info_interceptor", priority });
   },
 
-  sendToFrontend(payload: unknown, userId?: string): void {
-    post({ type: "frontend_message", payload, userId });
+  sendToFrontend(payload: unknown, userId?: string, options?: { frontendSessionId?: string }): void {
+    post({ type: "frontend_message", payload, userId, frontendSessionId: options?.frontendSessionId });
   },
 
-  onFrontendMessage(handler: (payload: unknown, userId: string) => void): () => void {
+  onFrontendMessage(handler: (payload: unknown, userId: string, frontendSessionId?: string) => void): () => void {
     frontendMessageHandlers.add(handler);
     return () => {
       frontendMessageHandlers.delete(handler);
@@ -3630,6 +4398,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
     case "init": {
       manifest = msg.manifest;
       storagePath = msg.storagePath;
+      hostDescriptor = msg.host;
 
       // Expose the API globally
       (globalThis as any).spindle = spindleApi;
@@ -3730,9 +4499,14 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
     }
 
     case "intercept_request": {
-      if (interceptHandler) {
+      if (interceptHandler && interceptRegistrationId === msg.registrationId) {
+        const abortController = new AbortController();
+        interceptorAbortControllers.set(msg.requestId, abortController);
         try {
-          const result = await interceptHandler(msg.messages, msg.context);
+          const result = await interceptHandler(msg.messages, {
+            ...msg.context,
+            signal: abortController.signal,
+          });
           // Normalize: handler may return LlmMessageDTO[] or { messages, parameters? }
           const normalized: InterceptorResultDTO = Array.isArray(result)
             ? { messages: result }
@@ -3740,23 +4514,37 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
           post({
             type: "intercept_result",
             requestId: msg.requestId,
+            registrationId: msg.registrationId,
             messages: normalized.messages,
             ...(normalized.parameters ? { parameters: normalized.parameters } : {}),
             ...(normalized.breakdown ? { breakdown: normalized.breakdown } : {}),
+            ...(normalized.deferredGuidance ? { deferredGuidance: normalized.deferredGuidance } : {}),
+            ...(normalized.finalResponse ? { finalResponse: normalized.finalResponse } : {}),
           });
         } catch (err: any) {
           post({
             type: "log",
             level: "error",
-            message: `Interceptor error: ${err.message}`,
+            message: `Interceptor error: ${err instanceof Error ? err.message : String(err)}`,
           });
           // Return original messages on error
           post({
             type: "intercept_result",
             requestId: msg.requestId,
+            registrationId: msg.registrationId,
             messages: msg.messages,
+            error: err instanceof Error ? err.message : String(err),
           });
+        } finally {
+          interceptorAbortControllers.delete(msg.requestId);
         }
+      }
+      break;
+    }
+
+    case "intercept_abort": {
+      if (interceptRegistrationId === msg.registrationId) {
+        interceptorAbortControllers.get(msg.requestId)?.abort(msg.reason);
       }
       break;
     }
@@ -3782,7 +4570,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
         };
         let result: string | undefined;
         for (const handler of handlers) {
-          const val = await Promise.resolve(handler(payload));
+          const val = await Promise.resolve(handler(payload, msg.userId));
           if (val !== undefined && val !== null && result === undefined) {
             result = String(val);
           }
@@ -3802,10 +4590,16 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       break;
     }
 
+    case 'context_handler_abort': {
+      contextAbortControllers.get(msg.requestId)?.abort(new Error(msg.reason));
+      break;
+    }
     case "context_handler_request": {
       if (contextHandlerFn) {
+        const controller = new AbortController();
+        contextAbortControllers.set(msg.requestId, controller);
         try {
-          const result = await contextHandlerFn(msg.context);
+          const result = await contextHandlerFn(msg.context, controller.signal);
           post({
             type: "context_handler_result",
             requestId: msg.requestId,
@@ -3815,14 +4609,21 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
           post({
             type: "log",
             level: "error",
-            message: `Context handler error: ${err.message}`,
+            message: `Context handler error: ${err instanceof Error ? err.message : String(err)}`,
           });
           post({
             type: "context_handler_result",
             requestId: msg.requestId,
             context: msg.context,
+            error: err instanceof Error ? err.message : String(err),
           });
-        }
+        } finally { contextAbortControllers.delete(msg.requestId); }
+      } else {
+        post({
+          type: "context_handler_result",
+          requestId: msg.requestId,
+          context: msg.context,
+        });
       }
       break;
     }
@@ -3920,6 +4721,23 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       break;
     }
 
+    case "image_gen_stream_chunk": {
+      streamingImageGenerations.get(msg.requestId)?.push(msg.event);
+      break;
+    }
+
+    case "image_gen_stream_error": {
+      const stream = streamingImageGenerations.get(msg.requestId);
+      if (stream) {
+        stream.fail(
+          msg.error.startsWith("AbortError:")
+            ? makeAbortError(msg.error.slice("AbortError:".length).trim())
+            : new Error(msg.error),
+        );
+      }
+      break;
+    }
+
     case "response": {
       const pending = pendingResponses.get(msg.requestId);
       if (pending) {
@@ -3927,10 +4745,11 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
         if (msg.error) {
           // Convert host-side abort errors back into a real DOMException so
           // extensions can do `err.name === "AbortError"` the usual way.
-          if (msg.error.startsWith("AbortError:")) {
-            pending.reject(makeAbortError(msg.error.slice("AbortError:".length).trim()));
+          const responseError = msg.error
+          if (typeof responseError === "string" && responseError.startsWith("AbortError:")) {
+            pending.reject(makeAbortError(responseError.slice("AbortError:".length).trim()))
           } else {
-            pending.reject(new Error(msg.error));
+            pending.reject(deserializeWorkerResponseError(responseError))
           }
         } else {
           pending.resolve(msg.result);
@@ -4067,7 +4886,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
 
       for (const handler of frontendMessageHandlers) {
         try {
-          handler(msg.payload, msg.userId)
+          handler(msg.payload, msg.userId, 'frontendSessionId' in msg ? msg.frontendSessionId : undefined)
         } catch (err: any) {
           post({
             type: "log",
@@ -4175,6 +4994,74 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
             level: "error",
             message: `Command handler error (${msg.commandId}): ${err?.message ?? err}`,
           } as any);
+        }
+      }
+      break;
+    }
+
+    case "provider_invoke": {
+      const handlerKey = `${msg.key.kind}\0${msg.key.id}`;
+      const handler = providerHandlers.get(handlerKey);
+      const abortController = new AbortController();
+      providerAbortControllers.set(msg.correlationId, abortController);
+      if (!handler) {
+        post({
+          type: "provider_result",
+          phase: "result",
+          correlationId: msg.correlationId,
+          round: msg.round,
+          error: `No provider handler registered for ${msg.key.kind}/${msg.key.id}`,
+        });
+        providerAbortControllers.delete(msg.correlationId);
+        break;
+      }
+      try {
+        const result = await Promise.resolve(handler({
+          correlationId: msg.correlationId,
+          round: msg.round,
+          key: msg.key,
+          request: msg.request,
+          signal: abortController.signal,
+        }));
+        if (abortController.signal.aborted) break;
+        post({
+          type: "provider_result",
+          phase: "result",
+          correlationId: msg.correlationId,
+          round: msg.round,
+          result,
+        });
+      } catch (err: any) {
+        if (abortController.signal.aborted) break;
+        post({
+          type: "provider_result",
+          phase: "result",
+          correlationId: msg.correlationId,
+          round: msg.round,
+          error: err?.message || "Provider invocation failed",
+        });
+      } finally {
+        providerAbortControllers.delete(msg.correlationId);
+      }
+      break;
+    }
+
+    case "provider_abort": {
+      providerAbortControllers.get(msg.correlationId)?.abort(msg.reason);
+      providerAbortControllers.delete(msg.correlationId);
+      break;
+    }
+
+    case "provider_changed": {
+      for (const handler of providerChangedHandlers) {
+        try {
+          handler({ action: msg.action, key: msg.key });
+        } catch (err: any) {
+          post({
+            type: "log",
+            level: "error",
+            message: `Provider changed handler error: ${err.message}`,
+          });
         }
       }
       break;

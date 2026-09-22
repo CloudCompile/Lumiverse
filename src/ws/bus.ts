@@ -1,10 +1,25 @@
 import type { ServerWebSocket } from "bun";
-import { EventType, type EventMessage } from "./events";
+import { advanceRuntimeStateRevision, runtimeMutationId } from '../spindle/runtime-state-revision';
+import {
+  EventType,
+  type EventMessage,
+  type ProviderRegistryAction,
+  type ProviderRegistryChangeAction,
+  type ProviderRegistryChangedPayload,
+} from "./events";
 
 type Listener = (event: EventMessage) => void;
 
+export type BufferedEvent = { event: EventType; payload: any; userId?: string; options?: { topic?: string } };
+export type BufferedEventRun<T> = { value: T; events: readonly BufferedEvent[] };
+
 const CLIENT_SWEEP_INTERVAL_MS = 60_000;
 const CLIENT_TIMEOUT_MS = 120_000;
+// A suspended PWA cannot reliably run JavaScript heartbeats. Bun's native
+// WebSocket keepalive still detects a broken transport, while this longer lease
+// prevents our application-level sweep from evicting a client merely because it
+// was backgrounded. The entry is still removed immediately on a real close.
+const HIDDEN_CLIENT_TIMEOUT_MS = 30 * 60_000;
 
 function getUserTopic(userId: string): string {
   return `user:${userId}`;
@@ -31,8 +46,11 @@ class EventBus {
   private clientToUser = new Map<ServerWebSocket<unknown>, string>();
   private sessionToClient = new Map<string, ServerWebSocket<unknown>>();
   private clientToSession = new Map<ServerWebSocket<unknown>, string>();
+  private desktopNotificationClient = new Map<ServerWebSocket<unknown>, { userId: string; destinationId: string }>();
+  private desktopNotificationClientsByUser = new Map<string, Map<string, ServerWebSocket<unknown>>>();
   private clientToFocusedChat = new Map<ServerWebSocket<unknown>, string>();
   private clientLastActivity = new Map<ServerWebSocket<unknown>, number>();
+  private clientVisibility = new Map<ServerWebSocket<unknown>, boolean>();
   // ── Multiplayer rooms ──
   // A socket may subscribe to one or more room topics. Peer (room-token)
   // sockets are tracked HERE but NOT in clientToUser — they never receive
@@ -47,6 +65,7 @@ class EventBus {
   private listeners = new Map<EventType, Set<Listener>>();
   private pendingListenerDispatches: Array<() => void> = [];
   private listenerDispatchTimer: ReturnType<typeof setTimeout> | null = null;
+  private bufferedEvents: BufferedEvent[] | null = null;
   /** Per-user visibility: true if at least one session reports visible. */
   private userVisibility = new Map<string, Map<string, boolean>>();
   private userAllHiddenSince = new Map<string, number>();
@@ -55,6 +74,21 @@ class EventBus {
   /** Store the Bun server reference so we can use native publish(). */
   setServer(server: import("bun").Server<unknown>): void {
     this.server = server;
+  }
+
+  withBufferedEvents<T>(callback: () => T): BufferedEventRun<T> {
+    const parent = this.bufferedEvents;
+    const buffer = parent ?? [];
+    this.bufferedEvents = buffer;
+    try {
+      const value = callback();
+      return { value, events: parent ? [] : buffer.slice() };
+    } catch (error) {
+      if (!parent) buffer.length = 0;
+      throw error;
+    } finally {
+      this.bufferedEvents = parent;
+    }
   }
 
   addClient(ws: ServerWebSocket<unknown>, userId: string, sessionId?: string): void {
@@ -81,6 +115,7 @@ class EventBus {
 
     this.clientToUser.set(ws, userId);
     this.clientLastActivity.set(ws, Date.now());
+    this.clientVisibility.set(ws, true);
 
     // Subscribe to per-user topic and system broadcast topic.
     // Bun's native pub/sub handles delivery in Zig — no JS iteration needed.
@@ -94,10 +129,75 @@ class EventBus {
     this.startSweep();
   }
 
+  /** Register a credential-authenticated socket that can only receive native notifications. */
+  addDesktopNotificationClient(
+    ws: ServerWebSocket<unknown>,
+    userId: string,
+    destinationId: string,
+  ): void {
+    if ((ws as { readyState?: number }).readyState !== 1) return;
+
+    let destinations = this.desktopNotificationClientsByUser.get(userId);
+    if (!destinations) {
+      destinations = new Map();
+      this.desktopNotificationClientsByUser.set(userId, destinations);
+    }
+    const previous = destinations.get(destinationId);
+    if (previous && previous !== ws) {
+      this.removeClient(previous);
+      try { previous.close(1000, "Desktop notification destination reconnected"); } catch {}
+    }
+
+    destinations.set(destinationId, ws);
+    this.desktopNotificationClient.set(ws, { userId, destinationId });
+    this.clientLastActivity.set(ws, Date.now());
+    this.startSweep();
+  }
+
+  /** Deliver directly to connected desktop destinations without joining the user event topic. */
+  sendDesktopNotification(
+    userId: string,
+    destinationIds: readonly string[],
+    payload: unknown,
+  ): number {
+    const destinations = this.desktopNotificationClientsByUser.get(userId);
+    if (!destinations || destinationIds.length === 0) return 0;
+    const allowed = new Set(destinationIds);
+    const message = JSON.stringify({
+      event: "DESKTOP_NOTIFICATION",
+      payload,
+      timestamp: Date.now(),
+    });
+    let sent = 0;
+    for (const [destinationId, ws] of destinations) {
+      if (!allowed.has(destinationId)) continue;
+      if ((ws as { readyState?: number }).readyState !== 1) {
+        this.removeClient(ws);
+        continue;
+      }
+      try {
+        ws.send(message);
+        sent++;
+      } catch {
+        this.removeClient(ws);
+      }
+    }
+    return sent;
+  }
+
+  /** Terminate the live notification session for a rotated or revoked destination. */
+  disconnectDesktopNotificationDestination(userId: string, destinationId: string): void {
+    const ws = this.desktopNotificationClientsByUser.get(userId)?.get(destinationId);
+    if (!ws) return;
+    this.removeClient(ws);
+    try { ws.close(1008, "Desktop notification destination revoked"); } catch {}
+  }
+
   removeClient(ws: ServerWebSocket<unknown>): void {
     const userId = this.clientToUser.get(ws);
     const sessionId = this.clientToSession.get(ws);
     const focusedChatId = this.clientToFocusedChat.get(ws);
+    const desktopNotification = this.desktopNotificationClient.get(ws);
     if (userId) {
       try {
         ws.unsubscribe(getUserTopic(userId));
@@ -119,6 +219,17 @@ class EventBus {
         this.sessionToClient.delete(sessionId);
       }
       this.clientToSession.delete(ws);
+    }
+
+    if (desktopNotification) {
+      const destinations = this.desktopNotificationClientsByUser.get(desktopNotification.userId);
+      if (destinations?.get(desktopNotification.destinationId) === ws) {
+        destinations.delete(desktopNotification.destinationId);
+        if (destinations.size === 0) {
+          this.desktopNotificationClientsByUser.delete(desktopNotification.userId);
+        }
+      }
+      this.desktopNotificationClient.delete(ws);
     }
 
     // Multiplayer room cleanup (runs for peer sockets that have no userId too).
@@ -146,11 +257,16 @@ class EventBus {
     // Peer-only sockets are tracked for the sweep but never had a userId, so
     // the userId block above won't have cleared their activity entry.
     if (!userId) this.clientLastActivity.delete(ws);
+    this.clientVisibility.delete(ws);
   }
 
   /** Refresh activity timestamp for a known socket. Called on any message. */
   touchClient(ws: ServerWebSocket<unknown>): void {
-    if (this.clientToUser.has(ws) || this.clientToRooms.has(ws)) {
+    if (
+      this.clientToUser.has(ws)
+      || this.clientToRooms.has(ws)
+      || this.desktopNotificationClient.has(ws)
+    ) {
       this.clientLastActivity.set(ws, Date.now());
     }
   }
@@ -317,7 +433,14 @@ class EventBus {
     const now = Date.now();
     let closed = 0;
     for (const [ws, lastActivity] of this.clientLastActivity) {
-      if (now - lastActivity > CLIENT_TIMEOUT_MS) {
+      // Hidden browser/PWA sessions need a long lease because their JavaScript
+      // timers can be suspended. Desktop notification sockets now heartbeat
+      // from Tauri's native runtime and can use the normal, fast stale-client
+      // timeout even while every WebView is hidden.
+      const timeoutMs = this.clientVisibility.get(ws) === false
+        ? HIDDEN_CLIENT_TIMEOUT_MS
+        : CLIENT_TIMEOUT_MS;
+      if (now - lastActivity > timeoutMs) {
         try {
           ws.close(1001, "Timeout");
         } catch {
@@ -361,11 +484,17 @@ class EventBus {
     userId?: string,
     options?: { topic?: string },
   ): void {
+    if (this.bufferedEvents) {
+      this.bufferedEvents.push({ event, payload, userId, options });
+      return;
+    }
     const message: EventMessage = {
       event,
       payload,
       timestamp: Date.now(),
       userId,
+      stateRevision: advanceRuntimeStateRevision(event, userId),
+      runtimeMutationId: runtimeMutationId(userId),
     };
 
     const json = JSON.stringify(message);
@@ -404,6 +533,8 @@ class EventBus {
       this.userVisibility.set(userId, new Map());
     }
     this.userVisibility.get(userId)!.set(sessionId, visible);
+    const client = this.sessionToClient.get(sessionId);
+    if (client) this.clientVisibility.set(client, visible);
     this.updateUserVisibilityState(userId);
   }
 
@@ -491,3 +622,71 @@ class EventBus {
 }
 
 export const eventBus = new EventBus();
+
+export interface EmitProviderRegistryChangedArgs {
+  userId: string;
+  scope: string;
+  action: ProviderRegistryChangeAction;
+  generation: number;
+  revision: number;
+  payload: unknown;
+}
+
+export interface EmitProviderRegistrySnapshotArgs {
+  userId: string;
+  scope: string;
+  generation: number;
+  revision: number;
+  payload: unknown;
+}
+
+function isScopedProviderRecipient(userId: unknown, scope: unknown): userId is string {
+  return typeof userId === "string" && userId.trim().length > 0
+    && typeof scope === "string" && scope.trim().length > 0;
+}
+
+function emitScopedProviderRegistryEvent(
+  action: ProviderRegistryAction,
+  args: {
+    userId: string;
+    scope: string;
+    generation: number;
+    revision: number;
+    payload: unknown;
+  },
+): void {
+  if (!isScopedProviderRecipient(args.userId, args.scope)) return;
+  if (!Number.isFinite(args.generation) || !Number.isFinite(args.revision)) return;
+
+  const userId = args.userId.trim();
+  const payload: ProviderRegistryChangedPayload = {
+    userId,
+    scope: args.scope.trim(),
+    action,
+    generation: args.generation,
+    revision: args.revision,
+    payload: args.payload,
+  };
+
+  // Explicit user topic — never the implicit system fallback in emit().
+  eventBus.emit(EventType.SPINDLE_PROVIDER_CHANGED, payload, userId, {
+    topic: getUserTopic(userId),
+  });
+}
+
+/**
+ * Lane 3 registry hook. Recipient-scoped to `user:${userId}`.
+ * Never broadcasts provider registration changes on the system topic.
+ */
+export function emitProviderRegistryChanged(args: EmitProviderRegistryChangedArgs): void {
+  if (args.action !== "add" && args.action !== "remove" && args.action !== "change") return;
+  emitScopedProviderRegistryEvent(args.action, args);
+}
+
+/**
+ * Lane 3 snapshot hook for reconnect resync. Same recipient scoping as
+ * {@link emitProviderRegistryChanged}.
+ */
+export function emitProviderRegistrySnapshot(args: EmitProviderRegistrySnapshotArgs): void {
+  emitScopedProviderRegistryEvent("snapshot", args);
+}

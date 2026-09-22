@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type RefObject } from 'react'
 import { imagesApi } from '@/api/images'
 import { getPreferredWallpaperVideoCodec } from '@/lib/wallpaperVideoCodec'
-import { primeWallpaperVideo, useWallpaperVideoSource } from '@/lib/wallpaperVideoCache'
 import type { WallpaperRef, WallpaperSettings } from '@/types/store'
 import styles from './WallpaperLayer.module.css'
 
@@ -22,6 +21,7 @@ interface WallpaperLayerProps {
 export default function WallpaperLayer({ wallpaper, settings, hidden = false, fixed = false, fadeInOnMount = false, videoRef, onVisualReady }: WallpaperLayerProps) {
   const [fadeReady, setFadeReady] = useState(!fadeInOnMount)
   const revealRef = useRef(() => setFadeReady(true))
+  const onVisualReadyRef = useRef(onVisualReady)
   const ownedVideoRef = useRef<HTMLVideoElement>(null)
   const activeVideoRef = videoRef ?? ownedVideoRef
 
@@ -30,7 +30,10 @@ export default function WallpaperLayer({ wallpaper, settings, hidden = false, fi
     ? imagesApi.url(wallpaper.image_id, { codec: getPreferredWallpaperVideoCodec() })
     : null
   const wallpaperKey = wallpaper ? `${wallpaper.type}:${wallpaper.image_id}` : 'none'
-  const { src: cachedVideoSrc, fromCache } = useWallpaperVideoSource(rawVideoUrl)
+
+  useEffect(() => {
+    onVisualReadyRef.current = onVisualReady
+  }, [onVisualReady])
 
   useEffect(() => {
     if (!fadeInOnMount || !wallpaper?.image_id) {
@@ -52,7 +55,7 @@ export default function WallpaperLayer({ wallpaper, settings, hidden = false, fi
       if (raf) window.cancelAnimationFrame(raf)
       raf = window.requestAnimationFrame(() => {
         setFadeReady(true)
-        onVisualReady?.(wallpaperKey)
+        onVisualReadyRef.current?.(wallpaperKey)
       })
     }
     revealRef.current = reveal
@@ -69,7 +72,7 @@ export default function WallpaperLayer({ wallpaper, settings, hidden = false, fi
       window.clearTimeout(fallback)
       if (raf) window.cancelAnimationFrame(raf)
     }
-  }, [fadeInOnMount, onVisualReady, rawImageUrl, wallpaper?.image_id, wallpaper?.type, wallpaperKey])
+  }, [fadeInOnMount, rawImageUrl, wallpaper?.image_id, wallpaper?.type, wallpaperKey])
 
   useEffect(() => {
     if (wallpaper?.type !== 'video') return
@@ -111,23 +114,16 @@ export default function WallpaperLayer({ wallpaper, settings, hidden = false, fi
         ref={activeVideoRef}
         key={wallpaper.image_id}
         className={videoClassName}
-        src={cachedVideoSrc ?? undefined}
+        src={rawVideoUrl ?? undefined}
         crossOrigin="use-credentials"
         autoPlay
         muted
         loop
         playsInline
-        preload="auto"
+        preload="metadata"
         onLoadedData={
           fadeInOnMount
-            ? () => {
-              revealRef.current()
-              if (!fromCache && rawVideoUrl) {
-                window.setTimeout(() => {
-                  void primeWallpaperVideo(rawVideoUrl).catch(() => {})
-                }, 1500)
-              }
-            }
+            ? () => revealRef.current()
             : undefined
         }
         onError={fadeInOnMount ? () => revealRef.current() : undefined}

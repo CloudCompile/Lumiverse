@@ -129,4 +129,16 @@ describe("reasoning delimiter helpers", () => {
       },
     ]);
   });
+
+  test("preserves stop details after flushing buffered text", async () => {
+    const details = { type: "refusal", category: null, explanation: "Declined." };
+    async function* source() {
+      yield { token: "Partial<thi" };
+      yield { token: "", finish_reason: "refusal", stop_details: details, stop_sequence: null };
+    }
+    const chunks = [];
+    for await (const chunk of wrapDelimitedReasoningStream(source(), { prefix: "<think>", suffix: "</think>" }, true)) chunks.push(chunk);
+    expect(chunks.map(c => c.token).join("")).toBe("Partial<thi");
+    expect(chunks.at(-1)).toMatchObject({ finish_reason: "refusal", stop_details: details, stop_sequence: null });
+  });
 });

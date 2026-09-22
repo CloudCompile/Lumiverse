@@ -225,7 +225,11 @@ export function shouldUseStreamingEndpoint(profile: StreamingPreference | null |
   if (!profile) return false
   const explicit = profile.default_parameters?.use_streaming_endpoint
   if (typeof explicit === 'boolean') return explicit
-  return isQwenTtsProvider(profile.provider)
+  return (
+    isQwenTtsProvider(profile.provider) ||
+    profile.provider === 'google_vertex_tts' ||
+    profile.provider === 'google_tts'
+  )
 }
 
 export async function synthesizeTtsSegments(

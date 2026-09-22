@@ -26,6 +26,7 @@ import * as poolSvc from "./generation-pool.service";
 import * as connectionsSvc from "./connections.service";
 import * as settingsSvc from "./settings.service";
 import * as worldBooksSvc from "./world-books.service";
+import { clampErrorMessage, describeProviderError } from "../utils/provider-errors";
 import {
   setMultiplayerPersonaProvider,
   setMultiplayerWorldInfoProvider,
@@ -302,6 +303,8 @@ function sanitizePersonaSnapshot(raw: unknown): PersonaSnapshot | null {
       subjective: sanitizeDisplayName(p.subjective, 24) || undefined,
       objective: sanitizeDisplayName(p.objective, 24) || undefined,
       possessive: sanitizeDisplayName(p.possessive, 24) || undefined,
+      reflexive: sanitizeDisplayName(p.reflexive, 24) || undefined,
+      possessiveStandalone: sanitizeDisplayName(p.possessiveStandalone, 24) || undefined,
     };
   }
   const avatarUrl = sanitizeAvatarUrl(obj.avatarUrl);
@@ -470,7 +473,7 @@ export function createRoom(
   })();
 
   // Mark the chat so the normal chat-open path can detect a room cheaply.
-  chatsSvc.mergeChatMetadata(hostUserId, chatId, { multiplayer_room_id: id });
+  chatsSvc.mergeChatMetadata(hostUserId, chatId, { multiplayer_room_id: id }, { touchUpdatedAt: false });
   invalidateChatRoute(chatId);
 
   const room = getRoom(id)!;
@@ -580,7 +583,7 @@ export function closeRoom(hostUserId: string, roomId: string): boolean {
   getDb()
     .query("UPDATE multiplayer_rooms SET status = 'closed', freeform_deadline = NULL, updated_at = ? WHERE id = ?")
     .run(Math.floor(Date.now() / 1000), roomId);
-  chatsSvc.mergeChatMetadata(hostUserId, room.chat_id, { multiplayer_room_id: undefined });
+  chatsSvc.mergeChatMetadata(hostUserId, room.chat_id, { multiplayer_room_id: undefined }, { touchUpdatedAt: false });
   invalidateChatRoute(room.chat_id);
 
   eventBus.publishToRoom(roomId, EventType.ROOM_STATUS, {
@@ -1255,7 +1258,12 @@ function checkFreeformComplete(roomId: string): void {
 
 // ─── peer message submit ──────────────────────────────────────────────────────────
 
-export function submitPeerMessage(roomId: string, participantId: string, rawContent: unknown): SubmitResult {
+export function submitPeerMessage(
+  roomId: string,
+  participantId: string,
+  rawContent: unknown,
+  rawRegexAppend?: unknown,
+): SubmitResult {
   const room = getRoom(roomId);
   if (!room) return { ok: false, reason: "not_found" };
   if (room.status === "closed") return { ok: false, reason: "closed" };
@@ -1268,7 +1276,11 @@ export function submitPeerMessage(roomId: string, participantId: string, rawCont
   if (typeof rawContent !== "string") return { ok: false, reason: "invalid" };
   const content = rawContent.trim();
   if (content.length === 0) return { ok: false, reason: "invalid" };
-  if (Buffer.byteLength(content, "utf8") > MAX_ROOM_MESSAGE_BYTES) return { ok: false, reason: "too_large" };
+  const regexAppend = normalizePeerRegexAppend(rawRegexAppend);
+  const appendBytes = regexAppend.reduce((total, item) => total + Buffer.byteLength(item.content, "utf8"), 0);
+  if (Buffer.byteLength(content, "utf8") + appendBytes > MAX_ROOM_MESSAGE_BYTES) {
+    return { ok: false, reason: "too_large" };
+  }
 
   // Turn authorization (server-side; never trust the client UI gate).
   if (room.turn_strategy === "round_robin") {
@@ -1282,7 +1294,7 @@ export function submitPeerMessage(roomId: string, participantId: string, rawCont
   }
 
   touchParticipant(participantId);
-  writePeerMessage(room, participant, content);
+  writePeerMessage(room, participant, content, regexAppend);
 
   // Round-robin generates immediately. Freeform collects every participant's
   // message, firing once everyone has submitted (or when the deadline hits).
@@ -1296,7 +1308,40 @@ export function submitPeerMessage(roomId: string, participantId: string, rawCont
   return { ok: true };
 }
 
-function writePeerMessage(room: Room, participant: Participant, content: string): Message {
+type PeerRegexAppend = {
+  content: string;
+  action_id?: string;
+  script_id?: string;
+  instance_id?: string;
+  source_message_id?: string;
+};
+
+function normalizePeerRegexAppend(raw: unknown): PeerRegexAppend[] {
+  if (!Array.isArray(raw)) return [];
+  const result: PeerRegexAppend[] = [];
+  for (const item of raw.slice(0, 20)) {
+    if (!item || typeof item !== "object") continue;
+    const value = item as Record<string, unknown>;
+    if (typeof value.content !== "string") continue;
+    const content = value.content.trim().slice(0, 10_000);
+    if (!content) continue;
+    result.push({
+      content,
+      ...(typeof value.action_id === "string" ? { action_id: value.action_id.slice(0, 64) } : {}),
+      ...(typeof value.script_id === "string" ? { script_id: value.script_id.slice(0, 64) } : {}),
+      ...(typeof value.instance_id === "string" ? { instance_id: value.instance_id.slice(0, 160) } : {}),
+      ...(typeof value.source_message_id === "string" ? { source_message_id: value.source_message_id.slice(0, 64) } : {}),
+    });
+  }
+  return result;
+}
+
+function writePeerMessage(
+  room: Room,
+  participant: Participant,
+  content: string,
+  regexAppend: PeerRegexAppend[] = [],
+): Message {
   const name = participantSpeakingName(participant);
   return chatsSvc.createMessage(
     room.chat_id,
@@ -1314,6 +1359,7 @@ function writePeerMessage(room: Room, participant: Participant, content: string)
           personaName: participant.persona_snapshot?.name,
           avatarUrl: participant.persona_snapshot?.avatarUrl ?? null,
         },
+        ...(regexAppend.length > 0 ? { associative_regex_append: regexAppend } : {}),
       },
     },
     room.host_user_id,
@@ -1338,19 +1384,13 @@ export function passTurn(roomId: string, participantId: string): void {
  * several profiles but no explicit default hard-fails with "No connection
  * profile found". Mirror the host's actual selection instead, with safe
  * fallbacks: their active profile → the DB default → any profile they own.
+ *
+ * That chain now lives in `connections.service.resolveActingConnectionId`, the
+ * single shared owner, so the room path and every other server-triggered
+ * generation (notably the Edit-and-Send outbox dispatch) cannot drift apart.
  */
 export function resolveHostConnectionId(userId: string): string | undefined {
-  const active = settingsSvc.getSetting(userId, "activeProfileId");
-  if (
-    typeof active?.value === "string" &&
-    active.value &&
-    connectionsSvc.getConnection(userId, active.value)
-  ) {
-    return active.value;
-  }
-  const def = connectionsSvc.getDefaultConnection(userId);
-  if (def) return def.id;
-  return connectionsSvc.listConnections(userId, { limit: 1, offset: 0 }).data[0]?.id;
+  return connectionsSvc.resolveActingConnectionId(userId);
 }
 
 async function triggerHostGeneration(room: Room): Promise<void> {
@@ -1360,9 +1400,10 @@ async function triggerHostGeneration(room: Room): Promise<void> {
       chat_id: room.chat_id,
       connection_id: resolveHostConnectionId(room.host_user_id),
       generation_type: "normal",
-    });
+    }, { requestOrigin: { kind: "chat", name: "Multiplayer", operation: "normal" } });
   } catch (err) {
-    console.error("[multiplayer] startGeneration error:", err);
+    const message = clampErrorMessage(describeProviderError(err, "Room generation failed"));
+    console.error(`[multiplayer] startGeneration error: ${message}`);
   }
 }
 

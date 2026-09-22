@@ -1,12 +1,19 @@
+import { createHash } from "node:crypto";
 import { getDatabasePath, getDb } from "../db/connection";
 import { healCorruptDatabase } from "../db/maintenance";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getCharacter, LANDING_PERSPECTIVE_LAYERS_KEY, normalizeLandingPerspectiveLayers } from "./characters.service";
 import { getEffectiveCharacterName, makeAssistantCharacter } from "../types/character";
-import type { Chat, CreateChatInput, CreateGroupChatInput, UpdateChatInput, RecentChat, GroupedRecentChat, ChatSummary } from "../types/chat";
+import type { Character } from "../types/character";
+import type { Chat, ChatAppearanceAction, CreateChatInput, CreateGroupChatInput, UpdateChatInput, RecentChat, GroupedRecentChat, ChatSummary } from "../types/chat";
 import { isTemporaryChatMetadata } from "../types/chat";
-import type { Message, CreateMessageInput, UpdateMessageInput } from "../types/message";
+import type {
+  Message,
+  CreateMessageInput,
+  UpdateMessageInput,
+  ChatMessageSearchResult,
+} from "../types/message";
 import type { BulkMessageInput } from "../types/migrate";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
@@ -14,6 +21,7 @@ import * as embeddingsSvc from "./embeddings.service";
 import * as audioSvc from "./audio.service";
 import * as memoryCortex from "./memory-cortex";
 import * as regexScriptsSvc from "./regex-scripts.service";
+import * as breakdownSvc from "./breakdown.service";
 import { removePoolEntriesForChat } from "./generation-pool.service";
 import { invalidateChatMemoryCache, scheduleChatMemoryRefresh } from "./chat-memory-cache.service";
 import { enqueueChatPipelineTask } from "./chat-pipeline-coordinator.service";
@@ -22,6 +30,15 @@ import { buildEnv, type MacroEnv } from "../macros";
 import { resolvePersonaOrDefault } from "./personas.service";
 import { resolvePersonaForChatMacros } from "./persona-addon-states";
 import { resolveAndSanitizeForVectorization, contentHasMacroHints } from "./vectorization-content.service";
+import {
+  AVATAR_BINDING_PRIMARY,
+  AVATAR_BINDING_FIELDS,
+  findAvatarForFieldBinding,
+  findAvatarForGreetingBinding,
+  getAvatarBindings,
+  resolveAvatarImageId,
+  type AvatarBindingField,
+} from "./avatar-bindings";
 
 // --- Chat helpers ---
 
@@ -33,6 +50,12 @@ function parseMetadataObject(value: unknown): Record<string, any> {
   } catch {
     return {};
   }
+}
+
+const HIDDEN_FROM_RECENT_KEY = "hidden_from_recent";
+
+function isHiddenFromRecent(metadata: Record<string, any>): boolean {
+  return metadata[HIDDEN_FROM_RECENT_KEY] === true;
 }
 
 function isGroupMetadata(metadata: Record<string, any>): boolean {
@@ -250,10 +273,26 @@ function normalizeStoredMessageExtra(
     normalized.generationMetricsBySwipe,
     safeSwipeCount,
   );
+  const generationOutcomeBySwipe = normalizeObjectEntries(normalized.generationOutcomeBySwipe, safeSwipeCount);
+  if (normalized.generationOutcome === null) generationOutcomeBySwipe[safeLegacySwipeId] = null;
+  else if (isPlainObject(normalized.generationOutcome)) generationOutcomeBySwipe[safeLegacySwipeId] = normalized.generationOutcome;
+  delete normalized.generationOutcome;
+  if (generationOutcomeBySwipe.some((entry) => entry !== null)) normalized.generationOutcomeBySwipe = generationOutcomeBySwipe;
+  else delete normalized.generationOutcomeBySwipe;
   const usageBySwipe = normalizeObjectEntries(
     normalized.usageBySwipe,
     safeSwipeCount,
   );
+  const reasoningCarrierBySwipe = normalizeObjectEntries(
+    normalized.reasoningCarrierBySwipe,
+    safeSwipeCount,
+  );
+  const promptActivationBySwipe = normalizeObjectEntries(normalized.promptActivationBySwipe, safeSwipeCount);
+  if (normalized.promptActivation === null) promptActivationBySwipe[safeLegacySwipeId] = null;
+  else if (isPlainObject(normalized.promptActivation)) promptActivationBySwipe[safeLegacySwipeId] = normalized.promptActivation;
+  delete normalized.promptActivation;
+  if (promptActivationBySwipe.some((entry) => entry !== null)) normalized.promptActivationBySwipe = promptActivationBySwipe;
+  else delete normalized.promptActivationBySwipe;
 
   if (normalized.reasoning === null) {
     reasoningBySwipe[safeLegacySwipeId] = null;
@@ -294,11 +333,18 @@ function normalizeStoredMessageExtra(
     usageBySwipe[safeLegacySwipeId] = normalized.usage;
   }
 
+  if (normalized.reasoningCarrier === null) {
+    reasoningCarrierBySwipe[safeLegacySwipeId] = null;
+  } else if (isPlainObject(normalized.reasoningCarrier)) {
+    reasoningCarrierBySwipe[safeLegacySwipeId] = normalized.reasoningCarrier;
+  }
+
   delete normalized.reasoning;
   delete normalized.reasoningDuration;
   delete normalized.tokenCount;
   delete normalized.generationMetrics;
   delete normalized.usage;
+  delete normalized.reasoningCarrier;
 
   if (reasoningBySwipe.some((entry) => entry !== null)) {
     normalized.reasoningBySwipe = reasoningBySwipe;
@@ -330,6 +376,12 @@ function normalizeStoredMessageExtra(
     delete normalized.usageBySwipe;
   }
 
+  if (reasoningCarrierBySwipe.some((entry) => entry !== null)) {
+    normalized.reasoningCarrierBySwipe = reasoningCarrierBySwipe;
+  } else {
+    delete normalized.reasoningCarrierBySwipe;
+  }
+
   return normalized;
 }
 
@@ -338,6 +390,12 @@ function projectActiveSwipeExtra(
   swipeId: number,
 ): Record<string, unknown> {
   const projected: Record<string, unknown> = { ...extra };
+  const outcome = Array.isArray(extra.generationOutcomeBySwipe) ? extra.generationOutcomeBySwipe[swipeId] : null;
+  if (isPlainObject(outcome)) projected.generationOutcome = outcome;
+  else delete projected.generationOutcome;
+  const activation = Array.isArray(extra.promptActivationBySwipe) ? extra.promptActivationBySwipe[swipeId] : null;
+  if (isPlainObject(activation)) projected.promptActivation = activation;
+  else delete projected.promptActivation;
   const activeReasoning = Array.isArray(extra.reasoningBySwipe)
     ? extra.reasoningBySwipe[swipeId]
     : null;
@@ -352,6 +410,9 @@ function projectActiveSwipeExtra(
     : null;
   const activeUsage = Array.isArray(extra.usageBySwipe)
     ? extra.usageBySwipe[swipeId]
+    : null;
+  const activeReasoningCarrier = Array.isArray(extra.reasoningCarrierBySwipe)
+    ? extra.reasoningCarrierBySwipe[swipeId]
     : null;
 
   if (typeof activeReasoning === "string" && activeReasoning.length > 0) {
@@ -392,6 +453,12 @@ function projectActiveSwipeExtra(
     delete projected.usage;
   }
 
+  if (isPlainObject(activeReasoningCarrier)) {
+    projected.reasoningCarrier = activeReasoningCarrier;
+  } else {
+    delete projected.reasoningCarrier;
+  }
+
   return projected;
 }
 
@@ -402,6 +469,12 @@ function removeSwipeScopedExtraEntry(
   removedSwipeId: number,
 ): Record<string, unknown> {
   const normalized = normalizeStoredMessageExtra(extra, swipeCount, legacySwipeId);
+  if (Array.isArray(normalized.promptActivationBySwipe)) {
+    const entries = [...normalized.promptActivationBySwipe];
+    entries.splice(removedSwipeId, 1);
+    if (entries.some((entry) => entry !== null)) normalized.promptActivationBySwipe = entries;
+    else delete normalized.promptActivationBySwipe;
+  }
 
   if (Array.isArray(normalized.reasoningBySwipe)) {
     const reasoningBySwipe = [
@@ -451,6 +524,13 @@ function removeSwipeScopedExtraEntry(
     }
   }
 
+  if (Array.isArray(normalized.generationOutcomeBySwipe)) {
+    const outcomes = [...normalized.generationOutcomeBySwipe];
+    outcomes.splice(removedSwipeId, 1);
+    if (outcomes.some((entry) => entry !== null)) normalized.generationOutcomeBySwipe = outcomes;
+    else delete normalized.generationOutcomeBySwipe;
+  }
+
   if (Array.isArray(normalized.usageBySwipe)) {
     const usageBySwipe = [
       ...(normalized.usageBySwipe as (Record<string, unknown> | null)[]),
@@ -460,6 +540,18 @@ function removeSwipeScopedExtraEntry(
       normalized.usageBySwipe = usageBySwipe;
     } else {
       delete normalized.usageBySwipe;
+    }
+  }
+
+  if (Array.isArray(normalized.reasoningCarrierBySwipe)) {
+    const reasoningCarrierBySwipe = [
+      ...(normalized.reasoningCarrierBySwipe as (Record<string, unknown> | null)[]),
+    ];
+    reasoningCarrierBySwipe.splice(removedSwipeId, 1);
+    if (reasoningCarrierBySwipe.some((entry) => entry !== null)) {
+      normalized.reasoningCarrierBySwipe = reasoningCarrierBySwipe;
+    } else {
+      delete normalized.reasoningCarrierBySwipe;
     }
   }
 
@@ -486,11 +578,14 @@ function rowToMessage(row: any): Message {
 }
 
 const SWIPE_SCOPED_EXTRA_ARRAY_KEYS = [
+  "promptActivationBySwipe",
   "reasoningBySwipe",
   "reasoningDurationBySwipe",
   "tokenCountBySwipe",
   "generationMetricsBySwipe",
+  "generationOutcomeBySwipe",
   "usageBySwipe",
+  "reasoningCarrierBySwipe",
 ] as const;
 
 /**
@@ -551,6 +646,8 @@ function rowToRecentChat(row: any): RecentChat {
     character_name: row.character_name || "",
     character_avatar_path: row.character_avatar_path || null,
     character_image_id: row.character_image_id || null,
+    message_count: row.message_count || 0,
+    last_message_preview: row.last_message_preview || "",
   };
 }
 
@@ -575,20 +672,80 @@ export function listChats(userId: string, pagination: PaginationParams, characte
   );
 }
 
-export function listRecentChats(userId: string, pagination: PaginationParams): PaginatedResult<RecentChat> {
-  return withRecentChatRecovery("loading recent chats", () =>
-    paginatedQuery(
-      `SELECT c.id, c.character_id, c.name, c.metadata, c.created_at, c.updated_at,
-         ch.name AS character_name, ch.avatar_path AS character_avatar_path, ch.image_id AS character_image_id
-       FROM chats c LEFT JOIN characters ch ON ch.id = c.character_id
-       WHERE c.user_id = ? AND c.character_id IS NOT NULL
-       ORDER BY c.updated_at DESC`,
-      "SELECT COUNT(*) as count FROM chats WHERE user_id = ? AND character_id IS NOT NULL",
-      [userId],
-      pagination,
-      rowToRecentChat
-    )
+export type RecentChatSort = 'name' | 'recent' | 'created';
+
+export interface RecentChatOptions {
+  search?: string;
+  sort?: RecentChatSort;
+  direction?: 'asc' | 'desc';
+}
+
+/**
+ * Flat, one-row-per-chat recent list. Mirrors the landing semantics of
+ * listRecentChatsGrouped (hidden-from-recent chats excluded, metadata parsed
+ * in JS so a malformed row cannot abort the query) while keeping every chat
+ * as its own row for ST-style chat browsers. `message_count` and the 280-char
+ * `last_message_preview` ride along in the same query so list UIs never need
+ * a per-row message fetch.
+ */
+export function listRecentChats(
+  userId: string,
+  pagination: PaginationParams,
+  options: RecentChatOptions = {},
+): PaginatedResult<RecentChat> {
+  const db = getDb();
+  const searchTerm = options.search?.trim().toLowerCase() ?? '';
+  const sort: RecentChatSort = options.sort ?? 'recent';
+  const direction = options.direction ?? (sort === 'name' ? 'asc' : 'desc');
+
+  const rows = withRecentChatRecovery("loading recent chats", () =>
+    db.query(`
+      SELECT
+        c.id, c.character_id, c.name, c.metadata, c.created_at, c.updated_at,
+        ch.name AS character_name,
+        ch.avatar_path AS character_avatar_path,
+        ch.image_id AS character_image_id,
+        (SELECT COUNT(*) FROM messages WHERE chat_id = c.id) as message_count,
+        (SELECT substr(content, 1, 280) FROM messages
+           WHERE chat_id = c.id
+           ORDER BY index_in_chat DESC LIMIT 1) as last_message_preview
+      FROM chats c LEFT JOIN characters ch ON ch.id = c.character_id
+      WHERE c.user_id = ? AND c.character_id IS NOT NULL
+      ORDER BY c.updated_at DESC
+    `).all(userId) as any[]
   );
+
+  const parsedRows = rows
+    .map((row: any) => ({ ...row, metadata: parseMetadataObject(row.metadata) }))
+    .filter((row: any) => !isHiddenFromRecent(row.metadata));
+
+  const filteredRows = searchTerm
+    ? parsedRows.filter((row: any) => {
+        const chatName = (row.name || '').toLowerCase();
+        const charName = (row.character_name || '').toLowerCase();
+        return chatName.includes(searchTerm) || charName.includes(searchTerm);
+      })
+    : parsedRows;
+
+  const sign = direction === 'asc' ? 1 : -1;
+  const sortedRows = [...filteredRows].sort((a: any, b: any) => {
+    if (sort === 'name') {
+      return sign * (a.name || a.character_name || '')
+        .localeCompare(b.name || b.character_name || '', undefined, { sensitivity: 'base' });
+    }
+    const aVal = sort === 'created' ? (a.created_at ?? 0) : (a.updated_at ?? 0);
+    const bVal = sort === 'created' ? (b.created_at ?? 0) : (b.updated_at ?? 0);
+    return sign * (aVal - bVal);
+  });
+
+  const pageRows = sortedRows.slice(pagination.offset, pagination.offset + pagination.limit);
+
+  return {
+    data: pageRows.map(rowToRecentChat),
+    total: sortedRows.length,
+    limit: pagination.limit,
+    offset: pagination.offset,
+  };
 }
 
 export type GroupedRecentChatSort = 'name' | 'recent' | 'created';
@@ -597,6 +754,20 @@ export interface GroupedRecentChatOptions {
   search?: string;
   sort?: GroupedRecentChatSort;
   direction?: 'asc' | 'desc';
+  favoriteCharacterIds?: string[];
+  hiddenCharacterIds?: string[];
+}
+
+/** A chat explicitly removed from the landing-page recent list. */
+export interface HiddenRecentChat {
+  id: string;
+  character_id: string;
+  name: string;
+  character_name: string;
+  character_avatar_path: string | null;
+  character_image_id: string | null;
+  updated_at: number;
+  is_group: boolean;
 }
 
 interface RecentChatCharacterInfo {
@@ -654,7 +825,12 @@ export function listRecentChatsGrouped(
   const searchTerm = options.search?.trim().toLowerCase() ?? '';
   const sort: GroupedRecentChatSort = options.sort ?? 'recent';
   const direction = options.direction ?? (sort === 'name' ? 'asc' : 'desc');
-  const isDefaultRecentSort = !searchTerm && sort === 'recent' && direction === 'desc';
+  const favoriteCharacterIds = new Set(options.favoriteCharacterIds ?? []);
+  const hiddenCharacterIds = new Set(options.hiddenCharacterIds ?? []);
+  const isDefaultRecentSort = !searchTerm
+    && favoriteCharacterIds.size === 0
+    && sort === 'recent'
+    && direction === 'desc';
 
   // Parse metadata in JS so a single malformed row cannot make SQLite abort
   // the landing-page recent-chat query while evaluating json_extract().
@@ -685,14 +861,27 @@ export function listRecentChatsGrouped(
         `).all(userId) as any[]
   );
 
-  const soloCounts = new Map<string, number>();
-  const groupCounts = new Map<string, number>();
-  const parsedRows = rows.map((row) => {
+  // Parse metadata first, then filter out chats the user has explicitly
+  // hidden from the landing-page recent list. Build the lineage lookup from
+  // the full set so forking/grouping resolution stays correct even when a
+  // hidden chat sits in a group's ancestry.
+  const allParsedRows = rows.map((row) => {
     const metadata = parseMetadataObject(row.metadata);
     const isGroup = isGroupMetadata(metadata);
-    if (!isGroup) soloCounts.set(row.character_id, (soloCounts.get(row.character_id) ?? 0) + 1);
     return { ...row, metadata, isGroup, groupKey: null as string | null };
   });
+  const parsedRows = allParsedRows.filter((row) => {
+    if (isHiddenFromRecent(row.metadata)) return false;
+    // Character visibility applies only to solo cards. Group chats remain
+    // chat-scoped entities even when one of their members is hidden from home.
+    return row.isGroup || !hiddenCharacterIds.has(row.character_id);
+  });
+
+  const soloCounts = new Map<string, number>();
+  const groupCounts = new Map<string, number>();
+  for (const row of parsedRows) {
+    if (!row.isGroup) soloCounts.set(row.character_id, (soloCounts.get(row.character_id) ?? 0) + 1);
+  }
 
   // Build a metadata lookup so we can resolve each group chat's lineage root.
   // Branches inherit the root's member-set key — without this, mutating the
@@ -700,7 +889,7 @@ export function listRecentChatsGrouped(
   // a separate landing-page entry, which users perceive as "new group chats
   // spawning on every fork."
   const metadataById = new Map<string, Record<string, any>>();
-  for (const row of parsedRows) metadataById.set(row.id, row.metadata);
+  for (const row of allParsedRows) metadataById.set(row.id, row.metadata);
 
   const resolveGroupDedupKey = (rowId: string, metadata: Record<string, any>): string | null => {
     const visited = new Set<string>([rowId]);
@@ -754,6 +943,9 @@ export function listRecentChatsGrouped(
 
   const sign = direction === 'asc' ? 1 : -1;
   const sortedRows = isDefaultRecentSort ? filteredRows : [...filteredRows].sort((a, b) => {
+    const aFavorite = !a.isGroup && favoriteCharacterIds.has(a.character_id) ? 1 : 0;
+    const bFavorite = !b.isGroup && favoriteCharacterIds.has(b.character_id) ? 1 : 0;
+    if (aFavorite !== bFavorite) return bFavorite - aFavorite;
     if (sort === 'name') {
       return sign * displayName(a).localeCompare(displayName(b), undefined, { sensitivity: 'base' });
     }
@@ -791,6 +983,44 @@ export function listRecentChatsGrouped(
     limit: pagination.limit,
     offset: pagination.offset,
   };
+}
+
+/**
+ * Return only chats explicitly hidden from the landing-page recent list.
+ * This intentionally does not consider `landingHiddenCharacterIds`: that
+ * preference is client-owned and is managed separately from per-chat hides.
+ */
+export function listHiddenRecentChats(userId: string): HiddenRecentChat[] {
+  const rows = getDb().query(`
+    SELECT
+      c.id,
+      c.character_id,
+      c.name,
+      c.metadata,
+      c.updated_at,
+      ch.name AS character_name,
+      ch.avatar_path AS character_avatar_path,
+      ch.image_id AS character_image_id
+    FROM chats c
+    LEFT JOIN characters ch ON ch.id = c.character_id
+    WHERE c.user_id = ? AND c.character_id IS NOT NULL
+    ORDER BY c.updated_at DESC
+  `).all(userId) as any[];
+
+  return rows.flatMap((row): HiddenRecentChat[] => {
+    const metadata = parseMetadataObject(row.metadata);
+    if (!isHiddenFromRecent(metadata)) return [];
+    return [{
+      id: row.id,
+      character_id: row.character_id,
+      name: row.name || '',
+      character_name: row.character_name || '',
+      character_avatar_path: row.character_avatar_path || null,
+      character_image_id: row.character_image_id || null,
+      updated_at: row.updated_at,
+      is_group: isGroupMetadata(metadata),
+    }];
+  });
 }
 
 export function listChatSummaries(userId: string, characterId: string): ChatSummary[] {
@@ -918,6 +1148,15 @@ export function getChat(userId: string, id: string): Chat | null {
 export function createChat(userId: string, input: CreateChatInput): Chat {
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
+  const requestedGreetingIndex = input.greeting_index
+    ?? input.metadata?.activeGreetingIndex;
+  const greetingIndex =
+    Number.isInteger(requestedGreetingIndex) && requestedGreetingIndex >= 0
+      ? requestedGreetingIndex
+      : 0;
+  const metadata = input.character_id
+    ? { ...(input.metadata || {}), activeGreetingIndex: greetingIndex }
+    : (input.metadata || {});
 
   // Auto-name with character name
   let chatName = input.name || "";
@@ -928,14 +1167,14 @@ export function createChat(userId: string, input: CreateChatInput): Chat {
 
   getDb()
     .query("INSERT INTO chats (id, user_id, character_id, name, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(id, userId, input.character_id ?? null, chatName, JSON.stringify(input.metadata || {}), now, now);
+    .run(id, userId, input.character_id ?? null, chatName, JSON.stringify(metadata), now, now);
 
   // Insert the character's greeting as the opening message
   const character = input.character_id ? getCharacter(userId, input.character_id) : null;
   if (character) {
     let greeting = character.first_mes;
-    if (input.greeting_index && input.greeting_index >= 1 && character.alternate_greetings?.length) {
-      const altIdx = input.greeting_index - 1;
+    if (greetingIndex >= 1 && character.alternate_greetings?.length) {
+      const altIdx = greetingIndex - 1;
       if (altIdx < character.alternate_greetings.length) {
         greeting = character.alternate_greetings[altIdx];
       }
@@ -948,13 +1187,23 @@ export function createChat(userId: string, input: CreateChatInput): Chat {
         extra: {
           greeting: true,
           greeting_character_id: character.id,
-          greeting_index: input.greeting_index ?? 0,
+          greeting_index: greetingIndex,
         },
       }, userId);
     }
   }
 
-  return getChat(userId, id)!;
+  const created = getChat(userId, id)!;
+  let result = created;
+  if (character && findAvatarForGreetingBinding(character, greetingIndex)) {
+    result = applyChatAppearance(userId, id, {
+      type: "greeting",
+      greeting_index: greetingIndex,
+      ...(metadata.group === true ? { character_id: character.id } : {}),
+    })?.chat || created;
+  }
+  eventBus.emit(EventType.CHAT_CREATED, { id, chat: result }, userId);
+  return result;
 }
 
 export function createGroupChat(userId: string, input: CreateGroupChatInput): Chat {
@@ -977,11 +1226,22 @@ export function convertSoloChatToGroup(userId: string, chatId: string): Chat | n
   if (source.metadata?.group) throw new Error("Chat is already a group chat");
   if (!source.character_id) throw new Error("Temporary chats cannot be converted to group chats");
 
+  // Conversion copies the conversation into a new, independently managed
+  // group chat. A solo fork's lineage markers describe its relationship to
+  // another solo chat; carrying them into the group makes the new group show
+  // up in that solo branch tree and lets lineage-based consumers treat it as
+  // another solo-character branch instead of a distinct group.
+  const {
+    branched_from: _branchedFrom,
+    branch_at_message: _branchAtMessage,
+    ...sourceMetadata
+  } = source.metadata || {};
+
   const converted = createChatRaw(userId, {
     character_id: source.character_id,
     name: source.name,
     metadata: {
-      ...(source.metadata || {}),
+      ...sourceMetadata,
       group: true,
       character_ids: [source.character_id],
     },
@@ -1003,7 +1263,9 @@ export function convertSoloChatToGroup(userId: string, chatId: string): Chat | n
   const now = Math.floor(Date.now() / 1000);
   getDb().query("UPDATE chats SET updated_at = ? WHERE id = ? AND user_id = ?").run(now, converted.id, userId);
 
-  return getChat(userId, converted.id)!;
+  const result = getChat(userId, converted.id)!;
+  eventBus.emit(EventType.CHAT_CREATED, { id: result.id, chat: result }, userId);
+  return result;
 }
 
 export function deleteChat(userId: string, id: string): boolean {
@@ -1021,7 +1283,12 @@ export function deleteChat(userId: string, id: string): boolean {
     console.warn(`[chats] Failed to scan messages for audio cleanup in chat ${id}:`, err);
   }
 
-  const result = getDb().query("DELETE FROM chats WHERE id = ? AND user_id = ?").run(id, userId);
+  const db = getDb();
+  const result = db.transaction(() => {
+    const deleted = db.query("DELETE FROM chats WHERE id = ? AND user_id = ?").run(id, userId);
+    if (deleted.changes > 0) breakdownSvc.deleteBreakdownsForChat(userId, id);
+    return deleted;
+  })();
   if (result.changes > 0) {
     cleanupAudioAttachments(userId, audioAttachments);
     invalidateChatMemoryCache(id);
@@ -1049,6 +1316,28 @@ export function deleteChat(userId: string, id: string): boolean {
     eventBus.emit(EventType.CHAT_DELETED, { id }, userId);
   }
   return result.changes > 0;
+}
+
+/**
+ * Delete an explicit set of chats while preserving the full per-chat cleanup
+ * performed by deleteChat. Duplicate, missing, and cross-user IDs are ignored.
+ */
+export function deleteChats(userId: string, ids: string[]): string[] {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return [];
+
+  const placeholders = uniqueIds.map(() => "?").join(", ");
+  const ownedRows = getDb()
+    .query(`SELECT id FROM chats WHERE user_id = ? AND id IN (${placeholders})`)
+    .all(userId, ...uniqueIds) as Array<{ id: string }>;
+  const ownedIds = new Set(ownedRows.map((row) => row.id));
+
+  const deletedIds: string[] = [];
+  for (const id of uniqueIds) {
+    if (!ownedIds.has(id)) continue;
+    if (deleteChat(userId, id)) deletedIds.push(id);
+  }
+  return deletedIds;
 }
 
 /**
@@ -1139,7 +1428,12 @@ function diffLeafBagInto(out: string[], prev: unknown, next: unknown, prefix: st
   }
 }
 
-export function updateChat(userId: string, id: string, input: UpdateChatInput): Chat | null {
+export function updateChat(
+  userId: string,
+  id: string,
+  input: UpdateChatInput,
+  opts: { touchUpdatedAt?: boolean } = {},
+): Chat | null {
   const existing = getChat(userId, id);
   if (!existing) return null;
 
@@ -1151,9 +1445,11 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
 
   if (fields.length === 0) return existing;
 
-  const now = Math.floor(Date.now() / 1000);
-  fields.push("updated_at = ?");
-  values.push(now);
+  if (opts.touchUpdatedAt !== false) {
+    const now = Math.floor(Date.now() / 1000);
+    fields.push("updated_at = ?");
+    values.push(now);
+  }
   values.push(id);
   values.push(userId);
 
@@ -1162,15 +1458,33 @@ export function updateChat(userId: string, id: string, input: UpdateChatInput): 
   const changedFields = diffChatChangedFields(existing, updated);
   eventBus.emit(EventType.CHAT_CHANGED, { chat: updated, changedFields }, userId);
 
-  // Detect avatar switch and emit specific event for theme resampling / extensions
-  const oldAvatarId = existing.metadata?.active_avatar_id as string | undefined;
-  const newAvatarId = updated.metadata?.active_avatar_id as string | undefined;
-  if (oldAvatarId !== newAvatarId) {
-    eventBus.emit(EventType.CHARACTER_AVATAR_CHANGED, {
-      chatId: id,
-      characterId: updated.character_id,
-      imageId: newAvatarId || null,
-    }, userId);
+  // Detect avatar switches and emit specific events for theme resampling / extensions.
+  if (updated.metadata?.group === true) {
+    const oldByCharacter = isPlainObject(existing.metadata?.group_active_avatar_ids)
+      ? existing.metadata.group_active_avatar_ids
+      : {};
+    const newByCharacter = isPlainObject(updated.metadata?.group_active_avatar_ids)
+      ? updated.metadata.group_active_avatar_ids
+      : {};
+    const characterIds = new Set([...Object.keys(oldByCharacter), ...Object.keys(newByCharacter)]);
+    for (const characterId of characterIds) {
+      if (oldByCharacter[characterId] === newByCharacter[characterId]) continue;
+      eventBus.emit(EventType.CHARACTER_AVATAR_CHANGED, {
+        chatId: id,
+        characterId,
+        imageId: typeof newByCharacter[characterId] === "string" ? newByCharacter[characterId] : null,
+      }, userId);
+    }
+  } else {
+    const oldAvatarId = existing.metadata?.active_avatar_id as string | undefined;
+    const newAvatarId = updated.metadata?.active_avatar_id as string | undefined;
+    if (oldAvatarId !== newAvatarId) {
+      eventBus.emit(EventType.CHARACTER_AVATAR_CHANGED, {
+        chatId: id,
+        characterId: updated.character_id,
+        imageId: newAvatarId || null,
+      }, userId);
+    }
   }
 
   return updated;
@@ -1196,6 +1510,7 @@ export function mergeChatMetadata(
   userId: string,
   id: string,
   partial: Record<string, any>,
+  opts: { touchUpdatedAt?: boolean } = {},
 ): Chat | null {
   const existing = getChat(userId, id);
   if (!existing) return null;
@@ -1204,7 +1519,7 @@ export function mergeChatMetadata(
     if (value === undefined) delete merged[key];
     else merged[key] = value;
   }
-  return updateChat(userId, id, { metadata: merged });
+  return updateChat(userId, id, { metadata: merged }, opts);
 }
 
 // ---- Group chat muting ----
@@ -1279,6 +1594,222 @@ export function setGroupMemberAlternateFields(
   return updateChat(userId, chatId, { metadata: nextMetadata });
 }
 
+export interface ChatAppearanceResult {
+  chat: Chat;
+  greeting_message?: Message;
+}
+
+function setCharacterMetadataValue(
+  metadata: Record<string, any>,
+  group: boolean,
+  characterId: string,
+  soloKey: string,
+  groupKey: string,
+  value: unknown,
+): void {
+  if (!group) {
+    if (value === undefined || value === null) delete metadata[soloKey];
+    else metadata[soloKey] = value;
+    return;
+  }
+
+  const current = isPlainObject(metadata[groupKey]) ? { ...metadata[groupKey] } : {};
+  if (value === undefined || value === null) delete current[characterId];
+  else current[characterId] = value;
+  if (Object.keys(current).length > 0) metadata[groupKey] = current;
+  else delete metadata[groupKey];
+}
+
+function getCharacterSelections(
+  metadata: Record<string, any>,
+  group: boolean,
+  characterId: string,
+): Record<string, string> {
+  if (!group) {
+    return isPlainObject(metadata.alternate_field_selections)
+      ? { ...metadata.alternate_field_selections } as Record<string, string>
+      : {};
+  }
+  const byCharacter = isPlainObject(metadata.group_alternate_field_selections)
+    ? metadata.group_alternate_field_selections
+    : {};
+  return isPlainObject(byCharacter[characterId])
+    ? { ...byCharacter[characterId] } as Record<string, string>
+    : {};
+}
+
+function setCharacterSelections(
+  metadata: Record<string, any>,
+  group: boolean,
+  characterId: string,
+  selections: Record<string, string>,
+): void {
+  setCharacterMetadataValue(
+    metadata,
+    group,
+    characterId,
+    "alternate_field_selections",
+    "group_alternate_field_selections",
+    Object.keys(selections).length > 0 ? selections : null,
+  );
+}
+
+function applyAvatarEntryToMetadata(
+  character: Character,
+  metadata: Record<string, any>,
+  group: boolean,
+  characterId: string,
+  avatarEntryId: string,
+): boolean {
+  const imageId = resolveAvatarImageId(character, avatarEntryId);
+  if (imageId === undefined) return false;
+
+  setCharacterMetadataValue(
+    metadata,
+    group,
+    characterId,
+    "active_avatar_id",
+    "group_active_avatar_ids",
+    avatarEntryId === AVATAR_BINDING_PRIMARY ? null : imageId,
+  );
+  setCharacterMetadataValue(
+    metadata,
+    group,
+    characterId,
+    "active_avatar_entry_id",
+    "group_active_avatar_entry_ids",
+    avatarEntryId,
+  );
+
+  const binding = getAvatarBindings(character)[avatarEntryId];
+  if (!binding) return true;
+
+  const selections = getCharacterSelections(metadata, group, characterId);
+  for (const field of AVATAR_BINDING_FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(binding, field)) continue;
+    const variantId = binding[field];
+    if (variantId === null) {
+      delete selections[field];
+    } else if (typeof variantId === "string" && hasAlternateVariant(character, field, variantId)) {
+      selections[field] = variantId;
+    } else {
+      return false;
+    }
+  }
+  setCharacterSelections(metadata, group, characterId, selections);
+
+  if (Object.prototype.hasOwnProperty.call(binding, "greeting_index")) {
+    const index = binding.greeting_index === null ? 0 : binding.greeting_index;
+    if (!Number.isInteger(index) || index! < 0 || index! > character.alternate_greetings.length) return false;
+    setCharacterMetadataValue(
+      metadata,
+      group,
+      characterId,
+      "activeGreetingIndex",
+      "group_active_greeting_indices",
+      index,
+    );
+  }
+  return true;
+}
+
+function updateAppearanceGreetingMessage(
+  userId: string,
+  chatId: string,
+  character: Character,
+  greetingIndex: number,
+  group: boolean,
+): Message | undefined {
+  const greeting = greetingIndex === 0
+    ? character.first_mes
+    : character.alternate_greetings[greetingIndex - 1];
+  if (typeof greeting !== "string") return undefined;
+
+  const message = getMessages(userId, chatId).find((candidate) =>
+    candidate.extra?.greeting === true
+    && (candidate.extra?.greeting_character_id === character.id
+      || (!group && !candidate.extra?.greeting_character_id)),
+  );
+  if (!message) return undefined;
+  return updateMessage(userId, message.id, {
+    content: greeting,
+    extra: { ...message.extra, greeting_index: greetingIndex },
+  }) || undefined;
+}
+
+/**
+ * Apply one appearance action using the latest chat row. Avatar bindings are
+ * resolved server-side so all metadata keys change in one CHAT_CHANGED event.
+ */
+export function applyChatAppearance(
+  userId: string,
+  chatId: string,
+  action: ChatAppearanceAction,
+): ChatAppearanceResult | null {
+  const chat = getChat(userId, chatId);
+  if (!chat) return null;
+  const group = chat.metadata?.group === true;
+  const characterId = action.character_id || chat.character_id;
+  if (!characterId) return null;
+  if (group && !getGroupMemberIds(chat.metadata).includes(characterId)) return null;
+  if (!group && characterId !== chat.character_id) return null;
+
+  const character = getCharacter(userId, characterId);
+  if (!character) return null;
+  const metadata: Record<string, any> = { ...(chat.metadata || {}) };
+  let greetingChanged = false;
+
+  if (action.type === "avatar") {
+    if (!applyAvatarEntryToMetadata(character, metadata, group, characterId, action.avatar_entry_id)) return null;
+    greetingChanged = Object.prototype.hasOwnProperty.call(
+      getAvatarBindings(character)[action.avatar_entry_id] || {},
+      "greeting_index",
+    );
+  } else if (action.type === "field") {
+    if (!AVATAR_BINDING_FIELDS.includes(action.field as AvatarBindingField)) return null;
+    if (action.variant_id !== null && !hasAlternateVariant(character, action.field, action.variant_id)) return null;
+    const selections = getCharacterSelections(metadata, group, characterId);
+    if (action.variant_id === null) delete selections[action.field];
+    else selections[action.field] = action.variant_id;
+    setCharacterSelections(metadata, group, characterId, selections);
+
+    const avatarEntryId = findAvatarForFieldBinding(character, action.field, action.variant_id);
+    if (avatarEntryId) {
+      if (!applyAvatarEntryToMetadata(character, metadata, group, characterId, avatarEntryId)) return null;
+      greetingChanged = Object.prototype.hasOwnProperty.call(
+        getAvatarBindings(character)[avatarEntryId] || {},
+        "greeting_index",
+      );
+    }
+  } else {
+    if (!Number.isInteger(action.greeting_index)
+      || action.greeting_index < 0
+      || action.greeting_index > character.alternate_greetings.length) return null;
+    setCharacterMetadataValue(
+      metadata,
+      group,
+      characterId,
+      "activeGreetingIndex",
+      "group_active_greeting_indices",
+      action.greeting_index,
+    );
+    const avatarEntryId = findAvatarForGreetingBinding(character, action.greeting_index);
+    if (avatarEntryId && !applyAvatarEntryToMetadata(character, metadata, group, characterId, avatarEntryId)) return null;
+    greetingChanged = true;
+  }
+
+  const updated = updateChat(userId, chatId, { metadata });
+  if (!updated) return null;
+
+  const greetingIndex = group
+    ? (updated.metadata.group_active_greeting_indices?.[characterId] as number | undefined)
+    : (updated.metadata.activeGreetingIndex as number | undefined);
+  const greetingMessage = greetingChanged && Number.isInteger(greetingIndex)
+    ? updateAppearanceGreetingMessage(userId, chatId, character, greetingIndex!, group)
+    : undefined;
+  return { chat: updated, ...(greetingMessage ? { greeting_message: greetingMessage } : {}) };
+}
+
 // ---- Group chat member management ----
 
 export function addGroupMember(
@@ -1319,6 +1850,14 @@ export function addGroupMember(
         },
       }, userId);
     }
+    const greetingIndex = options?.greeting_index ?? 0;
+    if (findAvatarForGreetingBinding(character, greetingIndex)) {
+      return applyChatAppearance(userId, chatId, {
+        type: "greeting",
+        greeting_index: greetingIndex,
+        character_id: character.id,
+      })?.chat || updated;
+    }
   }
 
   return updated;
@@ -1355,6 +1894,19 @@ export function removeGroupMember(userId: string, chatId: string, characterId: s
     delete groupAlternateFieldSelections[characterId];
   }
 
+  const groupActiveAvatarIds = isPlainObject(chat.metadata.group_active_avatar_ids)
+    ? { ...chat.metadata.group_active_avatar_ids }
+    : undefined;
+  if (groupActiveAvatarIds) delete groupActiveAvatarIds[characterId];
+  const groupActiveAvatarEntryIds = isPlainObject(chat.metadata.group_active_avatar_entry_ids)
+    ? { ...chat.metadata.group_active_avatar_entry_ids }
+    : undefined;
+  if (groupActiveAvatarEntryIds) delete groupActiveAvatarEntryIds[characterId];
+  const groupActiveGreetingIndices = isPlainObject(chat.metadata.group_active_greeting_indices)
+    ? { ...chat.metadata.group_active_greeting_indices }
+    : undefined;
+  if (groupActiveGreetingIndices) delete groupActiveGreetingIndices[characterId];
+
   const newMetadata = {
     ...chat.metadata,
     character_ids: newCharacterIds,
@@ -1363,11 +1915,17 @@ export function removeGroupMember(userId: string, chatId: string, characterId: s
     ...(groupAlternateFieldSelections !== undefined && {
       group_alternate_field_selections: groupAlternateFieldSelections,
     }),
+    ...(groupActiveAvatarIds !== undefined && { group_active_avatar_ids: groupActiveAvatarIds }),
+    ...(groupActiveAvatarEntryIds !== undefined && { group_active_avatar_entry_ids: groupActiveAvatarEntryIds }),
+    ...(groupActiveGreetingIndices !== undefined && { group_active_greeting_indices: groupActiveGreetingIndices }),
   };
 
   if (groupAlternateFieldSelections && Object.keys(groupAlternateFieldSelections).length === 0) {
     delete newMetadata.group_alternate_field_selections;
   }
+  if (groupActiveAvatarIds && Object.keys(groupActiveAvatarIds).length === 0) delete newMetadata.group_active_avatar_ids;
+  if (groupActiveAvatarEntryIds && Object.keys(groupActiveAvatarEntryIds).length === 0) delete newMetadata.group_active_avatar_entry_ids;
+  if (groupActiveGreetingIndices && Object.keys(groupActiveGreetingIndices).length === 0) delete newMetadata.group_active_greeting_indices;
 
   // If the removed character was the primary character_id on the chat row,
   // reassign to the first remaining member
@@ -1464,6 +2022,30 @@ export function getLastAssistantMessage(userId: string, chatId: string): Message
   return rowToMessage(row);
 }
 
+export function getPreviousSameRoleContent(
+  userId: string,
+  chatId: string,
+  isUser: boolean,
+  beforeMessageId?: string,
+): string | undefined {
+  const boundary = beforeMessageId
+    ? getDb()
+        .query("SELECT m.index_in_chat FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.id = ? AND m.chat_id = ? AND c.user_id = ?")
+        .get(beforeMessageId, chatId, userId) as { index_in_chat?: number } | null
+    : null;
+  const beforeIndex = typeof boundary?.index_in_chat === "number"
+    ? boundary.index_in_chat
+    : Number.MAX_SAFE_INTEGER;
+  const prior = getDb()
+    .query("SELECT m.content FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? AND m.is_user = ? AND m.index_in_chat < ? ORDER BY m.index_in_chat DESC LIMIT 1")
+    .get(chatId, userId, isUser ? 1 : 0, beforeIndex) as { content?: string } | null;
+  if (typeof prior?.content === "string") return prior.content;
+  const greeting = getDb()
+    .query("SELECT m.content FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? ORDER BY m.index_in_chat ASC LIMIT 1")
+    .get(chatId, userId) as { content?: string } | null;
+  return typeof greeting?.content === "string" ? greeting.content : undefined;
+}
+
 export function getLastMessage(userId: string, chatId: string): Message | null {
   const row = getDb()
     .query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? ORDER BY m.index_in_chat DESC LIMIT 1")
@@ -1479,6 +2061,7 @@ let _stmtMsgAll: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtMsgCount: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtMsgTail: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtMsgById: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
+let _stmtMsgRolesBefore: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
 let _stmtMsgGen = -1;
 
 function getMsgStmts() {
@@ -1489,18 +2072,76 @@ function getMsgStmts() {
     _stmtMsgCount = null;
     _stmtMsgTail = null;
     _stmtMsgById = null;
+    _stmtMsgRolesBefore = null;
     _stmtMsgGen = gen;
   }
   if (!_stmtMsgAll) _stmtMsgAll = db.query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? ORDER BY m.index_in_chat ASC");
   if (!_stmtMsgCount) _stmtMsgCount = db.query("SELECT COUNT(*) as count FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ?");
   if (!_stmtMsgTail) _stmtMsgTail = db.query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? ORDER BY m.index_in_chat DESC LIMIT ?");
   if (!_stmtMsgById) _stmtMsgById = db.query("SELECT m.* FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.id = ? AND c.user_id = ?");
-  return { all: _stmtMsgAll, count: _stmtMsgCount, tail: _stmtMsgTail, byId: _stmtMsgById };
+  if (!_stmtMsgRolesBefore) _stmtMsgRolesBefore = db.query("SELECT m.id, m.index_in_chat, m.is_user, m.extra FROM messages m JOIN chats c ON m.chat_id = c.id WHERE m.chat_id = ? AND c.user_id = ? AND m.index_in_chat < ? ORDER BY m.index_in_chat DESC LIMIT ?");
+  return { all: _stmtMsgAll, count: _stmtMsgCount, tail: _stmtMsgTail, byId: _stmtMsgById, rolesBefore: _stmtMsgRolesBefore };
+}
+
+let _msgRevisionCol: boolean | null = null;
+let _msgRevisionGen = -1;
+
+export function messagesHaveRevisionColumn(): boolean {
+  const gen = require("../db/connection").getDbGeneration() as number;
+  if (_msgRevisionCol !== null && _msgRevisionGen === gen) return _msgRevisionCol;
+  const columns = getDb().query("PRAGMA table_info('messages')").all() as Array<{ name: string }>;
+  _msgRevisionCol = columns.some((column) => column.name === "revision");
+  _msgRevisionGen = gen;
+  return _msgRevisionCol;
 }
 
 export function getMessages(userId: string, chatId: string): Message[] {
   const rows = getMsgStmts().all.all(chatId, userId) as any[];
   return rows.map(rowToMessage);
+}
+
+/**
+ * Return the visible user messages at the end of a chat without hydrating the
+ * entire history (including swipe text and per-swipe metadata). Generation
+ * uses this on every normal send to remember which queued user turns were
+ * consumed by the eventual assistant response.
+ */
+export function getTrailingVisibleUserMessageIds(userId: string, chatId: string): string[] {
+  const pageSize = 128;
+  let beforeIndex = Number.MAX_SAFE_INTEGER;
+  const ids: string[] = [];
+
+  while (true) {
+    const rows = getMsgStmts().rolesBefore.all(
+      chatId,
+      userId,
+      beforeIndex,
+      pageSize,
+    ) as Array<{ id: string; index_in_chat: number; is_user: number; extra: string | null }>;
+    if (rows.length === 0) break;
+
+    for (const row of rows) {
+      let hidden = false;
+      try {
+        const extra = JSON.parse(row.extra || "{}");
+        hidden = extra?.hidden === true;
+      } catch {
+        // Match rowToMessage's malformed-extra fallback: treat it as visible.
+      }
+      if (hidden) continue;
+      if (!row.is_user) {
+        ids.reverse();
+        return ids;
+      }
+      ids.push(row.id);
+    }
+
+    if (rows.length < pageSize) break;
+    beforeIndex = rows[rows.length - 1].index_in_chat;
+  }
+
+  ids.reverse();
+  return ids;
 }
 
 export function listMessages(userId: string, chatId: string, pagination: PaginationParams, opts?: { light?: boolean }): PaginatedResult<Message> {
@@ -1531,14 +2172,347 @@ export function listMessagesTail(userId: string, chatId: string, limit: number, 
   };
 }
 
+const CHAT_FIND_MAX_RESULTS = 10_000;
+
+function visibleMessageTextForSearch(row: { content?: unknown; swipes?: unknown; swipe_id?: unknown }): string {
+  let swipes: unknown[] | null = null;
+  try {
+    const parsed = typeof row.swipes === "string" ? JSON.parse(row.swipes) : row.swipes;
+    if (Array.isArray(parsed)) swipes = parsed;
+  } catch {
+    // Fall back to content below. Legacy and partially-written rows can carry
+    // malformed swipe JSON, but their active content is still searchable.
+  }
+
+  const swipeId = typeof row.swipe_id === "number" && Number.isInteger(row.swipe_id)
+    ? row.swipe_id
+    : 0;
+  const activeSwipe = swipes?.[swipeId];
+  return typeof activeSwipe === "string"
+    ? activeSwipe
+    : typeof row.content === "string"
+      ? row.content
+      : "";
+}
+
+function isLoomInjectedMessageForSearch(extra: unknown): boolean {
+  try {
+    const parsed = typeof extra === "string" ? JSON.parse(extra) : extra;
+    return !!parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      && !!(parsed as Record<string, unknown>)._loom_inject;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Find visible, active-swipe message text without loading the whole chat into
+ * the browser. The response includes a stable persisted offset so the
+ * virtualized client can page older history up to a selected result.
+ */
+export function searchMessages(userId: string, chatId: string, query: string): ChatMessageSearchResult {
+  const needle = query.toLocaleLowerCase();
+  if (!needle) {
+    return { data: [], total: 0, message_total: 0, truncated: false };
+  }
+
+  const rows = getDb()
+    .query(`
+      SELECT m.id, m.index_in_chat, m.content, m.swipes, m.swipe_id, m.extra
+      FROM messages m
+      JOIN chats c ON m.chat_id = c.id
+      WHERE m.chat_id = ? AND c.user_id = ?
+      ORDER BY m.index_in_chat ASC
+    `)
+    .all(chatId, userId) as Array<{
+      id: string;
+      index_in_chat: number;
+      content: string;
+      swipes: string;
+      swipe_id: number;
+      extra: string;
+    }>;
+
+  const data: ChatMessageSearchResult["data"] = [];
+  let total = 0;
+
+  rows.forEach((row, offset) => {
+    if (isLoomInjectedMessageForSearch(row.extra)) return;
+    if (!visibleMessageTextForSearch(row).toLocaleLowerCase().includes(needle)) return;
+
+    total += 1;
+    if (data.length < CHAT_FIND_MAX_RESULTS) {
+      data.push({ id: row.id, index_in_chat: row.index_in_chat, offset });
+    }
+  });
+
+  return {
+    data,
+    total,
+    message_total: rows.length,
+    truncated: total > data.length,
+  };
+}
+
 export function getMessage(userId: string, id: string): Message | null {
   const row = getMsgStmts().byId.get(id, userId) as any;
   if (!row) return null;
   return rowToMessage(row);
 }
 
-export function createMessage(chatId: string, input: CreateMessageInput, userId: string): Message {
-  const id = crypto.randomUUID();
+export interface AssociativeRegexActionUsage {
+  script_id: string;
+  action_id: string;
+  used_at: number;
+}
+
+const ASSOCIATIVE_REGEX_STATE_KEY_RE = /^[A-Za-z][A-Za-z0-9_:.-]{0,127}$/;
+const MAX_ASSOCIATIVE_REGEX_STATE_VALUE_LENGTH = 10_000;
+
+function hasValidAssociativeRegexStateEffects(
+  effects: ReadonlyArray<{ key: string; value: string }> | undefined,
+): boolean {
+  return !effects || (
+    effects.length <= 16 &&
+    effects.every((effect) => (
+      !!effect && typeof effect.key === "string" &&
+      ASSOCIATIVE_REGEX_STATE_KEY_RE.test(effect.key) &&
+      typeof effect.value === "string" &&
+      effect.value.length <= MAX_ASSOCIATIVE_REGEX_STATE_VALUE_LENGTH
+    ))
+  );
+}
+
+export type ClaimAssociativeRegexActionResult =
+  | { status: "claimed"; message: Message; usage: AssociativeRegexActionUsage; forkedChat?: Chat }
+  | { status: "used"; message: Message; usage: AssociativeRegexActionUsage }
+  | { status: "forbidden" }
+  | { status: "not_found" };
+
+export interface AssociativeRegexActionBatchInput {
+  messageId: string;
+  instanceId: string;
+  scriptId: string;
+  actionId: string;
+  multiSelect: boolean;
+  stateEffects?: Array<{ key: string; value: string }>;
+}
+
+export type ClaimAssociativeRegexActionsResult =
+  | { status: "claimed"; messages: Message[]; usages: AssociativeRegexActionUsage[]; chat?: Chat }
+  | { status: "used"; messages: Message[]; usage: AssociativeRegexActionUsage }
+  | { status: "forbidden"; messages: Message[] }
+  | { status: "not_found"; messages: Message[] };
+
+/** Atomically finalize a generation trigger and its provisional selections. */
+export function claimAssociativeRegexActions(
+  userId: string,
+  chatId: string,
+  inputs: AssociativeRegexActionBatchInput[],
+): ClaimAssociativeRegexActionsResult {
+  if (inputs.length === 0) return { status: "claimed", messages: [], usages: [] };
+  const db = getDb();
+  const outcome = db.transaction(() => {
+    const chatBefore = getChat(userId, chatId);
+    if (!chatBefore) return { status: "not_found" as const };
+    const messages = new Map<string, Message>();
+    const usageMaps = new Map<string, Record<string, AssociativeRegexActionUsage>>();
+    const seenClaims = new Set<string>();
+
+    for (const input of inputs) {
+      if (!hasValidAssociativeRegexStateEffects(input.stateEffects)) return { status: "forbidden" as const };
+      const existing = messages.get(input.messageId) ?? getMessage(userId, input.messageId);
+      if (!existing || existing.chat_id !== chatId) return { status: "not_found" as const };
+      if (input.stateEffects?.length && existing.is_user) return { status: "forbidden" as const };
+      messages.set(input.messageId, existing);
+      if (!usageMaps.has(input.messageId)) {
+        const stored = existing.extra?.associative_regex_action_usage;
+        usageMaps.set(input.messageId,
+          stored && typeof stored === "object" && !Array.isArray(stored) ? { ...stored } : {},
+        );
+      }
+
+      const usageByInstance = usageMaps.get(input.messageId)!;
+      const claimKey = input.multiSelect ? `${input.instanceId}:${input.actionId}` : input.instanceId;
+      const uniqueKey = `${input.messageId}:${claimKey}`;
+      if (seenClaims.has(uniqueKey)) continue;
+      seenClaims.add(uniqueKey);
+      const prior = usageByInstance[input.instanceId]
+        ?? usageByInstance[claimKey]
+        ?? (!input.multiSelect
+          ? Object.entries(usageByInstance).find(([key]) => key.startsWith(`${input.instanceId}:`))?.[1]
+          : undefined);
+      if (prior && typeof prior === "object") return { status: "used" as const, usage: prior };
+    }
+
+    const usages: AssociativeRegexActionUsage[] = [];
+    const chatVariables = {
+      ...((chatBefore.metadata?.chat_variables as Record<string, string> | undefined) ?? {}),
+    };
+    let chatStateChanged = false;
+    const now = Math.floor(Date.now() / 1000);
+    for (const input of inputs) {
+      const usageByInstance = usageMaps.get(input.messageId)!;
+      const claimKey = input.multiSelect ? `${input.instanceId}:${input.actionId}` : input.instanceId;
+      if (usageByInstance[claimKey]) continue;
+      const usage: AssociativeRegexActionUsage = {
+        script_id: input.scriptId,
+        action_id: input.actionId,
+        used_at: now,
+      };
+      usageByInstance[claimKey] = usage;
+      usages.push(usage);
+      for (const effect of input.stateEffects ?? []) {
+        if (chatVariables[effect.key] === effect.value) continue;
+        chatVariables[effect.key] = effect.value;
+        chatStateChanged = true;
+      }
+    }
+
+    for (const [messageId, usageByInstance] of usageMaps) {
+      const existing = messages.get(messageId)!;
+      const nextExtra = normalizeStoredMessageExtra(
+        { ...(existing.extra || {}), associative_regex_action_usage: usageByInstance },
+        existing.swipes.length,
+        existing.swipe_id,
+      );
+      db.query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?")
+        .run(JSON.stringify(nextExtra), messageId, chatId);
+    }
+    if (chatStateChanged) {
+      const metadata = { ...(chatBefore.metadata || {}), chat_variables: chatVariables };
+      db.query("UPDATE chats SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+        .run(JSON.stringify(metadata), now, chatId, userId);
+    }
+    return { status: "claimed" as const, usages, chatBefore, chatStateChanged };
+  })();
+
+  const messageIds = [...new Set(inputs.map((input) => input.messageId))];
+  const messages = messageIds
+    .map((messageId) => getMessage(userId, messageId))
+    .filter((message): message is Message => !!message);
+  if (outcome.status === "not_found") return { status: "not_found", messages };
+  if (outcome.status === "forbidden") return { status: "forbidden", messages };
+  if (outcome.status === "used") return { ...outcome, messages };
+  for (const message of messages) eventBus.emit(EventType.MESSAGE_EDITED, { chatId, message }, userId);
+  const chat = outcome.chatStateChanged ? getChat(userId, chatId) ?? undefined : undefined;
+  if (chat) {
+    eventBus.emit(EventType.CHAT_CHANGED, {
+      chat,
+      changedFields: diffChatChangedFields(outcome.chatBefore, chat),
+    }, userId);
+  }
+  return { status: "claimed", usages: outcome.usages, messages, ...(chat ? { chat } : {}) };
+}
+
+/**
+ * Atomically claim one rendered regex-action block. Usage is stored on the
+ * source message so it survives refreshes and is shared by every client.
+ */
+export function claimAssociativeRegexAction(
+  userId: string,
+  chatId: string,
+  messageId: string,
+  input: {
+    instanceId: string;
+    scriptId: string;
+    actionId: string;
+    multiSelect?: boolean;
+    stateEffects?: Array<{ key: string; value: string }>;
+    requiresAssistantSource?: boolean;
+    fork?: boolean;
+  },
+): ClaimAssociativeRegexActionResult {
+  const db = getDb();
+  const outcome = db.transaction(() => {
+    if (!hasValidAssociativeRegexStateEffects(input.stateEffects)) return { status: "forbidden" as const };
+    const chatBefore = getChat(userId, chatId);
+    if (!chatBefore) return { status: "not_found" as const };
+    const existing = getMessage(userId, messageId);
+    if (!existing || existing.chat_id !== chatId) return { status: "not_found" as const };
+    if ((input.requiresAssistantSource || input.stateEffects?.length || input.fork) && existing.is_user) {
+      return { status: "forbidden" as const };
+    }
+
+    const stored = existing.extra?.associative_regex_action_usage;
+    const usageByInstance: Record<string, AssociativeRegexActionUsage> =
+      stored && typeof stored === "object" && !Array.isArray(stored)
+        ? { ...stored }
+        : {};
+    const claimKey = input.multiSelect ? `${input.instanceId}:${input.actionId}` : input.instanceId;
+    const prior = usageByInstance[input.instanceId]
+      ?? usageByInstance[claimKey]
+      ?? (!input.multiSelect
+        ? Object.entries(usageByInstance).find(([key]) => key.startsWith(`${input.instanceId}:`))?.[1]
+        : undefined);
+    if (prior && typeof prior === "object") {
+      return { status: "used" as const, usage: prior };
+    }
+
+    const usage: AssociativeRegexActionUsage = {
+      script_id: input.scriptId,
+      action_id: input.actionId,
+      used_at: Math.floor(Date.now() / 1000),
+    };
+    usageByInstance[claimKey] = usage;
+    const nextExtra = normalizeStoredMessageExtra(
+      { ...(existing.extra || {}), associative_regex_action_usage: usageByInstance },
+      existing.swipes.length,
+      existing.swipe_id,
+    );
+    db.query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?")
+      .run(JSON.stringify(nextExtra), messageId, chatId);
+    const chatVariables = {
+      ...((chatBefore.metadata?.chat_variables as Record<string, string> | undefined) ?? {}),
+    };
+    let chatStateChanged = false;
+    for (const effect of input.stateEffects ?? []) {
+      if (chatVariables[effect.key] === effect.value) continue;
+      chatVariables[effect.key] = effect.value;
+      chatStateChanged = true;
+    }
+    const metadata = chatStateChanged
+      ? { ...(chatBefore.metadata || {}), chat_variables: chatVariables }
+      : chatBefore.metadata;
+    if (chatStateChanged) {
+      db.query("UPDATE chats SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+        .run(JSON.stringify(metadata), usage.used_at, chatId, userId);
+    }
+    const branchCreated = input.fork
+      ? createChatBranchRows(userId, { ...chatBefore, metadata }, existing)
+      : undefined;
+    return { status: "claimed" as const, usage, chatBefore, chatStateChanged, branchCreated };
+  })();
+
+  if (outcome.status === "not_found" || outcome.status === "forbidden") return outcome;
+  const message = getMessage(userId, messageId);
+  if (!message) return { status: "not_found" };
+  if (outcome.status === "used") return { status: "used", usage: outcome.usage, message };
+  if (outcome.status === "claimed") {
+    eventBus.emit(EventType.MESSAGE_EDITED, { chatId, message }, userId);
+    if (outcome.chatStateChanged) {
+      const chat = getChat(userId, chatId);
+      if (chat) {
+        eventBus.emit(EventType.CHAT_CHANGED, {
+          chat,
+          changedFields: diffChatChangedFields(outcome.chatBefore, chat),
+        }, userId);
+      }
+    }
+  }
+  const forkedChat = outcome.branchCreated
+    ? emitCreatedChatBranch(userId, outcome.branchCreated) ?? undefined
+    : undefined;
+  return {
+    status: "claimed",
+    usage: outcome.usage,
+    message,
+    ...(forkedChat ? { forkedChat } : {}),
+  };
+}
+
+export function createMessage(chatId: string, input: CreateMessageInput, userId: string, messageId?: string): Message {
+  const id = messageId ?? crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
   const maxIndex = getDb()
@@ -1609,7 +2583,7 @@ export function appendMessageAttachment(
     .query("UPDATE messages SET extra = ? WHERE id = ? AND chat_id = ?")
     .run(JSON.stringify(normalizedExtra), messageId, existing.chat_id);
 
-  const updated: Message = { ...existing, extra: normalizedExtra };
+  const updated: Message = { ...existing, extra: projectActiveSwipeExtra(normalizedExtra, existing.swipe_id) };
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
   return updated;
 }
@@ -1687,7 +2661,7 @@ export function removeMessageAttachment(
   // message and the orphan can be GC'd manually.
   cleanupAudioAttachments(userId, removed);
 
-  const updated: Message = { ...existing, extra: normalizedExtra };
+  const updated: Message = { ...existing, extra: projectActiveSwipeExtra(normalizedExtra, existing.swipe_id) };
   eventBus.emit(EventType.MESSAGE_EDITED, { chatId: updated.chat_id, message: updated }, userId);
   return updated;
 }
@@ -1712,11 +2686,14 @@ export function patchMessageExtra(userId: string, id: string, extra: Record<stri
 
 /** Top-level extra keys that are persisted per-swipe (folded into `*BySwipe[]`). */
 const SWIPE_SCOPED_EXTRA_KEYS = [
+  "promptActivation",
   "reasoning",
   "reasoningDuration",
   "tokenCount",
   "generationMetrics",
+  "generationOutcome",
   "usage",
+  "reasoningCarrier",
 ] as const;
 
 /**
@@ -1857,6 +2834,7 @@ export function updateMessage(userId: string, id: string, input: UpdateMessageIn
   if (normalizedExtra !== undefined) { fields.push("extra = ?"); values.push(JSON.stringify(normalizedExtra)); }
 
   if (fields.length === 0) return existing;
+  if (messagesHaveRevisionColumn()) fields.push("revision = revision + 1");
   values.push(id);
   values.push(existing.chat_id);
 
@@ -1954,6 +2932,16 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
 
   transaction();
 
+  if (
+    hidden &&
+    typeof chat.metadata?.context_history_anchor_message_id === "string" &&
+    messageIds.includes(chat.metadata.context_history_anchor_message_id)
+  ) {
+    mergeChatMetadata(userId, chatId, {
+      context_history_anchor_message_id: undefined,
+    });
+  }
+
   // Emit events for WS sync
   for (const msg of updated) {
     eventBus.emit(EventType.MESSAGE_EDITED, { chatId, message: msg }, userId);
@@ -1966,9 +2954,8 @@ export function bulkSetHidden(userId: string, chatId: string, messageIds: string
     memoryCortex.invalidateLinkedCortexCache(chatId);
   } catch { /* ignore if not loaded */ }
 
-  // Rebuild chunks once after all updates. Surgical from the earliest affected
-  // chunk; if any of the flipped messages were previously hidden (not in any
-  // chunk), the surgical path falls back to a full rebuild automatically.
+  // Rebuild chunks once after all updates, from the earliest affected message
+  // position. This also covers newly unhidden messages that had no old chunk.
   rebuildChatChunksFromMessages(userId, chatId, updated.map(m => m.id)).catch(err => {
     console.warn("[chats] Failed to rebuild chunks after bulk hide:", err);
   });
@@ -1983,12 +2970,13 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
   if (messageIds.length > 500) throw new Error("Maximum 500 messages per batch");
 
   const db = getDb();
-  const getStmt = db.query("SELECT id, extra FROM messages WHERE id = ? AND chat_id = ?");
+  const getStmt = db.query("SELECT id, extra, index_in_chat FROM messages WHERE id = ? AND chat_id = ?");
   const deleteStmt = db.query("DELETE FROM messages WHERE id = ? AND chat_id = ?");
 
   let deleted = 0;
   const deletedIds: string[] = [];
   const attachmentsToCleanup: any[] = [];
+  let earliestDeletedIndex: number | null = null;
 
   const transaction = db.transaction(() => {
     for (const msgId of messageIds) {
@@ -1996,13 +2984,31 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
       if (!row) continue;
 
       attachmentsToCleanup.push(...collectMessageAttachments(row));
-      deleteStmt.run(msgId, chatId);
-      deleted++;
-      deletedIds.push(msgId);
+      const result = deleteStmt.run(msgId, chatId);
+      if (result.changes > 0) {
+        breakdownSvc.deleteBreakdownForMessage(userId, msgId);
+        earliestDeletedIndex = earliestDeletedIndex == null
+          ? row.index_in_chat
+          : Math.min(earliestDeletedIndex, row.index_in_chat);
+        deleted++;
+        deletedIds.push(msgId);
+      }
+    }
+    if (earliestDeletedIndex != null) {
+      breakdownSvc.deleteBreakdownsAfterMessage(userId, chatId, earliestDeletedIndex);
     }
   });
 
   transaction();
+
+  if (
+    typeof chat.metadata?.context_history_anchor_message_id === "string" &&
+    deletedIds.includes(chat.metadata.context_history_anchor_message_id)
+  ) {
+    mergeChatMetadata(userId, chatId, {
+      context_history_anchor_message_id: undefined,
+    });
+  }
 
   cleanupAudioAttachments(userId, attachmentsToCleanup);
 
@@ -2018,7 +3024,13 @@ export function bulkDeleteMessages(userId: string, chatId: string, messageIds: s
       memoryCortex.invalidateLinkedCortexCache(chatId);
     } catch { /* ignore if not loaded */ }
 
-    rebuildChatChunksFromMessages(userId, chatId, deletedIds).catch(err => {
+    const rebuild = earliestDeletedIndex === null
+      ? rebuildChatChunks(userId, chatId)
+      : queueChatChunkRebuild(userId, chatId, {
+          kind: "from_message_index",
+          messageIndex: earliestDeletedIndex,
+        });
+    rebuild.catch(err => {
       console.warn("[chats] Failed to rebuild chunks after bulk delete:", err);
     });
   }
@@ -2030,8 +3042,22 @@ export function deleteMessage(userId: string, id: string): boolean {
   const msg = getMessage(userId, id);
   if (!msg) return false;
   const attachmentsToCleanup = collectMessageAttachments(msg);
-  const result = getDb().query("DELETE FROM messages WHERE id = ? AND chat_id = ?").run(id, msg.chat_id);
+  const db = getDb();
+  const result = db.transaction(() => {
+    const deleted = db.query("DELETE FROM messages WHERE id = ? AND chat_id = ?").run(id, msg.chat_id);
+    if (deleted.changes > 0) {
+      breakdownSvc.deleteBreakdownForMessage(userId, id);
+      breakdownSvc.deleteBreakdownsAfterMessage(userId, msg.chat_id, msg.index_in_chat);
+    }
+    return deleted;
+  })();
   if (result.changes > 0) {
+    const chat = getChat(userId, msg.chat_id);
+    if (chat?.metadata?.context_history_anchor_message_id === id) {
+      mergeChatMetadata(userId, msg.chat_id, {
+        context_history_anchor_message_id: undefined,
+      });
+    }
     cleanupAudioAttachments(userId, attachmentsToCleanup);
     eventBus.emit(EventType.MESSAGE_DELETED, { chatId: msg.chat_id, messageId: id }, userId);
     invalidateChatMemoryCache(msg.chat_id);
@@ -2041,7 +3067,10 @@ export function deleteMessage(userId: string, id: string): boolean {
       memoryCortex.invalidateLinkedCortexCache(msg.chat_id);
     } catch { /* ignore if not loaded */ }
 
-    rebuildChatChunksFromMessages(userId, msg.chat_id, [id]).catch(err => {
+    queueChatChunkRebuild(userId, msg.chat_id, {
+      kind: "from_message_index",
+      messageIndex: msg.index_in_chat,
+    }).catch(err => {
       console.warn("[chats] Failed to rebuild chunks after message delete:", err);
     });
   }
@@ -2249,96 +3278,449 @@ export function cycleSwipe(userId: string, messageId: string, direction: "left" 
 
 // --- Branching ---
 
-export function branchChat(userId: string, chatId: string, atMessageId: string): Chat | null {
-  const chat = getChat(userId, chatId);
-  if (!chat) return null;
+interface CreatedChatBranch {
+  sourceChatId: string;
+  newChatId: string;
+  branchId: string;
+  atMessageId: string;
+  atMessageIndex: number;
+  idMap: Map<string, string>;
+}
 
-  const msg = getMessage(userId, atMessageId);
-  if (!msg || msg.chat_id !== chatId) return null;
-
+/** Insert a branch while participating in the caller's current transaction. */
+function createChatBranchRows(userId: string, chat: Chat, msg: Message, requestedName?: string): CreatedChatBranch {
   const branchId = crypto.randomUUID();
   const newChatId = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
 
-  // Branch names: "{baseName} — Branch at #{msgIndex}"
-  const character = chat.character_id ? getCharacter(userId, chat.character_id) : null;
-  const baseName = (chat.name || character?.name || "Chat").replace(/\s+—\s+Branch.*$/i, "").replace(/\s+\(branch\s*\d*\)$/i, "");
-  const branchLabel = `${baseName} — Branch at #${msg.index_in_chat}`;
+  const customName = requestedName?.trim();
+  let newName = customName || "";
 
-  // De-duplicate if multiple branches @ same point
-  // M-07: Escape LIKE metacharacters in branchLabel so a chat name containing
-  // "%" or "_" doesn't match unrelated chats and produce a wrong branch count.
-  const branchLabelEscaped = branchLabel.replace(/[%_\\]/g, "\\$&");
-  const existing = getDb()
-    .query("SELECT COUNT(*) as count FROM chats WHERE user_id = ? AND name LIKE ? ESCAPE '\\'")
-    .get(userId, `${branchLabelEscaped}%`) as { count: number };
-  const newName = existing.count > 0 ? `${branchLabel} (${existing.count + 1})` : branchLabel;
+  if (!newName) {
+    // Branch names: "{baseName} — Branch at #{msgIndex}"
+    const character = chat.character_id ? getCharacter(userId, chat.character_id) : null;
+    const baseName = (chat.name || character?.name || "Chat").replace(/\s+—\s+Branch.*$/i, "").replace(/\s+\(branch\s*\d*\)$/i, "");
+    const branchLabel = `${baseName} — Branch at #${msg.index_in_chat}`;
 
-  const metadata = { ...chat.metadata, branched_from: chatId, branch_at_message: atMessageId };
+    // De-duplicate automatically named branches at the same point.
+    // M-07: Escape LIKE metacharacters so a chat name containing "%" or "_"
+    // doesn't match unrelated chats and produce a wrong branch count.
+    const branchLabelEscaped = branchLabel.replace(/[%_\\]/g, "\\$&");
+    const existing = getDb()
+      .query("SELECT COUNT(*) as count FROM chats WHERE user_id = ? AND name LIKE ? ESCAPE '\\'")
+      .get(userId, `${branchLabelEscaped}%`) as { count: number };
+    newName = existing.count > 0 ? `${branchLabel} (${existing.count + 1})` : branchLabel;
+  }
+
+  const metadata: Record<string, any> = {
+    ...chat.metadata,
+    branched_from: chat.id,
+    branch_at_message: msg.id,
+  };
 
   const db = getDb();
-  const tx = db.transaction(() => {
-    db.query("INSERT INTO chats (id, user_id, character_id, name, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(newChatId, userId, chat.character_id, newName, JSON.stringify(metadata), now, now);
+  db.query("INSERT INTO chats (id, user_id, character_id, name, metadata, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+    .run(newChatId, userId, chat.character_id, newName, JSON.stringify(metadata), now, now);
 
-    const messages = db
-      .query("SELECT * FROM messages WHERE chat_id = ? AND index_in_chat <= ? ORDER BY index_in_chat ASC")
-      .all(chatId, msg.index_in_chat) as any[];
+  const messages = db
+    .query("SELECT * FROM messages WHERE chat_id = ? AND index_in_chat <= ? ORDER BY index_in_chat ASC")
+    .all(chat.id, msg.index_in_chat) as any[];
 
-    const idMap = new Map<string, string>();
+  const idMap = new Map<string, string>();
 
-    for (const m of messages) {
-      const newMsgId = crypto.randomUUID();
-      idMap.set(m.id, newMsgId);
-      
-      // Relink parent_message_id to the new ID within this branch
-      const parentId = m.parent_message_id ? (idMap.get(m.parent_message_id) || null) : null;
+  for (const m of messages) {
+    const newMsgId = crypto.randomUUID();
+    idMap.set(m.id, newMsgId);
+    const parentId = m.parent_message_id ? (idMap.get(m.parent_message_id) || null) : null;
 
-      db.query(
-        `INSERT INTO messages (id, chat_id, index_in_chat, is_user, name, content, send_date, swipe_id, swipes, swipe_dates, extra, parent_message_id, branch_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      ).run(
-        newMsgId,
-        newChatId,
-        m.index_in_chat,
-        m.is_user,
-        m.name,
-        m.content,
-        m.send_date,
-        m.swipe_id,
-        m.swipes,
-        m.swipe_dates,
-        m.extra,
-        parentId,
-        branchId,
-        now
-      );
+    db.query(
+      `INSERT INTO messages (id, chat_id, index_in_chat, is_user, name, content, send_date, swipe_id, swipes, swipe_dates, extra, parent_message_id, branch_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      newMsgId,
+      newChatId,
+      m.index_in_chat,
+      m.is_user,
+      m.name,
+      m.content,
+      m.send_date,
+      m.swipe_id,
+      m.swipes,
+      m.swipe_dates,
+      m.extra,
+      parentId,
+      branchId,
+      now,
+    );
+  }
+
+  const sourceAnchorId = typeof chat.metadata?.context_history_anchor_message_id === "string"
+    ? chat.metadata.context_history_anchor_message_id
+    : null;
+  if (sourceAnchorId) {
+    const mappedAnchorId = idMap.get(sourceAnchorId);
+    if (mappedAnchorId) {
+      metadata.context_history_anchor_message_id = mappedAnchorId;
+    } else {
+      delete metadata.context_history_anchor_message_id;
     }
-  });
+    db.query("UPDATE chats SET metadata = ? WHERE id = ? AND user_id = ?")
+      .run(JSON.stringify(metadata), newChatId, userId);
+  }
+
+  return {
+    sourceChatId: chat.id,
+    newChatId,
+    branchId,
+    atMessageId: msg.id,
+    atMessageIndex: msg.index_in_chat,
+    idMap,
+  };
+}
+
+function emitCreatedChatBranch(userId: string, created: CreatedChatBranch): Chat | null {
+  const forkedChat = getChat(userId, created.newChatId);
+  if (!forkedChat) return null;
+  eventBus.emit(
+    EventType.CHAT_FORKED,
+    {
+      sourceChatId: created.sourceChatId,
+      forkedChatId: created.newChatId,
+      chat: forkedChat,
+      branchId: created.branchId,
+      forkedAtMessageId: created.atMessageId,
+      forkedAtMessageIndex: created.atMessageIndex,
+      messageIdMap: Object.fromEntries(created.idMap),
+    },
+    userId,
+  );
+  return forkedChat;
+}
+
+export function branchChat(userId: string, chatId: string, atMessageId: string, requestedName?: string): Chat | null {
+  const chat = getChat(userId, chatId);
+  if (!chat) return null;
+  const msg = getMessage(userId, atMessageId);
+  if (!msg || msg.chat_id !== chatId) return null;
+
+  let created: CreatedChatBranch;
 
   try {
-    tx();
+    created = getDb().transaction(() => createChatBranchRows(userId, chat, msg, requestedName))();
   } catch (err) {
     console.error("[chats] Branch failed:", err);
     return null;
   }
+  return emitCreatedChatBranch(userId, created);
+}
 
-  const forkedChat = getChat(userId, newChatId);
-  if (forkedChat) {
-    eventBus.emit(
-      EventType.CHAT_FORKED,
-      {
-        sourceChatId: chatId,
-        forkedChatId: newChatId,
-        chat: forkedChat,
-        branchId,
-        forkedAtMessageId: atMessageId,
-        forkedAtMessageIndex: msg.index_in_chat,
-      },
-      userId,
-    );
+export type EditAndSendMode = "normal" | "swipe";
+
+export interface EditAndSendInput {
+  messageId: string;
+  content: string;
+  expectedVersion: number;
+  requestId: string;
+  branchChatOnEditAndSend?: boolean;
+}
+
+export interface EditAndSendGenerationCursor {
+  generationId: string;
+  chatId: string;
+  requestId: string;
+  mode: EditAndSendMode;
+}
+
+export interface EditAndSendSuccess {
+  branchChatId: string;
+  editedMessageId: string;
+  immediateAssistantId: string | null;
+  generationCursor: EditAndSendGenerationCursor;
+}
+
+export type EditAndSendResult =
+  | { status: "ok"; replayed: boolean; payload: EditAndSendSuccess }
+  | { status: "not_found"; error: string }
+  | { status: "conflict"; error: string }
+  | { status: "bad_request"; error: string };
+
+function editAndSendFingerprint(input: EditAndSendInput): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      messageId: input.messageId,
+      content: input.content,
+      expectedVersion: input.expectedVersion,
+      branchChatOnEditAndSend: input.branchChatOnEditAndSend ?? true,
+    }))
+    .digest("hex");
+}
+
+function parseStoredEditAndSendPayload(raw: string): EditAndSendSuccess | null {
+  try {
+    const parsed = JSON.parse(raw) as EditAndSendSuccess;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.branchChatId !== "string" || typeof parsed.editedMessageId !== "string") return null;
+    if (!parsed.generationCursor || typeof parsed.generationCursor.generationId !== "string") return null;
+    return parsed;
+  } catch {
+    return null;
   }
-  return forkedChat;
+}
+
+function withImmediateTransaction<T>(fn: () => T): T {
+  const db = getDb();
+  const txn = db.transaction(fn) as (() => T) & { immediate?: () => T };
+  if (typeof txn.immediate === "function") return txn.immediate();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw err;
+  }
+}
+
+function messageRevision(row: { revision?: unknown }): number {
+  return typeof row.revision === "number" && Number.isInteger(row.revision) ? row.revision : 1;
+}
+
+class EditAndSendBranchMappingError extends Error {}
+
+export function editAndSend(
+  userId: string,
+  chatId: string,
+  input: EditAndSendInput,
+): EditAndSendResult {
+  if (typeof input.requestId !== "string" || input.requestId.trim().length === 0) {
+    return { status: "bad_request", error: "requestId is required" };
+  }
+  if (typeof input.messageId !== "string" || input.messageId.trim().length === 0) {
+    return { status: "bad_request", error: "messageId is required" };
+  }
+  if (typeof input.content !== "string") {
+    return { status: "bad_request", error: "content is required" };
+  }
+  if (input.content.trim().length === 0) {
+    return { status: "bad_request", error: "content must not be empty" };
+  }
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    return { status: "bad_request", error: "expectedVersion must be a positive integer" };
+  }
+  const branchChatOnEditAndSend = input.branchChatOnEditAndSend ?? true;
+
+  const fingerprint = editAndSendFingerprint(input);
+  const now = Date.now();
+  // Holder object: assignments made inside the transaction callback are not
+  // tracked by control-flow analysis on the bare `let`, which collapsed the
+  // post-transaction guard to `never`.
+  const branchRef: { current: CreatedChatBranch | null } = { current: null };
+  let editedCopy: Message | null = null;
+
+  let outcome: EditAndSendResult;
+  try {
+    outcome = withImmediateTransaction((): EditAndSendResult => {
+    const db = getDb();
+    const existingRequest = db.query(
+      `SELECT request_fingerprint, response FROM edit_and_send_requests
+       WHERE user_id = ? AND chat_id = ? AND request_id = ?`,
+    ).get(userId, chatId, input.requestId) as { request_fingerprint: string; response: string } | null;
+    if (existingRequest) {
+      if (existingRequest.request_fingerprint !== fingerprint) {
+        return { status: "conflict", error: "requestId already used with a different payload" };
+      }
+      const payload = parseStoredEditAndSendPayload(existingRequest.response);
+      if (!payload) return { status: "conflict", error: "stored edit-and-send response is unreadable" };
+      return { status: "ok", replayed: true, payload };
+    }
+
+    const chat = getChat(userId, chatId);
+    if (!chat) return { status: "not_found", error: "Chat not found" };
+    const source = getMessage(userId, input.messageId);
+    if (!source || source.chat_id !== chatId) return { status: "not_found", error: "Message not found" };
+    if (!source.is_user) return { status: "bad_request", error: "Only user messages can be edited and sent" };
+
+    const hasRevision = messagesHaveRevisionColumn();
+    if (hasRevision && messageRevision(source as Message & { revision?: number }) !== input.expectedVersion) {
+      return { status: "conflict", error: "Message revision mismatch" };
+    }
+
+    const subsequent = db.query(
+      `SELECT * FROM messages WHERE chat_id = ? AND index_in_chat = ?`,
+    ).get(chatId, source.index_in_chat + 1) as any;
+    const subsequentAssistant = subsequent && !subsequent.is_user ? rowToMessage(subsequent) : null;
+    const branchAt = subsequentAssistant ?? source;
+    const mode: EditAndSendMode = subsequentAssistant ? "swipe" : "normal";
+
+    let targetChatId: string;
+    let editedMessageId: string;
+    let targetMessageId: string | null;
+
+    if (branchChatOnEditAndSend) {
+      const createdBranch = createChatBranchRows(userId, chat, branchAt);
+      branchRef.current = createdBranch;
+
+      const copiedUserMessageId = createdBranch.idMap.get(source.id);
+      if (!copiedUserMessageId) {
+        throw new EditAndSendBranchMappingError("Failed to copy edited message");
+      }
+
+      targetChatId = createdBranch.newChatId;
+      editedMessageId = copiedUserMessageId;
+      if (subsequentAssistant) {
+        const copiedAssistantMessageId = createdBranch.idMap.get(subsequentAssistant.id);
+        if (!copiedAssistantMessageId) {
+          throw new EditAndSendBranchMappingError("Failed to copy immediate assistant message");
+        }
+        targetMessageId = copiedAssistantMessageId;
+      } else {
+        targetMessageId = null;
+      }
+    } else {
+      targetChatId = chatId;
+      editedMessageId = source.id;
+      targetMessageId = subsequentAssistant?.id ?? null;
+    }
+    const targetSwipeIndex = subsequentAssistant ? subsequentAssistant.swipes.length : null;
+
+    const copied = getMessage(userId, editedMessageId);
+    if (!copied) return { status: "not_found", error: "Copied message not found" };
+    const nextSwipes = [...copied.swipes];
+    const swipeSlot =
+      Number.isInteger(copied.swipe_id) && copied.swipe_id >= 0 && copied.swipe_id < nextSwipes.length
+        ? copied.swipe_id
+        : 0;
+    nextSwipes[swipeSlot] = input.content;
+    const nextDates = [...copied.swipe_dates];
+    if (nextDates.length !== nextSwipes.length) {
+      const stamp = Math.floor(now / 1000);
+      while (nextDates.length < nextSwipes.length) nextDates.push(stamp);
+      if (nextDates.length > nextSwipes.length) nextDates.length = nextSwipes.length;
+    }
+    const revisionSql = hasRevision ? ", revision = revision + 1" : "";
+    db.query(
+      `UPDATE messages SET content = ?, swipes = ?, swipe_id = ?, swipe_dates = ?${revisionSql}
+       WHERE id = ? AND chat_id = ?`,
+    ).run(
+      input.content,
+      JSON.stringify(nextSwipes),
+      swipeSlot,
+      JSON.stringify(nextDates),
+      editedMessageId,
+      targetChatId,
+    );
+
+    editedCopy = getMessage(userId, editedMessageId);
+    const generationId = crypto.randomUUID();
+    const payload: EditAndSendSuccess = {
+      branchChatId: targetChatId,
+      editedMessageId,
+      immediateAssistantId: targetMessageId,
+      generationCursor: {
+        generationId,
+        chatId: targetChatId,
+        requestId: input.requestId,
+        mode,
+      },
+    };
+    const requestRowId = crypto.randomUUID();
+    const cursorJson = JSON.stringify(payload.generationCursor);
+    const responseJson = JSON.stringify(payload);
+
+    db.query(
+      `INSERT INTO edit_and_send_requests (
+        id, user_id, chat_id, request_id, request_fingerprint, branch_chat_id,
+        edited_message_id, target_message_id, target_swipe_index, generation_id,
+        response, cursor, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      requestRowId,
+      userId,
+      chatId,
+      input.requestId,
+      fingerprint,
+      targetChatId,
+      editedMessageId,
+      targetMessageId,
+      targetSwipeIndex,
+      generationId,
+      responseJson,
+      cursorJson,
+      now,
+      now,
+    );
+    // Resolve the connection ONCE, here, at COMMIT time, and store it on the
+    // row. The outbox is durable but its dispatch is not a single event: the
+    // same row can be dispatched from the POST handler, again from the periodic
+    // retry tick after a backoff, and again from startup crash recovery, hours
+    // apart. Re-reading `activeProfileId` / the opt-in / the chat pin on each of
+    // those ticks means switching the active profile retargets a request the
+    // user already committed. Recording the answer makes it immutable for the
+    // life of the request.
+    //
+    // Note the replay short-circuit at the top of this transaction: an existing
+    // `edit_and_send_requests` row returns the ORIGINAL stored payload and never
+    // reaches this INSERT, so the value recorded on the FIRST commit is
+    // automatically the one honored by every subsequent replay of the same
+    // requestId. There is no second resolution to keep in sync.
+    //
+    // Lazily required rather than statically imported (existing precedent in
+    // this file for `resolveConnection`): `chats.service` carries no static
+    // connections/settings import today, and it must never gain a static import
+    // of `generate.service`, which imports this module — that would be a cycle.
+    // `resolveEditAndSendConnectionId` never throws and returns `undefined` when
+    // nothing resolves (including in fixtures with no `settings` /
+    // `connection_profiles` tables), so a connection lookup can never fail the
+    // user's edit; a NULL column simply means "fall back to the legacy
+    // resolve-at-dispatch ladder", exactly like pre-migration rows.
+    const { resolveEditAndSendConnectionId } = require("./connections.service");
+    const committedConnectionId: string | undefined = resolveEditAndSendConnectionId(
+      userId,
+      chat.metadata,
+    );
+    db.query(
+      `INSERT INTO generation_outbox (
+        id, request_id, user_id, chat_id, branch_chat_id, edited_message_id,
+        target_message_id, target_swipe_index, expected_version, generation_id,
+        mode, status, attempt_count, created_at, updated_at, connection_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)`,
+    ).run(
+      crypto.randomUUID(),
+      input.requestId,
+      userId,
+      chatId,
+      targetChatId,
+      editedMessageId,
+      targetMessageId,
+      targetSwipeIndex,
+      input.expectedVersion,
+      generationId,
+      mode,
+      now,
+      now,
+      committedConnectionId ?? null,
+    );
+
+      return { status: "ok", replayed: false, payload };
+    });
+  } catch (error) {
+    if (error instanceof EditAndSendBranchMappingError) {
+      return { status: "not_found", error: error.message };
+    }
+    throw error;
+  }
+
+  if (outcome.status === "ok" && !outcome.replayed) {
+    if (branchRef.current) emitCreatedChatBranch(userId, branchRef.current);
+    if (editedCopy) {
+      const targetChatId = branchRef.current?.newChatId ?? chatId;
+      eventBus.emit(EventType.MESSAGE_EDITED, { chatId: targetChatId, message: editedCopy }, userId);
+      try { invalidateChatMemoryCache(targetChatId); } catch { /* optional in tests */ }
+    }
+  }
+
+  return outcome;
 }
 
 // Branch tree
@@ -2468,6 +3850,23 @@ export function createChatRaw(userId: string, input: { character_id: string; nam
   return getChat(userId, id)!;
 }
 
+/** Load migration identities once so a rerun does not re-import the same ST chat. */
+export function listChatSourceFilenameIds(userId: string): Map<string, string> {
+  const rows = getDb()
+    .query(
+      `SELECT id, json_extract(metadata, '$._lumiverse_source_filename') AS source_filename
+       FROM chats
+       WHERE user_id = ?
+         AND json_type(metadata, '$._lumiverse_source_filename') = 'text'
+       ORDER BY updated_at ASC`,
+    )
+    .all(userId) as Array<{ id: string; source_filename: string }>;
+
+  const result = new Map<string, string>();
+  for (const row of rows) result.set(row.source_filename, row.id);
+  return result;
+}
+
 export function bulkInsertMessages(chatId: string, messages: BulkMessageInput[], userId: string): number {
   const db = getDb();
   const now = Math.floor(Date.now() / 1000);
@@ -2562,6 +3961,8 @@ interface ChatChunk {
   retrieval_count: number;
   last_retrieved_at: number | null;
   message_count: number;
+  message_range_start: number | null;
+  message_range_end: number | null;
   created_at: number;
   updated_at: number;
 }
@@ -2580,6 +3981,8 @@ function rowToChatChunk(row: any): ChatChunk {
     retrieval_count: row.retrieval_count,
     last_retrieved_at: row.last_retrieved_at,
     message_count: row.message_count,
+    message_range_start: row.message_range_start ?? null,
+    message_range_end: row.message_range_end ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -2590,7 +3993,15 @@ function rowToChatChunk(row: any): ChatChunk {
  */
 function getLastChatChunk(chatId: string): ChatChunk | null {
   const row = getDb()
-    .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at DESC LIMIT 1")
+    .query(
+      `SELECT * FROM chat_chunks
+       WHERE chat_id = ?
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start DESC,
+                message_range_end DESC,
+                id DESC
+       LIMIT 1`,
+    )
     .get(chatId) as any;
   return row ? rowToChatChunk(row) : null;
 }
@@ -2603,7 +4014,14 @@ export function getChatChunks(userId: string, chatId: string): ChatChunk[] {
   if (!chat) return [];
 
   const rows = getDb()
-    .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
+    .query(
+      `SELECT * FROM chat_chunks
+       WHERE chat_id = ?
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start ASC,
+                message_range_end ASC,
+                id ASC`,
+    )
     .all(chatId) as any[];
 
   return rows.map(rowToChatChunk);
@@ -2703,8 +4121,9 @@ function createChatChunk(chatId: string, messages: Message[], sanitizedContents:
     .query(
       `INSERT INTO chat_chunks (
         id, chat_id, start_message_id, end_message_id, message_ids, content,
-        token_count, message_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        token_count, message_count, message_range_start, message_range_end,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -2715,6 +4134,8 @@ function createChatChunk(chatId: string, messages: Message[], sanitizedContents:
       content,
       tokenCount,
       messages.length,
+      messages[0].index_in_chat,
+      messages[messages.length - 1].index_in_chat,
       now,
       now
     );
@@ -2741,6 +4162,7 @@ function appendToChunk(chunkId: string, message: Message, sanitizedContent: stri
         content = ?,
         token_count = ?,
         message_count = ?,
+        message_range_end = ?,
         updated_at = ?,
         vectorized_at = NULL,
         vector_model = NULL,
@@ -2748,7 +4170,16 @@ function appendToChunk(chunkId: string, message: Message, sanitizedContent: stri
         cortex_warmup_completed_at = NULL
       WHERE id = ?`
     )
-    .run(message.id, JSON.stringify(messageIds), newContent, newTokenCount, messageIds.length, now, chunkId);
+    .run(
+      message.id,
+      JSON.stringify(messageIds),
+      newContent,
+      newTokenCount,
+      messageIds.length,
+      message.index_in_chat,
+      now,
+      chunkId,
+    );
 }
 
 type SalienceSnapshotRow = {
@@ -2776,7 +4207,10 @@ function snapshotSalienceByChunkContent(chatId: string): Map<string, SalienceSna
      FROM memory_salience ms
      JOIN chat_chunks cc ON cc.id = ms.chunk_id
      WHERE ms.chat_id = ?
-     ORDER BY cc.created_at ASC`,
+     ORDER BY cc.message_range_start IS NULL ASC,
+              cc.message_range_start ASC,
+              cc.message_range_end ASC,
+              cc.id ASC`,
   ).all(chatId) as Array<SalienceSnapshotRow & { content: string }>;
 
   const byContent = new Map<string, SalienceSnapshotRow[]>();
@@ -2887,7 +4321,7 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
     const chunk = getDb().query("SELECT * FROM chat_chunks WHERE id = ?").get(chunkId) as any;
     if (chunk) {
       const cortexConfig = memoryCortex.getCortexConfig(userId);
-      if (!cortexConfig.enabled) return;
+      if (!memoryCortex.isCortexEnabledForChat(cortexConfig, chat?.metadata)) return;
 
       const characterNames: string[] = [];
       const aliasMaps: Map<string, string>[] = [];
@@ -3076,30 +4510,60 @@ export async function ensureChatMemoryFresh(userId: string, chatId: string): Pro
   }
 }
 
-/**
- * Find the earliest chunk that holds any of the given message IDs. Used to
- * scope a surgical rebuild: chunks before this one stay intact (keeping
- * their cortex_warmup_signature, salience, embeddings), chunks from this
- * one onward are dropped and re-chunked.
- *
- * Returns null when none of the messages map to a known chunk — typically
- * because they were hidden before chunks were built or the chat has no
- * chunks yet. Callers should fall back to a full rebuild in that case.
- */
-function findAnchorChunkForMessages(chatId: string, messageIds: Iterable<string>): string | null {
-  const idSet = new Set(messageIds);
-  if (idSet.size === 0) return null;
-  const rows = getDb()
-    .query("SELECT id, message_ids FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
-    .all(chatId) as Array<{ id: string; message_ids: string }>;
-  for (const row of rows) {
+type ChatChunkRebuildScope =
+  | { kind: "full" }
+  | { kind: "from_message_index"; messageIndex: number };
+
+interface ChatChunkRebuildState {
+  pending: ChatChunkRebuildScope | null;
+  promise: Promise<void>;
+}
+
+/** Resolve IDs to a durable chat position. Live/hidden messages come directly
+ * from messages.index_in_chat. The chunk lookup is a fallback for callers that
+ * have already deleted a message but still have its stale chunk graph. */
+function findEarliestAffectedMessageIndex(chatId: string, messageIds: Iterable<string>): number | null {
+  const ids = [...new Set(messageIds)];
+  if (ids.length === 0) return null;
+
+  const db = getDb();
+  const placeholders = ids.map(() => "?").join(",");
+  const messageRows = db.query(
+    `SELECT id, index_in_chat FROM messages WHERE chat_id = ? AND id IN (${placeholders})`,
+  ).all(chatId, ...ids) as Array<{ id: string; index_in_chat: number }>;
+  const resolvedIds = new Set(messageRows.map((row) => row.id));
+
+  let earliest = messageRows.reduce<number | null>(
+    (value, row) => value === null ? row.index_in_chat : Math.min(value, row.index_in_chat),
+    null,
+  );
+
+  if (messageRows.length === ids.length) return earliest;
+
+  const unresolvedIds = new Set(ids.filter((id) => !resolvedIds.has(id)));
+  const chunkRows = db.query(
+    `SELECT message_ids, message_range_start
+     FROM chat_chunks
+     WHERE chat_id = ?
+     ORDER BY message_range_start IS NULL ASC,
+              message_range_start ASC,
+              message_range_end ASC,
+              id ASC`,
+  ).all(chatId) as Array<{ message_ids: string; message_range_start: number | null }>;
+  for (const row of chunkRows) {
     let parsed: string[];
     try { parsed = JSON.parse(row.message_ids); } catch { continue; }
-    for (const mid of parsed) {
-      if (idSet.has(mid)) return row.id;
-    }
+    const matchedIds = parsed.filter((id) => unresolvedIds.has(id));
+    if (matchedIds.length === 0) continue;
+    if (typeof row.message_range_start !== "number") return null;
+    for (const id of matchedIds) resolvedIds.add(id);
+    earliest = earliest === null
+      ? row.message_range_start
+      : Math.min(earliest, row.message_range_start);
   }
-  return null;
+  // An unresolved ID could belong to an earlier part of the chat. A full
+  // rebuild is the only safe fallback when its original position is unknown.
+  return resolvedIds.size === ids.length ? earliest : null;
 }
 
 function snapshotSalienceForChunks(chatId: string, chunkIds: string[]): Map<string, SalienceSnapshotRow[]> {
@@ -3114,7 +4578,10 @@ function snapshotSalienceForChunks(chatId: string, chunkIds: string[]): Map<stri
      FROM memory_salience ms
      JOIN chat_chunks cc ON cc.id = ms.chunk_id
      WHERE ms.chat_id = ? AND cc.id IN (${placeholders})
-     ORDER BY cc.created_at ASC`,
+     ORDER BY cc.message_range_start IS NULL ASC,
+              cc.message_range_start ASC,
+              cc.message_range_end ASC,
+              cc.id ASC`,
   ).all(chatId, ...chunkIds) as Array<SalienceSnapshotRow & { content: string }>;
 
   const byContent = new Map<string, SalienceSnapshotRow[]>();
@@ -3127,18 +4594,74 @@ function snapshotSalienceForChunks(chatId: string, chunkIds: string[]): Map<stri
   return byContent;
 }
 
-/**
- * In-flight rebuild tracking per chat — prevents concurrent rebuilds from
- * racing each other (each deleting the previous one's chunks). When a
- * rebuild is already running for a chatId, subsequent calls wait for it
- * and then trigger one more rebuild to capture any changes that landed
- * during the first rebuild.
- */
-const _rebuildInflight = new Map<string, Promise<void>>();
-const _rebuildPending = new Set<string>();
+/** One drain per chat. Pending scopes are merged while work is queued/running:
+ * full dominates surgical, and surgical scopes retain the earliest position. */
+const _rebuildStates = new Map<string, ChatChunkRebuildState>();
 
 export function isChatChunkRebuildInProgress(chatId: string): boolean {
-  return _rebuildInflight.has(chatId);
+  return _rebuildStates.has(chatId);
+}
+
+function mergeChatChunkRebuildScope(
+  current: ChatChunkRebuildScope | null,
+  incoming: ChatChunkRebuildScope,
+): ChatChunkRebuildScope {
+  if (!current) return incoming;
+  if (current.kind === "full" || incoming.kind === "full") return { kind: "full" };
+  return {
+    kind: "from_message_index",
+    messageIndex: Math.min(current.messageIndex, incoming.messageIndex),
+  };
+}
+
+function queueChatChunkRebuild(
+  userId: string,
+  chatId: string,
+  scope: ChatChunkRebuildScope,
+): Promise<void> {
+  const existing = _rebuildStates.get(chatId);
+  if (existing) {
+    existing.pending = mergeChatChunkRebuildScope(existing.pending, scope);
+    return existing.promise;
+  }
+
+  const state: ChatChunkRebuildState = {
+    pending: scope,
+    promise: Promise.resolve(),
+  };
+  _rebuildStates.set(chatId, state);
+  state.promise = Promise.resolve()
+    .then(() => drainChatChunkRebuilds(userId, chatId, state))
+    .finally(() => {
+      if (_rebuildStates.get(chatId) === state) _rebuildStates.delete(chatId);
+    });
+  return state.promise;
+}
+
+async function drainChatChunkRebuilds(
+  userId: string,
+  chatId: string,
+  state: ChatChunkRebuildState,
+): Promise<void> {
+  while (state.pending) {
+    await enqueueChatPipelineTask({
+      chatId,
+      kind: "chunk_rebuild",
+      exclusive: true,
+      run: async () => {
+        // Consume at execution time so requests arriving while this task waits
+        // behind Cortex are folded into the same rebuild.
+        const scope = state.pending;
+        state.pending = null;
+        if (!scope) return;
+        if (scope.kind === "full") {
+          await _rebuildChatChunksBody(userId, chatId);
+        } else {
+          await _rebuildChatChunksFromBody(userId, chatId, scope.messageIndex);
+        }
+      },
+    });
+  }
 }
 
 /**
@@ -3150,26 +4673,7 @@ export function isChatChunkRebuildInProgress(chatId: string): boolean {
  * rebuild runs to capture any changes that landed during the first.
  */
 export async function rebuildChatChunks(userId: string, chatId: string): Promise<void> {
-  const inflight = _rebuildInflight.get(chatId);
-  if (inflight) {
-    // Another rebuild is already running — mark pending and wait for it
-    _rebuildPending.add(chatId);
-    await inflight;
-    // If we're the one to run the follow-up, do it; otherwise another
-    // caller already picked it up.
-    if (!_rebuildPending.has(chatId)) return;
-    _rebuildPending.delete(chatId);
-  }
-
-  const promise = _rebuildChatChunksImpl(userId, chatId);
-  _rebuildInflight.set(chatId, promise);
-  try {
-    await promise;
-  } finally {
-    if (_rebuildInflight.get(chatId) === promise) {
-      _rebuildInflight.delete(chatId);
-    }
-  }
+  return queueChatChunkRebuild(userId, chatId, { kind: "full" });
 }
 
 /**
@@ -3178,53 +4682,18 @@ export async function rebuildChatChunks(userId: string, chatId: string): Promise
  * cortex_warmup_signature and salience), so a message edit no longer cascades
  * into a full-chat cortex rebuild.
  *
- * Falls back to a full rebuild when:
- *   - No chunk contains any of the affected message IDs (e.g., the message
- *     was hidden, the chat has no chunks yet).
- *   - A rebuild is already in flight (the follow-up runs as a full rebuild
- *     because we can't know which scope covers the work that landed during
- *     the wait).
+ * The durable message position survives deletion and chunk replacement, so an
+ * overlapping request can remain surgical instead of falling back to full.
  */
 export async function rebuildChatChunksFromMessages(
   userId: string,
   chatId: string,
   affectedMessageIds: Iterable<string>,
 ): Promise<void> {
-  const anchorChunkId = findAnchorChunkForMessages(chatId, affectedMessageIds);
-  if (anchorChunkId === null) {
-    return rebuildChatChunks(userId, chatId);
-  }
-
-  const inflight = _rebuildInflight.get(chatId);
-  if (inflight) {
-    _rebuildPending.add(chatId);
-    await inflight;
-    if (!_rebuildPending.has(chatId)) return;
-    _rebuildPending.delete(chatId);
-    // Conservative follow-up: the in-flight rebuild may have already replaced
-    // the chunk graph, so the anchor we picked could be stale. A full rebuild
-    // is correct under any state.
-    return rebuildChatChunks(userId, chatId);
-  }
-
-  const promise = _rebuildChatChunksFromImpl(userId, chatId, anchorChunkId);
-  _rebuildInflight.set(chatId, promise);
-  try {
-    await promise;
-  } finally {
-    if (_rebuildInflight.get(chatId) === promise) {
-      _rebuildInflight.delete(chatId);
-    }
-  }
-}
-
-async function _rebuildChatChunksImpl(userId: string, chatId: string): Promise<void> {
-  await enqueueChatPipelineTask({
-    chatId,
-    kind: "chunk_rebuild",
-    exclusive: true,
-    run: () => _rebuildChatChunksBody(userId, chatId),
-  });
+  const messageIndex = findEarliestAffectedMessageIndex(chatId, affectedMessageIds);
+  return messageIndex === null
+    ? queueChatChunkRebuild(userId, chatId, { kind: "full" })
+    : queueChatChunkRebuild(userId, chatId, { kind: "from_message_index", messageIndex });
 }
 
 async function _rebuildChatChunksBody(userId: string, chatId: string): Promise<void> {
@@ -3364,23 +4833,11 @@ async function chunkAndPersistMessages(
 }
 
 /**
- * Surgical rebuild: keep every chunk up to (but not including) `fromChunkId`
- * intact, drop the rest, and re-chunk messages that follow the last preserved
- * chunk. Preserved chunks keep their cortex_warmup_signature so the Memory
- * Cortex coverage check skips them on the next warmup. Falls back to a full
- * rebuild whenever the inputs make a surgical pass unsafe (anchor missing,
- * anchor is chunk 0, preserved chunk's tail message has been deleted).
+ * Surgical rebuild: resolve the first affected chunk from a durable message
+ * position, keep every earlier chunk intact, and re-chunk the remaining
+ * messages. Preserved chunks retain their Cortex signatures and vectors.
  */
-async function _rebuildChatChunksFromImpl(userId: string, chatId: string, fromChunkId: string): Promise<void> {
-  await enqueueChatPipelineTask({
-    chatId,
-    kind: "chunk_rebuild",
-    exclusive: true,
-    run: () => _rebuildChatChunksFromBody(userId, chatId, fromChunkId),
-  });
-}
-
-async function _rebuildChatChunksFromBody(userId: string, chatId: string, fromChunkId: string): Promise<void> {
+async function _rebuildChatChunksFromBody(userId: string, chatId: string, fromMessageIndex: number): Promise<void> {
   invalidateChatMemoryCache(chatId);
 
   const cfg = await embeddingsSvc.getEmbeddingConfig(userId);
@@ -3391,13 +4848,39 @@ async function _rebuildChatChunksFromBody(userId: string, chatId: string, fromCh
   }
 
   const allChunks = getDb()
-    .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
-    .all(chatId) as Array<{ id: string; end_message_id: string; created_at: number }>;
-  const fromIdx = allChunks.findIndex((c) => c.id === fromChunkId);
+    .query(
+      `SELECT * FROM chat_chunks
+       WHERE chat_id = ?
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start ASC,
+                message_range_end ASC,
+                id ASC`,
+    )
+    .all(chatId) as Array<{
+      id: string;
+      message_range_start: number | null;
+      message_range_end: number | null;
+    }>;
+
+  if (
+    allChunks.length === 0
+    || allChunks.some((chunk) => (
+      typeof chunk.message_range_start !== "number"
+      || typeof chunk.message_range_end !== "number"
+    ))
+  ) {
+    return _rebuildChatChunksBody(userId, chatId);
+  }
+
+  let fromIdx = allChunks.findIndex((chunk) => chunk.message_range_end! >= fromMessageIndex);
+  if (fromIdx < 0) {
+    // A newly unhidden/appended message can sit beyond every stored range. Drop
+    // the last chunk too so normal boundary rules decide whether it can append.
+    fromIdx = allChunks.length - 1;
+  }
 
   if (fromIdx <= 0) {
-    // Anchor disappeared between selection and execution, or it was the very
-    // first chunk (preserving nothing → equivalent to full rebuild).
+    // Preserving nothing is equivalent to a full rebuild.
     return _rebuildChatChunksBody(userId, chatId);
   }
 
@@ -3405,13 +4888,9 @@ async function _rebuildChatChunksFromBody(userId: string, chatId: string, fromCh
   const discardedChunkIds = allChunks.slice(fromIdx).map((c) => c.id);
 
   const allMessages = getMessages(userId, chatId).filter((m) => m.extra?.hidden !== true);
-  const preservedEndIdx = allMessages.findIndex((m) => m.id === lastPreserved.end_message_id);
-  if (preservedEndIdx < 0) {
-    // The last preserved chunk's tail message was deleted; the surgical
-    // boundary is no longer well-defined. Full rebuild is safer.
-    return _rebuildChatChunksBody(userId, chatId);
-  }
-  const messagesToChunk = allMessages.slice(preservedEndIdx + 1);
+  const messagesToChunk = allMessages.filter(
+    (message) => message.index_in_chat > lastPreserved.message_range_end!,
+  );
 
   const salienceByContent = snapshotSalienceForChunks(chatId, discardedChunkIds);
 

@@ -1,10 +1,11 @@
-import { useRef, useState, useCallback, useEffect } from 'react'
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
 import { motion, AnimatePresence } from 'motion/react'
-import { Sparkles, Settings, Puzzle } from 'lucide-react'
+import { Sparkles, Settings, Puzzle, CircleHelp } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import { CloseButton } from '@/components/shared/CloseButton'
+import { GuideViewer } from '@/components/shared/GuideViewer'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import { useLongPress } from '@/hooks/useLongPress'
 import { DRAWER_TABS, adaptExtensionTabs, applyDrawerTabOrder, sanitizeDrawerTabOrder, sanitizeHiddenDrawerTabIds } from '@/lib/drawer-tab-registry'
@@ -14,10 +15,12 @@ import TabPanelContent from './TabPanelContent'
 import styles from './ViewportDrawer.module.css'
 import DOMPurify from 'dompurify'
 import clsx from 'clsx'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 function ExtensionTabContent({ tabId }: { tabId: string }) {
   const drawerTabs = useStore((s) => s.drawerTabs)
-  const tab = drawerTabs.find((t) => t.id === tabId)
+  const extensions = useStore((s) => s.extensions)
+  const tab = filterEnabledFrontendContributions(drawerTabs, extensions).find((entry) => entry.id === tabId)
   const containerRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -44,6 +47,7 @@ export default function ViewportDrawer() {
   const settingsLoaded = useStore((s) => s.settingsLoaded)
   const drawerSettings = useStore((s) => s.drawerSettings)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const extensions = useStore((s) => s.extensions)
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
   const isGroupChat = useStore((s) => s.isGroupChat)
 
@@ -53,6 +57,8 @@ export default function ViewportDrawer() {
   const panelContentRef = useRef<HTMLDivElement>(null)
   const [tabListScroll, setTabListScroll] = useState({ up: false, down: false })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
+  const [guideOpen, setGuideOpen] = useState(false)
+
 
   const updateTabListScroll = useCallback(() => {
     const el = tabListRef.current
@@ -90,20 +96,38 @@ export default function ViewportDrawer() {
   )
 
   // Merge built-in tabs with dynamic extension tabs
-  const extensionEntries = adaptExtensionTabs(drawerTabs).map((entry) => ({
+  const enabledDrawerTabs = filterEnabledFrontendContributions(drawerTabs, extensions)
+  const extensionEntries = adaptExtensionTabs(enabledDrawerTabs).map((entry) => ({
     ...entry,
     component: () => <ExtensionTabContent tabId={entry.id} />,
   }))
   const orderedBuiltInTabs = applyDrawerTabOrder(DRAWER_TABS, tabOrder)
-  const orderedDrawerTabs = applyDrawerTabOrder(drawerTabs, tabOrder)
+  const orderedDrawerTabs = applyDrawerTabOrder(enabledDrawerTabs, tabOrder)
   const orderedExtensionEntries = applyDrawerTabOrder(extensionEntries, tabOrder)
   const visibleBuiltInTabs = orderedBuiltInTabs.filter((tab) => !hiddenTabIdsSet.has(tab.id))
   const visibleDrawerTabs = orderedDrawerTabs.filter((tab) => !hiddenTabIdsSet.has(tab.id) && !hiddenPlacementIdsSet.has(tab.id))
   const visibleExtensionEntries = orderedExtensionEntries.filter((entry) => !hiddenTabIdsSet.has(entry.id) && !hiddenPlacementIdsSet.has(entry.id))
   const requestedActiveTab = drawerTab || 'profile'
-  const allTabs = [...visibleBuiltInTabs, ...visibleExtensionEntries]
+  const allTabs = useMemo(
+    () => [...visibleBuiltInTabs, ...visibleExtensionEntries],
+    [visibleBuiltInTabs, visibleExtensionEntries],
+  )
   const activeTab = allTabs.some((tab) => tab.id === requestedActiveTab) ? requestedActiveTab : 'profile'
   const activeTabConfig = allTabs.find((t) => t.id === activeTab) || DRAWER_TABS[0]
+const activeTabTitle =
+  activeTab === 'profile' && isGroupChat
+    ? t('group')
+    : activeTabConfig
+      ? translateDrawerField(
+          activeTabConfig.id,
+          'tabHeaderTitle',
+          activeTabConfig.tabHeaderTitle ?? activeTabConfig.tabName,
+        )
+      : t('panel', { defaultValue: 'Panel' })
+
+useEffect(() => {
+  setGuideOpen(false)
+}, [activeTab])
 
   useEffect(() => {
     if (drawerTab && drawerTab !== activeTab) {
@@ -216,6 +240,7 @@ export default function ViewportDrawer() {
         {/* Drawer panel */}
         <div className={styles.drawer}>
           <div className={styles.sidebar} ref={sidebarRef} data-spindle-mount="sidebar">
+            <span data-spindle-mount="sidebar_top" data-spindle-scope="drawer:sidebar-top" style={{ display: 'contents' }} />
             <div className={clsx(
               styles.tabListWrap,
               tabListScroll.up && styles.tabListScrollUp,
@@ -240,6 +265,7 @@ export default function ViewportDrawer() {
                     >
                       <Icon size={20} strokeWidth={1.5} />
                       {showTabLabels && <span className={styles.tabLabel}>{translateDrawerField(tab.id, 'shortName', tab.shortName)}</span>}
+                      <span data-spindle-mount="drawer_tab" data-spindle-scope={`drawer-tab:${tab.id}`} style={{ display: 'contents' }} />
                     </button>
                   )
                 })}
@@ -274,6 +300,7 @@ export default function ViewportDrawer() {
                           )}
                           {showTabLabels && extEntry && <span className={styles.tabLabel}>{extEntry.shortName}</span>}
                           {dt.badge && <span className={styles.tabBadge}>{dt.badge}</span>}
+                          <span data-spindle-mount="drawer_tab" data-spindle-scope={`drawer-tab:${dt.id}`} style={{ display: 'contents' }} />
                         </button>
                       )
                     })}
@@ -283,6 +310,7 @@ export default function ViewportDrawer() {
             </div>
 
             <div className={styles.sidebarBottom}>
+              <span data-spindle-mount="sidebar_bottom" data-spindle-scope="drawer:sidebar-bottom" style={{ display: 'contents' }} />
               <button
                 type="button"
                 className={styles.tabBtn}
@@ -296,25 +324,45 @@ export default function ViewportDrawer() {
 
           <div className={styles.panel}>
             <div className={styles.panelHeader}>
-              <h2 className={styles.panelTitle}>
-                {activeTab === 'profile' && isGroupChat
-                  ? t('group')
-                  : activeTabConfig
-                    ? translateDrawerField(
-                        activeTabConfig.id,
-                        'tabHeaderTitle',
-                        activeTabConfig.tabHeaderTitle ?? activeTabConfig.tabName,
-                      )
-                    : t('panel', { defaultValue: 'Panel' })}
-              </h2>
+              <div className={styles.panelHeaderMain}>
+                <h2 className={styles.panelTitle}>
+                  {activeTabTitle}
+                </h2>
+
+                {activeTabConfig.guide && (
+                  <button
+                    type="button"
+                    className={styles.guideButton}
+                    onClick={() => setGuideOpen(true)}
+                    aria-label={`Open guide for ${activeTabTitle}`}
+                    title="Open guide"
+                  >
+                    <CircleHelp size={15} strokeWidth={1.7} />
+                  </button>
+                )}
+              </div>
+
+              <span className={styles.headerActions}>
+                <span data-spindle-mount="drawer_header_actions" data-spindle-scope="drawer:header-actions" style={{ display: 'contents' }} />
+              </span>
               <CloseButton onClick={closeDrawer} />
             </div>
             <div className={clsx(styles.panelContent, (activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser' || activeTab === 'lorebook') && styles.panelContentFull)} ref={panelContentRef}>
               <TabPanelContent tabId={activeTab} location={{ kind: 'main-drawer' }} />
             </div>
           </div>
+          <span data-spindle-mount="drawer_footer" data-spindle-scope="drawer:footer" style={{ display: 'contents' }} />
         </div>
       </div>
+
+{activeTabConfig.guide && (
+  <GuideViewer
+    isOpen={guideOpen}
+    onClose={() => setGuideOpen(false)}
+    guide={activeTabConfig.guide}
+    title={activeTabTitle}
+  />
+)}
 
       <ContextMenu
         position={contextMenu}

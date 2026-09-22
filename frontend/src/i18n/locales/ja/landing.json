@@ -1,6 +1,10 @@
 {
   "groupChat": "グループチャット",
   "active": "アクティブ",
+  "galleryWidth": {
+    "compact": "コンパクトなギャラリー幅を使用",
+    "expanded": "ギャラリーを全幅に拡大"
+  },
   "account": "アカウント",
   "subtitle": {
     "chooseGroupThreads": "グループ スレッドから選択",

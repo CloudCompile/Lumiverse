@@ -23,6 +23,27 @@ export function didMobileQueueHoldReachThreshold({
   return (releasedAt - holdStartedAt) >= thresholdMs
 }
 
+type ShouldQueueMobileHoldParams = DidMobileQueueHoldReachThresholdParams & {
+  isArmed: boolean
+}
+
+// The visual state is driven by a timer while the release event carries the
+// browser's event timestamp. Some Android WebViews do not keep those clocks in
+// lockstep, so an armed control must remain queueable even when the timestamps
+// cannot be compared reliably on release.
+export function shouldQueueMobileHold({
+  isArmed,
+  holdStartedAt,
+  releasedAt,
+  thresholdMs,
+}: ShouldQueueMobileHoldParams): boolean {
+  return isArmed || didMobileQueueHoldReachThreshold({
+    holdStartedAt,
+    releasedAt,
+    thresholdMs,
+  })
+}
+
 export function getMobileQueueHoldPreviewState({
   holdStartedAt,
   evaluatedAt,

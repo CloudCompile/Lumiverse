@@ -1,0 +1,226 @@
+name: Desktop Release
+
+# Builds fresh installers from the staging→main merge commit and attaches them
+# to the matching desktop release on GitHub. Server-only merges skip it via the
+# path filter; desktop and tray-runner changes use the same release pipeline.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+    paths:
+      - "desktop/**"
+      - "scripts/finalize-appimage.sh"
+      - "scripts/smoke-test-appimage.sh"
+      - "scripts/tauri-finalized.ts"
+      - "scripts/verify-appimage-gstreamer.sh"
+      - "scripts/runner.ts"
+      - "scripts/runner/**"
+      - "src/main.ts"
+      - "src/services/operator.service.ts"
+      - "src/services/runner-channel.ts"
+      - "src/services/runner-control-transport.ts"
+      - "src/services/runner-control-transport.test.ts"
+      - "src/types/operator.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate desktop manifests
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'staging'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify versions and Cargo.lock
+        run: |
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "lumiverse-tray") | .version')"
+          package_version="$(jq -r .version desktop/package.json)"
+          tauri_version="$(jq -r .version desktop/src-tauri/tauri.conf.json)"
+          if [[ "$cargo_version" != "$package_version" || "$cargo_version" != "$tauri_version" ]]; then
+            echo "::error::Desktop versions differ: Cargo.toml=$cargo_version, package.json=$package_version, tauri.conf.json=$tauri_version"
+            exit 1
+          fi
+
+  build:
+    name: Desktop (${{ matrix.target }})
+    needs: validate
+    if: >-
+      github.event.pull_request.merged &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref == 'staging'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+          # AppImage cannot be cross-compiled, so build Linux ARM64 natively.
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: appimage,deb
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+          # ARM64 Windows: NSIS only — WiX/MSI has no ARM64 support.
+          # Cross-compiled on the x64 runner, the documented approach.
+          - os: windows-2022
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Build the actual merge commit on main.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Test Windows tray runner transport
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: >-
+          bun test
+          src/services/runner-control-transport.test.ts
+          scripts/runner/server-manager.test.ts
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf xdg-utils \
+            dbus-x11 xauth xvfb gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+
+      - name: Build desktop installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          # Ad-hoc signing needs no Apple certificate, but is NOT notarization.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+          # Let AppImage packaging run without a FUSE mount in hosted CI.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        with:
+          projectPath: desktop
+          # Finalize Linux AppImages before tauri-action uploads the artifacts.
+          tauriScript: bun run tauri:finalized
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: desktop-[platform]-[arch]-[bundle]
+
+      - name: Smoke-test Linux AppImage startup
+        if: runner.os == 'Linux'
+        run: >-
+          bash scripts/smoke-test-appimage.sh
+          desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage
+
+  release:
+    name: Attach installers to desktop release
+    needs: build
+    # Skipped (not failed) when any matrix leg failed, so a partial set of
+    # installers is never attached.
+    if: >-
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled') &&
+      !contains(needs.*.result, 'skipped')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      DESKTOP_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The merge commit on main, so the version read matches what was built.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Read desktop version
+        id: version
+        run: echo "version=$(jq -r .version desktop/package.json)" | tee -a "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: desktop-*
+          path: installers
+          merge-multiple: true
+
+      - name: Create release if needed and upload installers
+        uses: actions/github-script@v9
+        env:
+          RELEASE_TAG: desktop-v${{ steps.version.outputs.version }}
+          RELEASE_TITLE: Lumiverse Desktop v${{ steps.version.outputs.version }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        with:
+          script: |
+            const fs = require('node:fs/promises');
+            const path = require('node:path');
+            const { owner, repo } = context.repo;
+            const tag = process.env.RELEASE_TAG;
+            const version = process.env.RELEASE_VERSION;
+            let release;
+            try {
+              ({ data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag }));
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              ({ data: release } = await github.rest.repos.createRelease({
+                owner, repo, tag_name: tag, name: process.env.RELEASE_TITLE,
+                target_commitish: process.env.DESKTOP_SHA,
+                draft: false, prerelease: version.includes('-'),
+                body: `Lumiverse Desktop ${version}, built from the staging→main merge (${process.env.DESKTOP_SHA}).\n\nInstallers are unsigned (macOS uses ad-hoc signing without notarization). Windows SmartScreen and macOS Gatekeeper may block installation or launch. The desktop client still requires Bun and a Lumiverse checkout; it does not bundle the server.\n\nLinux AppImages are precompiled and do not require Cargo, a system WebKitGTK package, or system GStreamer plugins. Choose the asset matching your CPU architecture and see the [Linux AppImage instructions](https://github.com/${owner}/${repo}/blob/${process.env.DESKTOP_SHA}/desktop/README.md#run-a-prebuilt-linux-appimage) for FUSE and Wayland troubleshooting.`
+              }));
+            }
+            const existing = await github.paginate(github.rest.repos.listReleaseAssets, {
+              owner, repo, release_id: release.id, per_page: 100
+            });
+            const files = await fs.readdir('installers', { recursive: true, withFileTypes: true });
+            const installers = files.filter(file => file.isFile() && /\.(exe|msi|dmg|deb|AppImage)$/.test(file.name));
+            if (installers.length === 0) throw new Error('No desktop installers found');
+            for (const file of installers) {
+              // GitHub normalizes spaces and other special characters on upload.
+              const name = file.name.replace(/[^a-zA-Z0-9_.-]/g, '.');
+              const previous = existing.find(asset => asset.name === name);
+              if (previous) {
+                await github.rest.repos.deleteReleaseAsset({ owner, repo, asset_id: previous.id });
+              }
+              await github.rest.repos.uploadReleaseAsset({
+                owner, repo, release_id: release.id, name,
+                data: await fs.readFile(path.join(file.parentPath ?? file.path, file.name))
+              });
+            }

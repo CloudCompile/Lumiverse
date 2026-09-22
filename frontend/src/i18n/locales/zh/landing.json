@@ -1,6 +1,10 @@
 {
   "groupChat": "群聊",
   "active": "进行中",
+  "galleryWidth": {
+    "compact": "使用紧凑画廊宽度",
+    "expanded": "将画廊扩展至全宽"
+  },
   "account": "账户",
   "subtitle": {
     "chooseGroupThreads": "从群组话题中选择",

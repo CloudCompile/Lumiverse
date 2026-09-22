@@ -1,6 +1,10 @@
 {
   "groupChat": "Chat de groupe",
   "active": "Actif",
+  "galleryWidth": {
+    "compact": "Utiliser une largeur de galerie compacte",
+    "expanded": "Étendre la galerie sur toute la largeur"
+  },
   "account": "Compte",
   "subtitle": {
     "chooseGroupThreads": "Choisir parmi les fils de discussion du groupe",

@@ -18,6 +18,9 @@
 import { getDb } from "../../db/connection";
 import {
   getCortexConfig,
+  isCortexEnabledForChat,
+  listCortexFallbackEndpoints,
+  listCortexSidecarEndpoints,
   putCortexConfig,
   shouldUseCortexSidecar,
   shouldUseCortexSidecarForChunkAnalysis,
@@ -62,8 +65,34 @@ import type {
 } from "./types";
 
 // Re-export public types and config
-export { getCortexConfig, putCortexConfig, applyCortexPreset, shouldUseCortexSidecar, shouldUseCortexSidecarForChunkAnalysis } from "./config";
-export type { MemoryCortexConfig, CortexPresetMode, FactManagementConfig } from "./config";
+export {
+  getCortexConfig,
+  isCortexEnabledForChat,
+  putCortexConfig,
+  applyCortexPreset,
+  shouldUseCortexSidecar,
+  shouldUseCortexSidecarForChunkAnalysis,
+  listCortexSidecarEndpoints,
+  updateCortexSidecarEndpoints,
+  migrateSidecarIntoEndpointPairs,
+  getCortexSidecarConnectionId,
+} from "./config";
+export {
+  listCortexSidecarProviders,
+  commitSidecarRegistryProvider,
+  revokeSidecarRegistryProvider,
+  publishSidecarProviderRegistryChanged,
+  registerSidecarEndpoint,
+  type CortexSidecarProviderInfo,
+  type HostSidecarEndpoint,
+} from "./sidecar-adapter";
+export type {
+  MemoryCortexConfig,
+  CortexPresetMode,
+  FactManagementConfig,
+  CortexModelEndpoint,
+  CortexModelFallbackPair,
+} from "./config";
 export { createCortexSidecarGenerateRawAdapter } from "./sidecar-adapter";
 export { formatShadowPrompt, formatContextSections, formatLinkedCortexSection } from "./shadow-formatter";
 export type { FormatterMode, ShadowPromptResult, LinkedFormatResult } from "./shadow-formatter";
@@ -88,6 +117,39 @@ export type {
 export { buildEmotionalContext } from "./emotional-context";
 export { formatEntitySnapshots, formatRelationships } from "./entity-context";
 export { extractNPsFromChunk } from "./np-chunker";
+
+/** Read the chat-scoped Cortex opt-out without importing chats.service (which
+ * already depends on this module). */
+function isCortexEnabledForStoredChat(
+  userId: string,
+  chatId: string,
+  config: Pick<MemoryCortexConfig, "enabled">,
+): boolean {
+  const row = getDb()
+    .query("SELECT metadata FROM chats WHERE id = ? AND user_id = ?")
+    .get(chatId, userId) as { metadata?: string } | null;
+  if (!row) return false;
+
+  let metadata: unknown = null;
+  try { metadata = row.metadata ? JSON.parse(row.metadata) : null; } catch { /* inherit global setting */ }
+  return isCortexEnabledForChat(config, metadata);
+}
+
+/**
+ * Return the tag name for a configured HTML thought delimiter pair.
+ * The sanitizer needs this narrow hint so it can retain the delimiters inside
+ * a font block long enough for font attribution to classify the block.
+ */
+function getThoughtMarkerHtmlTags(markers: MemoryCortexConfig["thoughtMarkers"]): string[] {
+  const prefix = markers?.prefix?.trim();
+  const suffix = markers?.suffix?.trim();
+  if (!prefix || !suffix) return [];
+
+  const open = prefix.match(/^<\s*([a-zA-Z][\w:-]*)\b[^>]*>$/);
+  const close = suffix.match(/^<\s*\/\s*([a-zA-Z][\w:-]*)\s*>$/);
+  if (!open || !close || open[1].toLowerCase() !== close[1].toLowerCase()) return [];
+  return [open[1].toLowerCase()];
+}
 export {
   resolveCanonicalId,
   normalizeEntityName,
@@ -162,6 +224,15 @@ export interface CortexIngestionTelemetry {
   };
 }
 
+export type CortexSidecarVisibilityState = "ok" | "unavailable" | "timeout" | "aborted";
+
+export interface CortexIngestionErrorSnapshot {
+  message: string;
+  sidecarState: CortexSidecarVisibilityState | null;
+  occurredAt: number;
+  chunkId: string | null;
+}
+
 export interface CortexIngestionStatus {
   chatId: string;
   status: "idle" | "processing" | "complete" | "error";
@@ -171,6 +242,9 @@ export interface CortexIngestionStatus {
   updatedAt: number;
   pendingJobs: number;
   error?: string;
+  sidecarState?: CortexSidecarVisibilityState | null;
+  /** Most recent failure retained for diagnostics after the active error state expires. */
+  lastError?: CortexIngestionErrorSnapshot | null;
   timings?: CortexIngestionTimings | null;
 }
 
@@ -269,6 +343,8 @@ export function getCortexRuntimeSignature(config: MemoryCortexConfig): string {
       chunkBatchSize: config.sidecar?.chunkBatchSize ?? 5,
       rebuildConcurrency: config.sidecar?.rebuildConcurrency ?? 3,
     },
+    queryGeneration: config.queryGeneration,
+    memorySummarization: config.memorySummarization,
     sidecarTimeoutMs: config.sidecarTimeoutMs,
     consolidation: config.consolidation,
     entityPruning: config.entityPruning,
@@ -552,6 +628,12 @@ export function invalidateLinkedCortexCache(chatId: string): void {
   linkedCortexResultCache.delete(chatId);
 }
 
+/** Drop completed warm results without disturbing in-flight cortex work. */
+export function clearCortexResultCaches(): void {
+  cortexResultCache.clear();
+  linkedCortexResultCache.clear();
+}
+
 /**
  * Prime the linked-cortex warm cache with a result computed off the main
  * thread (see `primeCortexCache`). `queryLinkedCortex` skips caching on abort;
@@ -567,6 +649,10 @@ export function primeLinkedCortexCache(
 // ─── Ingestion Status / Telemetry ──────────────────────────────
 
 const cortexIngestionStatus = new Map<string, CortexIngestionStatus>();
+/** Terminal failures are active UI status only briefly. The diagnostic snapshot
+ *  remains on CortexIngestionStatus.lastError until a later failure replaces it
+ *  or the chat is deleted. */
+export const CORTEX_INGESTION_ERROR_STATUS_TTL_MS = 60_000;
 const cortexIngestionSamples = new Map<string, {
   samples: number;
   fontMsTotal: number;
@@ -646,6 +732,7 @@ function beginIngestionTracking(userId: string, chatId: string, chunkId: string)
     startedAt: current.startedAt ?? Date.now(),
     pendingJobs,
     error: undefined,
+    sidecarState: null,
   });
   return pendingJobs;
 }
@@ -665,6 +752,7 @@ function completeIngestionTracking(
     startedAt: pendingJobs > 0 ? current.startedAt : null,
     pendingJobs,
     error: undefined,
+    sidecarState: null,
     timings,
   });
 
@@ -689,20 +777,61 @@ function completeIngestionTracking(
   cortexIngestionSamples.set(chatId, aggregate);
 }
 
-function failIngestionTracking(userId: string, chatId: string, error: string): void {
+function failIngestionTracking(
+  userId: string,
+  chatId: string,
+  error: string,
+  sidecarState?: CortexSidecarVisibilityState | null,
+): void {
   const current = getOrCreateIngestionStatus(chatId);
   const pendingJobs = Math.max(0, current.pendingJobs - 1);
+  const occurredAt = Date.now();
   updateIngestionStatus(userId, chatId, {
     status: "error",
     phase: "error",
     startedAt: pendingJobs > 0 ? current.startedAt : null,
     pendingJobs,
     error,
+    sidecarState: sidecarState ?? current.sidecarState ?? null,
+    lastError: {
+      message: error,
+      sidecarState: sidecarState ?? current.sidecarState ?? null,
+      occurredAt,
+      chunkId: current.chunkId,
+    },
   });
 }
 
+/** Convert an old terminal failure into idle status while preserving its
+ *  diagnostic snapshot. This keeps status consumers from treating historical
+ *  failures as work that is still active. */
+export function normalizeCortexIngestionStatusForRead(
+  status: CortexIngestionStatus,
+  now = Date.now(),
+): CortexIngestionStatus {
+  if (status.status !== "error" || now - status.updatedAt < CORTEX_INGESTION_ERROR_STATUS_TTL_MS) {
+    return status;
+  }
+
+  return {
+    ...status,
+    status: "idle",
+    phase: "complete",
+    chunkId: null,
+    startedAt: null,
+    updatedAt: now,
+    pendingJobs: 0,
+    error: undefined,
+    sidecarState: null,
+  };
+}
+
 export function getIngestionStatus(chatId: string): CortexIngestionStatus | null {
-  return cortexIngestionStatus.get(chatId) ?? null;
+  const status = cortexIngestionStatus.get(chatId);
+  if (!status) return null;
+  const normalized = normalizeCortexIngestionStatusForRead(status);
+  if (normalized !== status) cortexIngestionStatus.set(chatId, normalized);
+  return normalized;
 }
 
 export function getIngestionTelemetry(chatId: string): CortexIngestionTelemetry {
@@ -968,7 +1097,251 @@ export async function queryCortex(
   }
 }
 
-// ─── Ingestion Pipeline ────────────────────────────────────────
+// ─── Sidecar primary → configured fallbacks → heuristic|skip ──────
+
+export const CORTEX_SIDECAR_CIRCUIT_FAILURE_THRESHOLD = 3;
+export const CORTEX_SIDECAR_CIRCUIT_COOLDOWN_MS = 30_000;
+
+export type CortexSidecarRole = "primary" | "secondary";
+
+export interface CortexSidecarInvokeTarget {
+  connectionProfileId: string;
+  model: string | null;
+  role: CortexSidecarRole;
+}
+
+export type CortexSidecarChainStatus = "ok" | "aborted" | "timeout" | "unavailable" | "exhausted";
+
+export interface CortexSidecarIngestDecision<T = unknown> {
+  status: CortexSidecarChainStatus;
+  result: T | null;
+  role: CortexSidecarRole | null;
+  persist: boolean;
+  useHeuristic: boolean;
+  sidecarState: CortexSidecarVisibilityState | null;
+  attempts: number;
+}
+
+interface CortexSidecarCircuit {
+  consecutiveTransientFailures: number;
+  openedUntil: number | null;
+}
+
+const sidecarCircuits = new Map<string, CortexSidecarCircuit>();
+
+function sidecarCircuitKey(userId: string, connectionProfileId: string): string {
+  return `${userId}:${connectionProfileId}`;
+}
+
+function getSidecarCircuit(userId: string, connectionProfileId: string): CortexSidecarCircuit {
+  const key = sidecarCircuitKey(userId, connectionProfileId);
+  const existing = sidecarCircuits.get(key);
+  if (existing) return existing;
+  const created: CortexSidecarCircuit = { consecutiveTransientFailures: 0, openedUntil: null };
+  sidecarCircuits.set(key, created);
+  return created;
+}
+
+export function resetCortexSidecarCircuitForTests(): void {
+  sidecarCircuits.clear();
+}
+
+export function recordCortexSidecarCircuitOpenForTests(userId: string, connectionProfileId: string): void {
+  sidecarCircuits.set(sidecarCircuitKey(userId, connectionProfileId), {
+    consecutiveTransientFailures: CORTEX_SIDECAR_CIRCUIT_FAILURE_THRESHOLD,
+    openedUntil: Date.now() + CORTEX_SIDECAR_CIRCUIT_COOLDOWN_MS,
+  });
+}
+
+export function isCortexSidecarCircuitOpen(
+  userId: string,
+  connectionProfileId: string,
+  now = Date.now(),
+): boolean {
+  const circuit = sidecarCircuits.get(sidecarCircuitKey(userId, connectionProfileId));
+  if (!circuit?.openedUntil) return false;
+  if (now >= circuit.openedUntil) {
+    circuit.openedUntil = null;
+    circuit.consecutiveTransientFailures = 0;
+    return false;
+  }
+  return true;
+}
+
+function recordCortexSidecarSuccess(userId: string, connectionProfileId: string): void {
+  sidecarCircuits.set(sidecarCircuitKey(userId, connectionProfileId), {
+    consecutiveTransientFailures: 0,
+    openedUntil: null,
+  });
+}
+
+function recordCortexSidecarTransientFailure(
+  userId: string,
+  connectionProfileId: string,
+  now = Date.now(),
+): void {
+  const circuit = getSidecarCircuit(userId, connectionProfileId);
+  circuit.consecutiveTransientFailures += 1;
+  if (circuit.consecutiveTransientFailures >= CORTEX_SIDECAR_CIRCUIT_FAILURE_THRESHOLD) {
+    circuit.openedUntil = now + CORTEX_SIDECAR_CIRCUIT_COOLDOWN_MS;
+  }
+}
+
+export function isTransientCortexSidecarError(err: unknown, callerAborted: boolean): boolean {
+  if (callerAborted) return false;
+  const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
+  const message = err && typeof err === "object" && "message" in err
+    ? String((err as { message?: unknown }).message ?? "")
+    : String(err ?? "");
+  const haystack = `${name} ${message}`.toLowerCase();
+  if (name === "AbortError" || name === "TimeoutError") return true;
+  return /timeout|timed out|econnreset|enotfound|econnrefused|429|502|503|504|network|fetch failed|socket/.test(haystack);
+}
+
+function callerAbortReason(signal?: AbortSignal): unknown {
+  return signal?.reason ?? new DOMException("Aborted", "AbortError");
+}
+
+function throwIfCallerAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw callerAbortReason(signal);
+}
+
+export function collectQueryGenerationTargets(
+  config: MemoryCortexConfig,
+  fallbackConnectionId?: string,
+): CortexSidecarInvokeTarget[] {
+  const pair = config.queryGeneration ?? listCortexSidecarEndpoints(config).queryGeneration;
+  const primaryId = pair.primary.connectionProfileId
+    || config.sidecar?.connectionProfileId
+    || fallbackConnectionId
+    || null;
+  const primaryModel = pair.primary.model ?? config.sidecar?.model ?? null;
+  const targets: CortexSidecarInvokeTarget[] = [];
+  if (primaryId) {
+    targets.push({ connectionProfileId: primaryId, model: primaryModel, role: "primary" });
+  }
+  const seen = new Set<string>(primaryId ? [primaryId] : []);
+  for (const extra of listCortexFallbackEndpoints(pair)) {
+    if (!extra.connectionProfileId || seen.has(extra.connectionProfileId)) continue;
+    seen.add(extra.connectionProfileId);
+    targets.push({
+      connectionProfileId: extra.connectionProfileId,
+      model: extra.model,
+      role: "secondary",
+    });
+  }
+  return targets;
+}
+
+export function decideCortexSidecarFallback(
+  status: CortexSidecarChainStatus,
+  fallback: "heuristic" | "skip",
+): { persist: boolean; useHeuristic: boolean } {
+  if (status === "ok") return { persist: true, useHeuristic: false };
+  if (status === "aborted") return { persist: false, useHeuristic: false };
+  if (fallback === "skip") return { persist: false, useHeuristic: false };
+  return { persist: true, useHeuristic: true };
+}
+
+export async function runQueryGenerationSidecar<T>(options: {
+  userId: string;
+  config: MemoryCortexConfig;
+  sidecarConnectionId?: string;
+  signal?: AbortSignal;
+  extract: (target: CortexSidecarInvokeTarget & { attempt: number; signal?: AbortSignal }) => Promise<T | null>;
+}): Promise<CortexSidecarIngestDecision<T>> {
+  const { userId, config, sidecarConnectionId, signal, extract } = options;
+  const fallback = config.sidecarReliability.fallback === "skip" ? "skip" : "heuristic";
+  const sidecarTimeoutMs = config.sidecarTimeoutMs ?? 60000;
+  const targets = collectQueryGenerationTargets(config, sidecarConnectionId);
+
+  const finish = (
+    status: CortexSidecarChainStatus,
+    extra: Partial<CortexSidecarIngestDecision<T>> = {},
+  ): CortexSidecarIngestDecision<T> => {
+    const decided = decideCortexSidecarFallback(status, fallback);
+    const sidecarState: CortexSidecarVisibilityState | null =
+      status === "ok" ? "ok"
+        : status === "aborted" ? "aborted"
+          : status === "timeout" ? "timeout"
+            : status === "unavailable" ? "unavailable"
+              : null;
+    return {
+      status,
+      result: extra.result ?? null,
+      role: extra.role ?? null,
+      persist: decided.persist,
+      useHeuristic: decided.useHeuristic,
+      sidecarState,
+      attempts: extra.attempts ?? 0,
+    };
+  };
+
+  if (signal?.aborted) return finish("aborted");
+  if (targets.length === 0) return finish("unavailable");
+
+  let attempts = 0;
+  let lastRole: CortexSidecarRole | null = null;
+  let sawTimeout = false;
+  let invokedAny = false;
+
+  for (const target of targets) {
+    if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+    lastRole = target.role;
+    if (isCortexSidecarCircuitOpen(userId, target.connectionProfileId)) {
+      continue;
+    }
+
+    const timeoutController = sidecarTimeoutMs > 0 ? new AbortController() : null;
+    const timer = timeoutController
+      ? setTimeout(() => {
+          console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
+          timeoutController.abort();
+        }, sidecarTimeoutMs)
+      : null;
+    const combinedSignal = signal && timeoutController
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : signal ?? timeoutController?.signal;
+
+    attempts += 1;
+    invokedAny = true;
+    try {
+      const result = await extract({
+        ...target,
+        attempt: 1,
+        signal: combinedSignal,
+      });
+      if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+      if (result != null) {
+        recordCortexSidecarSuccess(userId, target.connectionProfileId);
+        return finish("ok", { result, role: target.role, attempts });
+      }
+      throw new Error("sidecar returned empty extraction");
+    } catch (err: unknown) {
+      if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+      const timedOut = timeoutController?.signal.aborted === true;
+      if (timedOut) sawTimeout = true;
+      const transient = isTransientCortexSidecarError(err, false) || timedOut;
+      if (transient) {
+        recordCortexSidecarTransientFailure(userId, target.connectionProfileId);
+      }
+      const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
+      if (name !== "AbortError" && !timedOut) {
+        console.warn(
+          `[memory-cortex] Sidecar ${target.role} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+  if (!invokedAny) return finish("unavailable", { role: lastRole, attempts });
+  if (sawTimeout) return finish("timeout", { role: lastRole, attempts });
+  return finish("exhausted", { role: lastRole, attempts });
+}
 
 /**
  * Process a newly created chat chunk through the cortex pipeline.
@@ -990,6 +1363,7 @@ export function scheduleProcessChunk(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -997,6 +1371,7 @@ export function scheduleProcessChunk(
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   sidecarConnectionId?: string,
   descriptionAliases?: Map<string, string>,
+  signal?: AbortSignal,
 ): Promise<ChatPipelineTaskResult<void>> {
   const db = getDb();
   const queuedRow = db
@@ -1011,7 +1386,9 @@ export function scheduleProcessChunk(
     revision: queuedRevision,
     preflight: () => {
       const cfg = getCortexConfig(data.userId);
-      if (!cfg.enabled) return { action: "skip", reason: "cortex_disabled" } as const;
+      if (!isCortexEnabledForStoredChat(data.userId, data.chatId, cfg)) {
+        return { action: "skip", reason: "cortex_disabled" } as const;
+      }
 
       const row = db
         .query(
@@ -1027,12 +1404,15 @@ export function scheduleProcessChunk(
       }
       return { action: "run" } as const;
     },
-    run: () => processChunk(
+    run: (laneSignal) => processChunk(
       data,
       characterNames,
       generateRawFn,
       sidecarConnectionId,
       descriptionAliases,
+      undefined,
+      false,
+      signal ? AbortSignal.any([signal, laneSignal]) : laneSignal,
     ),
   });
 }
@@ -1042,6 +1422,7 @@ export async function processChunk(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -1059,10 +1440,17 @@ export async function processChunk(
    *  External callers should normally use scheduleProcessChunk() so chunk
    *  rebuilds, warmups, and live ingests share the same chat-scoped lane. */
   precomputedHeuristic?: import("./heuristic-runtime").HeuristicAnalysisOutput,
+  /** Rebuilds ingest chunks concurrently and use pre-computed extraction
+   *  adapters. They consolidate the completed backlog once, with the real
+   *  sidecar adapter, after all chunk writes finish. */
+  skipConsolidation = false,
+  signal?: AbortSignal,
 ): Promise<void> {
   const config = getCortexConfig(data.userId);
-  if (!config.enabled) return;
-  const sidecarActive = shouldUseCortexSidecarForChunkAnalysis(config) && !!generateRawFn && !!sidecarConnectionId;
+  if (!isCortexEnabledForStoredChat(data.userId, data.chatId, config)) return;
+  if (signal?.aborted) return;
+  const queryTargets = collectQueryGenerationTargets(config, sidecarConnectionId);
+  const sidecarActive = shouldUseCortexSidecarForChunkAnalysis(config) && !!generateRawFn && queryTargets.length > 0;
   const warmupSignature = getCortexStructuralSignature(config);
 
   const db = getDb();
@@ -1104,6 +1492,7 @@ export async function processChunk(
     // keeps font tags so attribution still works.
     const proseContent = stripNonProseTags(rawChunkContent, {
       keepFontTags: true,
+      preserveFontInnerTags: getThoughtMarkerHtmlTags(config.thoughtMarkers),
       extraScaffoldTags: config.nonProseScaffoldTags,
     });
     const thoughtDelimiters = config.thoughtMarkers;
@@ -1223,6 +1612,8 @@ export async function processChunk(
 
     let extraction: Awaited<ReturnType<typeof extractWithSidecar>> | null = null;
     let skipChunkPersistence = false;
+    let skipHeuristicFallback = false;
+    let sidecarDecisionState: CortexSidecarVisibilityState | null = null;
     let liveSidecarTokenCounter: ((text: string) => number) | undefined;
     if (sidecarActive) {
       updateIngestionStatus(data.userId, data.chatId, { phase: "sidecar", chunkId: data.chunkId });
@@ -1230,75 +1621,74 @@ export async function processChunk(
       // Falls back to char/4 inside resolveCounter when no model-specific
       // tokenizer is available — never throws.
       try {
-        const resolved = await resolveCounter(config.sidecar.model || "");
+        const resolved = await resolveCounter(
+          queryTargets[0]?.model || config.sidecar.model || "",
+        );
         liveSidecarTokenCounter = resolved.count;
       } catch {
         liveSidecarTokenCounter = undefined;
       }
       const sidecarStart = performance.now();
-      const maxAttempts = 1 + (config.sidecarReliability.maxRetries ?? 0);
-      const baseDelayMs = config.sidecarReliability.retryDelayMs ?? 500;
-      let lastErr: any = null;
-
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        if (attempt > 0) {
-          const delay = baseDelayMs * Math.pow(2, attempt - 1);
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          console.info(`[memory-cortex] Sidecar retry attempt ${attempt + 1}/${maxAttempts} after ${delay}ms`);
-        }
-
-        const sidecarTimeout = config.sidecarTimeoutMs ?? 30000;
-        const ac = sidecarTimeout > 0 ? new AbortController() : null;
-        const timer = ac ? setTimeout(() => {
-          console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
-          ac.abort();
-        }, sidecarTimeout) : null;
-
-        try {
-          extraction = await extractWithSidecar(
-            proseContent,
-            generateRawFn!,
-            sidecarConnectionId!,
-            {
-              characterNames,
-              knownEntities: entityContext,
-              arbiter: arbiterInput,
-              descriptionAliases: buildSidecarAliasList(descriptionAliases, knownEntities),
-              samplingParameters: buildSidecarSamplingParameters(config.sidecar),
-              tokenCounter: liveSidecarTokenCounter,
-              logTag: `live chunk=${data.chunkId.slice(0, 8)} attempt=${attempt + 1}/${maxAttempts}`,
-              throwOnFailure: true,
-              signal: ac?.signal,
-            },
-          );
-          lastErr = null;
-          break;
-        } catch (err: any) {
-          lastErr = err;
-          const isAbort = err?.name === "AbortError" || ac?.signal.aborted;
-          if (!isAbort) {
-            console.warn(`[memory-cortex] Sidecar attempt ${attempt + 1}/${maxAttempts} failed:`, err?.message ?? err);
-          }
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
-      }
+      const decision = await runQueryGenerationSidecar({
+        userId: data.userId,
+        config,
+        sidecarConnectionId,
+        signal,
+        extract: async (target) => extractWithSidecar(
+          proseContent,
+          generateRawFn!,
+          target.connectionProfileId,
+          {
+            characterNames,
+            knownEntities: entityContext,
+            arbiter: arbiterInput,
+            descriptionAliases: buildSidecarAliasList(descriptionAliases, knownEntities),
+            samplingParameters: buildSidecarSamplingParameters(config.sidecar, {
+              model: target.model,
+            }),
+            tokenCounter: liveSidecarTokenCounter,
+            logTag: `live chunk=${data.chunkId.slice(0, 8)} role=${target.role} attempt=${target.attempt}`,
+            throwOnFailure: true,
+            signal: target.signal,
+          },
+        ),
+      });
       timings.sidecarMs = performance.now() - sidecarStart;
+      sidecarDecisionState = decision.sidecarState;
+      extraction = decision.result;
+      skipChunkPersistence = !decision.persist;
+      skipHeuristicFallback = !decision.useHeuristic && decision.status !== "ok";
 
-      if (!extraction && lastErr) {
-        if (config.sidecarReliability.fallback === "skip") {
-          console.warn(
-            `[memory-cortex] Sidecar failed after ${maxAttempts} attempt(s); skipping chunk persistence ` +
-            `(warmup signature left null so next warmup will retry)`,
-          );
-          skipChunkPersistence = true;
-        } else {
-          console.warn(`[memory-cortex] Sidecar failed after ${maxAttempts} attempt(s); falling back to heuristic`);
+      if (decision.status === "aborted") {
+        failIngestionTracking(data.userId, data.chatId, "aborted", "aborted");
+        return;
+      }
+      if (!decision.persist) {
+        if (decision.status === "timeout") {
+          console.warn("[memory-cortex] Sidecar timed out; skipping chunk persistence");
+          failIngestionTracking(data.userId, data.chatId, "sidecar_timeout", "timeout");
+          return;
         }
+        if (decision.status === "unavailable") {
+          console.warn("[memory-cortex] Sidecar unavailable; skipping chunk persistence");
+          failIngestionTracking(data.userId, data.chatId, "sidecar_unavailable", "unavailable");
+          return;
+        }
+        console.warn(
+          `[memory-cortex] Sidecar failed after ${decision.attempts} attempt(s); skipping chunk persistence ` +
+          `(warmup signature left null so next warmup will retry)`,
+        );
+      } else if (decision.useHeuristic) {
+        console.warn(`[memory-cortex] Sidecar failed after ${decision.attempts} attempt(s); falling back to heuristic`);
       }
     }
 
-    if (heuristicPromise && !heuristicResult) {
+    if (signal?.aborted) {
+      failIngestionTracking(data.userId, data.chatId, "aborted", "aborted");
+      return;
+    }
+
+    if (heuristicPromise && !heuristicResult && !skipHeuristicFallback) {
       heuristicResult = await heuristicPromise;
       timings.heuristicMs = heuristicResult.timings.totalMs;
       timings.heuristicSalienceMs = heuristicResult.timings.salienceMs;
@@ -1323,7 +1713,11 @@ export async function processChunk(
         completedAt: Date.now(),
         chunkId: data.chunkId,
       };
-      completeIngestionTracking(data.userId, data.chatId, data.chunkId, skippedTimings);
+      if (sidecarDecisionState === "timeout" || sidecarDecisionState === "unavailable") {
+        failIngestionTracking(data.userId, data.chatId, `sidecar_${sidecarDecisionState}`, sidecarDecisionState);
+      } else {
+        completeIngestionTracking(data.userId, data.chatId, data.chunkId, skippedTimings);
+      }
       return;
     }
 
@@ -1365,6 +1759,11 @@ export async function processChunk(
       salienceResult = heuristicResult.salienceResult;
     } else {
       salienceResult = scoreChunkHeuristic(cleanContent);
+    }
+
+    if (signal?.aborted) {
+      failIngestionTracking(data.userId, data.chatId, "aborted", "aborted");
+      return;
     }
 
     // Warmup rebuild works from a chunk snapshot, so the source chunk may have
@@ -1725,7 +2124,7 @@ export async function processChunk(
       await curateEntityFactsWithLLM(
         deferredFactAutopilot, sidecarFacts, chunkImp,
         config.factManagement.maxFactsPerEntity,
-        generateRawFn, sidecarConnectionId, config,
+        generateRawFn, sidecarConnectionId, config, signal,
       );
     }
 
@@ -1734,7 +2133,7 @@ export async function processChunk(
     // ask it whether to reactivate; otherwise auto-reactivate.
     if (sidecarActive && config.sidecarReliability.arbitratesHeuristics) {
       await evaluatePendingReactivations(
-        data.chatId, proseContent, generateRawFn!, sidecarConnectionId!, config,
+        data.chatId, proseContent, generateRawFn!, sidecarConnectionId!, config, signal,
       );
     } else {
       // Non-arbiter mode: auto-reactivate any pending relations
@@ -1767,7 +2166,7 @@ export async function processChunk(
 
   // ── Consolidation Check ──
 
-  if (config.consolidation.enabled) {
+  if (config.consolidation.enabled && !skipConsolidation) {
     // Run async — don't block the ingestion pipeline
     consolidation
       .maybeConsolidate(
@@ -1804,6 +2203,7 @@ export type RebuildPhase =
   | "precompute"
   | "awaiting_provider"
   | "ingesting"
+  | "consolidating"
   | "idle_between_batches";
 
 interface RebuildState {
@@ -1849,6 +2249,7 @@ export async function rebuildCortex(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -1864,7 +2265,7 @@ export async function rebuildCortex(
   options: CortexRebuildOptions = {},
 ): Promise<{ chunksProcessed: number; entitiesFound: number; relationsFound: number }> {
   const config = getCortexConfig(userId);
-  if (!config.enabled) {
+  if (!isCortexEnabledForStoredChat(userId, chatId, config)) {
     return { chunksProcessed: 0, entitiesFound: 0, relationsFound: 0 };
   }
   const resumable = options.resumable === true;
@@ -1892,7 +2293,14 @@ export async function rebuildCortex(
   if (!resumable) {
     clearDerivedCortexData(chatId);
     chunks = db
-      .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
+      .query(
+        `SELECT * FROM chat_chunks
+         WHERE chat_id = ?
+         ORDER BY message_range_start IS NULL ASC,
+                  message_range_start ASC,
+                  message_range_end ASC,
+                  id ASC`,
+      )
       .all(chatId) as any[];
     totalChunks = chunks.length;
   } else {
@@ -1905,13 +2313,26 @@ export async function rebuildCortex(
       // keep existing salience visible until replacement scores are upserted.
       clearDerivedCortexData(chatId, { preserveSalience: true });
       chunks = db
-        .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
+        .query(
+          `SELECT * FROM chat_chunks
+           WHERE chat_id = ?
+           ORDER BY message_range_start IS NULL ASC,
+                    message_range_start ASC,
+                    message_range_end ASC,
+                    id ASC`,
+        )
         .all(chatId) as any[];
     } else {
       completedBeforeStart = coverage.completedChunks;
       chunks = db
         .query(
-          "SELECT * FROM chat_chunks WHERE chat_id = ? AND (cortex_warmup_signature IS NULL OR cortex_warmup_signature != ?) ORDER BY created_at ASC",
+          `SELECT * FROM chat_chunks
+           WHERE chat_id = ?
+             AND (cortex_warmup_signature IS NULL OR cortex_warmup_signature != ?)
+           ORDER BY message_range_start IS NULL ASC,
+                    message_range_start ASC,
+                    message_range_end ASC,
+                    id ASC`,
         )
         .all(chatId, warmupSignature) as any[];
     }
@@ -1952,6 +2373,8 @@ export async function rebuildCortex(
           sidecarAvailable ? generateRawFn : undefined,
           sidecarAvailable ? sidecarConnectionId : undefined,
           descriptionAliases,
+          true,
+          signal,
         );
         const current = completedBeforeStart + i + 1;
         state.current = current;
@@ -2007,7 +2430,11 @@ export async function rebuildCortex(
             // keepFontTags: true so the sidecar can still do color attribution.
             content: stripNonProseTags(
               hydrateChunkContentFromMessages(safeJsonArray(chunk.message_ids), chunk.content),
-              { keepFontTags: true, extraScaffoldTags: config.nonProseScaffoldTags },
+              {
+                keepFontTags: true,
+                preserveFontInnerTags: getThoughtMarkerHtmlTags(config.thoughtMarkers),
+                extraScaffoldTags: config.nonProseScaffoldTags,
+              },
             ),
           }));
 
@@ -2056,6 +2483,7 @@ export async function rebuildCortex(
                 // processChunkFontColors path is acceptable for grading input.
                 const proseContent = stripNonProseTags(raw, {
                   keepFontTags: true,
+                  preserveFontInnerTags: getThoughtMarkerHtmlTags(config.thoughtMarkers),
                   extraScaffoldTags: config.nonProseScaffoldTags,
                 });
                 const cleanContent = stripThoughtDelimiters(stripFontTags(proseContent), config.thoughtMarkers);
@@ -2142,13 +2570,14 @@ export async function rebuildCortex(
                 await processChunkWithPrecomputedSidecar(
                   chunk, chatId, userId, characterId, characterNames, sidecarResult, descriptionAliases,
                   perChunkHeuristic[i] ?? undefined,
+                  signal,
                 );
               } else {
-                await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, undefined, undefined, descriptionAliases);
+                await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, undefined, undefined, descriptionAliases, true, signal);
               }
             } catch {
               // fall back to heuristic on ingest failure
-              await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, undefined, undefined, descriptionAliases);
+              await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, undefined, undefined, descriptionAliases, true, signal);
             }
             tickProgress();
           }
@@ -2158,6 +2587,25 @@ export async function rebuildCortex(
       // concurrency workers, each pulls batches
       const workers = Array.from({ length: Math.min(concurrency, chunks.length) }, () => processNextBatch());
       await Promise.all(workers);
+    }
+
+    if (config.consolidation.enabled && config.consolidation.useSidecar && sidecarAvailable) {
+      state.phase = "consolidating";
+      emit();
+      const created = await consolidation.consolidateBacklog(
+        userId,
+        chatId,
+        config.consolidation,
+        generateRawFn,
+        sidecarConnectionId,
+        config.sidecarTimeoutMs,
+        buildSidecarSamplingParameters(config.sidecar, { includeMaxTokens: false }),
+        config.nonProseScaffoldTags,
+        { signal },
+      );
+      if (created > 0) {
+        console.info(`[memory-cortex] Rebuild created ${created} scene consolidation(s) for chat ${chatId}`);
+      }
     }
 
     if (signal?.aborted) {
@@ -2206,6 +2654,8 @@ async function processChunkFromRaw(
   generateRawFn?: any,
   sidecarConnectionId?: string,
   descriptionAliases?: Map<string, string>,
+  skipConsolidation = false,
+  signal?: AbortSignal,
 ): Promise<void> {
   await processChunk(
     {
@@ -2223,6 +2673,9 @@ async function processChunkFromRaw(
     generateRawFn,
     sidecarConnectionId,
     descriptionAliases,
+    undefined,
+    skipConsolidation,
+    signal,
   );
 }
 
@@ -2242,6 +2695,7 @@ async function processChunkWithPrecomputedSidecar(
   /** Pre-computed heuristic output for this chunk. Forwarded to processChunk
    *  so the heuristic worker doesn't run a second time during batched rebuild. */
   precomputedHeuristic?: import("./heuristic-runtime").HeuristicAnalysisOutput,
+  signal?: AbortSignal,
 ): Promise<void> {
   // Build a fake generateRawFn that returns pre-computed tool_calls so processChunk's
   // sidecar branch gets structured data without making an actual API call.
@@ -2324,6 +2778,8 @@ async function processChunkWithPrecomputedSidecar(
     "precomputed",
     descriptionAliases,
     precomputedHeuristic,
+    true,
+    signal,
   );
 }
 
@@ -2437,7 +2893,7 @@ export function getRelationsIncludingInactive(chatId: string) {
  */
 function buildSidecarSamplingParameters(
   sidecar: MemoryCortexConfig["sidecar"],
-  opts: { includeMaxTokens?: boolean } = {},
+  opts: { includeMaxTokens?: boolean; model?: string | null } = {},
 ): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   if (typeof sidecar.temperature === "number" && Number.isFinite(sidecar.temperature)) {
@@ -2454,6 +2910,8 @@ function buildSidecarSamplingParameters(
     && sidecar.maxTokens > 0) {
     params.max_tokens = sidecar.maxTokens;
   }
+  const model = opts.model ?? sidecar.model;
+  if (typeof model === "string" && model.trim()) params.model = model.trim();
   return params;
 }
 
@@ -2475,6 +2933,7 @@ async function curateEntityFactsWithLLM(
   maxFacts: number,
   generateRawFn: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -2482,7 +2941,9 @@ async function curateEntityFactsWithLLM(
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   connectionId: string,
   config: MemoryCortexConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return;
   // Read raw facts WITH importance tags to preserve provenance
   const entity = entityGraph.getEntity(entityId);
   if (!entity || entity.facts.length <= maxFacts) return;
@@ -2518,6 +2979,7 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
 
   try {
     const result = await generateRawFn({
+      requestPurpose: "fact curation",
       connectionId,
       messages: [
         { role: "system", content: "You are a factual memory curator. Output valid JSON only — an array of {\"text\": string, \"salience\": number} objects." },
@@ -2528,7 +2990,10 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
         max_tokens: 2048,
         temperature: 0.1,
       },
+      signal,
     });
+
+    if (signal?.aborted) return;
 
     const text = result.content.trim();
     const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -2562,6 +3027,7 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
       `UPDATE memory_entities SET facts = ?, fact_extraction_status = 'ok', updated_at = ? WHERE id = ?`,
     ).run(JSON.stringify(tagged), now, entityId);
   } catch (err) {
+    if (signal?.aborted) return;
     console.warn("[memory-cortex] Fact autopilot LLM call failed, keeping score-based result:", err);
   }
 }
@@ -2597,6 +3063,7 @@ async function evaluatePendingReactivations(
   passageContent: string,
   generateRawFn: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -2604,7 +3071,9 @@ async function evaluatePendingReactivations(
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   connectionId: string,
   config: MemoryCortexConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return;
   const db = getDb();
   const pendingRows = db.query(
     `SELECT r.id, r.source_entity_id, r.target_entity_id, r.relation_type,
@@ -2654,6 +3123,7 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
 
   try {
     const result = await generateRawFn({
+      requestPurpose: "relationship reactivation",
       connectionId,
       messages: [
         { role: "system", content: "You are a relationship status evaluator. Output valid JSON only." },
@@ -2664,7 +3134,10 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
         max_tokens: 1024,
         temperature: 0.1,
       },
+      signal,
     });
+
+    if (signal?.aborted) return;
 
     const text = result.content.trim();
     const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -2702,6 +3175,7 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
       if (!decided.has(c.id)) entityGraph.dismissReactivation(c.id);
     }
   } catch (err) {
+    if (signal?.aborted) return;
     console.warn("[memory-cortex] Relationship reactivation arbiter failed, auto-reactivating:", err);
     for (const c of candidates) entityGraph.reactivateRelation(c.id);
   }
@@ -2850,6 +3324,7 @@ function findPrefixMatch(np: string, characterNames: string[]): string | null {
  *   - "known as X", "also known as X", "aka X", "nicknamed X"
  *   - "called X", "goes by X", "referred to as X", "titled X"
  *   - Quoted nicknames in description text
+ *   - Card-style fields such as "Nickname: X" and "Aliases: X, Y"
  *
  * Usage: call once per character/persona during chunk processing setup,
  * pass the merged map to processChunk as `descriptionAliases`.
@@ -2967,7 +3442,7 @@ export function extractDescriptionAliases(
     // Pattern 1: Verb-based with quoted name.
     // Handles verb + optional pronoun + quoted name patterns
     // Optional pronoun object (him/her/them/me/it) + space between verb and quote.
-    const quotedPatterns = /(?:known as|also known as|aka|nicknamed|called|goes by|referred to as|titled|call(?:s|ed)?)\s+(?:(?:him|her|them|me|it)\s+)?["'""\u201C\u2018]([^"'""'\u201D\u2019]{2,50})["'""\u201D\u2019]/gi;
+    const quotedPatterns = /(?:known as|also known as|aka|nicknamed|nickname(?:\s+(?:is|was))?|alias(?:\s+(?:is|was))?|moniker(?:\s+(?:is|was))?|called|goes by|referred to as|titled)\s+(?:(?:him|her|them|me|it)\s+)?["'""\u201C\u2018]([^"'""'\u201D\u2019]{2,50})["'""\u201D\u2019]/gi;
     let match;
     while ((match = quotedPatterns.exec(desc)) !== null) {
       addAlias(aliases, match[1], canonicalName);
@@ -2978,9 +3453,30 @@ export function extractDescriptionAliases(
     // Note: NO `i` flag — the capture group MUST match actual uppercase to avoid
     // grabbing lowercase words like "him" or "among" as aliases.
     // Keywords use [Xx] alternation for first-letter case insensitivity instead.
-    const unquotedPatterns = /(?:[Kk]nown as|[Aa]lso known as|[Aa]ka|[Nn]icknamed|[Cc]alled|[Gg]oes by|[Rr]eferred to as|[Tt]itled)\s+(?:[Tt]he\s+)?([A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,4})/g;
+    const unquotedPatterns = /(?:[Kk]nown as|[Aa]lso known as|[Aa]ka|[Nn]icknamed|[Nn]ickname\s+(?:is|was)|[Aa]lias\s+(?:is|was)|[Mm]oniker\s+(?:is|was)|[Cc]alled|[Gg]oes by|[Rr]eferred to as|[Tt]itled)\s+(?:[Tt]he\s+)?([A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,4})/g;
     while ((match = unquotedPatterns.exec(desc)) !== null) {
       addAlias(aliases, match[1], canonicalName);
+    }
+
+    // Pattern 2b: common structured card fields. Character cards often keep
+    // aliases in a compact profile section instead of prose, e.g.
+    // "Nickname: Lia" or "**Aliases:** Lia, The Nightingale". These are
+    // authoritative declarations, so thread every plausible value into the
+    // same alias map that is supplied to the sidecar and arbiter.
+    const aliasFieldPatterns = /(?:^|[\r\n])\s*(?:[-*\u2022]\s*)?(?:\*{1,2}|_)?\s*(?:nicknames?|aliases?|aka|also known as|monikers?|epithets?)\s*(?::\s*(?:\*{1,2}|_)?|(?:\*{1,2}|_)?\s*(?:=|[-\u2013\u2014]))\s*([^\r\n]+)/gi;
+    while ((match = aliasFieldPatterns.exec(desc)) !== null) {
+      const value = match[1].trim();
+      // Read quoted values separately, then retain any unquoted entries in a
+      // mixed list such as `Aliases: "The Nightingale", Voss`.
+      const quotedPattern = /["'\u201C\u2018]([^"'\u201D\u2019]{2,50})["'\u201D\u2019]/g;
+      const quoted = [...value.matchAll(quotedPattern)]
+        .map((quotedMatch) => quotedMatch[1]);
+      const unquotedRemainder = value.replace(quotedPattern, "");
+      const candidates = [
+        ...quoted,
+        ...unquotedRemainder.split(/\s*(?:,|;|\/|\||\bor\b|\band\b)\s*/i),
+      ];
+      for (const candidate of candidates) addAlias(aliases, candidate, canonicalName);
     }
 
     // Pattern 3: parenthetical aliases — "Name (Alias)", "Name (Alias1, Alias2)"

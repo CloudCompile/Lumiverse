@@ -124,12 +124,23 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
+}
+
+.listHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .updateAllBtn {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 6px;
   padding: 5px 10px;
   border-radius: var(--lumiverse-radius);
@@ -140,9 +151,6 @@
   font-weight: 600;
   cursor: pointer;
   transition: all var(--lumiverse-transition-fast);
-  max-width: 60%;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -222,6 +230,54 @@
   align-items: center;
   gap: 6px;
   flex-shrink: 0;
+}
+
+.updateNotificationBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid var(--lumiverse-border);
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition:
+    color var(--lumiverse-transition-fast),
+    border-color var(--lumiverse-transition-fast),
+    background var(--lumiverse-transition-fast);
+}
+
+.updateNotificationBtn:hover {
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border-hover);
+  background: var(--lumiverse-fill-hover);
+}
+
+.updateNotificationBtnActive {
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-020);
+  background: var(--lumiverse-primary-010);
+}
+
+.updateIconWrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  overflow: visible !important;
+}
+
+.updateDot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--lumiverse-warning);
+  pointer-events: none;
 }
 
 .githubLink {
@@ -593,6 +649,13 @@
   border-color: var(--lumiverse-border-hover);
 }
 
+.updateAvailableBtn,
+.updateAvailableBtn:hover:not(:disabled) {
+  background: var(--lumiverse-warning-015);
+  color: var(--lumiverse-warning);
+  border-color: var(--lumiverse-warning-050);
+}
+
 .labeledBtn:active:not(:disabled) {
   transform: translateY(1px);
 }
@@ -661,4 +724,409 @@
 .iconBtnDanger:hover:not(:disabled) {
   color: var(--lumiverse-danger);
   background: var(--lumiverse-danger-015);
+}
+
+/* ─── Extension manager organization / density pass ─── */
+.managementToolbar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.toolbarPrimaryRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.toolbarPrimaryRow .addMenuWrap {
+  display: flex;
+  align-items: stretch;
+}
+
+.toolbarPrimaryRow .installBtn {
+  min-height: 34px;
+}
+
+.searchField {
+  width: 100%;
+  min-width: 0;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-radius: var(--lumiverse-radius);
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-dim);
+  transition: border-color var(--lumiverse-transition-fast), background var(--lumiverse-transition-fast);
+}
+
+.searchField:focus-within {
+  border-color: var(--lumiverse-primary);
+  background: var(--lumiverse-fill);
+}
+
+.searchField input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font: inherit;
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+}
+
+.searchField input::placeholder {
+  color: var(--lumiverse-text-dim);
+}
+
+.searchField input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.searchClearBtn {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.searchClearBtn:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.toolbarActions {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 7px;
+}
+
+.viewToggle {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: var(--lumiverse-radius);
+  background: var(--lumiverse-fill-subtle);
+}
+
+.viewToggleBtn {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: calc(var(--lumiverse-radius) - 2px);
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  font-family: inherit;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
+}
+
+.viewToggleBtn:hover {
+  color: var(--lumiverse-text);
+}
+
+.viewToggleBtnActive {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-primary);
+}
+
+.sortField {
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 7px 0 9px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: var(--lumiverse-radius);
+  background: var(--lumiverse-fill-subtle);
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.sortField select {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+  padding: 4px 22px 4px 5px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font-family: inherit;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: normal;
+  cursor: pointer;
+}
+
+.sortField select option {
+  background: var(--lumiverse-bg);
+  color: var(--lumiverse-text);
+}
+
+.listHeaderMeta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+}
+
+.extensionCard {
+  position: relative;
+}
+
+.extensionCardManual {
+  padding-left: 40px;
+}
+
+.dragHandle {
+  position: absolute;
+  left: 8px;
+  top: 9px;
+  width: 24px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: grab;
+  touch-action: none;
+  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
+}
+
+.dragHandle:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.extensionCardDragging {
+  z-index: 5;
+  box-shadow: var(--lumiverse-shadow-lg);
+  border-color: var(--lumiverse-primary-020);
+}
+
+.extensionCardList {
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.extensionCardList.extensionCardManual {
+  padding-left: 40px;
+}
+
+.extensionCardListExpanded {
+  background: var(--lumiverse-fill-subtle);
+}
+
+.extensionCardList .extensionHeader {
+  min-height: 28px;
+  align-items: center;
+}
+
+.extensionCardList .extensionInfo {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.extensionCardList .extensionName {
+  flex: 0 1 220px;
+  min-width: 120px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.extensionCardList .extensionMeta {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.expandRowBtn {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast);
+}
+
+.expandRowBtn:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+}
+
+.permissionsSummary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.permissionsCount {
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  font-variant-numeric: tabular-nums;
+}
+
+.permissionsCountIncomplete {
+  color: var(--lumiverse-warning);
+}
+
+.permissionHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.enableAllBtnProminent {
+  background: var(--lumiverse-primary-015);
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-020);
+}
+
+.enableAllBtnProminent:hover:not(:disabled) {
+  background: var(--lumiverse-primary-020);
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary);
+}
+
+.permissionReviewBtn {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--lumiverse-border);
+  color: var(--lumiverse-text-dim);
+  font-family: inherit;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  cursor: pointer;
+  transition: background var(--lumiverse-transition-fast), color var(--lumiverse-transition-fast), border-color var(--lumiverse-transition-fast);
+}
+
+.permissionReviewBtn:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
+  border-color: var(--lumiverse-border-hover);
+}
+
+@container extCard (max-width: 620px) {
+  .extensionCardList .extensionInfo {
+    flex-wrap: wrap;
+    column-gap: 8px;
+    row-gap: 1px;
+  }
+
+  .extensionCardList .extensionName {
+    flex-basis: calc(100% - 4px);
+  }
+}
+
+@media (max-width: 760px) {
+  .toolbarPrimaryRow {
+    gap: 7px;
+  }
+}
+
+@media (max-width: 520px) {
+  .viewToggleBtn span {
+    display: none;
+  }
+
+  .sortField select {
+    flex: 1;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .updateAllBtn {
+    padding-inline: 8px;
+  }
+
+  .installBtn {
+    padding-inline: 10px;
+  }
+
+  .listHeaderActions {
+    width: 100%;
+  }
+
+  .listHeaderMeta {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin-left: 0;
+  }
+
+  .extensionCardList .extensionMeta {
+    max-width: 100%;
+  }
+
+  .permissionsHeader {
+    align-items: flex-start;
+  }
+
+  .permissionHeaderActions {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }

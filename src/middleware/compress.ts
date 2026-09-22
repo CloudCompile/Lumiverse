@@ -26,7 +26,9 @@ const MIN_SIZE = 1024;
  * Pick the best mutually-supported encoding from Accept-Encoding.
  * Tie-break order when quality values are equal: br > gzip > deflate.
  */
-function negotiate(header: string): Encoding | null {
+function negotiate(
+  header: string,
+): Encoding | null {
   let best: Encoding | null = null;
   let bestScore = -1;
   const PRIO: Record<string, number> = { br: 3, gzip: 2, deflate: 1 };
@@ -35,7 +37,6 @@ function negotiate(header: string): Encoding | null {
     const [raw, ...params] = part.trim().split(";");
     const name = raw?.trim().toLowerCase();
     if (!name || !(name in PRIO)) continue;
-
     let q = 1;
     for (const p of params) {
       const m = p.trim().match(/^q=([\d.]+)$/);
@@ -51,6 +52,17 @@ function negotiate(header: string): Encoding | null {
     }
   }
   return best;
+}
+
+function appendVary(headers: Headers, field: string): void {
+  const existing = headers.get("Vary");
+  if (!existing) {
+    headers.set("Vary", field);
+    return;
+  }
+  const fields = existing.split(",").map((value) => value.trim());
+  if (fields.includes("*") || fields.some((value) => value.toLowerCase() === field.toLowerCase())) return;
+  headers.set("Vary", [...fields, field].join(", "));
 }
 
 /** Pipe a web ReadableStream through the chosen compressor. */
@@ -96,6 +108,6 @@ export function compress() {
     c.res = new Response(compressStream(res.body, encoding), res);
     c.res.headers.set("Content-Encoding", encoding);
     c.res.headers.delete("Content-Length");
-    c.res.headers.append("Vary", "Accept-Encoding");
+    appendVary(c.res.headers, "Accept-Encoding");
   });
 }

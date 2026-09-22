@@ -1,5 +1,3 @@
-import { warnBunWorkerFallback, shouldUseBunWorkers } from "../../utils/bun-worker-guard";
-import { runHeuristicAnalysis } from "./heuristic-analysis";
 import type {
   HeuristicAnalysisInput,
   HeuristicAnalysisOutput,
@@ -54,12 +52,17 @@ class HeuristicWorkerHost {
     this.pending.clear();
   }
 
-  run(payload: HeuristicAnalysisInput): Promise<HeuristicAnalysisOutput> {
-    if (!shouldUseBunWorkers()) {
-      warnBunWorkerFallback("memory-cortex heuristics");
-      return Promise.resolve(runHeuristicAnalysis(payload));
-    }
+  releaseIfIdle(): boolean {
+    if (!this.worker || this.pending.size > 0) return false;
+    const worker = this.worker;
+    this.worker = null;
+    worker.onmessage = null;
+    worker.onerror = null;
+    worker.terminate();
+    return true;
+  }
 
+  run(payload: HeuristicAnalysisInput): Promise<HeuristicAnalysisOutput> {
     const requestId = crypto.randomUUID();
     const worker = this.ensureWorker();
     const request: HeuristicWorkerRequest = { type: "run", requestId, payload };
@@ -100,10 +103,22 @@ class HeuristicWorkerPool {
     this.nextIdx = (this.nextIdx + 1) % this.hosts.length;
     return host.run(payload);
   }
+
+  releaseIdle(): number {
+    let released = 0;
+    for (const host of this.hosts) {
+      if (host.releaseIfIdle()) released++;
+    }
+    return released;
+  }
 }
 
 const pool = new HeuristicWorkerPool(HEURISTIC_WORKER_POOL_SIZE);
 
 export function runHeuristicAnalysisInWorker(payload: HeuristicAnalysisInput): Promise<HeuristicAnalysisOutput> {
   return pool.run(payload);
+}
+
+export function releaseIdleHeuristicWorkers(): number {
+  return pool.releaseIdle();
 }

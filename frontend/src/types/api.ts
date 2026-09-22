@@ -1,4 +1,6 @@
 // ---- Character ----
+export type CharacterLibraryScope = 'mine' | 'shared';
+
 export interface Character {
   id: string;
   name: string;
@@ -13,6 +15,8 @@ export interface Character {
   creator_notes: string;
   system_prompt: string;
   post_history_instructions: string;
+  folder: string;
+  library_scope: CharacterLibraryScope;
   tags: string[];
   alternate_greetings: string[];
   talkativeness: number; // 0.0–1.0, default 0.5
@@ -39,6 +43,8 @@ export interface CreateCharacterInput {
   creator_notes?: string;
   system_prompt?: string;
   post_history_instructions?: string;
+  folder?: string;
+  library_scope?: CharacterLibraryScope;
   tags?: string[];
   alternate_greetings?: string[];
   talkativeness?: number;
@@ -50,12 +56,33 @@ export type UpdateCharacterInput = Partial<CreateCharacterInput>;
 export interface CharacterSummary {
   id: string;
   name: string;
+  description: string;
+  preview_description: string;
   creator: string;
+  folder: string;
   tags: string[];
   image_id: string | null;
+  library_scope: CharacterLibraryScope;
   created_at: number;
   updated_at: number;
   has_alternate_greetings: boolean;
+}
+
+export interface CharacterPreview {
+  character: CharacterSummary;
+  lorebooks: { id: string; name: string }[];
+  last_chat: {
+    id: string;
+    name: string;
+    updated_at: number;
+    last_message_preview: string;
+  } | null;
+  open_chat_id: string | null;
+}
+
+export interface CharacterFolderMutationResponse {
+  updated: Character[];
+  count: number;
 }
 
 export interface TagCount {
@@ -92,6 +119,10 @@ export interface RecentChat {
   character_name: string;
   character_avatar_path: string | null;
   character_image_id: string | null;
+  /** Total messages in the chat; rides along so list UIs avoid per-row fetches. */
+  message_count: number;
+  /** First 280 chars of the newest message, for list previews. */
+  last_message_preview: string;
 }
 
 export interface GroupedRecentChat {
@@ -108,6 +139,17 @@ export interface GroupedRecentChat {
   group_character_ids?: string[];
   group_name?: string;
   multiplayer?: boolean;
+}
+
+export interface HiddenRecentChat {
+  id: string;
+  character_id: string;
+  name: string;
+  character_name: string;
+  character_avatar_path: string | null;
+  character_image_id: string | null;
+  updated_at: number;
+  is_group: boolean;
 }
 
 export interface ChatSummary {
@@ -170,7 +212,7 @@ export interface CharacterTtsExtension {
 
 // ---- Message Attachment ----
 export interface MessageAttachment {
-  type: "image" | "audio";
+  type: "image" | "audio" | "video";
   image_id: string;
   mime_type: string;
   original_filename: string;
@@ -197,6 +239,11 @@ export interface MessageExtra {
   _loom_inject?: import('@/lib/loom/types').LoomInjectTag;
   _loom_block_id?: string;
   attachments?: MessageAttachment[];
+  associative_regex_action_usage?: Record<string, {
+    script_id: string;
+    action_id: string;
+    used_at: number;
+  }>;
   [key: string]: any;
 }
 
@@ -221,6 +268,21 @@ export interface Message {
   parent_message_id: string | null;
   branch_id: string | null;
   created_at: number;
+  /** Optimistic-concurrency token from messages.revision (server default 1). */
+  revision?: number;
+}
+
+export interface ChatMessageSearchMatch {
+  id: string;
+  index_in_chat: number;
+  offset: number;
+}
+
+export interface ChatMessageSearchResult {
+  data: ChatMessageSearchMatch[];
+  total: number;
+  message_total: number;
+  truncated: boolean;
 }
 
 export interface CreateMessageInput {
@@ -289,6 +351,7 @@ export interface ConnectionModelsResult {
 }
 
 export interface EmbeddingModelsPreviewInput {
+  profile_id?: string
   provider?: EmbeddingConfig['provider']
   api_url?: string
   api_key?: string
@@ -393,6 +456,8 @@ export interface ImageGenParameterSchema {
   required?: boolean;
   options?: Array<{ id: string; label: string }>;
   group?: string;
+  /** Optional model-id prefixes that control when this parameter is shown. */
+  modelPrefixes?: string[];
   /** When set, the UI fetches models from GET /image-gen-connections/:id/models/:modelSubtype */
   modelSubtype?: string;
 }
@@ -525,6 +590,8 @@ export interface TtsConnectionVoicesPreviewInput {
   provider: string;
   api_url?: string;
   api_key?: string;
+  model?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface TtsConnectionModelsPreviewInput {
@@ -532,6 +599,7 @@ export interface TtsConnectionModelsPreviewInput {
   provider: string;
   api_url?: string;
   api_key?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface QwenCustomVoice {
@@ -608,6 +676,12 @@ export interface PersonaAddon {
   content: string
   enabled: boolean
   sort_order: number
+  /** When set, content is exposed as {{persona_outlet::name}} instead of {{persona}}. */
+  outlet_name?: string | null
+  /** Persona-specific artwork shown while this add-on is active. */
+  avatar_image_id?: string
+  /** Optional square crop of avatar_image_id, preferred for avatar surfaces. */
+  avatar_crop_image_id?: string
 }
 
 export interface GlobalAddon {
@@ -623,6 +697,9 @@ export interface GlobalAddon {
 export interface AttachedGlobalAddon {
   id: string
   enabled: boolean
+  /** Avatar overrides belong to the persona attachment, not the shared add-on. */
+  avatar_image_id?: string
+  avatar_crop_image_id?: string
 }
 
 export interface CharacterPersonaBinding {
@@ -638,6 +715,8 @@ export interface Persona {
   subjective_pronoun: string;
   objective_pronoun: string;
   possessive_pronoun: string;
+  reflexive_pronoun: string;
+  possessive_pronoun_standalone: string;
   avatar_path: string | null;
   image_id: string | null;
   attached_world_book_id: string | null;
@@ -656,10 +735,12 @@ export interface CreatePersonaInput {
   subjective_pronoun?: string;
   objective_pronoun?: string;
   possessive_pronoun?: string;
+  reflexive_pronoun?: string;
+  possessive_pronoun_standalone?: string;
   folder?: string;
   is_default?: boolean;
   is_narrator?: boolean;
-  attached_world_book_id?: string;
+  attached_world_book_id?: string | null;
   metadata?: Record<string, any>;
 }
 
@@ -686,6 +767,8 @@ export interface Preset {
   metadata: Record<string, any>;
   created_at: number;
   updated_at: number;
+  /** Monotonic persisted revision used for conditional preset updates. */
+  cache_revision?: number;
 }
 
 export interface CreatePresetInput {
@@ -697,13 +780,17 @@ export interface CreatePresetInput {
   metadata?: Record<string, any>;
 }
 
-export type UpdatePresetInput = Partial<CreatePresetInput>;
+export type UpdatePresetInput = Partial<CreatePresetInput> & {
+  /** Transport-only precondition for an atomic cache revision check. */
+  expected_cache_revision?: number;
+};
 
 export interface PresetRegistryItem {
   id: string;
   name: string;
   provider: string;
   block_count: number;
+  cover_url?: string | null;
   updated_at: number;
 }
 
@@ -711,6 +798,8 @@ export interface PresetRegistryItem {
 export interface CharacterGalleryItem {
   id: string;
   image_id: string;
+  /** Portable source for Markdown image embeds, preserved across CharX installs. */
+  reference: string;
   caption: string;
   sort_order: number;
   created_at: number;
@@ -782,6 +871,8 @@ export interface WorldBookEntry {
   world_book_id: string;
   uid: string;
   outlet_name: string | null;
+  wi_marker: string | null;
+  wi_marker_side: "before" | "after" | null;
   key: string[];
   keysecondary: string[];
   content: string;
@@ -815,9 +906,27 @@ export interface WorldBookEntry {
   vector_index_status: WorldBookVectorIndexStatus;
   vector_indexed_at: number | null;
   vector_index_error: string | null;
+  revision: number;
   extensions: Record<string, any>;
   created_at: number;
   updated_at: number;
+}
+export interface WorldBookEntryConflict {
+  id: string
+  current: WorldBookEntry | null
+}
+
+export interface WorldBookEntryConflictPayload {
+  error: 'world_book_entry_conflict'
+  code: 'WORLD_BOOK_ENTRY_CONFLICT'
+  conflicts: WorldBookEntryConflict[]
+}
+
+export interface WorldBookEntryPreconditionErrorPayload {
+  error: string
+  code: string
+  field: string
+  message: string
 }
 
 export interface WorldBookVectorSummary {
@@ -866,6 +975,17 @@ export interface WorldBookDiagnostics {
   };
   vector_summary: WorldBookVectorSummary;
   query_preview: string;
+  query_scope: {
+    configured_scan_depth: number | null;
+    visible_messages_available: number;
+    vector_messages_selected: number;
+    max_tokens: number;
+    token_truncated: boolean;
+  };
+  lexical_query_previews: Array<{
+    kind: 'anchors' | 'mixed' | 'topical';
+    text: string;
+  }>;
   eligible_entries: number;
   retrieval: {
     top_k: number;
@@ -907,6 +1027,7 @@ export interface WorldBookDiagnostics {
       commentExact: number;
       commentPartial: number;
       focusBoost: number;
+      supportingContextBoost: number;
       priority: number;
       broadPenalty: number;
       focusMissPenalty: number;
@@ -948,6 +1069,7 @@ export interface WorldBookDiagnostics {
       commentExact: number;
       commentPartial: number;
       focusBoost: number;
+      supportingContextBoost: number;
       priority: number;
       broadPenalty: number;
       focusMissPenalty: number;
@@ -982,8 +1104,20 @@ export interface CreateWorldBookInput {
 
 export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
+export interface RenameWorldBookFolderResponse {
+  updated: WorldBook[];
+  count: number;
+}
+
+export interface DeleteWorldBookFolderResponse {
+  updated: WorldBook[];
+  count: number;
+}
+
 export interface CreateWorldBookEntryInput {
   outlet_name?: string | null;
+  wi_marker?: string | null;
+  wi_marker_side?: "before" | "after" | null;
   key?: string[];
   keysecondary?: string[];
   content?: string;
@@ -1017,23 +1151,31 @@ export interface CreateWorldBookEntryInput {
   extensions?: Record<string, any>;
 }
 
+export interface UpdateWorldBookEntryInput extends CreateWorldBookEntryInput {
+  expected_revision?: number;
+}
+
 export interface DuplicateWorldBookEntryInput {
-  target_book_id?: string | null;
+  target_book_id?: string | null
+  expected_revision?: number
 }
 
 export interface ReorderWorldBookEntriesInput {
   ordered_ids: string[];
+  expected_revisions?: Record<string, number>;
 }
 
 export interface WorldBookEntryBulkDeleteInput {
   action: 'delete';
   entry_ids: string[];
+  expected_revisions?: Record<string, number>;
 }
 
 export interface WorldBookEntryBulkMoveInput {
   action: 'move';
   entry_ids: string[];
   target_book_id: string;
+  expected_revisions?: Record<string, number>;
 }
 
 export interface WorldBookEntryBulkRenumberInput {
@@ -1042,6 +1184,7 @@ export interface WorldBookEntryBulkRenumberInput {
   start?: number | null;
   step?: number;
   direction?: 'asc' | 'desc';
+  expected_revisions?: Record<string, number>;
 }
 
 export interface WorldBookEntryBulkAddKeywordInput {
@@ -1049,6 +1192,7 @@ export interface WorldBookEntryBulkAddKeywordInput {
   entry_ids: string[];
   keyword: string;
   target?: 'primary' | 'secondary';
+  expected_revisions?: Record<string, number>;
 }
 
 export interface WorldBookEntryBulkSetPositionInput {
@@ -1056,6 +1200,55 @@ export interface WorldBookEntryBulkSetPositionInput {
   entry_ids: string[];
   position: number;
   depth?: number;
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetActivationInput {
+  action: 'set_activation';
+  entry_ids: string[];
+  activation: 'trigger' | 'constant' | 'vector';
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetTriggerInput {
+  action: 'set_trigger';
+  entry_ids: string[];
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetPriorityInput {
+  action: 'set_priority';
+  entry_ids: string[];
+  priority: number;
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetDepthInput {
+  action: 'set_depth';
+  entry_ids: string[];
+  depth: number;
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetEnabledInput {
+  action: 'set_enabled';
+  entry_ids: string[];
+  enabled: boolean;
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkSetFieldsInput {
+  action: 'set_fields';
+  entry_ids: string[];
+  fields: Partial<CreateWorldBookEntryInput>;
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryBulkCopyInput {
+  action: 'copy';
+  entry_ids: string[];
+  target_book_id: string;
+  expected_revisions?: Record<string, number>;
 }
 
 export type WorldBookEntryBulkActionInput =
@@ -1063,7 +1256,14 @@ export type WorldBookEntryBulkActionInput =
   | WorldBookEntryBulkMoveInput
   | WorldBookEntryBulkRenumberInput
   | WorldBookEntryBulkAddKeywordInput
-  | WorldBookEntryBulkSetPositionInput;
+  | WorldBookEntryBulkSetPositionInput
+  | WorldBookEntryBulkSetActivationInput
+  | WorldBookEntryBulkSetTriggerInput
+  | WorldBookEntryBulkSetPriorityInput
+  | WorldBookEntryBulkSetDepthInput
+  | WorldBookEntryBulkSetEnabledInput
+  | WorldBookEntryBulkSetFieldsInput
+  | WorldBookEntryBulkCopyInput;
 
 export interface WorldBookEntryBulkActionResult {
   action: WorldBookEntryBulkActionInput['action'];
@@ -1071,9 +1271,31 @@ export interface WorldBookEntryBulkActionResult {
   target_book_id?: string;
 }
 
+export type EmbeddingProvider = 'openai-compatible' | 'openai' | 'mistral' | 'cohere' | 'openrouter' | 'electronhub' | 'bananabread' | 'nanogpt' | 'nvidia-nim' | 'google_vertex';
+
+export interface EmbeddingProviderProfile {
+  api_url: string;
+  model: string;
+  dimensions: number | null;
+  send_dimensions: boolean;
+  retrieval_top_k: number;
+  hybrid_weight_mode: 'keyword_first' | 'balanced' | 'vector_first';
+  preferred_context_size: number;
+  batch_size: number;
+  similarity_threshold: number;
+  rerank_cutoff: number;
+  vectorize_world_books: boolean;
+  vectorize_chat_messages: boolean;
+  vectorize_chat_documents: boolean;
+  chat_memory_mode: 'conservative' | 'balanced' | 'aggressive';
+  request_timeout: number;
+  vertex_region?: string;
+  has_api_key: boolean;
+}
+
 export interface EmbeddingConfig {
   enabled: boolean;
-  provider: 'openai-compatible' | 'openai' | 'openrouter' | 'electronhub' | 'bananabread' | 'nanogpt';
+  provider: EmbeddingProvider;
   api_url: string;
   model: string;
   dimensions: number | null;
@@ -1090,6 +1312,7 @@ export interface EmbeddingConfig {
   chat_memory_mode: 'conservative' | 'balanced' | 'aggressive';
   request_timeout: number;
   has_api_key: boolean;
+  provider_profiles?: Partial<Record<EmbeddingProvider, EmbeddingProviderProfile>>;
   /** True when the server owner has enabled a shared embedding config and the
    *  current user is a non-owner inheriting it. The form should be read-only
    *  and the config is not user-editable while this flag is set. */
@@ -1114,9 +1337,12 @@ export interface ChatMemorySettings {
   splitOnTimeGapMinutes: number
   maxMessagesPerChunk: number
   quickMode: 'conservative' | 'balanced' | 'aggressive' | null
+  injectionStrategy: 'fallback' | 'macro_only' | 'disabled'
 }
 
 export interface WorldInfoSettings {
+  forceCaseSensitive: boolean;
+  forceMatchWholeWords: boolean;
   globalScanDepth: number | null;
   maxRecursionPasses: number;
   maxActivatedEntries: number;
@@ -1143,12 +1369,34 @@ export interface ActivatedWorldInfoEntry {
   comment: string;
   keys: string[];
   source: 'keyword' | 'vector';
+  activationType: 'constant' | 'sticky' | 'keyword' | 'vector';
   score?: number;
   bookSource?: 'character' | 'persona' | 'chat' | 'global' | 'peer';
   bookId?: string;
+  bookName?: string;
+  activationOrder: number;
+  firstTriggeredForBook: boolean;
+  estimatedTokens: number;
+  priority: number;
+  position: number;
+  depth: number;
+  preventRecursion: boolean;
+  triggerPhrase?: string;
+  matchedPhrase?: string;
+  matchedKey?: string;
+  matchedTrigger?: string;
+  trigger?: string;
+  matchedPrimaryKeys?: string[];
+  matchedSecondaryKeys?: string[];
+  matchedBecause?: string;
+  matchReason?: string;
+  matchedContentPreview?: string;
+  contentPreview?: string;
+  whyActivated?: string;
+  triggeringSentence?: string;
+  messageExcerpt?: string;
+  contextExcerpt?: string;
 }
-
-export type UpdateWorldBookEntryInput = CreateWorldBookEntryInput;
 
 // ---- Pack ----
 export interface Pack {
@@ -1306,9 +1554,37 @@ export interface BulkImportResult {
   summary: { total: number; imported: number; skipped: number; failed: number }
 }
 
+export type CharacterImportJobStatus = 'accepting' | 'processing' | 'complete' | 'cancelled' | 'error'
+
+export interface CharacterImportJob {
+  jobId: string
+  status: CharacterImportJobStatus
+  total: number
+  uploaded: number
+  processed: number
+  results: BulkImportResultItem[]
+  summary: { total: number; imported: number; skipped: number; failed: number }
+  error?: string
+}
+
+export interface BulkPersonaImportResult {
+  imported: Persona[]
+  count: number
+  failed: number
+  errors: Array<{ index: number; name: string; error: string }>
+  warnings: {
+    detached_world_books: number
+    skipped_asset_references: number
+  }
+}
+
 export interface BatchDeleteResult {
   deleted: string[]
   failed: string[]
+}
+export interface BulkTagResult {
+  updated: number;
+  unchanged: number;
 }
 
 export interface LumiModule {

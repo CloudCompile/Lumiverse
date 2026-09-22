@@ -388,7 +388,7 @@ export async function synthesizeBible(
   if (!extraction) throw new Error("Read the dream first — there is nothing to synthesize");
 
   const facts = extraction.committed_facts;
-  const taste = getTaste(userId);
+  const taste = getTaste(userId, sessionId);
   const targets = partsToAuthor(reg, facts);
   const dream = session.seed.text;
   const sourceNoun = seedSourceNoun(session.seed.type);
@@ -494,7 +494,7 @@ export async function resynthesizeEntry(
   const group = reg.synthesisGroups.find(
     (g) => g.id === slotSynthesisGroup(reg.slots, reg.synthesisGroups, slotId),
   )!;
-  const taste = getTaste(userId);
+  const taste = getTaste(userId, sessionId);
   const sourceNoun = seedSourceNoun(session.seed.type);
   const dynamicEntries = getDynamicEntries(userId, sessionId);
 

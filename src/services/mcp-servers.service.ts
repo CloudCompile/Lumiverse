@@ -49,6 +49,40 @@ export function getServer(userId: string, id: string): McpServerProfile | null {
   return row ? rowToProfile(row) : null;
 }
 
+/** Keep an MCP profile editable when its encrypted headers/env no longer decrypt. */
+export async function withReadableMcpSecretStatus(
+  userId: string,
+  profile: McpServerProfile,
+): Promise<McpServerProfile> {
+  const hasEnv = Object.keys(profile.env).length > 0;
+  const [headers, envValues] = await Promise.all([
+    profile.has_headers
+      ? secretsSvc.getSecretForStatus(userId, mcpServerHeadersKey(profile.id))
+      : Promise.resolve(null),
+    hasEnv
+      ? secretsSvc.getSecretForStatus(userId, mcpServerEnvKey(profile.id))
+      : Promise.resolve(null),
+  ]);
+
+  if ((!profile.has_headers || headers) && (!hasEnv || envValues)) return profile;
+  return {
+    ...profile,
+    has_headers: profile.has_headers && !!headers,
+    env: hasEnv && !envValues ? {} : profile.env,
+  };
+}
+
+export async function listServersForApi(
+  userId: string,
+  pagination: PaginationParams,
+): Promise<PaginatedResult<McpServerProfile>> {
+  const result = listServers(userId, pagination);
+  return {
+    ...result,
+    data: await Promise.all(result.data.map((profile) => withReadableMcpSecretStatus(userId, profile))),
+  };
+}
+
 export function getEnabledServers(userId: string): McpServerProfile[] {
   const rows = getDb()
     .query("SELECT * FROM mcp_servers WHERE user_id = ? AND is_enabled = 1 ORDER BY name ASC")

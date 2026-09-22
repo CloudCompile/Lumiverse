@@ -22,6 +22,9 @@ export class ZAIProvider extends OpenAICompatibleProvider {
     supportsStreaming: true,
     apiKeyRequired: true,
     modelListStyle: "openai",
+    // GLM-4.5+ supports interleaved thinking by default: the model reasons
+    // between tool calls and after receiving tool results.
+    interleavedThinking: true,
   };
 
   // Z.AI does not expose an OpenAI-compatible /models endpoint (documented
@@ -56,6 +59,8 @@ export class ZAIProvider extends OpenAICompatibleProvider {
   // Serve a static model list because the API has no /models endpoint.
   async listModels(_apiKey: string, _apiUrl: string): Promise<string[]> {
     return [
+      "glm-5.3-flash",
+      "glm-5.3",
       "glm-5.2",
       "glm-5.1",
       "glm-5-turbo",

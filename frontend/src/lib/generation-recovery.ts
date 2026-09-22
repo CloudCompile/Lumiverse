@@ -24,6 +24,13 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
   if (!chatId) return
   const state = useStore.getState()
   if (state.activeChatId !== chatId) return
+  // Chat exit keeps one frozen stream frame mounted for its short animation.
+  // Recovery must not resume writes into that fading subtree.
+  if (state.streamingNavigationPaused) return
+  // Until HTTP/WS identifies this request, the pool may still describe the
+  // previous generation. It cannot confirm or finish an optimistic new swipe.
+  if (state.isStreaming && !state.activeGenerationId) return
+  const generationEpoch = state.getGenerationEpoch()
 
   // Multiplayer peers don't own the host's generation pool — they reconcile
   // purely from the re-broadcast WS event stream. Polling the pool would either
@@ -54,17 +61,28 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
   }
 
   const latest = useStore.getState()
-  if (latest.activeChatId !== chatId) return
+  if (
+    latest.activeChatId !== chatId ||
+    latest.streamingNavigationPaused ||
+    latest.getGenerationEpoch() !== generationEpoch ||
+    latest.isStreaming !== state.isStreaming ||
+    latest.activeGenerationId !== state.activeGenerationId
+  ) return
 
-   if (
-    genStatus.active &&
-    genStatus.generationId &&
+  if (genStatus.active && genStatus.generationId) {
+    latest.startStreaming(genStatus.generationId, genStatus.targetMessageId, getLocalStreamingType(genStatus.generationType))
+    // startStreaming rejects already-ended generations. Do not attach their
+    // swipe anchors or replay their buffers after that rejection.
+    if (useStore.getState().activeGenerationId !== genStatus.generationId) return
+    latest.setStreamingSwipeId(genStatus.targetSwipeId ?? null)
+  }
+
+  if (
+    genStatus.active && genStatus.generationId &&
     genStatus.status === 'council' &&
     genStatus.councilRetryPending &&
     genStatus.councilToolsFailure
   ) {
-    latest.startStreaming(genStatus.generationId, genStatus.targetMessageId)
-    latest.setStreamingSwipeId(genStatus.targetSwipeId ?? null)
     latest.setCouncilExecuting(false)
 
     const existingFailure = latest.councilToolsFailure
@@ -80,8 +98,6 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
   }
 
   if (genStatus.active && genStatus.generationId && (genStatus.status === 'streaming' || genStatus.status === 'reasoning')) {
-    latest.startStreaming(genStatus.generationId, genStatus.targetMessageId, getLocalStreamingType(genStatus.generationType))
-    latest.setStreamingSwipeId(genStatus.targetSwipeId ?? null)
     if (genStatus.content) latest.reconcileStreamContent(genStatus.content, genStatus.contentOffset ?? 0)
     if (genStatus.reasoning) latest.reconcileStreamReasoning(genStatus.reasoning, genStatus.reasoningOffset ?? 0)
     if (genStatus.reasoningDurationMs) {
@@ -92,13 +108,10 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
     return
   }
 
-  if (genStatus.active && genStatus.generationId) {
-    latest.startStreaming(genStatus.generationId, genStatus.targetMessageId, getLocalStreamingType(genStatus.generationType))
-    latest.setStreamingSwipeId(genStatus.targetSwipeId ?? null)
-    return
-  }
-
   if (!genStatus.active) {
+    // A previous completion must not refresh the message list of a newer
+    // stream, even when there is no streaming state to clear for that result.
+    if (latest.activeGenerationId && latest.activeGenerationId !== genStatus.generationId) return
     const completedImpersonateDraft =
       genStatus.status === 'completed' &&
       genStatus.generationType === 'impersonate' &&
@@ -115,8 +128,7 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
         : genStatus.content
     }
 
-    const sameGeneration = !latest.activeGenerationId || latest.activeGenerationId === genStatus.generationId
-    if (latest.isStreaming && sameGeneration) {
+    if (latest.isStreaming) {
       if (genStatus.error) {
         latest.setStreamingError(genStatus.error)
       } else if (completedImpersonateDraft) {
@@ -136,10 +148,18 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
     if (!genStatus.completedMessageId) return
 
     const pageSize = latest.messagesPerPage || 50
+    const beforeRefresh = useStore.getState()
+    const refreshEpoch = beforeRefresh.getGenerationEpoch()
     try {
       const fresh = await messagesApi.list(chatId, { limit: pageSize, tail: true })
       const after = useStore.getState()
-      if (after.activeChatId === chatId) {
+      if (
+        after.activeChatId === chatId &&
+        !after.streamingNavigationPaused &&
+        !after.isStreaming &&
+        after.getGenerationEpoch() === refreshEpoch &&
+        after.activeGenerationId === beforeRefresh.activeGenerationId
+      ) {
         after.setMessages(fresh.data, fresh.total)
       }
     } catch { /* best-effort */ }

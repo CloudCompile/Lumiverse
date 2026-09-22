@@ -4,26 +4,28 @@ title: Notifications
 
 # Notifications
 
-Lumiverse can send push notifications to your devices when certain events happen — like when a character finishes responding. This is useful when you're multitasking or using the PWA on mobile.
+Lumiverse can send system notifications to your devices when certain events happen — like when a character finishes responding. This is useful when you're multitasking, using the PWA on mobile, or running Lumiverse Desktop.
 
 ---
 
-!!! warning "HTTPS or localhost required"
-    Push notifications rely on Service Workers, which most browsers only allow in **secure contexts**. This means they will only work when accessing Lumiverse via:
+!!! warning "HTTPS or localhost required in a browser"
+    Browser push notifications rely on Service Workers, which most browsers only allow in **secure contexts**. This means browser delivery will only work when accessing Lumiverse via:
 
     - **`localhost`** — Always treated as secure, even without SSL
     - **HTTPS** — A reverse proxy with a valid SSL certificate (e.g., `https://lumiverse.example.com`)
 
-    If you're accessing Lumiverse over plain HTTP on a remote IP (e.g., `http://192.168.1.50:7860`), push notifications will not be available. The browser silently disables Service Worker registration in insecure remote contexts.
+    If you're accessing Lumiverse in a browser over plain HTTP on a remote IP (e.g., `http://192.168.1.50:7860`), browser push will not be available. Lumiverse Desktop uses its native notification bridge instead of Service Worker push.
 
 ## Setting Up
 
 1. Open **Settings > Notifications**
 2. Toggle **Enable push notifications**
-3. Click **Enable** for this device (your browser will ask for notification permission)
+3. Click **Enable** for this device (your browser or operating system will ask for notification permission)
 4. Grant permission when prompted
 
 Each device must be subscribed individually. You can manage all your registered devices from this settings tab.
+
+Lumiverse Desktop registers as a native destination. Its device identity and revocable enrollment credential are stored in the operating system's per-app configuration directory, so rebuilding or updating the desktop bundle does not require you to sign in again just to keep receiving notifications. The credential is pinned to that server's origin and identity; removing the destination in Settings revokes it.
 
 ---
 
@@ -32,7 +34,7 @@ Each device must be subscribed individually. You can manage all your registered 
 | Event | Notification |
 |-------|-------------|
 | **Generation completed** | Character name as title, first 120 characters of the response as body |
-| **Generation failed** | "Generation Failed" as title, error message as body |
+| **Generation failed** | Connection name in the title, with the error code and message in the body |
 
 Each event type can be enabled or disabled independently.
 
@@ -40,7 +42,11 @@ Each event type can be enabled or disabled independently.
 
 ## Visibility Gating
 
-Notifications are **suppressed when you're actively viewing the app**. They only fire when you're in another tab, have the window minimized, or are on a different app. This prevents redundant notifications for events you're already watching.
+Automatic notifications are **suppressed when you're actively viewing the app on any connected device**. For example, keeping Lumiverse visible on your laptop suppresses notifications to your phone. They resume when all connected sessions are hidden or closed.
+
+The per-device **test notification** deliberately bypasses this visibility check so you can verify delivery while the Settings page is open.
+
+A notification already sent while you were away may still arrive just after you reopen the app.
 
 ---
 
@@ -52,7 +58,7 @@ From the Notifications settings tab:
 - Remove individual device subscriptions
 - Send a **test notification** to verify everything works
 
-Devices that stop accepting notifications (uninstalled browser, cleared data) are automatically cleaned up.
+Browser subscriptions that stop accepting notifications are automatically cleaned up. A desktop destination can be removed from Settings to revoke its durable credential.
 
 ---
 

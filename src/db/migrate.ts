@@ -75,7 +75,66 @@ const BASELINE_MIGRATIONS: readonly string[] = [
   "063_lumia_gender_default_any.sql",
   "064_theme_assets.sql",
   "065_regex_script_character_id.sql",
+  "066_chat_chunks_cortex_warmup.sql",
+  "066_dream_weaver_messages.sql",
+  "066_spindle_image_ownership.sql",
+  "068_migrate_dream_weaver_from_1_0.sql",
+  "069_stt_connections.sql",
+  "070_cortex_user_edits.sql",
+  "070_signup_indexes.sql",
+  "071_import_consumed_tickets.sql",
+  "072_world_books_folder.sql",
+  "073_cortex_relation_user_edits.sql",
+  "074_audio_files.sql",
+  "075_persona_is_narrator.sql",
+  "076_cortex_salience_peak.sql",
+  "077_regex_target_array.sql",
+  "078_chats_character_id_nullable.sql",
+  "079_weaver_studio_tables.sql",
+  "080_weaver_interview_lifecycle.sql",
+  "081_weaver_bible_review.sql",
+  "082_weaver_dynamic_lane.sql",
+  "083_weaver_session_build_type.sql",
+  "084_weaver_cast.sql",
+  "085_weaver_people_rename.sql",
+  "086_weaver_narration_mode.sql",
+  "087_weaver_persona_plan.sql",
+  "088_lumihub_share_usage_stats.sql",
+  "088_multiplayer.sql",
+  "089_sso_providers.sql",
+  "090_sso_account_indexes.sql",
   "091_images_byte_size.sql",
+  "092_characters_deleting_flag.sql",
+  "092_leaderboard.sql",
+  "093_preset_cache_revision.sql",
+  "093_leaderboard_expansion.sql",
+  "094_regex_actions.sql",
+  "095_lumihub_link_user_scope.sql",
+  "096_character_folders.sql",
+  "097_persona_extended_pronouns.sql",
+  "098_world_book_entry_exclude_greeting.sql",
+  "098_world_book_entry_revision.sql",
+  "099_character_library_scope.sql",
+  "100_stream_deck_tokens.sql",
+  "101_regex_script_extension_ownership.sql",
+  "102_character_source_filename_index.sql",
+  "102_spindle_provider_scope.sql",
+  "103_character_fts_update_columns.sql",
+  "103_edit_and_send_outbox.sql",
+  "104_world_book_source_filename_index.sql",
+  "104_extension_grants_scoped_unique.sql",
+  "105_st_migration_source_indexes.sql",
+  "106_image_processing_queue.sql",
+  "107_world_book_entry_order_index.sql",
+  "108_images_skip_thumbnail_processing.sql",
+  "109_illarin_instance.sql",
+  "110_illarin_delivery_receipts.sql",
+  "111_generation_outbox_connection_id.sql",
+  "112_weaver_session_taste.sql",
+  "113_better_auth_1_7_accounts.sql",
+  "114_cleanup_stale_message_breakdowns.sql",
+  "117_desktop_notification_destinations.sql",
+  "118_desktop_oauth_provider.sql",
 ];
 
 const BASELINE_SET = new Set(BASELINE_MIGRATIONS);
@@ -178,7 +237,15 @@ function isBaselineDriftAlreadyApplied(db: Database, file: string): boolean {
 // implicit DELETE that fires ON DELETE CASCADE into every child table.
 // PRAGMA foreign_keys is a no-op inside a transaction, so the runner flips
 // it around the transaction instead of the .sql file doing it itself.
-const FOREIGN_KEYS_OFF_MIGRATIONS = new Set(["078_chats_character_id_nullable.sql"]);
+const FOREIGN_KEYS_OFF_MIGRATIONS = new Set([
+  "078_chats_character_id_nullable.sql",
+  // Table rebuild (drop + recreate) of extension_grants, which carries a child
+  // FK into extensions with ON DELETE CASCADE.
+  "104_extension_grants_scoped_unique.sql",
+  // Better Auth 1.7 makes account.issuer required and adds a compound unique
+  // identity index, which requires rebuilding SQLite's account table.
+  "113_better_auth_1_7_accounts.sql",
+]);
 
 function applyMigrationWithForeignKeysOff(db: Database, file: string, sql: string): void {
   db.run("PRAGMA foreign_keys = OFF");
@@ -197,6 +264,54 @@ function applyMigrationWithForeignKeysOff(db: Database, file: string, sql: strin
     }
   } finally {
     db.run("PRAGMA foreign_keys = ON");
+  }
+}
+
+function assertBetterAuthAccountMigrationReady(db: Database): void {
+  const providerIds = db.query("SELECT DISTINCT providerId FROM account").all() as Array<{
+    providerId: string;
+  }>;
+  const unsupported = providerIds
+    .map((row) => row.providerId)
+    .filter((providerId) =>
+      providerId !== "credential"
+      && providerId !== "siwe"
+      && (!providerId || encodeURIComponent(providerId) !== providerId)
+    );
+  if (unsupported.length > 0) {
+    throw new Error(
+      "Better Auth 1.7 account migration cannot safely encode legacy provider IDs: "
+        + unsupported.map((providerId) => JSON.stringify(providerId)).join(", ")
+        + ". Rename or migrate these providers before restarting.",
+    );
+  }
+
+  const collision = db.query(`
+    SELECT
+      CASE
+        WHEN providerId = 'credential' THEN 'local:credential'
+        WHEN providerId = 'siwe' THEN 'local:siwe'
+        ELSE 'local:oauth:' || providerId
+      END AS issuer,
+      CASE WHEN providerId = 'credential' THEN userId ELSE accountId END AS accountId,
+      COUNT(*) AS accountCount,
+      COUNT(DISTINCT userId) AS userCount
+    FROM account
+    GROUP BY 1, 2
+    HAVING COUNT(*) > 1
+    LIMIT 1
+  `).get() as {
+    issuer: string;
+    accountId: string;
+    accountCount: number;
+    userCount: number;
+  } | null;
+  if (collision) {
+    throw new Error(
+      `Better Auth 1.7 account identity collision for (${collision.issuer}, ${collision.accountId}): `
+        + `${collision.accountCount} account rows across ${collision.userCount} user(s). `
+        + "Resolve the duplicate account links before restarting.",
+    );
   }
 }
 
@@ -288,6 +403,10 @@ export async function runMigrations(db: Database, migrationsDir?: string): Promi
 
     const sql = await Bun.file(join(dir, file)).text();
     console.log(`Applying migration: ${file}`);
+
+    if (file === "113_better_auth_1_7_accounts.sql") {
+      assertBetterAuthAccountMigrationReady(db);
+    }
 
     if (FOREIGN_KEYS_OFF_MIGRATIONS.has(file)) {
       applyMigrationWithForeignKeysOff(db, file, sql);

@@ -3,10 +3,30 @@ import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
 import { messagesApi, chatsApi } from '@/api/chats'
-import { getCharacterAvatarThumbUrlById, getCharacterAvatarLargeUrlById, getCharacterAvatarUrlById, getPersonaAvatarThumbUrlById, getPersonaAvatarLargeUrlById, getPersonaAvatarUrlById, getCharacterAvatarTiers, getPersonaAvatarTiers, getImageTiers, type AvatarTierUrls } from '@/lib/avatarUrls'
+import { generateUUID } from '@/lib/uuid'
+import {
+  getCharacterAvatarThumbUrlById,
+  getCharacterAvatarLargeUrlById,
+  getCharacterAvatarUrlById,
+  getPersonaAvatarThumbUrlById,
+  getPersonaAvatarLargeUrlById,
+  getPersonaAvatarUrlById,
+  getPersonaAvatarTiers,
+  getCharacterAvatarTiers,
+  getImageTiers,
+  type AvatarTierUrls,
+} from '@/lib/avatarUrls'
 import { imagesApi } from '@/api/images'
+import { resolveMessageExpressionImageId } from '@/lib/expressionResolution'
 import type { Message } from '@/types/api'
 import type { GenerationMetrics } from '@/types/ws-events'
+import { resolveMultiplayerMessageAuthor } from '@/lib/multiplayerMessageAuthor'
+import {
+  preloadChatNavigationSnapshot,
+  preloadChatNavigationSnapshotById,
+} from '@/lib/chatNavigationSnapshot'
+
+const CONTEXT_HISTORY_ANCHOR_KEY = 'context_history_anchor_message_id'
 
 /**
  * Strip thinking/reasoning tags from content and extract the thoughts.
@@ -39,18 +59,31 @@ function parseThinkingTags(content: string): { cleaned: string; thoughts: string
 
 export function useMessageCard(message: Message, chatId: string) {
   const { t } = useTranslation('chat', { keyPrefix: 'toast' })
+  const { t: tChat } = useTranslation('chat')
   const { t: tc } = useTranslation('chat', { keyPrefix: 'messageCard' })
   const navigate = useNavigate()
   const editingMessageId = useStore((s) => s.editingMessageId)
-  const setEditingMessageId = useStore((s) => s.setEditingMessageId)
+  const messageEditDraft = useStore((s) => s.messageEditDraft)
+  const beginMessageEdit = useStore((s) => s.beginMessageEdit)
+  const updateMessageEditDraft = useStore((s) => s.updateMessageEditDraft)
+  const clearMessageEdit = useStore((s) => s.clearMessageEdit)
   const updateMessage = useStore((s) => s.updateMessage)
   const addToast = useStore((s) => s.addToast)
   const isEditing = editingMessageId === message.id
-  const [editContent, setEditContent] = useState('')
-  const [editReasoning, setEditReasoning] = useState('')
-  const [showReasoningEditor, setShowReasoningEditor] = useState(false)
-  const hadReasoningRef = useRef(false)
-  const wasEditingRef = useRef(false)
+  const activeDraft = messageEditDraft?.chatId === chatId && messageEditDraft.messageId === message.id
+    ? messageEditDraft
+    : null
+  const editContent = activeDraft?.content ?? ''
+  const editReasoning = activeDraft?.reasoning ?? ''
+  const showReasoningEditor = activeDraft?.showReasoningEditor ?? false
+  const setEditContent = useCallback((content: string) => {
+    updateMessageEditDraft({ content })
+  }, [updateMessageEditDraft])
+  const setEditReasoning = useCallback((reasoning: string) => {
+    updateMessageEditDraft({ reasoning })
+  }, [updateMessageEditDraft])
+  const editAndSendRequestRef = useRef<{ fingerprint: string; requestId: string } | null>(null)
+  const [editAndSendPending, setEditAndSendPending] = useState(false)
   const removeMessage = useStore((s) => s.removeMessage)
   const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -64,7 +97,10 @@ export function useMessageCard(message: Message, chatId: string) {
   const mpCharacterAvatar = useStore((s) => s.mpCharacterAvatar)
   const autoParse = useStore((s) => s.reasoningSettings.autoParse)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
-  const isBubbleMode = useStore((s) => s.chatSheldDisplayMode) === 'bubble'
+  const activeChatMetadata = useStore((s) => s.activeChatMetadata)
+  const setActiveChatMetadata = useStore((s) => s.setActiveChatMetadata)
+  const isBubbleMode = useStore((s) => s.chatDisplayMode) === 'bubble'
+  const branchChatOnEditAndSend = useStore((s) => s.quickToolbarSettings?.branchChatOnEditAndSend ?? true)
 
   const regeneratingMessageId = useStore((s) => s.regeneratingMessageId)
   const streamingSwipeId = useStore((s) => s.streamingSwipeId)
@@ -186,14 +222,43 @@ export function useMessageCard(message: Message, chatId: string) {
 
   const effectiveCharId = messageCharacterId || activeCharacterId
   const getCharAvatarUrl = isBubbleMode ? getCharacterAvatarLargeUrlById : getCharacterAvatarThumbUrlById
-  const getPersonaAvatarUrl = isBubbleMode ? getPersonaAvatarLargeUrlById : getPersonaAvatarThumbUrlById
   const getImageUrl = isBubbleMode ? imagesApi.largeUrl : imagesApi.smallUrl
   const characterAvatarCropImageId = typeof effectiveCharacter?.extensions?.avatar_crop_image_id === 'string'
     ? effectiveCharacter.extensions.avatar_crop_image_id
     : null
-  const activeAltAvatar = activeChatAvatarId && effectiveCharId === activeCharacterId
+  const personaAvatarId = userPersonaId ?? activePersona?.id ?? null
+  const chatPersonaAvatarVersion = personaAvatarId && typeof activeChatMetadata?.persona_addon_avatar_versions?.[personaAvatarId] === 'string'
+    ? activeChatMetadata.persona_addon_avatar_versions[personaAvatarId]
+    : null
+  // Chat-aware persona avatars use a resolver URL so add-on overrides can be
+  // applied server-side. Include the current base image IDs in its version so
+  // an upload changes the <img> URL immediately, rather than waiting for a
+  // browser revalidation of the otherwise-stable resolver URL.
+  const effectivePersona = messagePersona ?? activePersona
+  const personaImageVersion = [
+    effectivePersona?.image_id,
+    effectivePersona?.metadata?.avatar_crop_image_id,
+  ].filter((value): value is string => typeof value === 'string' && value.length > 0).join('.')
+  const personaAvatarVersion = [chatPersonaAvatarVersion, personaImageVersion]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join('.') || null
+  const personaAvatarContext = !isTemporaryChat && personaAvatarId
+    ? { chatId, version: personaAvatarVersion }
+    : undefined
+  const personaAvatarFallbackUrl = isBubbleMode
+    ? getPersonaAvatarLargeUrlById(personaAvatarId, null, personaAvatarContext)
+    : getPersonaAvatarThumbUrlById(personaAvatarId, null, personaAvatarContext)
+  const groupAvatarId = typeof activeChatMetadata?.group_active_avatar_ids?.[effectiveCharId || ''] === 'string'
+    ? activeChatMetadata.group_active_avatar_ids[effectiveCharId || ''] as string
+    : null
+  const effectiveChatAvatarId = activeChatMetadata?.group === true
+    ? groupAvatarId
+    : activeChatAvatarId && effectiveCharId === activeCharacterId
+      ? activeChatAvatarId
+      : null
+  const activeAltAvatar = effectiveChatAvatarId
     ? (effectiveCharacter?.extensions?.alternate_avatars as Array<{ image_id: string; original_image_id?: string }> | undefined)
-        ?.find((avatar) => avatar.image_id === activeChatAvatarId)
+        ?.find((avatar) => avatar.image_id === effectiveChatAvatarId)
     : null
 
   // Multiplayer peers can't fetch the owner-scoped character-avatar endpoint —
@@ -201,25 +266,27 @@ export function useMessageCard(message: Message, chatId: string) {
   // messages when we're a peer (the host renders the real character avatar).
   const peerBotAvatar = !isUser && mpRoomId && !mpIsHost ? mpCharacterAvatar : null
 
+  const expressionAvatarImageId = useStore((state) =>
+    mpRoomId && !mpIsHost ? null : resolveMessageExpressionImageId(
+      state, effectiveCharacter, effectiveCharId, chatId, isUser,
+    )
+  )
+  const messageAvatarImageId = expressionAvatarImageId || effectiveChatAvatarId
+  const messageOriginalImageId = expressionAvatarImageId || activeAltAvatar?.original_image_id || effectiveChatAvatarId
+
   const avatarUrl = isUser
-    ? getPersonaAvatarUrl(
-        userPersonaId ?? activePersona?.id ?? null,
-        messagePersona?.image_id ?? activePersona?.image_id ?? null
-      )
+    ? personaAvatarFallbackUrl
     : peerBotAvatar
-      ?? ((activeChatAvatarId && effectiveCharId === activeCharacterId)
-        ? getImageUrl(activeChatAvatarId)
+      ?? (messageAvatarImageId
+        ? getImageUrl(messageAvatarImageId)
         : getCharAvatarUrl(effectiveCharId, characterAvatarCropImageId ?? effectiveCharacter?.image_id ?? null))
 
   // Full-size avatar URL for lightbox/floating viewer (no resize)
   const fullAvatarUrl = isUser
-    ? getPersonaAvatarUrlById(
-        userPersonaId ?? activePersona?.id ?? null,
-        messagePersona?.image_id ?? activePersona?.image_id ?? null
-      )
+    ? getPersonaAvatarUrlById(personaAvatarId, null, personaAvatarContext)
     : peerBotAvatar
-      ?? ((activeChatAvatarId && effectiveCharId === activeCharacterId)
-        ? imagesApi.url(activeAltAvatar?.original_image_id || activeChatAvatarId)
+      ?? (messageAvatarImageId
+        ? imagesApi.url(messageOriginalImageId)
         : getCharacterAvatarUrlById(
             effectiveCharId,
             typeof effectiveCharacter?.extensions?.original_image_id === 'string'
@@ -230,31 +297,26 @@ export function useMessageCard(message: Message, chatId: string) {
   // ── Full sm/lg/full tier matrix for theme overrides. `cropped` is the 1:1
   //    square variant; `original` is the uploaded aspect ratio. Mirrors the
   //    avatarUrl/fullAvatarUrl resolution above so they stay consistent. ──
-  const personaAvatarId = userPersonaId ?? activePersona?.id ?? null
-  const personaImageId = messagePersona?.image_id ?? activePersona?.image_id ?? null
   const characterOriginalImageId = typeof effectiveCharacter?.extensions?.original_image_id === 'string'
     ? effectiveCharacter.extensions.original_image_id
     : effectiveCharacter?.image_id ?? null
-  const usesChatAvatar = !!activeChatAvatarId && effectiveCharId === activeCharacterId
+  const usesChatAvatar = !!messageAvatarImageId
 
   const croppedAvatarTiers: AvatarTierUrls = isUser
-    ? getPersonaAvatarTiers(personaAvatarId, personaImageId)
+    ? getPersonaAvatarTiers(personaAvatarId, null, personaAvatarContext, 'crop')
     : usesChatAvatar
-      ? getImageTiers(activeChatAvatarId)
+      ? getImageTiers(messageAvatarImageId)
       : getCharacterAvatarTiers(effectiveCharId, characterAvatarCropImageId ?? effectiveCharacter?.image_id ?? null)
 
   const originalAvatarTiers: AvatarTierUrls = isUser
-    ? getPersonaAvatarTiers(personaAvatarId, personaImageId)
+    ? getPersonaAvatarTiers(personaAvatarId, null, personaAvatarContext, 'original')
     : usesChatAvatar
-      ? getImageTiers(activeAltAvatar?.original_image_id || activeChatAvatarId)
+      ? getImageTiers(messageOriginalImageId)
       : getCharacterAvatarTiers(effectiveCharId, characterOriginalImageId)
 
   const avatar = useMemo(
     () => ({ cropped: croppedAvatarTiers, original: originalAvatarTiers }),
-    [
-      croppedAvatarTiers.sm, croppedAvatarTiers.lg, croppedAvatarTiers.full,
-      originalAvatarTiers.sm, originalAvatarTiers.lg, originalAvatarTiers.full,
-    ],
+    [croppedAvatarTiers, originalAvatarTiers],
   )
 
   const macroUserName = useMemo(() => {
@@ -276,40 +338,56 @@ export function useMessageCard(message: Message, chatId: string) {
   }, [messages, message.id, message.name, isUser, activePersona])
 
   const initializeEdit = useCallback(() => {
+    const persistedMessages = messages.filter((entry) => (
+      !entry.id.startsWith('__stream_placeholder_') && !entry.id.startsWith('__regen_placeholder_')
+    ))
+    const loadedOffset = Math.max(0, useStore.getState().totalChatLength - persistedMessages.length)
+    const loadedIndex = persistedMessages.findIndex((entry) => entry.id === message.id)
+    const messageOffset = loadedOffset + Math.max(0, loadedIndex)
+
     if (!message.is_user) {
       // For assistant messages, separate reasoning from content
       const apiReasoning = typeof message.extra?.reasoning === 'string' ? message.extra.reasoning : ''
       const { cleaned, thoughts } = parseThinkingTags(message.content)
       const reasoningText = apiReasoning || thoughts
       const hasReasoning = !!reasoningText
-      hadReasoningRef.current = hasReasoning
-      setShowReasoningEditor(hasReasoning)
-      setEditReasoning(reasoningText)
-      // Clean content: strip think tags and leading blank lines
-      setEditContent(cleaned.replace(/^\n{2,}/, ''))
+      beginMessageEdit({
+        chatId,
+        messageId: message.id,
+        messageOffset,
+        messageIndexInChat: message.index_in_chat,
+        content: cleaned.replace(/^\n{2,}/, ''),
+        reasoning: reasoningText,
+        showReasoningEditor: hasReasoning,
+        hadReasoning: hasReasoning,
+      })
     } else {
-      setEditContent(message.content)
-      setEditReasoning('')
-      setShowReasoningEditor(false)
-      hadReasoningRef.current = false
+      beginMessageEdit({
+        chatId,
+        messageId: message.id,
+        messageOffset,
+        messageIndexInChat: message.index_in_chat,
+        content: message.content,
+        reasoning: '',
+        showReasoningEditor: false,
+        hadReasoning: false,
+      })
     }
-  }, [message.content, message.is_user, message.extra])
+  }, [beginMessageEdit, chatId, message.content, message.extra, message.id, message.index_in_chat, message.is_user, messages])
 
-  // Populate edit fields on the false→true transition of isEditing,
-  // so externally-triggered edits (keyboard shortcut) seed the fields too.
-  // useLayoutEffect so the content is populated before paint — useEffect
-  // leaves a frame where the textarea is empty (min-height 220px) which
-  // the virtualizer measures as a height spike ("void").
+  // Keyboard-triggered edits only publish the target id. Initialize the
+  // durable draft before paint if this target does not have one yet. A row
+  // remount caused by virtualization sees the matching draft and leaves it
+  // untouched.
   useLayoutEffect(() => {
-    if (isEditing && !wasEditingRef.current) {
+    if (isEditing && !activeDraft) {
       initializeEdit()
     }
-    wasEditingRef.current = isEditing
-  }, [isEditing, initializeEdit])
+  }, [activeDraft, isEditing, initializeEdit])
 
   const handleEdit = useCallback(() => {
-    setEditingMessageId(message.id)
-  }, [message.id, setEditingMessageId])
+    initializeEdit()
+  }, [initializeEdit])
 
   const handleSaveEdit = useCallback(async () => {
     try {
@@ -317,7 +395,7 @@ export function useMessageCard(message: Message, chatId: string) {
       const cleanContent = editContent.trim()
       let updated: Message
 
-      if (!message.is_user && hadReasoningRef.current) {
+      if (!message.is_user && activeDraft?.hadReasoning) {
         // Let the WS MESSAGE_EDITED payload reconcile the final stored message so
         // extension-postprocessed content is not overwritten by a late local merge.
         const extra = {
@@ -330,20 +408,62 @@ export function useMessageCard(message: Message, chatId: string) {
         updated = await messagesApi.update(chatId, message.id, { content: cleanContent })
       }
       updateMessage(updated.id, updated)
-      setEditingMessageId(null)
+      clearMessageEdit()
     } catch (err) {
       console.error('[MessageCard] Failed to save edit:', err)
       addToast({ type: 'error', message: t('failedSaveMessageEdit') })
     }
-  }, [chatId, message.id, editContent, editReasoning, message.is_user, message.extra, setEditingMessageId, updateMessage, addToast, t])
+  }, [activeDraft?.hadReasoning, chatId, message.id, editContent, editReasoning, message.is_user, message.extra, clearMessageEdit, updateMessage, addToast, t])
 
   const handleCancelEdit = useCallback(() => {
-    setEditingMessageId(null)
-    setEditContent('')
-    setEditReasoning('')
-    setShowReasoningEditor(false)
-    hadReasoningRef.current = false
-  }, [setEditingMessageId])
+    if (editAndSendPending) return
+    editAndSendRequestRef.current = null
+    clearMessageEdit()
+  }, [clearMessageEdit, editAndSendPending])
+
+  const handleEditAndSend = useCallback(async () => {
+    if (!message.is_user || editAndSendPending || isStreaming) return
+    const cleanContent = editContent.trim()
+    if (!cleanContent) {
+      addToast({ type: 'error', message: t('emptyEditAndSend', { defaultValue: 'Message cannot be empty' }) })
+      return
+    }
+
+    const expectedVersion = message.revision ?? 1
+    const fingerprint = `${message.id}\0${expectedVersion}\0${cleanContent}\0${branchChatOnEditAndSend ? '1' : '0'}`
+    if (editAndSendRequestRef.current?.fingerprint !== fingerprint) {
+      editAndSendRequestRef.current = { fingerprint, requestId: generateUUID() }
+    }
+    const requestId = editAndSendRequestRef.current.requestId
+
+    setEditAndSendPending(true)
+    try {
+      const result = await chatsApi.editAndSend(chatId, {
+        messageId: message.id,
+        content: cleanContent,
+        expectedVersion,
+        requestId,
+        branchChatOnEditAndSend,
+      })
+      if (branchChatOnEditAndSend) {
+        const messageLimit = useStore.getState().messagesPerPage || 50
+        await preloadChatNavigationSnapshotById(result.branchChatId, messageLimit).catch((err) => {
+          console.warn('[MessageCard] Failed to preload edit-and-send branch:', err)
+        })
+      }
+      editAndSendRequestRef.current = null
+      clearMessageEdit()
+      if (branchChatOnEditAndSend) navigate(`/chat/${result.branchChatId}`)
+    } catch (err: any) {
+      console.error('[MessageCard] Failed to edit and send:', err)
+      addToast({
+        type: 'error',
+        message: err?.body?.error || err?.message || t('failedEditAndSend', { defaultValue: 'Failed to edit and send' }),
+      })
+    } finally {
+      setEditAndSendPending(false)
+    }
+  }, [branchChatOnEditAndSend, chatId, editAndSendPending, editContent, isStreaming, message, t, addToast, clearMessageEdit, navigate])
 
   const doDeleteMessage = useCallback(async () => {
     try {
@@ -363,6 +483,38 @@ export function useMessageCard(message: Message, chatId: string) {
   }, [chatId, message.id, message.swipe_id])
 
   const isHidden = message.extra?.hidden === true
+  const contextAnchorMessageId = typeof activeChatMetadata?.[CONTEXT_HISTORY_ANCHOR_KEY] === 'string'
+    ? activeChatMetadata[CONTEXT_HISTORY_ANCHOR_KEY] as string
+    : null
+  const isContextAnchor = contextAnchorMessageId === message.id
+
+  const handleToggleContextAnchor = useCallback(async () => {
+    if (isHidden) return
+
+    const previousMetadata = activeChatMetadata
+    const nextAnchorMessageId = isContextAnchor ? null : message.id
+    const optimisticMetadata = {
+      ...(previousMetadata ?? {}),
+      ...(nextAnchorMessageId ? { [CONTEXT_HISTORY_ANCHOR_KEY]: nextAnchorMessageId } : {}),
+    }
+    if (!nextAnchorMessageId) delete optimisticMetadata[CONTEXT_HISTORY_ANCHOR_KEY]
+    setActiveChatMetadata(optimisticMetadata)
+
+    try {
+      const updated = await chatsApi.patchMetadata(chatId, {
+        [CONTEXT_HISTORY_ANCHOR_KEY]: nextAnchorMessageId,
+      })
+      setActiveChatMetadata(updated.metadata ?? null)
+      addToast({
+        type: 'success',
+        message: tChat(isContextAnchor ? 'messageActions.contextAnchorCleared' : 'messageActions.contextAnchorSet'),
+      })
+    } catch (err) {
+      console.error('[MessageCard] Failed to update context anchor:', err)
+      setActiveChatMetadata(previousMetadata)
+      addToast({ type: 'error', message: tChat('messageActions.contextAnchorFailed') })
+    }
+  }, [activeChatMetadata, addToast, chatId, isContextAnchor, isHidden, message.id, setActiveChatMetadata, tChat])
 
   const handleToggleHidden = useCallback(async () => {
     try {
@@ -371,19 +523,31 @@ export function useMessageCard(message: Message, chatId: string) {
       if (!newHidden) delete extra.hidden
       const updated = await messagesApi.update(chatId, message.id, { extra })
       updateMessage(updated.id, updated)
+      if (newHidden && isContextAnchor) {
+        const updatedChat = await chatsApi.patchMetadata(chatId, {
+          [CONTEXT_HISTORY_ANCHOR_KEY]: null,
+        })
+        setActiveChatMetadata(updatedChat.metadata ?? null)
+      }
     } catch (err) {
       console.error('[MessageCard] Failed to toggle hidden:', err)
     }
-  }, [chatId, message.id, message.extra, updateMessage])
+  }, [chatId, isContextAnchor, message.id, message.extra, setActiveChatMetadata, updateMessage])
 
   const handleFork = useCallback(() => {
     openModal('confirm', {
       title: tc('fork.title'),
       message: tc('fork.message'),
       confirmText: tc('fork.confirm'),
-      onConfirm: async () => {
+      inputLabel: tc('fork.nameLabel'),
+      inputPlaceholder: tc('fork.namePlaceholder'),
+      onConfirm: async (name: string) => {
         try {
-          const newChat = await chatsApi.branch(chatId, message.id)
+          const newChat = await chatsApi.branch(chatId, message.id, name)
+          const messageLimit = useStore.getState().messagesPerPage || 50
+          await preloadChatNavigationSnapshot(newChat, messageLimit).catch((err) => {
+            console.warn('[MessageCard] Failed to preload forked chat:', err)
+          })
           navigate(`/chat/${newChat.id}`)
         } catch (err) {
           console.error('[MessageCard] Failed to fork chat:', err)
@@ -419,28 +583,23 @@ export function useMessageCard(message: Message, chatId: string) {
     }
   }, [message.is_user, message.swipes, openModal, doDeleteMessage, doDeleteSwipe, tc])
 
-  // Multiplayer: peer-authored messages carry author attribution in extra.mp.
-  // Render the peer's persona name + broadcast WebP avatar instead of the
-  // host's persona. Guarded by extra.mp, so normal messages are unaffected.
-  // Multiplayer author resolution. The WebP data-URL avatar lives once in the
-  // participants slice (not on every message). Resolve the author participant
-  // by stamped id (peer messages) or, for the host's own messages — which have
-  // no extra.mp — by matching the persona name. Non-reactive read on purpose:
-  // avoids re-rendering every card on typing/presence churn.
+  // Multiplayer author resolution. Peer-authored messages persist a stamped
+  // snapshot in `extra.mp`; that saved row is authoritative for historical
+  // rendering and must not be rewritten by later peer persona/avatar changes.
+  // Unstamped room messages (the host's own local-account turns) still fall
+  // back to the live roster because no per-message snapshot exists for them.
+  // Non-reactive read on purpose: avoids re-rendering every card on
+  // typing/presence churn.
   const mpStore = useStore.getState()
-  const mpStamp = isUser && message.extra?.mp && typeof message.extra.mp === 'object'
-    ? (message.extra.mp as { participantId?: string; displayName?: string; personaName?: string; avatarUrl?: string | null })
-    : null
-  const mpParticipant = mpStore.mpRoomId && isUser
-    ? mpStamp?.participantId
-      ? mpStore.mpParticipants.find((p) => p.id === mpStamp.participantId)
-      : mpStore.mpParticipants.find((p) => !!p.persona?.name && p.persona.name === (message.name || '').trim())
-    : undefined
-  const isMpAuthor = !!mpStamp || !!mpParticipant
-  const mpAvatarData = mpParticipant?.persona?.avatarUrl || mpStamp?.avatarUrl || ''
-  const mpDisplayName = isMpAuthor
-    ? (mpParticipant?.persona?.name || mpStamp?.personaName || mpStamp?.displayName || displayName)
-    : displayName
+  const mpAuthor = resolveMultiplayerMessageAuthor({
+    message,
+    roomId: mpStore.mpRoomId,
+    participants: mpStore.mpParticipants,
+    fallbackDisplayName: displayName,
+  })
+  const isMpAuthor = !!mpAuthor
+  const mpAvatarData = mpAuthor?.avatarUrl || ''
+  const mpDisplayName = mpAuthor?.displayName || displayName
   const mpAvatarUrl = isMpAuthor ? (mpAvatarData || null) : avatarUrl
   const mpFullAvatarUrl = isMpAuthor ? (mpAvatarData || null) : fullAvatarUrl
   const mpAvatar: typeof avatar = isMpAuthor
@@ -472,11 +631,15 @@ export function useMessageCard(message: Message, chatId: string) {
     displayName: mpDisplayName,
     macroUserName,
     isHidden,
+    isContextAnchor,
     handleEdit,
     handleSaveEdit,
+    handleEditAndSend,
     handleCancelEdit,
+    editAndSendPending,
     handleDelete,
     handleToggleHidden,
+    handleToggleContextAnchor,
     handleFork,
   }
 }

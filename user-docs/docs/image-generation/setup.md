@@ -60,6 +60,12 @@ You can duplicate a connection to keep variant presets (for example, two SwarmUI
 3. Configure sampler (`k_euler_ancestral`, `k_euler`, `k_dpmpp_2m`, `k_dpmpp_2s_ancestral`, `k_dpmpp_sde`, `ddim_v3`), resolution, steps (1–50, default 28), guidance (1–20, default 5), and the SMEA / SMEA-DYN toggles.
 4. NovelAI uses **Danbooru-style tags** instead of prose prompts; Lumiverse builds tag prompts automatically in Scene mode and includes character tags when **Include Characters and Persona** is on.
 
+**API URL.** Leave this field blank to use `https://image.novelai.net`, or enter your proxy's base URL (for example, `https://proxy.example`). Existing base URLs continue to work. Enter the base URL without a generation endpoint suffix.
+
+**Non-streaming generation.** Enable **Use non-streaming generation** in the NovelAI connection profile if your proxy only supports `/ai/generate-image`. With the checkbox off (the default), Lumiverse uses `/ai/generate-image-stream`. The saved profile selects the route and payload before a single request; errors never trigger a retry on another endpoint, and toggling the checkbox leaves your saved base URL unchanged. This setting applies to chat, Weaver, and Spindle image generation. Both modes support PNG and ZIP image responses.
+
+**Testing the connection.** The **Test** button checks `/user/information` on the configured base URL without generating an image, regardless of the generation mode. A proxy must expose this route for the test to succeed.
+
 **Director references.** NovelAI can take up to 14 reference images per generation. Lumiverse can include the current character and/or persona avatar automatically, or you can upload your own. Each reference has its own strength, info-extracted, and fidelity sliders, plus a reference type. References are padded to the nearest supported canvas size (1024×1536, 1536×1024, or 1472×1472).
 
 ### NanoGPT

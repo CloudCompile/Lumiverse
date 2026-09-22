@@ -1,8 +1,11 @@
-import type { AssemblyContext, AssemblyResult } from "../llm/types";
+import type { AssemblyResult } from "../llm/types";
 import type { MacroDefinition, MacroEnv, MacroHandler } from "../macros/types";
 import { configureLanceDbNativeOverride } from "../lancedb-preflight";
 import { initIdentity } from "../crypto/init";
 import { initDatabase } from "../db/connection";
+import type { AssemblyWorkerRequest, AssemblyWorkerResponse } from "./prompt-assembly-worker-protocol";
+import { warmTokenizerForModel, getCachedTokenizerIds, invalidate, invalidatePatterns } from "./tokenizer.service";
+import { setTokenizerResourceOwner } from "./tokenizer-resource-cache";
 
 // Mark this isolate as the assembly worker so assemblePrompt can skip work that
 // only makes sense in the main process — notably the deferred cortex warm task,
@@ -11,17 +14,8 @@ import { initDatabase } from "../db/connection";
 // before any assemblePrompt() call.
 (globalThis as { __LUMIVERSE_ASSEMBLY_WORKER?: boolean }).__LUMIVERSE_ASSEMBLY_WORKER = true;
 
-type AssembleRequest = {
-  type: "assemble";
-  requestId: string;
-  ctx: Omit<AssemblyContext, "signal" | "prefetched">;
-};
-
-type WorkerResponse =
-  | { type: "result"; requestId: string; result: AssemblyResult }
-  | { type: "error"; requestId: string; error: string; name?: string; stack?: string };
-
 let initialized: Promise<void> | null = null;
+let lastTokenizerRevision = -1;
 
 function ensureInitialized(): Promise<void> {
   if (!initialized) {
@@ -75,7 +69,7 @@ function sanitizeAssemblyResult(result: AssemblyResult): AssemblyResult {
   };
 }
 
-async function handleAssemble(message: AssembleRequest): Promise<void> {
+async function handleAssemble(message: Extract<AssemblyWorkerRequest, { type: "assemble" }>): Promise<void> {
   await ensureInitialized();
 
   const [{ prefetchAssemblyData }, { assemblePrompt }] = await Promise.all([
@@ -90,20 +84,42 @@ async function handleAssemble(message: AssembleRequest): Promise<void> {
     type: "result",
     requestId: message.requestId,
     result: sanitizeAssemblyResult(result),
-  } satisfies WorkerResponse);
+    tokenizerRevision: message.tokenizerRevision,
+    tokenizerIds: getCachedTokenizerIds(),
+  } satisfies AssemblyWorkerResponse);
 }
 
-self.onmessage = (event: MessageEvent<AssembleRequest>) => {
-  const message = event.data;
-  if (!message || message.type !== "assemble") return;
+async function handleWarmup(message: Extract<AssemblyWorkerRequest, { type: "warm-tokenizer" }>): Promise<void> {
+  await ensureInitialized();
+  await warmTokenizerForModel(message.modelId);
+  postMessage({ type: "tokenizer-warmed", requestId: message.requestId,
+    tokenizerRevision: message.tokenizerRevision, tokenizerIds: getCachedTokenizerIds() } satisfies AssemblyWorkerResponse);
+}
 
-  handleAssemble(message).catch((err: any) => {
+self.onmessage = (event: MessageEvent<AssemblyWorkerRequest>) => {
+  const message = event.data;
+  if (!message) return;
+  if (message.type === "invalidate-tokenizer") {
+    if (message.tokenizerId === null) invalidatePatterns();
+    else invalidate(message.tokenizerId);
+    return;
+  }
+  if (message.type !== "assemble" && message.type !== "warm-tokenizer") return;
+  setTokenizerResourceOwner(message.resourceOwner);
+  // Recheck at request boundaries too: an older running job may have read
+  // patterns while the main process was still committing an admin transaction.
+  if (message.tokenizerRevision !== lastTokenizerRevision) {
+    invalidatePatterns();
+    lastTokenizerRevision = message.tokenizerRevision;
+  }
+
+  (message.type === "assemble" ? handleAssemble(message) : handleWarmup(message)).catch((err: any) => {
     postMessage({
       type: "error",
       requestId: message.requestId,
       error: err?.message || String(err),
       name: err?.name,
       stack: err?.stack,
-    } satisfies WorkerResponse);
+    } satisfies AssemblyWorkerResponse);
   });
 };

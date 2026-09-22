@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildEnv } from "./MacroEnv";
+import { macroInterceptorChain } from "../spindle/macro-interceptor";
 import type { Character } from "../types/character";
 import type { Chat } from "../types/chat";
 import type { Message } from "../types/message";
@@ -19,6 +20,7 @@ const baseCharacter: Character = {
   creator_notes: "",
   system_prompt: "",
   post_history_instructions: "",
+  folder: "",
   tags: [],
   alternate_greetings: [],
   extensions: {},
@@ -43,6 +45,8 @@ const basePersona: Persona = {
   subjective_pronoun: "",
   objective_pronoun: "",
   possessive_pronoun: "",
+  reflexive_pronoun: "",
+  possessive_pronoun_standalone: "",
   folder: "",
   avatar_path: null,
   image_id: null,
@@ -121,6 +125,56 @@ describe("buildEnv firstMessage", () => {
 
     expect(env.character.firstMessage).toBe("Group greeting");
   });
+
+  test("exposes the selected greeting identity without matching message text", () => {
+    const env = buildEnv({
+      character: {
+        ...baseCharacter,
+        alternate_greetings: ["Alternate one", "Alternate two"],
+      },
+      persona: null,
+      chat: {
+        ...baseChat,
+        metadata: { activeGreetingIndex: 2 },
+      },
+      messages: [
+        makeMessage({
+          content: "Edited selected greeting",
+          extra: { greeting: true, greeting_index: 0 },
+        }),
+      ],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.character.firstMessage).toBe("Edited selected greeting");
+    expect(env.character.alternateGreetings).toEqual([
+      "Alternate one",
+      "Alternate two",
+    ]);
+    expect(env.chat.greetingIndex).toBe(2);
+  });
+
+  test("falls back to the persisted greeting message index", () => {
+    const env = buildEnv({
+      character: {
+        ...baseCharacter,
+        alternate_greetings: ["Alternate one"],
+      },
+      persona: null,
+      chat: baseChat,
+      messages: [
+        makeMessage({
+          content: "Alternate one",
+          extra: { greeting: true, greeting_index: 1 },
+        }),
+      ],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.chat.greetingIndex).toBe(1);
+  });
 });
 
 describe("buildEnv persona pronouns", () => {
@@ -137,6 +191,8 @@ describe("buildEnv persona pronouns", () => {
     expect(env.character.personaSubjectivePronoun).toBe("they");
     expect(env.character.personaObjectivePronoun).toBe("them");
     expect(env.character.personaPossessivePronoun).toBe("their");
+    expect(env.character.personaReflexivePronoun).toBe("themselves");
+    expect(env.character.personaPossessivePronounStandalone).toBe("theirs");
   });
 
   test("uses configured persona pronouns when present", () => {
@@ -147,6 +203,8 @@ describe("buildEnv persona pronouns", () => {
         subjective_pronoun: " she ",
         objective_pronoun: " her ",
         possessive_pronoun: " her ",
+        reflexive_pronoun: " herself ",
+        possessive_pronoun_standalone: " hers ",
       },
       chat: baseChat,
       messages: [],
@@ -157,6 +215,36 @@ describe("buildEnv persona pronouns", () => {
     expect(env.character.personaSubjectivePronoun).toBe("she");
     expect(env.character.personaObjectivePronoun).toBe("her");
     expect(env.character.personaPossessivePronoun).toBe("her");
+    expect(env.character.personaReflexivePronoun).toBe("herself");
+    expect(env.character.personaPossessivePronounStandalone).toBe("hers");
+  });
+});
+
+describe("buildEnv persona add-on outlets", () => {
+  test("publishes enabled outlet add-ons without appending them to {{persona}}", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: {
+        ...basePersona,
+        description: "Base persona",
+        metadata: {
+          addons: [
+            { id: "append", content: "Appended", enabled: true, sort_order: 1 },
+            { id: "outlet-2", content: "Second outlet", enabled: true, sort_order: 2, outlet_name: " Details " },
+            { id: "outlet-1", content: "First outlet", enabled: true, sort_order: 0, outlet_name: "DETAILS" },
+            { id: "disabled", content: "Hidden", enabled: false, sort_order: 3, outlet_name: "details" },
+          ],
+        },
+      },
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.character.persona).toBe("Base persona\nAppended");
+    expect(env.extra.personaAddonOutlets).toEqual({ details: "First outlet\n\nSecond outlet" });
+    expect(env.extra.worldInfoOutlets).toBeUndefined();
   });
 });
 
@@ -186,6 +274,22 @@ describe("buildEnv rejected swipe", () => {
     });
 
     expect(env.chat.rejectedSwipe).toBe("Yes I am!");
+  });
+});
+
+describe("buildEnv user input", () => {
+  test("threads the raw input-bar draft into macro state", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [],
+      generationType: "normal",
+      connection: null,
+      userInput: "  Preserve this exact draft\n",
+    });
+
+    expect(env.extra.userInput).toBe("  Preserve this exact draft\n");
   });
 });
 
@@ -229,7 +333,7 @@ describe("buildEnv lastMessageTime", () => {
     expect(env.extra.lastMessageTime).toBeUndefined();
   });
 
-  test("is derived from the last message's send_date in milliseconds", () => {
+  test("is derived from the last assistant message's send_date in milliseconds", () => {
     const env = buildEnv({
       character: baseCharacter,
       persona: null,
@@ -243,6 +347,66 @@ describe("buildEnv lastMessageTime", () => {
     });
 
     expect(env.extra.lastMessageTime).toBe(1_700_000_060_000);
+  });
+
+  test("is not reset by a newer user message", () => {
+    const env = buildEnv({
+      character: baseCharacter,
+      persona: null,
+      chat: baseChat,
+      messages: [
+        makeMessage({ content: "Earlier assistant reply", is_user: false, send_date: 1_700_000_000 }),
+        makeMessage({ id: "msg-2", content: "New user input", index_in_chat: 1, is_user: true, send_date: 1_700_000_600 }),
+      ],
+      generationType: "normal",
+      connection: null,
+    });
+
+    expect(env.extra.lastMessageTime).toBe(1_700_000_000_000);
+  });
+});
+
+describe("buildEnv focused group character state", () => {
+  test("keeps focused member card fields separate from merged card fields", () => {
+    const focusedCharacter: Character = {
+      ...baseCharacter,
+      id: "char-2",
+      name: "Charlie",
+      description: "Focused description",
+      personality: "Focused personality",
+    };
+
+    const env = buildEnv({
+      character: {
+        ...baseCharacter,
+        description: "Merged description",
+        personality: "Merged personality",
+      },
+      focusedCharacter,
+      persona: null,
+      chat: {
+        ...baseChat,
+        metadata: {
+          group: true,
+          character_ids: ["char-1", "char-2"],
+          group_card_mode: "merge",
+        },
+      },
+      messages: [],
+      generationType: "normal",
+      connection: null,
+      targetCharacterId: "char-2",
+    });
+
+    expect(env.names.charGroupFocused).toBe("Charlie");
+    expect(env.character.description).toBe("Merged description");
+    expect(env.character.personality).toBe("Merged personality");
+    expect(env.extra.groupFocusedCharacter).toMatchObject({
+      id: "char-2",
+      name: "Charlie",
+      description: "Focused description",
+      personality: "Focused personality",
+    });
   });
 });
 
@@ -301,4 +465,15 @@ describe("buildEnv groupCardMode", () => {
       expect(env.names.groupCardMode).toBe("swap");
     }
   });
+});
+
+
+test("preserves message source only for an opted-in display owner in the same account", () => {
+  const remove = macroInterceptorChain.register({ extensionId: 'owner-install', extensionIdentifier: 'owner', handlesOwnedSources: true, priority: 100, userId: 'owner-user', handler: async () => undefined });
+  try {
+    for (const [owner, userId, expected] of [[true, 'owner-user', true], [false, 'owner-user', false], [true, 'other-user', false]] as const) {
+      const env = buildEnv({ character: { ...baseCharacter, extensions: { owner: { display_owner: owner } } }, persona: null, chat: baseChat, messages: [], generationType: 'normal', userId });
+      expect(env.extra.preserveMessageSource).toBe(expected);
+    }
+  } finally { remove(); }
 });

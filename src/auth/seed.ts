@@ -10,6 +10,7 @@ import {
   readOwnerCredentials,
   writeOwnerCredentials,
 } from "../crypto/credentials";
+import { SYSTEM_SECRET_PRINCIPAL_EMAIL } from "../services/secrets.service";
 
 const CONTENT_TABLES = [
   "characters",
@@ -33,9 +34,12 @@ let firstUserId: string | null = null;
 export function getFirstUserId(): string | null {
   if (!firstUserId) {
     try {
+      // The reserved system principal is not a login account and must never
+      // resolve as the first user (owner seeding, migrations, settings
+      // ownership all key off this).
       const row = getDb()
-        .query('SELECT id FROM "user" ORDER BY createdAt ASC LIMIT 1')
-        .get() as { id: string } | null;
+        .query('SELECT id FROM "user" WHERE email IS NULL OR email != ? ORDER BY createdAt ASC LIMIT 1')
+        .get(SYSTEM_SECRET_PRINCIPAL_EMAIL) as { id: string } | null;
       firstUserId = row?.id ?? null;
     } catch {
       return null;
@@ -67,8 +71,8 @@ function seedOwnerDirectly(db: ReturnType<typeof getDb>, username: string, passw
     );
 
     db.run(
-      `INSERT INTO "account" (id, accountId, providerId, userId, password, createdAt, updatedAt)
-       VALUES (?, ?, 'credential', ?, ?, ?, ?)`,
+      `INSERT INTO "account" (id, accountId, providerId, issuer, userId, password, createdAt, updatedAt)
+       VALUES (?, ?, 'credential', 'local:credential', ?, ?, ?, ?)`,
       [accountId, userId, userId, passwordHash, now, now]
     );
   })();
@@ -246,10 +250,11 @@ export async function seedOwner(): Promise<void> {
   }
 
   if (!owner) {
-    // Fallback: the very first user created is the instance owner.
+    // Fallback: the very first user created is the instance owner. The
+    // reserved system principal is excluded — it must never be promoted.
     owner = db
-      .query('SELECT id, role, username FROM "user" ORDER BY createdAt ASC LIMIT 1')
-      .get() as UserRow | null;
+      .query('SELECT id, role, username FROM "user" WHERE email IS NULL OR email != ? ORDER BY createdAt ASC LIMIT 1')
+      .get(SYSTEM_SECRET_PRINCIPAL_EMAIL) as UserRow | null;
     if (owner) {
       console.log(`[Auth] Owner resolved via first-user fallback: "${owner.username}" (id: ${owner.id})`);
     }
@@ -282,8 +287,8 @@ export function backfillUserIds(): void {
   }
   if (!ownerId) {
     const row = db
-      .query('SELECT id FROM "user" ORDER BY createdAt ASC LIMIT 1')
-      .get() as { id: string } | null;
+      .query('SELECT id FROM "user" WHERE email IS NULL OR email != ? ORDER BY createdAt ASC LIMIT 1')
+      .get(SYSTEM_SECRET_PRINCIPAL_EMAIL) as { id: string } | null;
     ownerId = row?.id ?? null;
   }
 

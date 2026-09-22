@@ -1,3 +1,4 @@
+export const TAG_COLOR_SLOTS = 12
 const PALETTE = [
   { bg: 'rgba(147, 112, 219, 0.15)', text: '#c4a8ff', border: 'rgba(147, 112, 219, 0.3)' },
   { bg: 'rgba(72, 160, 220, 0.15)', text: '#7ec8f0', border: 'rgba(72, 160, 220, 0.3)' },
@@ -13,11 +14,28 @@ const PALETTE = [
   { bg: 'rgba(140, 170, 220, 0.15)', text: '#a0b8e0', border: 'rgba(140, 170, 220, 0.3)' },
 ] as const
 
+const PALETTE_RGB = [
+  '147, 112, 219',
+  '72, 160, 220',
+  '80, 200, 160',
+  '240, 180, 80',
+  '220, 100, 120',
+  '100, 180, 240',
+  '200, 140, 220',
+  '120, 210, 200',
+  '240, 150, 100',
+  '160, 200, 100',
+  '220, 160, 180',
+  '140, 170, 220',
+] as const
+
 export interface TagColor {
   bg: string
   text: string
   border: string
 }
+
+const indexCache = new Map<string, number>()
 
 function hashString(str: string): number {
   let hash = 0
@@ -32,7 +50,15 @@ const cache = new Map<string, TagColor>()
 export function getTagColor(tag: string): TagColor {
   const cached = cache.get(tag)
   if (cached) return cached
-  const color = PALETTE[hashString(tag) % PALETTE.length]
+  const index = indexCache.get(tag) ?? hashString(tag) % TAG_COLOR_SLOTS
+  indexCache.set(tag, index)
+  const color = PALETTE[index]
   cache.set(tag, color)
   return color
+}
+
+export function getTagColorVar(tag: string): string {
+  const index = indexCache.get(tag) ?? hashString(tag) % TAG_COLOR_SLOTS
+  indexCache.set(tag, index)
+  return PALETTE_RGB[index]
 }

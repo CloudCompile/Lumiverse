@@ -68,6 +68,19 @@
   contain: style;
 }
 
+/* Async display work starts when overscan rows mount. Keep the virtualizer's
+   cached height (or first estimate) until the replacement is ready, so raw
+   source cannot collapse a previously measured HTML row and move the range. */
+.virtualRow:has(:global([data-display-pending])) {
+  box-sizing: border-box;
+  height: var(--message-row-estimated-height);
+  overflow: hidden;
+}
+
+.virtualRow :global([data-display-pending]) {
+  visibility: hidden;
+}
+
 .virtualRow:not([data-item-type='messageFooter']):not([data-item-type='bottom']) {
   padding-bottom: 8px;
 }

@@ -1,6 +1,11 @@
 {
   "appName": "Lumivers",
   "home": "Accueil",
+  "safeTheme": {
+    "url": "Le mode thème sécurisé est actif pour cette session de navigation. Le CSS personnalisé et les remplacements de composants sont temporairement désactivés ; rechargez sans ?safe-theme=1 pour les restaurer.",
+    "server": "Le mode thème sécurisé est actif pour ce serveur. Le CSS personnalisé et les remplacements de composants sont temporairement désactivés ; supprimez LUMIVERSE_SAFE_THEME et redémarrez pour les restaurer.",
+    "both": "Le mode thème sécurisé est actif via l’URL et le serveur. Le CSS personnalisé et les remplacements de composants sont temporairement désactivés."
+  },
   "actions": {
     "save": "Enregistrer",
     "cancel": "Annuler",
@@ -51,9 +56,17 @@
     "px": "{{count}}px"
   },
   "toast": {
+    "desktopDownloadTitle": "Enregistrement du téléchargement",
+    "desktopDownloadStarted": "Enregistrement de {{fileName}}…",
+    "desktopDownloadComplete": "{{fileName}} enregistré",
+    "desktopDownloadFailed": "Impossible d’enregistrer {{fileName}}",
     "operatorUpdateTitle": "Mise à jour disponible",
     "operatorUpdatesAvailable": "{{count}} mise à jour disponible{{suffix}}",
     "operatorUpdatesAvailable_plural": "{{count}} mises à jour disponibles{{suffix}}",
+    "extensionUpdateTitle": "Mise à jour d’extension disponible",
+    "extensionUpdatesAvailable": "{{count}} mise à jour d’extension disponible{{suffix}}",
+    "extensionUpdatesAvailable_plural": "{{count}} mises à jour d’extensions disponibles{{suffix}}",
+    "viewExtensions": "Voir les extensions",
     "extensionErrorTitle": "Erreur d'extension",
     "extensionsNoneToUpdate": "Aucune extension à mettre à jour",
     "extensionsUpdated": "Extension {{count}} mise à jour",

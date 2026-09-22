@@ -31,34 +31,17 @@ export class PollinationsImageProvider implements ImageProvider {
         description: "Random seed for reproducible images",
         group: "advanced",
       },
-      enhance: {
-        type: "boolean",
-        default: false,
-        description: "Enable prompt enhancement",
-        group: "advanced",
-      },
       quality: {
         type: "select",
-        default: "auto",
+        default: "medium",
         description: "Generation quality tier",
         group: "advanced",
         options: [
-          { id: "auto", label: "Auto" },
           { id: "low", label: "Low" },
           { id: "medium", label: "Medium" },
           { id: "high", label: "High" },
+          { id: "hd", label: "HD" },
         ],
-      },
-      transparent: {
-        type: "boolean",
-        default: false,
-        description: "Request transparent background when supported",
-        group: "advanced",
-      },
-      negative_prompt: {
-        type: "string",
-        description: "Optional negative prompt",
-        group: "advanced",
       },
       rawRequestOverride: {
         type: "string",
@@ -68,17 +51,18 @@ export class PollinationsImageProvider implements ImageProvider {
     },
     apiKeyRequired: true,
     modelListStyle: "dynamic",
+    // Canonical `publisher/model` IDs. Older short aliases (e.g. `zimage`)
+    // still resolve server-side, but new selections should use the canonical ID.
     staticModels: [
-      { id: "zimage", label: "zimage" },
-      { id: "flux", label: "flux" },
-      { id: "gptimage", label: "gptimage" },
-      { id: "gptimage-large", label: "gptimage-large" },
-      { id: "kontext", label: "kontext" },
-      { id: "nanobanana", label: "nanobanana" },
-      { id: "seedream", label: "seedream" },
-      { id: "seedream5", label: "seedream5" },
-      { id: "qwen-image", label: "qwen-image" },
-      { id: "nova-canvas", label: "nova-canvas" },
+      { id: "tongyi-mai/z-image-turbo", label: "Z-Image Turbo" },
+      { id: "black-forest-labs/flux.1-schnell", label: "Flux.1 Schnell" },
+      { id: "black-forest-labs/flux.2-pro", label: "Flux.2 Pro" },
+      { id: "black-forest-labs/flux.1-kontext-pro", label: "Flux.1 Kontext Pro" },
+      { id: "openai/gpt-image-1-mini", label: "GPT Image 1 Mini" },
+      { id: "google/gemini-2.5-flash-image", label: "Gemini 2.5 Flash Image" },
+      { id: "bytedance/seedream-4.0", label: "Seedream 4.0" },
+      { id: "qwen/qwen-image", label: "Qwen Image" },
+      { id: "amazon/nova-canvas-v1", label: "Nova Canvas" },
     ],
     defaultUrl: "https://gen.pollinations.ai/v1",
   };
@@ -90,7 +74,7 @@ export class PollinationsImageProvider implements ImageProvider {
 
     const body: Record<string, any> = {
       prompt: request.prompt,
-      model: request.model || "zimage",
+      model: request.model || "tongyi-mai/z-image-turbo",
       n: 1,
       size: `${width}x${height}`,
       response_format: "b64_json",
@@ -99,10 +83,10 @@ export class PollinationsImageProvider implements ImageProvider {
     if (request.parameters.seed != null && Number.isFinite(Number(request.parameters.seed))) {
       body.seed = Number(request.parameters.seed);
     }
-    if (request.parameters.enhance != null) body.enhance = !!request.parameters.enhance;
+    // `enhance`, `negative_prompt`, and `transparent` are not part of the
+    // OpenAI-shaped request schema (negative_prompt is audio-only), so they are
+    // not forwarded; use rawRequestOverride for provider extensions.
     if (request.parameters.quality) body.quality = String(request.parameters.quality);
-    if (request.parameters.transparent != null) body.transparent = !!request.parameters.transparent;
-    if (request.parameters.negative_prompt) body.negative_prompt = String(request.parameters.negative_prompt);
 
     const finalBody = applyRawOverride(body, request.parameters.rawRequestOverride);
 
@@ -228,10 +212,18 @@ export class PollinationsImageProvider implements ImageProvider {
           ? data.data
           : [];
 
-    const models = list
+    // `/image/models` also returns video models. Keep only entries that output
+    // an image so the image picker never offers a video-only model.
+    const modelList = list.filter((m: any) => {
+      const outputs = m?.output_modalities;
+      if (!Array.isArray(outputs) || outputs.length === 0) return true;
+      return outputs.includes("image");
+    });
+
+    const models = modelList
       .map((m: any) => ({
         id: String(m?.id || m?.model || m?.name || "").trim(),
-        label: String(m?.name || m?.label || m?.id || m?.model || "").trim(),
+        label: String(m?.title || m?.name || m?.label || m?.id || m?.model || "").trim(),
       }))
       .filter((m: { id: string; label: string }) => !!m.id)
       .map((m: { id: string; label: string }) => ({ id: m.id, label: m.label || m.id }));

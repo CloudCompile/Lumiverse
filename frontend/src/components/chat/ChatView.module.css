@@ -69,6 +69,49 @@
   z-index: 3;
 }
 
+:global([data-spindle-mount='chat_surface_side']),
+:global([data-spindle-mount='lorebook_half_workspace']),
+:global([data-spindle-mount='lorebook_half_workspace'] > [data-spindle-extension-root]),
+:global([data-spindle-mount='lorebook_half_workspace'] > [data-spindle-extension-root] > [data-spindle-host-surface='lorebook.half.workspace']) {
+  display: contents;
+}
+
+:global([data-spindle-mount='chat_surface_side'] > [data-spindle-extension-root]),
+:global([data-spindle-mount='chat_surface_side'] > [data-spindle-extension-root] > [data-spindle-host-surface]),
+:global([data-spindle-mount='chat_surface_side'] > [data-spindle-extension-root] > [data-spindle-host-surface] > [data-surface-id='portrait_dock.workspace']) {
+  display: contents;
+}
+
+:global([data-spindle-mount='chat_bottom_dock']) {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: calc(var(--lcs-input-safe-zone, 100px) - 8px);
+  z-index: var(--z-chat-lore-dock, 33);
+  display: flex;
+  justify-content: center;
+  overflow: visible;
+  pointer-events: none;
+}
+
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root]),
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root] > [data-spindle-host-surface]) {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  pointer-events: none;
+}
+
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root] > [data-spindle-host-surface] > [data-surface-id='activated_lore.indicator']),
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root] > [data-spindle-host-surface] > [data-surface-id='activated_lore.panel']) {
+  pointer-events: none;
+}
+
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root] > [data-spindle-host-surface] > [data-surface-id='activated_lore.indicator'] *),
+:global([data-spindle-mount='chat_bottom_dock'] > [data-spindle-extension-root] > [data-spindle-host-surface] > [data-surface-id='activated_lore.panel'] *) {
+  pointer-events: auto;
+}
+
 .chatColumn {
   display: flex;
   flex-direction: column;
@@ -90,7 +133,54 @@
   position: relative;
 }
 
+/* The chat top dock spans 100% of the chatColumnInner container */
+.chatColumnInner > .chatToolbar {
+  width: 100%;
+  align-self: stretch;
+}
+
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied][data-dock-request='floating']) {
+  justify-content: flex-start;
+}
+
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
+  justify-content: center;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) > :global([data-spindle-host-surface]),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) > :global([data-spindle-host-surface]) > :global([data-surface-id='quick_toolbar.workspace']) {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: row;
+  justify-content: center;
+  align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
+  width: 100%;
+}
+
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']:empty),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-spindle-extension-root]:empty),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) > :global([data-spindle-host-surface]:empty),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) > :global([data-spindle-host-surface]:has(> [data-surface-id='quick_toolbar.workspace']:not(:has(*)))),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock'][data-spindle-occupied]) > :global([data-dock-request='strip']) > :global([data-spindle-host-surface]) > :global([data-surface-id='quick_toolbar.workspace']:not(:has(*))) {
+  display: contents;
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+}
+
 .chatColumnInner[data-chat-chrome-entering] .chatToolbar,
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='ChatFindBar']),
 .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageList']),
 .chatColumnInner[data-chat-chrome-entering] :global([data-component='InputArea']),
 .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageSelectBar']) {
@@ -99,6 +189,10 @@
 }
 
 .chatColumnInner[data-chat-chrome-entering] .chatToolbar {
+  transform: translateY(-8px);
+}
+
+.chatColumnInner[data-chat-chrome-entering] :global([data-component='ChatFindBar']) {
   transform: translateY(-8px);
 }
 
@@ -111,7 +205,19 @@
   transform: translateY(6px);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .chatColumnInner[data-chat-chrome-entering] .chatToolbar,
+  .chatColumnInner[data-chat-chrome-entering] :global([data-component='ChatFindBar']),
+  .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageList']),
+  .chatColumnInner[data-chat-chrome-entering] :global([data-component='InputArea']),
+  .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageSelectBar']) {
+    transform: none;
+    transition: none;
+  }
+}
+
 .chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageList']),
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='ChatFindBar']),
 .chatColumnInner[data-chat-chrome-leaving] :global([data-component='InputArea']),
 .chatColumnInner[data-chat-chrome-leaving] :global([data-component='MessageSelectBar']) {
   opacity: 0;
@@ -127,10 +233,14 @@
   transform: translateY(6px);
 }
 
+.chatColumnInner[data-chat-chrome-leaving] :global([data-component='ChatFindBar']) {
+  transform: translateY(-8px);
+}
+
 .noticeDock,
 .cortexNoticeDock {
   position: absolute;
-  top: 48px;
+  top: calc(48px + var(--lcs-top-dock-height, 0px));
   left: 12px;
   right: 12px;
   z-index: 5;
@@ -168,9 +278,40 @@
 }
 
 .cortexNoticeError {
+  padding-right: 38px;
   border-color: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 34%, var(--lcs-glass-border, var(--lumiverse-border)));
   background: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 10%, var(--lcs-glass-bg, var(--lumiverse-bg-elevated)));
   box-shadow: var(--lumiverse-shadow-sm), 0 0 0 1px color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 18%, transparent);
+}
+
+.cortexNoticeDismiss {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--lumiverse-text-muted);
+  cursor: pointer;
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.cortexNoticeDismiss:hover,
+.cortexNoticeDismiss:focus-visible {
+  background: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 18%, transparent);
+  color: var(--lumiverse-text);
+}
+
+.cortexNoticeDismiss:focus-visible {
+  outline: 1px solid var(--lumiverse-danger, #ff6b6b);
+  outline-offset: 1px;
 }
 
 .cortexNoticeStatus {
@@ -280,13 +421,123 @@
   padding: 6px 12px;
   gap: 4px;
   flex-shrink: 0;
+  width: 100%;
+  align-self: stretch;
   background: var(--lcs-glass-bg, var(--lumiverse-bg-elevated));
   border-bottom: 1px solid var(--lcs-glass-border, var(--lumiverse-border));
   transition: opacity 180ms ease, transform 180ms ease;
 }
 
+/* Suite owns alternate native-action placement. Keep the original core rail
+   alignment unless ChatView explicitly opts into that Suite-owned contract. */
+.chatToolbar[data-native-action-side] {
+  justify-content: flex-start;
+  padding: 6px 8px;
+  gap: 6px;
+}
+
+.chatToolbar[data-dock-request='strip'],
+.chatToolbar[data-spindle-occupied] {
+  min-height: 41px;
+}
+
+/* A retained host may remain mounted while its canonical workspace is empty
+   during a placement transition. It must not paint a blank top-dock rail when floating. */
+.chatToolbar[data-dock-request='floating']:not(:has(> button:not([hidden]), > .nativeDockActions > button:not([hidden]), > [data-component='QuickToolbar'])):not([data-spindle-occupied]),
+.chatToolbar:not([data-dock-request]):not(:has(> button:not([hidden]), > .nativeDockActions > button:not([hidden]), > [data-component='QuickToolbar'])):not([data-spindle-occupied]) {
+  display: contents;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+}
+
+/* Native V1 centers in the rail and expands symmetrically */
+.chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-variant='v1']) {
+  margin-inline: auto;
+  align-self: stretch;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* V2 occupies leftover rail after the reserved native select button. */
+.chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-variant='v2']) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Empty spindle wrappers must not collapse the host-owned top-dock rail or create a visible second rail. */
+.chatToolbar > :global([data-spindle-extension-root]:empty),
+.chatToolbar > :global([data-spindle-extension-root]:not(:has(*))),
+.chatToolbar :global([data-surface-id='quick_toolbar.workspace']:not(:has(*))),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock']) > :global([data-spindle-extension-root]:not(:has(button, a, input, select, textarea, [role='button'], svg, img, canvas, [data-toolbar-action], [data-component]))) {
+  display: contents;
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  max-width: 0;
+  height: auto;
+  min-height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.chatToolbar:has([data-component='QuickToolbar']) {
+  padding: 4px 6px;
+  width: 100%;
+}
+
+/* When fill-top-dock is 1, expand the original .chatToolbar edge-to-edge across the entire screen */
+.chatToolbar:has([data-component='QuickToolbar'][data-fill-top-dock='1']),
+.chatColumnInner > [data-spindle-mount='chat_top_dock']:has([data-component='QuickToolbar'][data-fill-top-dock='1']) {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  z-index: 9999 !important;
+  background: rgba(24, 24, 27, 0.94) !important;
+  backdrop-filter: blur(12px) !important;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12) !important;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.45) !important;
+  box-sizing: border-box !important;
+  padding: 0 4px !important;
+  margin: 0 !important;
+}
+
+.chatColumnInner:has(.chatToolbar [data-component='QuickToolbar'][data-fill-top-dock='1']) {
+  padding-top: var(--lcs-top-dock-height, 41px);
+}
+
+.chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock']),
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock']) :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock']) {
+  flex: 1 1 100% !important;
+  width: 100% !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+}
+
+.chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock'][data-quick-toolbar-variant='v2']) > nav,
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock']) :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock'][data-quick-toolbar-variant='v2']) > nav {
+  width: 100% !important;
+  justify-content: flex-start !important;
+}
+
+.chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock'][data-quick-toolbar-variant='v1']) > nav,
+.chatColumnInner > :global([data-spindle-mount='chat_top_dock']) :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock'][data-quick-toolbar-variant='v1']) > nav {
+  width: auto !important;
+  max-width: 100% !important;
+  margin-inline: auto !important;
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+}
+
 .toolbarBtn {
   display: flex;
+  flex: 0 0 auto;
+  order: 0;
   align-items: center;
   justify-content: center;
   width: 28px;
@@ -298,6 +549,36 @@
   cursor: pointer;
   transition: all var(--lumiverse-transition-fast, 120ms);
   opacity: 0.6;
+}
+
+.nativeDockActions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+}
+
+.chatToolbar[data-native-action-side] .nativeDockActions {
+  gap: 6px;
+  order: 2;
+  margin-inline-start: auto;
+}
+
+.chatToolbar[data-native-action-side='left'] .nativeDockActions {
+  order: 1;
+  margin-inline-start: 0;
+}
+
+.chatToolbar[data-native-action-side='left'] > :global([data-component='QuickToolbar']) {
+  order: 2;
+}
+
+.chatToolbar[data-native-action-side='right'] > :global([data-component='QuickToolbar']) {
+  order: 1;
+}
+
+.toolbarBtnPrimary {
+  margin-left: auto;
 }
 
 .toolbarBtn:hover {
@@ -314,13 +595,21 @@
   border-color: var(--lumiverse-primary);
 }
 
-/* GPU optimization: disable backdrop-filter on all cards during streaming */
-.streaming [data-message-id] {
-  backdrop-filter: none !important;
-  -webkit-backdrop-filter: none !important;
+.toolbarBtn:disabled {
+  cursor: wait;
+  opacity: 0.45;
 }
 
-.streaming :global([data-component='InputArea']) {
+.toolbarSpinner {
+  animation: chatToolbarSpin 0.8s linear infinite;
+}
+
+@keyframes chatToolbarSpin {
+  to { transform: rotate(360deg); }
+}
+
+/* GPU optimization: disable backdrop-filter on the card receiving tokens. */
+.streaming :global([data-part='streaming']) {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
 }
@@ -444,7 +733,7 @@
 @media (max-width: 600px) {
   .noticeDock,
   .cortexNoticeDock {
-    top: 54px;
+    top: calc(54px + var(--lcs-top-dock-height, 0px));
     left: 8px;
     right: 8px;
   }

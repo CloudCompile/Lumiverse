@@ -7,6 +7,7 @@ import {
   BUILTIN_DEFAULT_PRESET_SLUG,
   seedDefaultPreset,
 } from "./default-preset";
+import { SYSTEM_SECRET_PRINCIPAL, SYSTEM_SECRET_PRINCIPAL_EMAIL } from "../services/secrets.service";
 
 function initDefaultPresetTestDb(): void {
   closeDatabase();
@@ -16,6 +17,7 @@ function initDefaultPresetTestDb(): void {
   db.run(`CREATE TABLE "user" (
     id TEXT PRIMARY KEY,
     username TEXT,
+    email TEXT,
     createdAt INTEGER NOT NULL
   )`);
 
@@ -30,7 +32,8 @@ function initDefaultPresetTestDb(): void {
     updated_at INTEGER NOT NULL DEFAULT 0,
     prompts TEXT NOT NULL DEFAULT '{}',
     user_id TEXT,
-    engine TEXT NOT NULL DEFAULT 'classic'
+    engine TEXT NOT NULL DEFAULT 'classic',
+    cache_revision INTEGER NOT NULL DEFAULT 0
   )`);
 
   db.run(`CREATE TABLE settings (
@@ -170,6 +173,9 @@ describe("default preset seeding", () => {
     expect(countPresets("u1")).toBe(1);
     expect(findBuiltInPreset("u1")?.id).toBe("legacy-built-in");
     expect(settingsSvc.getSetting("u1", BUILTIN_DEFAULT_PRESET_SEED_SETTING_KEY)?.value).toBe(1);
+    expect(getDb().query("SELECT cache_revision FROM presets WHERE id = ?").get("legacy-built-in")).toEqual({
+      cache_revision: 1,
+    });
   });
 
   test("startup backfill seeds all unmarked users once and only auto-activates empty accounts", () => {
@@ -209,5 +215,21 @@ describe("default preset seeding", () => {
     expect(second.upgradedLegacy).toBe(0);
     expect(second.activated).toBe(0);
     expect(second.markedSeeded).toBe(0);
+  });
+
+  test("startup backfill skips the reserved system principal", () => {
+    // The synthetic row sorts first (createdAt = 0 legacy shape): the
+    // exclusion guard must keep it out of preset seeding regardless.
+    getDb().run(
+      `INSERT INTO "user" (id, username, email, createdAt) VALUES (?, 'System', ?, 0)`,
+      [SYSTEM_SECRET_PRINCIPAL, SYSTEM_SECRET_PRINCIPAL_EMAIL],
+    );
+    insertUser("u1", 1);
+
+    const result = backfillDefaultPresets();
+
+    expect(result.usersScanned).toBe(1);
+    expect(countPresets(SYSTEM_SECRET_PRINCIPAL)).toBe(0);
+    expect(findBuiltInPreset("u1")).not.toBeNull();
   });
 });

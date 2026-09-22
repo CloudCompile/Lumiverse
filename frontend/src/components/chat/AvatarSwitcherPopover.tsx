@@ -1,13 +1,15 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'motion/react'
 import { ChevronUp } from 'lucide-react'
 import { useStore } from '@/store'
-import { chatsApi } from '@/api/chats'
 import { imagesApi } from '@/api/images'
 import LazyImage from '@/components/shared/LazyImage'
 import styles from './AvatarSwitcherPopover.module.css'
 import clsx from 'clsx'
+import { applyChatAppearance } from '@/lib/chatAppearance'
+import { PRIMARY_AVATAR_ENTRY_ID } from '@/lib/avatarBindings'
+import { toast } from '@/lib/toast'
 
 interface AlternateAvatarEntry {
   id: string
@@ -25,23 +27,25 @@ const MAX_VISIBLE_COLLAPSED = THUMBS_PER_ROW * 2
 
 export default function AvatarSwitcherPopover({ chatId, children }: Props) {
   const { t } = useTranslation('chat')
-  const [activeAvatarId, setActiveAvatarId] = useState<string | null>(null)
   const [expanded, setExpanded] = useState(false)
 
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const character = characters.find((c) => c.id === activeCharacterId)
-  const setActiveChatAvatarId = useStore((s) => s.setActiveChatAvatarId)
+  const activeAvatarId = useStore((s) => s.activeChatAvatarId)
 
-  const alternates = (character?.extensions?.alternate_avatars || []) as AlternateAvatarEntry[]
+  const alternates = useMemo(
+    () => (character?.extensions?.alternate_avatars || []) as AlternateAvatarEntry[],
+    [character?.extensions?.alternate_avatars],
+  )
 
   const allAvatars = useMemo(() => {
-    const list: { key: string; imageId: string | null; label: string }[] = []
+    const list: { key: string; entryId: string; imageId: string | null; label: string }[] = []
     if (character?.image_id) {
-      list.push({ key: 'primary', imageId: null, label: t('avatarSwitcher.primary') })
+      list.push({ key: 'primary', entryId: PRIMARY_AVATAR_ENTRY_ID, imageId: null, label: t('avatarSwitcher.primary') })
     }
     for (const entry of alternates) {
-      list.push({ key: entry.id, imageId: entry.image_id, label: entry.label })
+      list.push({ key: entry.id, entryId: entry.id, imageId: entry.image_id, label: entry.label })
     }
     return list
   }, [character?.image_id, alternates, t])
@@ -54,28 +58,18 @@ export default function AvatarSwitcherPopover({ chatId, children }: Props) {
       : allAvatars
   const overflowCount = allAvatars.length - (MAX_VISIBLE_COLLAPSED - 1)
 
-  useEffect(() => {
-    if (!chatId || allAvatars.length < 2) return
-    let cancelled = false
-    chatsApi.get(chatId, { messages: false }).then((chat) => {
-      if (cancelled) return
-      setActiveAvatarId((chat.metadata?.active_avatar_id as string) || null)
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [chatId, allAvatars.length])
-
   const handleSelect = useCallback(
-    async (imageId: string | null) => {
-      setActiveAvatarId(imageId)
-      setActiveChatAvatarId(imageId)
+    async (avatarEntryId: string) => {
+      if (!character) return
       setExpanded(false)
       try {
-        await chatsApi.patchMetadata(chatId, { active_avatar_id: imageId ?? null })
+        await applyChatAppearance(chatId, character, { type: 'avatar', avatar_entry_id: avatarEntryId })
       } catch (err) {
         console.error('[AvatarSwitcher] Failed to save:', err)
+        toast.error(err instanceof Error ? err.message : 'Failed to change avatar')
       }
     },
-    [chatId, setActiveChatAvatarId]
+    [character, chatId]
   )
 
   if (allAvatars.length < 2) return <>{children}</>
@@ -106,7 +100,7 @@ export default function AvatarSwitcherPopover({ chatId, children }: Props) {
                 key={avatar.key}
                 type="button"
                 className={clsx(styles.thumb, isActive && styles.thumbActive)}
-                onClick={() => handleSelect(avatar.imageId)}
+                onClick={() => handleSelect(avatar.entryId)}
                 aria-label={avatar.label}
                 aria-pressed={isActive}
                 title={avatar.label}

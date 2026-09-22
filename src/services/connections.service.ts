@@ -16,6 +16,9 @@ const DEFAULT_CONNECTION_TEST_TIMEOUT_MS = 15_000;
 const ZAI_GENERAL_API_URL = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_API_URL = "https://api.z.ai/api/coding/paas/v4";
 export const MODEL_ROULETTE_PROVIDER = "model_roulette";
+/** Legacy settings key retained solely for one-way encrypted migration. */
+export const LEGACY_POLLINATIONS_APP_KEY_SETTING = "pollinations_app_key";
+export const POLLINATIONS_APP_KEY_SECRET = "pollinations_app_key";
 
 export interface ConnectionRouletteConfig {
   connection_ids: string[];
@@ -144,7 +147,7 @@ export function resolveEffectiveApiUrl(profile: { provider: string; api_url?: st
   if (profile.provider === "zai") {
     return resolveZaiApiUrl(url, profile.metadata?.use_coding_plan_endpoint === true);
   }
-  if (profile.provider === "google_vertex") {
+  if (profile.provider === "google_vertex" || profile.provider === "google_vertex_tts") {
     const region = profile.metadata?.vertex_region;
     // Per Google's @google/genai SDK: `global` routes through the
     // un-prefixed host, regional routes through `{region}-aiplatform`.
@@ -185,16 +188,62 @@ export function resolveNanoGptSubscriptionUsageUrl(profile: { api_url?: string |
   }
 }
 
-export function resolvePollinationsAppKey(userId: string): string {
+/**
+ * Resolve the Pollinations application key and migrate the legacy plaintext
+ * settings value before it can be used. The environment override preserves
+ * its existing precedence, but does not prevent a legacy user value from
+ * being moved into the encrypted store.
+ */
+export async function resolvePollinationsAppKey(userId: string): Promise<string> {
   const envKey = env.pollinationsAppKey.trim();
-  if (envKey) return envKey;
+  const stored = await secretsSvc.getSecretForStatus(userId, POLLINATIONS_APP_KEY_SECRET);
+  const setting = settingsSvc.getSetting(userId, LEGACY_POLLINATIONS_APP_KEY_SETTING);
+  const legacy = typeof setting?.value === "string" ? setting.value.trim() : "";
 
-  const setting = settingsSvc.getSetting(userId, "pollinations_app_key");
-  const settingValue = typeof setting?.value === "string" ? setting.value.trim() : "";
-  return settingValue;
+  if (setting) {
+    // Do not overwrite an already configured encrypted value. A successful
+    // write precedes deletion so a storage failure cannot discard the key.
+    if (legacy && !stored) {
+      await secretsSvc.putSecret(userId, POLLINATIONS_APP_KEY_SECRET, legacy);
+    }
+    settingsSvc.deleteSetting(userId, LEGACY_POLLINATIONS_APP_KEY_SETTING);
+  }
+
+  return envKey || stored || legacy;
 }
 
-export function buildPollinationsAuthorizeUrl(
+/**
+ * One-time, startup-safe migration for plaintext Pollinations keys written by
+ * older builds. The encrypted write always finishes before the old setting is
+ * removed, so a failed write leaves the legacy value recoverable for retry.
+ */
+export async function migrateLegacyPollinationsAppKeys(): Promise<number> {
+  const rows = getDb()
+    .query("SELECT user_id, value FROM settings WHERE key = ?")
+    .all(LEGACY_POLLINATIONS_APP_KEY_SETTING) as Array<{ user_id: string; value: string }>;
+  let migrated = 0;
+
+  for (const row of rows) {
+    let raw: unknown = null;
+    try {
+      raw = JSON.parse(row.value);
+    } catch {
+      // Invalid settings JSON cannot contain a usable legacy key, but should
+      // still be removed so it does not remain a misleading plaintext entry.
+    }
+    const legacy = typeof raw === "string" ? raw.trim() : "";
+    const stored = await secretsSvc.getSecretForStatus(row.user_id, POLLINATIONS_APP_KEY_SECRET);
+    if (legacy && !stored) {
+      await secretsSvc.putSecret(row.user_id, POLLINATIONS_APP_KEY_SECRET, legacy);
+      migrated++;
+    }
+    settingsSvc.deleteSetting(row.user_id, LEGACY_POLLINATIONS_APP_KEY_SETTING);
+  }
+
+  return migrated;
+}
+
+export async function buildPollinationsAuthorizeUrl(
   userId: string,
   input: {
     redirect_url: string;
@@ -203,11 +252,11 @@ export function buildPollinationsAuthorizeUrl(
     expiry?: number;
     permissions?: string;
   }
-): string {
+): Promise<string> {
   const params = new URLSearchParams();
   params.set("redirect_url", input.redirect_url);
 
-  const appKey = resolvePollinationsAppKey(userId);
+  const appKey = await resolvePollinationsAppKey(userId);
   if (appKey) params.set("app_key", appKey);
   if (input.models) params.set("models", input.models);
   if (typeof input.budget === "number" && Number.isFinite(input.budget) && input.budget > 0) {
@@ -314,6 +363,103 @@ export function resolveConnection(userId: string, id?: string): ConnectionProfil
   }
 
   return candidates[Math.floor(Math.random() * candidates.length)];
+}
+
+/**
+ * The user's explicitly selected connection profile — the STRICT first rung of
+ * the acting chain: the persisted `activeProfileId` setting, validated with
+ * `getConnection`, or `undefined` when it is absent, empty, not a string, or
+ * names a profile that no longer exists.
+ *
+ * Exported separately from `resolveActingConnectionId` on purpose: this is the
+ * only rung that expresses an explicit user selection, so it is the only rung
+ * permitted to override a chat-scoped `connection_profile_id` pin (the
+ * `editAndSendAlwaysUseActiveConnection` opt-in). `resolveActingConnectionId`
+ * ends in "any profile you own", and "any profile you own" is a weaker signal
+ * than an explicit pin.
+ */
+export function resolveActiveConnectionId(userId: string): string | undefined {
+  const active = settingsSvc.getSetting(userId, "activeProfileId");
+  if (
+    typeof active?.value === "string" &&
+    active.value &&
+    getConnection(userId, active.value)
+  ) {
+    return active.value;
+  }
+  return undefined;
+}
+
+/**
+ * Pick the connection profile a generation triggered SERVER-SIDE with no
+ * caller-supplied `connection_id` should run on.
+ *
+ * A user's own sends pass `connection_id: activeProfileId` from the UI, but
+ * server-triggered generations (Edit-and-Send outbox dispatch, room peer
+ * message / freeform deadline / "End now", spindle sends that forward an
+ * `undefined` id) have no such context. `resolveConnection` then falls back to
+ * `getDefaultConnection`, which ONLY matches `is_default = 1` — so a user whose
+ * active profile is not their default silently runs on a connection they never
+ * selected, and a user with several profiles but no explicit default hard-fails
+ * with "No connection profile found". Mirror the user's actual selection
+ * instead, with safe fallbacks: their active profile → the DB default → any
+ * profile they own.
+ *
+ * Returns `undefined` when the user owns no connections at all, preserving the
+ * caller's existing "no connection profile found" error.
+ *
+ * This is the single owner of that chain; `multiplayer.resolveHostConnectionId`
+ * delegates here so the room path and the Edit-and-Send path cannot drift.
+ */
+export function resolveActingConnectionId(userId: string): string | undefined {
+  return resolveActiveConnectionId(userId)
+    ?? getDefaultConnection(userId)?.id
+    ?? listConnections(userId, { limit: 1, offset: 0 }).data[0]?.id;
+}
+
+/**
+ * The connection an Edit-and-Send request is COMMITTED against, resolved once at
+ * enqueue time and then persisted on `generation_outbox.connection_id`.
+ *
+ * This exists because connection selection used to be re-read at dispatch time.
+ * The outbox is durable and its dispatch is not: the same row can be dispatched
+ * from the POST handler, again from the periodic retry tick after a backoff, and
+ * again from startup crash recovery — potentially hours apart. Re-reading
+ * `activeProfileId` (or the chat's `connection_profile_id` pin) on each of those
+ * ticks means switching profiles retargets a request the user already committed.
+ * Resolving here and storing the answer makes the choice immutable for the life
+ * of the request, which is the whole point of an outbox.
+ *
+ * Mirrors `generate.service.resolveChatGenerationConnection` rung for rung:
+ *   1. the `editAndSendAlwaysUseActiveConnection` opt-in → STRICT active profile
+ *   2. a live chat-scoped `connection_profile_id` pin
+ *   3. the acting chain (active → `is_default` → any owned profile)
+ *
+ * Returns `undefined` when nothing resolves — including when the `settings` or
+ * `connection_profiles` tables are absent, which is the case in several
+ * edit-and-send test fixtures that build a minimal schema by hand. A `NULL`
+ * column is a first-class value here: the dispatcher falls back to the existing
+ * resolve-at-dispatch ladder, which is also what rows committed before this
+ * column existed must do. Never throws: a connection lookup failure must not be
+ * able to fail the user's edit.
+ */
+export function resolveEditAndSendConnectionId(
+  userId: string,
+  chatMetadata: Record<string, any> | null | undefined,
+): string | undefined {
+  try {
+    if (settingsSvc.readEditAndSendAlwaysUseActiveConnection(userId)) {
+      const activeId = resolveActiveConnectionId(userId);
+      if (activeId) return activeId;
+    }
+    const boundId = typeof chatMetadata?.connection_profile_id === "string"
+      ? chatMetadata.connection_profile_id.trim()
+      : "";
+    if (boundId && getConnection(userId, boundId)) return boundId;
+    return resolveActingConnectionId(userId);
+  } catch {
+    return undefined;
+  }
 }
 
 export async function createConnection(userId: string, input: CreateConnectionProfileInput): Promise<ConnectionProfile> {
@@ -437,6 +583,7 @@ export async function deleteConnection(userId: string, id: string): Promise<bool
     // Cleanup the connection's secret
     secretsSvc.deleteSecret(userId, connectionSecretKey(id));
     settingsSvc.deleteSetting(userId, `presetProfile:connection:${id}`);
+    eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: `presetProfile:connection:${id}`, binding: null }, userId);
   }
   return deleted;
 }

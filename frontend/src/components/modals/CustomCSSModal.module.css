@@ -6,6 +6,10 @@
   overflow: hidden;
 }
 
+.dockShell {
+  container-type: inline-size;
+}
+
 /* ── Unified header ──────────────────────────────────────────────────── */
 
 .header {
@@ -167,9 +171,14 @@
   overflow: hidden;
 }
 
+.sidebarSearch {
+  position: relative;
+  flex-shrink: 0;
+}
+
 .searchInput {
   width: 100%;
-  padding: 8px 12px;
+  padding: 8px 34px 8px 12px;
   margin: 0;
   border: none;
   border-bottom: 1px solid var(--lumiverse-border);
@@ -179,6 +188,29 @@
   font-family: inherit;
   outline: none;
   transition: border-color var(--lumiverse-transition-fast);
+}
+
+.searchClear {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.searchClear:hover {
+  background: var(--lumiverse-fill-hover);
+  color: var(--lumiverse-text);
 }
 
 .searchInput:focus {
@@ -577,6 +609,152 @@
   }
 
   .headerTitle {
+    font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  }
+}
+
+/* Keep the dock toolbar stacked through intermediate widths. The editor body
+   can remain side-by-side until the narrower compact breakpoint below. */
+@container (min-width: 701px) and (max-width: 900px) {
+  .dockShell .header {
+    align-items: stretch;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .dockShell .headerLeft {
+    width: 100%;
+    flex-shrink: 0;
+  }
+
+  .dockShell .headerCount {
+    display: none;
+  }
+
+  .dockShell .headerRight {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
+    overflow: visible;
+  }
+
+  .dockShell .headerDivider {
+    display: none;
+  }
+
+  .dockShell .actionBtn,
+  .dockShell .closeBtn,
+  .dockShell .toggleRow {
+    flex-shrink: 0;
+  }
+
+  .dockShell .toggleLabel {
+    max-width: 92px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+/* Dock compact mode follows the editor container width rather than the
+   viewport width, allowing a narrow dock on a wide desktop display. */
+@container (max-width: 700px) {
+  .dockShell .header {
+    align-items: stretch;
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    height: auto;
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .dockShell .headerLeft {
+    width: 100%;
+    flex-shrink: 0;
+  }
+
+  .dockShell .headerCount {
+    display: none;
+  }
+
+  .dockShell .headerRight {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    gap: 6px;
+    overflow: visible;
+  }
+
+  .dockShell .headerDivider {
+    display: none;
+  }
+
+  .dockShell .actionBtn,
+  .dockShell .closeBtn,
+  .dockShell .toggleRow {
+    flex-shrink: 0;
+  }
+
+  .dockShell .toggleLabel {
+    max-width: 92px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dockShell .body {
+    flex-direction: column;
+  }
+
+  .dockShell .sidebar {
+    width: 100%;
+    min-width: unset;
+    border-right: none;
+    border-bottom: 1px solid var(--lumiverse-border);
+    max-height: calc(45vh / var(--lumiverse-ui-scale, 1));
+    transition: max-height var(--lumiverse-transition);
+  }
+
+  .dockShell .sidebarCollapsed {
+    max-height: 0;
+    border-bottom: none;
+    overflow: hidden;
+  }
+
+  .dockShell .mobileToggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    padding: 6px;
+    border: none;
+    border-bottom: 1px solid var(--lumiverse-border);
+    background: var(--lumiverse-bg);
+    color: var(--lumiverse-text-muted);
+    font-size: calc(11px * var(--lumiverse-font-scale, 1));
+    font-weight: 500;
+    cursor: pointer;
+    width: 100%;
+  }
+
+  .dockShell .mobileToggle:hover {
+    background: var(--lumiverse-fill-subtle);
+  }
+
+  .dockShell .headerTitle {
     font-size: calc(13px * var(--lumiverse-font-scale, 1));
   }
 }

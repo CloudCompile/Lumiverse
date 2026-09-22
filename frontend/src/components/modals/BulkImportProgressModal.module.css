@@ -65,6 +65,12 @@
   text-overflow: ellipsis;
 }
 
+.importError {
+  color: var(--lumiverse-danger, #ef4444);
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  overflow-wrap: anywhere;
+}
+
 .resultsList {
   display: flex;
   flex-direction: column;

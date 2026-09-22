@@ -4,11 +4,12 @@ import type { FloatingAvatarSlice } from '@/types/store'
 export const createFloatingAvatarSlice: StateCreator<FloatingAvatarSlice> = (set) => ({
   floatingAvatar: null,
 
-  openFloatingAvatar: (imageUrl, displayName) =>
+  openFloatingAvatar: (imageUrl, displayName, owner = 'native') =>
     set({
       floatingAvatar: {
         imageUrl,
         displayName,
+        owner,
         x: -1,
         y: -1,
         width: 280,

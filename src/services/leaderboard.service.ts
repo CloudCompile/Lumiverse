@@ -274,6 +274,25 @@ function getOrCreateRating(
 
   if (found) return found;
 
+  // A row may already exist for this (model, provider) under a stale canonical
+  // model (e.g. after an alias edit). Re-point it instead of inserting a second
+  // row, which would violate the (user_id, model, provider) unique constraint.
+  const stale = db.query(
+    `SELECT elo, wins, losses, total_votes
+     FROM leaderboard_ratings
+     WHERE user_id = ? AND provider = ? AND model = ?`,
+  ).get(userId, provider, model) as { elo: number; wins: number; losses: number; total_votes: number } | null;
+
+  if (stale) {
+    db.run(
+      `UPDATE leaderboard_ratings
+       SET canonical_model = ?, raw_model = COALESCE(?, raw_model), updated_at = unixepoch()
+       WHERE user_id = ? AND provider = ? AND model = ?`,
+      [canonicalModel, model, userId, provider, model],
+    );
+    return stale;
+  }
+
   db.run(
     `INSERT INTO leaderboard_ratings
      (user_id, model, raw_model, canonical_model, provider, connection_id, elo, confidence_score)
@@ -579,17 +598,14 @@ export function castVote(userId: string, input: CastVoteInput): LeaderboardEntry
       canonical_model: string;
     } | null;
 
-  let rating = getOrCreateRating(
-    userId,
-    provider,
-    identity.displayModel,
-    identity.canonicalModel,
-    connectionId ?? null,
-  );
-
-  let { elo, wins, losses, total_votes } = rating;
-
   if (existing && existing.vote === vote) {
+    const current = getOrCreateRating(
+      userId,
+      provider,
+      identity.displayModel,
+      identity.canonicalModel,
+      connectionId ?? null,
+    );
     return getLeaderboard(userId).find(
       (entry) => entry.provider === provider && entry.canonical_model === identity.canonicalModel,
     ) || toEntry(
@@ -599,10 +615,10 @@ export function castVote(userId: string, input: CastVoteInput): LeaderboardEntry
         canonical_model: identity.canonicalModel,
         provider,
         connection_id: connectionId ?? null,
-        elo,
-        wins,
-        losses,
-        total_votes,
+        elo: current.elo,
+        wins: current.wins,
+        losses: current.losses,
+        total_votes: current.total_votes,
       },
       settings,
       0,
@@ -610,11 +626,39 @@ export function castVote(userId: string, input: CastVoteInput): LeaderboardEntry
   }
 
   if (existing) {
-    elo -= existing.elo_delta;
-    if (existing.vote === 1) wins = Math.max(0, wins - 1);
-    if (existing.vote === -1) losses = Math.max(0, losses - 1);
-    total_votes = Math.max(0, total_votes - 1);
+    // The stored vote may point at a different provider/canonical model than
+    // the current input (e.g. after an alias edit). Undo the recorded delta on
+    // the rating row that actually holds it, before any lookup re-points that
+    // row to the newly-resolved canonical model.
+    const priorProvider = existing.provider;
+    const priorCanonical = existing.canonical_model;
+    const priorRating = db
+      .query(
+        `SELECT elo, wins, losses, total_votes FROM leaderboard_ratings
+         WHERE user_id = ? AND provider = ? AND canonical_model = ?`,
+      )
+      .get(userId, priorProvider, priorCanonical) as
+      | { elo: number; wins: number; losses: number; total_votes: number }
+      | null;
+
+    if (priorRating) {
+      updateRating(userId, priorProvider, priorCanonical, {
+        elo: priorRating.elo - existing.elo_delta,
+        wins: existing.vote === 1 ? Math.max(0, priorRating.wins - 1) : priorRating.wins,
+        losses: existing.vote === -1 ? Math.max(0, priorRating.losses - 1) : priorRating.losses,
+        total_votes: Math.max(0, priorRating.total_votes - 1),
+      });
+    }
   }
+
+  const rating = getOrCreateRating(
+    userId,
+    provider,
+    identity.displayModel,
+    identity.canonicalModel,
+    connectionId ?? null,
+  );
+  let { elo, wins, losses, total_votes } = rating;
 
   const damping = computeDuplicateDamping(userId, provider, identity.canonicalModel, settings);
   const delta = computeDelta(
@@ -857,6 +901,26 @@ export function reprocessLeaderboardModels(userId: string): { updatedVotes: numb
       [identity.displayModel, identity.rawModel, identity.canonicalModel, vote.id],
     );
     updatedVotes++;
+  }
+
+  // Re-resolve each rating row's canonical model through the current alias map,
+  // otherwise an alias merge leaves the rating rows split by their old canonical
+  // keys and the GROUP BY below never collapses them.
+  const ratingRows = db.query(
+    `SELECT id, provider, model, raw_model
+     FROM leaderboard_ratings
+     WHERE user_id = ?`,
+  ).all(userId) as Array<{ id: number; provider: string; model: string; raw_model: string | null }>;
+
+  for (const row of ratingRows) {
+    const raw = row.raw_model && row.raw_model.trim().length > 0 ? row.raw_model : row.model;
+    const identity = resolveCanonicalModel(userId, row.provider, raw, settings);
+    db.run(
+      `UPDATE leaderboard_ratings
+       SET canonical_model = ?
+       WHERE id = ?`,
+      [identity.canonicalModel, row.id],
+    );
   }
 
   const grouped = db.query(
@@ -1145,12 +1209,24 @@ export function importLeaderboardData(userId: string, payload: {
       for (const row of payload.votes) {
         if (!row || typeof row !== "object") continue;
         db.run(
-          `INSERT OR REPLACE INTO leaderboard_votes
-           (id, user_id, message_id, swipe_id, chat_id, model, raw_model, canonical_model,
+          `INSERT INTO leaderboard_votes
+           (user_id, message_id, swipe_id, chat_id, model, raw_model, canonical_model,
             provider, connection_id, vote, ranking_mode, confidence, effect_weight, elo_delta, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(user_id, message_id, swipe_id) DO UPDATE SET
+             chat_id = excluded.chat_id,
+             model = excluded.model,
+             raw_model = excluded.raw_model,
+             canonical_model = excluded.canonical_model,
+             provider = excluded.provider,
+             connection_id = excluded.connection_id,
+             vote = excluded.vote,
+             ranking_mode = excluded.ranking_mode,
+             confidence = excluded.confidence,
+             effect_weight = excluded.effect_weight,
+             elo_delta = excluded.elo_delta,
+             created_at = excluded.created_at`,
           [
-            row.id ?? null,
             userId,
             row.message_id,
             Number(row.swipe_id) || 0,
@@ -1175,13 +1251,12 @@ export function importLeaderboardData(userId: string, payload: {
       for (const row of payload.roulette_votes) {
         if (!row || typeof row !== "object") continue;
         db.run(
-          `INSERT OR REPLACE INTO leaderboard_roulette_votes
-           (id, user_id, left_model, left_provider, left_canonical_model,
+          `INSERT INTO leaderboard_roulette_votes
+           (user_id, left_model, left_provider, left_canonical_model,
             right_model, right_provider, right_canonical_model,
             winner, confidence, ranking_mode, left_elo_delta, right_elo_delta, connection_id, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
-            row.id ?? null,
             userId,
             row.left_model,
             row.left_provider,

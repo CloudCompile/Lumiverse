@@ -1,7 +1,12 @@
-import { get, post, put, del, upload, uploadWithProgress, getBlob, BASE_URL } from './client'
+import { get, post, put, del, upload, uploadRaw, uploadWithProgress, getBlob, BASE_URL, type RequestOptions } from './client'
 import { triggerBlobDownload } from '@/lib/downloads'
+
+/** Ceiling for calls that may download a full expression pack (~20 MB). */
+const EXPRESSION_FETCH_TIMEOUT_MS = 5 * 60 * 1000
 import type {
   Character,
+  CharacterLibraryScope,
+  CharacterPreview,
   CharacterPerspectiveLayer,
   CharacterSummary,
   TagCount,
@@ -10,8 +15,11 @@ import type {
   PaginatedResult,
   ImportResult,
   BulkImportResult,
+  CharacterImportJob,
   BatchDeleteResult,
+  BulkTagResult,
   TagLibraryImportResult,
+  CharacterFolderMutationResponse,
 } from '@/types/api'
 
 export interface SummaryParams {
@@ -25,6 +33,8 @@ export interface SummaryParams {
   filter?: string
   favorite_ids?: string
   seed?: number
+  chat_id?: string
+  scope?: CharacterLibraryScope
 }
 
 export type CharacterPerspectiveLayerKind = 'background' | 'framing' | 'subject'
@@ -35,8 +45,14 @@ export const charactersApi = {
     return get<PaginatedResult<Character>>('/characters', params)
   },
 
-  listSummaries(params?: SummaryParams) {
-    return get<PaginatedResult<CharacterSummary>>('/characters/summary', params)
+  listSummaries(params?: SummaryParams, signal?: AbortSignal) {
+    const options: RequestOptions | undefined = signal === undefined ? undefined : { signal }
+    return get<PaginatedResult<CharacterSummary>>('/characters/summary', params, options)
+  },
+
+  getHomepagePreview(id: string, signal?: AbortSignal) {
+    const options: RequestOptions | undefined = signal === undefined ? undefined : { signal }
+    return get<CharacterPreview>(`/characters/${id}/homepage-preview`, undefined, options)
   },
 
   listTags() {
@@ -124,8 +140,38 @@ export const charactersApi = {
     return upload<ImportResult>('/characters/import', form)
   },
 
+  replaceCard(id: string, file: File, onProgress?: (percent: number) => void) {
+    const form = new FormData()
+    form.append('file', file)
+    if (onProgress) return uploadWithProgress<Character>(`/characters/${id}/replace-card`, form, onProgress)
+    return upload<Character>(`/characters/${id}/replace-card`, form)
+  },
+
   importUrl(url: string) {
-    return post<ImportResult>('/characters/import-url', { url })
+    // Importing may also pull a gallery and an expression pack, so this shares
+    // the longer ceiling rather than the default 30s.
+    return post<ImportResult>('/characters/import-url', { url }, { timeout: EXPRESSION_FETCH_TIMEOUT_MS })
+  },
+
+  /**
+   * Pull this character's expression pack from the Chub source it came from.
+   *
+   * A pack is tens of images and can take minutes on a slow link, so the
+   * default 30s ceiling would abort a download that was progressing fine.
+   */
+  fetchChubExpressions(id: string) {
+    return post<{ imported: number; skipped: number; available: number; sourceMissing?: boolean }>(
+      `/characters/${id}/chub-expressions`,
+      undefined,
+      { timeout: EXPRESSION_FETCH_TIMEOUT_MS },
+    )
+  },
+
+  /** Characters that trace back to Chub and have no expressions yet. */
+  chubExpressionCandidates() {
+    return get<{ candidates: Array<{ id: string; name: string }>; count: number }>(
+      '/characters/chub-expression-candidates',
+    )
   },
 
   importBulk(files: File[], skipDuplicates = false) {
@@ -139,6 +185,35 @@ export const charactersApi = {
     return upload<BulkImportResult>('/characters/import-bulk', form, { timeout: 0 })
   },
 
+  createImportJob(total: number, skipDuplicates = false) {
+    return post<CharacterImportJob>('/characters/import-jobs', {
+      total,
+      skip_duplicates: skipDuplicates,
+    })
+  },
+
+  uploadImportJobFile(jobId: string, index: number, file: File, signal?: AbortSignal) {
+    const filename = encodeURIComponent(file.name || `character-${index + 1}`)
+    return uploadRaw<CharacterImportJob>(
+      `/characters/import-jobs/${encodeURIComponent(jobId)}/files/${index}?filename=${filename}`,
+      file,
+      { timeout: 0, signal, contentType: file.type || 'application/octet-stream' },
+    )
+  },
+
+  startImportJob(jobId: string) {
+    return post<CharacterImportJob>(`/characters/import-jobs/${encodeURIComponent(jobId)}/start`)
+  },
+
+  getImportJob(jobId: string, signal?: AbortSignal) {
+    const options: RequestOptions | undefined = signal === undefined ? undefined : { signal }
+    return get<CharacterImportJob>(`/characters/import-jobs/${encodeURIComponent(jobId)}/status`, undefined, options)
+  },
+
+  cancelImportJob(jobId: string) {
+    return post<CharacterImportJob>(`/characters/import-jobs/${encodeURIComponent(jobId)}/cancel`)
+  },
+
   importTagLibrary(file: File) {
     const form = new FormData()
     form.append('file', file)
@@ -149,11 +224,47 @@ export const charactersApi = {
     return post<BatchDeleteResult>('/characters/batch-delete', { ids, keep_chats: keepChats })
   },
 
+  bulkUpdateTags(ids: string[], operation: 'add' | 'remove' | 'replace', tags: string[]) {
+    return post<BulkTagResult>('/characters/bulk-tags', { ids, operation, tags })
+  },
+
+  renameFolder(oldName: string, newName: string) {
+    return post<CharacterFolderMutationResponse>('/characters/folders/rename', {
+      old_name: oldName,
+      new_name: newName,
+    })
+  },
+
+  deleteFolder(name: string) {
+    return post<CharacterFolderMutationResponse>('/characters/folders/delete', { name })
+  },
+
+  bulkUpdateFolder(ids: string[], folder: string) {
+    return post<CharacterFolderMutationResponse>('/characters/bulk-update', { ids, folder })
+  },
+
   async exportCharacter(id: string, format: 'json' | 'png' | 'charx', characterName?: string) {
     const blob = await getBlob(`/characters/${id}/export`, { format })
     const ext = format === 'charx' ? 'charx' : format
     const safeName = (characterName || 'character').replace(/[^a-zA-Z0-9_\-. ]/g, '_')
     triggerBlobDownload(blob, `${safeName}.${ext}`)
+  },
+
+  /**
+   * Start a CHARX download as a native browser download. Unlike fetching a
+   * Blob into JavaScript, this lets the browser show its own transfer progress
+   * and avoids keeping a second copy of a potentially large archive in memory.
+   */
+  downloadCharxExport(id: string, exportId: string, characterName?: string) {
+    const safeName = (characterName || 'character').replace(/[^a-zA-Z0-9_\-. ]/g, '_')
+    const params = new URLSearchParams({ format: 'charx', export_id: exportId })
+    const anchor = document.createElement('a')
+    anchor.href = `${BASE_URL}/characters/${encodeURIComponent(id)}/export?${params.toString()}`
+    anchor.download = `${safeName}.charx`
+    anchor.style.display = 'none'
+    document.body.appendChild(anchor)
+    anchor.click()
+    document.body.removeChild(anchor)
   },
 
   getResolvedFields(id: string, chatId?: string) {

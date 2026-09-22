@@ -1,4 +1,4 @@
-import { get, del, upload, uploadWithProgress, BASE_URL } from './client'
+import { get, del, post, upload, uploadWithProgress, BASE_URL } from './client'
 import type { Image } from '@/types/api'
 
 export type ImageSize = 'sm' | 'lg'
@@ -23,6 +23,17 @@ interface WallpaperUploadOptions {
 
 interface ImageUrlOptions {
   codec?: 'h264' | 'hevc'
+}
+
+function joinApiPath(path: string): string {
+  return `${BASE_URL.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`
+}
+
+function isDirectImageUrl(value: string): boolean {
+  const apiBase = BASE_URL.replace(/\/+$/, '')
+  return (value.startsWith('/') && !value.startsWith('//'))
+    || value.startsWith(`${apiBase}/images/`)
+    || value.startsWith('/api/v1/images/')
 }
 
 export const imagesApi = {
@@ -91,13 +102,40 @@ export const imagesApi = {
     return `${BASE_URL}/images/${id}?size=lg`
   },
 
+  /** Same-origin proxy for third-party raster images used in rich HTML. */
+  remoteUrl(url: string) {
+    return `${joinApiPath('/images/remote')}?url=${encodeURIComponent(url)}`
+  },
+
+  /** Render a durable local image directly; proxy only third-party URLs. */
+  displayUrl(url: string) {
+    const value = url.trim()
+    if (isDirectImageUrl(value)) return value
+    return `${joinApiPath('/images/remote')}?url=${encodeURIComponent(value)}`
+  },
+
+  /**
+   * Browser-side fallback for split-horizon/LAN hosts rejected by the SSRF-safe
+   * proxy. The caller should try this only after displayUrl() fails.
+   */
+  directDisplayFallback(url: string) {
+    const value = url.trim()
+    if (!value || isDirectImageUrl(value)) return null
+    try {
+      const parsed = new URL(value)
+      return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? value : null
+    } catch {
+      return null
+    }
+  },
+
   rebuildThumbnails(options?: {
     onProgress?: (p: ThumbnailRebuildProgress) => void
   }): Promise<ThumbnailRebuildProgress> {
     if (options?.onProgress) {
       return new Promise(async (resolve, reject) => {
         try {
-          const res = await fetch(`/api/v1/images/rebuild-thumbnails`, {
+          const res = await fetch(joinApiPath('/images/rebuild-thumbnails'), {
             method: 'POST',
             headers: { Accept: 'text/event-stream' },
             credentials: 'include',
@@ -107,12 +145,18 @@ export const imagesApi = {
             reject(new Error(err.error || `HTTP ${res.status}`))
             return
           }
+          if (!res.headers.get('content-type')?.includes('text/event-stream')) {
+            const contentType = res.headers.get('content-type') || 'unknown content type'
+            reject(new Error(`Rebuild endpoint returned ${contentType} instead of an event stream`))
+            return
+          }
           const reader = res.body?.getReader()
           if (!reader) { reject(new Error('No response body')); return }
 
           const decoder = new TextDecoder()
           let buffer = ''
           let finalResult: any = null
+          let eventType = ''
 
           while (true) {
             const { done, value } = await reader.read()
@@ -121,7 +165,6 @@ export const imagesApi = {
             const lines = buffer.split('\n')
             buffer = lines.pop() || ''
 
-            let eventType = ''
             for (const line of lines) {
               if (line.startsWith('event: ')) {
                 eventType = line.slice(7).trim()
@@ -130,6 +173,7 @@ export const imagesApi = {
                 if (eventType === 'progress') options.onProgress!(data)
                 else if (eventType === 'done') finalResult = data
                 else if (eventType === 'error') { reject(new Error(data.error)); return }
+                eventType = ''
               }
             }
           }
@@ -140,9 +184,6 @@ export const imagesApi = {
       })
     }
 
-    return fetch(`/api/v1/images/rebuild-thumbnails`, {
-      method: 'POST',
-      credentials: 'include',
-    }).then((r) => r.json())
+    return post<ThumbnailRebuildProgress>('/images/rebuild-thumbnails', undefined, { timeout: 0 })
   },
 }

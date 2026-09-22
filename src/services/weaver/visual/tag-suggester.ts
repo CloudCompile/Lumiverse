@@ -252,7 +252,7 @@ export async function suggestVisualTags(input: SuggestWeaverTagsInput): Promise<
     messages: buildTagSuggestionMessages(input.evidence),
     parameters: { model, temperature: 0.35, max_tokens: 2048 },
     signal: input.signal,
-  });
+  }, { origin: { kind: "sidecar", name: "Weaver", operation: "visual tags" } });
 
   const parsed = parseSectionedTagResponse(response.content);
   if (parsed) {

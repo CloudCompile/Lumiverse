@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { User, Crown, Copy, Trash2, Play, Upload, Pencil, MessagesSquare, Link, Globe, RefreshCw, X, BookOpen } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
+import TokenCountButton from '@/components/shared/TokenCountButton'
 import { getPersonaAvatarLargeUrl } from '@/lib/avatarUrls'
 import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
@@ -30,17 +31,19 @@ import type { Persona, TagCount, WorldBook } from '@/types/api'
 import styles from './PersonaEditor.module.css'
 import clsx from 'clsx'
 
-type PronounField = 'subjective_pronoun' | 'objective_pronoun' | 'possessive_pronoun'
+type PronounField = 'subjective_pronoun' | 'objective_pronoun' | 'possessive_pronoun' | 'reflexive_pronoun' | 'possessive_pronoun_standalone'
 
 const PRONOUN_FIELDS: Array<{
   key: PronounField
   labelKey: string
-  macro: '{{sub}}' | '{{obj}}' | '{{poss}}'
+  macro: '{{sub}}' | '{{obj}}' | '{{poss}}' | '{{ref}}' | '{{poss_p}}'
   placeholderKey: string
 }> = [
   { key: 'subjective_pronoun', labelKey: 'personaEditor.pronouns.subjective', macro: '{{sub}}', placeholderKey: 'personaEditor.pronouns.subjectivePlaceholder' },
   { key: 'objective_pronoun', labelKey: 'personaEditor.pronouns.objective', macro: '{{obj}}', placeholderKey: 'personaEditor.pronouns.objectivePlaceholder' },
   { key: 'possessive_pronoun', labelKey: 'personaEditor.pronouns.possessive', macro: '{{poss}}', placeholderKey: 'personaEditor.pronouns.possessivePlaceholder' },
+  { key: 'reflexive_pronoun', labelKey: 'personaEditor.pronouns.reflexive', macro: '{{ref}}', placeholderKey: 'personaEditor.pronouns.reflexivePlaceholder' },
+  { key: 'possessive_pronoun_standalone', labelKey: 'personaEditor.pronouns.possessiveStandalone', macro: '{{poss_p}}', placeholderKey: 'personaEditor.pronouns.possessiveStandalonePlaceholder' },
 ]
 
 const POSITION_OPTIONS = [
@@ -60,6 +63,7 @@ const ROLE_OPTIONS = [
 interface PersonaEditorProps {
   persona: Persona
   isActive: boolean
+  isSwitchActive: boolean
   onUpdate: (id: string, input: Record<string, any>) => Promise<any>
   onDelete: (id: string) => Promise<void>
   onDuplicate: (id: string) => Promise<any>
@@ -72,6 +76,7 @@ interface PersonaEditorProps {
 export default function PersonaEditor({
   persona,
   isActive,
+  isSwitchActive,
   onUpdate,
   onDelete,
   onDuplicate,
@@ -87,6 +92,8 @@ export default function PersonaEditor({
   const [subjectivePronoun, setSubjectivePronoun] = useState(persona.subjective_pronoun || '')
   const [objectivePronoun, setObjectivePronoun] = useState(persona.objective_pronoun || '')
   const [possessivePronoun, setPossessivePronoun] = useState(persona.possessive_pronoun || '')
+  const [reflexivePronoun, setReflexivePronoun] = useState(persona.reflexive_pronoun || '')
+  const [possessivePronounStandalone, setPossessivePronounStandalone] = useState(persona.possessive_pronoun_standalone || '')
   const [folder, setFolder] = useState(persona.folder || '')
   const [descPosition, setDescPosition] = useState<number>(persona.metadata?.description_position ?? 0)
   const [descDepth, setDescDepth] = useState<number>(persona.metadata?.description_depth ?? 4)
@@ -100,8 +107,6 @@ export default function PersonaEditor({
   const personaTagBindings = useStore((s) => s.personaTagBindings)
   const setCharacterPersonaBinding = useStore((s) => s.setCharacterPersonaBinding)
   const setPersonaTagBinding = useStore((s) => s.setPersonaTagBinding)
-  const messages = useStore((s) => s.messages)
-  const setMessages = useStore((s) => s.setMessages)
   const allPersonas = useStore((s) => s.personas)
   const [worldBooks, setWorldBooks] = useState<WorldBook[]>([])
   const [availableTags, setAvailableTags] = useState<TagCount[]>([])
@@ -130,6 +135,8 @@ export default function PersonaEditor({
     setSubjectivePronoun(persona.subjective_pronoun || '')
     setObjectivePronoun(persona.objective_pronoun || '')
     setPossessivePronoun(persona.possessive_pronoun || '')
+    setReflexivePronoun(persona.reflexive_pronoun || '')
+    setPossessivePronounStandalone(persona.possessive_pronoun_standalone || '')
     setFolder(persona.folder || '')
     setDescPosition(persona.metadata?.description_position ?? 0)
     setDescDepth(persona.metadata?.description_depth ?? 4)
@@ -189,6 +196,8 @@ export default function PersonaEditor({
       if (field === 'subjective_pronoun') setSubjectivePronoun(value)
       if (field === 'objective_pronoun') setObjectivePronoun(value)
       if (field === 'possessive_pronoun') setPossessivePronoun(value)
+      if (field === 'reflexive_pronoun') setReflexivePronoun(value)
+      if (field === 'possessive_pronoun_standalone') setPossessivePronounStandalone(value)
 
       clearTimeout(pronounTimers.current[field])
       pronounTimers.current[field] = setTimeout(() => {
@@ -297,20 +306,20 @@ export default function PersonaEditor({
     if (!activeChatId || reattributing) return
     setReattributing(true)
     try {
+      const messageIds = new Set(useStore.getState().messages.filter((m) => m.is_user).map((m) => m.id))
       await chatsApi.reattributeUserMessages(activeChatId, persona.id)
-      const patched = messages.map((m) =>
-        m.is_user
+      useStore.setState((state) => state.activeChatId !== activeChatId ? state : {
+        messages: state.messages.map((m) => m.is_user && messageIds.has(m.id)
           ? { ...m, name: persona.name, extra: { ...(m.extra || {}), persona_id: persona.id } }
-          : m
-      )
-      setMessages(patched)
+          : m),
+      })
       setShowReattributeConfirm(false)
     } catch (err) {
       console.error('[PersonaEditor] Failed to re-attribute chat messages:', err)
     } finally {
       setReattributing(false)
     }
-  }, [activeChatId, reattributing, persona.id, persona.name, messages, setMessages])
+  }, [activeChatId, reattributing, persona.id, persona.name])
 
   // Character-persona binding
   const activeCharName = activeCharacterId ? characters.find((c) => c.id === activeCharacterId)?.name : null
@@ -328,7 +337,7 @@ export default function PersonaEditor({
   const addonCount = personaAddonCount + globalAddonCount
   const tagOptions = useMemo(
     () => availableTags.map(({ tag, count }) => ({ value: tag, label: tag, sublabel: t('personaEditor.characterCount', { count }) })),
-    [availableTags],
+    [availableTags, t],
   )
   const matchingCharacterCount = useMemo(
     () => tagBinding ? characters.filter((character) => characterMatchesPersonaTagBinding(character.tags || [], tagBinding)).length : 0,
@@ -480,10 +489,15 @@ export default function PersonaEditor({
             placeholder={t('personaEditor.shortTitle')}
           />
         </div>
+        <span data-spindle-mount="persona_editor_tab" data-spindle-scope={`persona-editor:${persona.id}:tab`} style={{ display: 'contents' }} />
       </div>
 
       {/* Description */}
       <div className={styles.section}>
+        <div className={styles.descriptionHeader}>
+          <span className={styles.descriptionLabel}>{t('personaEditor.description')}</span>
+          <TokenCountButton text={description} />
+        </div>
         <ExpandableTextarea
           className={styles.descTextarea}
           value={description}
@@ -538,7 +552,11 @@ export default function PersonaEditor({
                 ? subjectivePronoun
                 : field.key === 'objective_pronoun'
                   ? objectivePronoun
-                  : possessivePronoun
+                  : field.key === 'possessive_pronoun'
+                    ? possessivePronoun
+                    : field.key === 'reflexive_pronoun'
+                      ? reflexivePronoun
+                      : possessivePronounStandalone
 
             return (
               <label key={field.key} className={styles.pronounField}>
@@ -602,6 +620,7 @@ export default function PersonaEditor({
             clearable
             clearLabel={t('personaEditor.noLorebook')}
             className={styles.lorebookSelectWrapper}
+            portal
           />
           <Button
             size="icon-sm" variant="ghost"
@@ -785,7 +804,7 @@ export default function PersonaEditor({
           icon={<Play size={13} />}
           onClick={() => onSwitchTo(persona.id)}
         >
-          {isActive ? t('personaEditor.deactivate') : t('personaEditor.switchTo')}
+          {isSwitchActive ? t('personaEditor.deactivate') : t('personaEditor.switchTo')}
         </Button>
         <Button
           variant="secondary" size="sm"

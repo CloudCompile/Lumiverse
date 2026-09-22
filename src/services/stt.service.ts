@@ -1,6 +1,12 @@
 import * as secretsSvc from "./secrets.service";
 import * as sttConnectionsSvc from "./stt-connections.service";
 
+export function listSttProviders(userId?: string) {
+  return sttConnectionsSvc.listProviders(userId);
+}
+
+export { registerSttEngine, type HostSttEngine } from "./stt-connections.service";
+
 /** Secret key pattern for LLM connections (matches connections.service.ts) */
 function connectionSecretKey(id: string): string {
   return sttConnectionsSvc.sttConnectionSecretKey(id);
@@ -53,7 +59,7 @@ export async function transcribe(userId: string, input: TranscribeInput): Promis
     throw new Error("Selected STT connection was not found");
   }
 
-  const provider = sttConnectionsSvc.getProvider(profile.provider);
+  const provider = sttConnectionsSvc.getProvider(profile.provider, userId);
   if (!provider) {
     throw new Error(`Unknown STT provider: ${profile.provider}`);
   }
@@ -63,7 +69,7 @@ export async function transcribe(userId: string, input: TranscribeInput): Promis
     throw new Error("No API key found for the selected connection");
   }
 
-  const model = input.model?.trim() || (await sttConnectionsSvc.resolveConnectionModel(provider, profile, apiKey));
+  const model = input.model?.trim() || (await sttConnectionsSvc.resolveConnectionModel(provider, profile, apiKey, userId));
 
   const formData = new FormData();
   formData.append("file", new Blob([input.audioData]), input.fileName);
@@ -73,7 +79,7 @@ export async function transcribe(userId: string, input: TranscribeInput): Promis
     formData.append("language", language);
   }
 
-  const res = await fetch(`${sttConnectionsSvc.resolveSttApiUrl(profile)}/audio/transcriptions`, {
+  const res = await fetch(`${sttConnectionsSvc.resolveSttApiUrl(profile, userId)}/audio/transcriptions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,

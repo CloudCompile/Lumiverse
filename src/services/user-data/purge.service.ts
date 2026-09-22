@@ -20,6 +20,7 @@ import { getUserBaseDir } from "../../auth/provision";
 import { deleteUserVectors } from "../embeddings.service";
 import { getMcpClientManager } from "../mcp-client-manager";
 import { stopUserGenerations } from "../generate.service";
+import { requestHistoryStore } from "../request-history-store";
 import * as spindleLifecycle from "../../spindle/lifecycle";
 import {
   TABLE_REGISTRY,
@@ -74,6 +75,7 @@ export async function purgeUser(userId: string): Promise<PurgeReport> {
 
   // ── 4) SQL wipe. One transaction; FK cascades handle children.
   const deletedRows = performSqlWipe(userId);
+  requestHistoryStore.clear(userId);
 
   // ── 5) Filesystem. Run after commit — if the transaction had thrown we'd
   //    still want the files around for forensic recovery.
@@ -205,8 +207,7 @@ function collectUserFilePaths(userId: string): string[] {
     }
   }
 
-  // Image thumbnails: the registry only knows the v2 suffix; sweep legacy
-  // names too so an old-tier-thumbnail orphan doesn't survive.
+  // Sweep legacy names too so an old-tier-thumbnail orphan doesn't survive.
   try {
     const imgs = getDb()
       .query("SELECT id FROM images WHERE user_id = ?")
@@ -342,11 +343,16 @@ function performSqlWipe(userId: string): Record<string, number> {
       );
     }
 
-    // 4d) Tables excluded from export/import but still user-scoped. Today
-    //     that's just push_subscriptions (device-bound).
+    // 4d) Tables excluded from export/import but still user-scoped. These
+    //     notification destinations are device-bound.
     counts["push_subscriptions"] = runDelete(
       db,
       "DELETE FROM push_subscriptions WHERE user_id = ?",
+      userId,
+    );
+    counts["desktop_notification_destinations"] = runDelete(
+      db,
+      "DELETE FROM desktop_notification_destinations WHERE user_id = ?",
       userId,
     );
 
@@ -390,4 +396,3 @@ function runDelete(db: ReturnType<typeof getDb>, sql: string, ...params: any[]):
   const res = db.prepare(sql).run(...params);
   return Number(res.changes ?? 0);
 }
-

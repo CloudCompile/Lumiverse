@@ -167,8 +167,47 @@ function parseJson(raw: string): ParsedDocument {
 }
 
 function parseXml(raw: string): ParsedDocument {
-  // Strip XML tags, keeping text content
-  const text = raw
+  try {
+    const root = Bun.XML.parse(raw, { compact: false }) as XmlTreeElement;
+    const textParts: string[] = [];
+    collectXmlText(root, textParts);
+    return {
+      text: textParts.join(" ").replace(/\s+/g, " ").trim(),
+      metadata: { format: "xml", valid: true },
+    };
+  } catch {
+    // Preserve the old lenient behavior for malformed or HTML-flavoured XML.
+    return {
+      text: stripXmlLikeText(raw),
+      metadata: { format: "xml", valid: false },
+    };
+  }
+}
+
+interface XmlTreeElement {
+  name: string;
+  attributes: Record<string, string>;
+  children: XmlTreeChild[];
+}
+
+type XmlTreeChild = string | XmlTreeElement | { comment: string } | { target: string; data: string };
+
+function collectXmlText(root: XmlTreeElement, output: string[]): void {
+  const pending: XmlTreeChild[] = [root];
+  while (pending.length > 0) {
+    const child = pending.pop()!;
+    if (typeof child === "string") {
+      output.push(child);
+    } else if ("name" in child) {
+      for (let i = child.children.length - 1; i >= 0; i--) {
+        pending.push(child.children[i]!);
+      }
+    }
+  }
+}
+
+function stripXmlLikeText(raw: string): string {
+  return raw
     .replace(/<\?xml[^>]*\?>/gi, "")
     .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/<[^>]+>/g, " ")
@@ -179,7 +218,6 @@ function parseXml(raw: string): ParsedDocument {
     .replace(/&apos;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
-  return { text, metadata: { format: "xml" } };
 }
 
 function parseHtml(raw: string): ParsedDocument {

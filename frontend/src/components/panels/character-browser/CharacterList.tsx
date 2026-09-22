@@ -19,6 +19,7 @@ interface CharacterListProps {
 }
 
 const ROW_HEIGHT = 74
+const MINIMUM_VIEWPORT_HEIGHT = ROW_HEIGHT + 20
 
 export default function CharacterList({
   characters,
@@ -69,7 +70,13 @@ export default function CharacterList({
   if (characters.length === 0) return null
 
   return (
-    <div ref={parentRef} className={styles.scrollContainer}>
+    <div
+      ref={parentRef}
+      className={styles.scrollContainer}
+      // Keep the list equivalent of one complete row visible when several
+      // expanded folders compete for the browser's available height.
+      style={{ minHeight: MINIMUM_VIEWPORT_HEIGHT }}
+    >
       <div
         style={{
           height: virtualizer.getTotalSize(),

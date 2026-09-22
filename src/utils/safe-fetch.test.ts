@@ -13,6 +13,14 @@ describe("validateHost loopback allowance", () => {
     await expect(validateHost("service.localhost", { allowLoopback: true })).resolves.toBeUndefined();
   });
 
+  test("treats loopback as private when private ranges are enabled", async () => {
+    await expect(validateHost("localhost", { allowPrivate: true })).resolves.toBeUndefined();
+    await expect(validateHost("localhost.", { allowPrivate: true })).resolves.toBeUndefined();
+    await expect(validateHost("service.localhost", { allowPrivate: true })).resolves.toBeUndefined();
+    await expect(validateHost("127.0.0.1", { allowPrivate: true })).resolves.toBeUndefined();
+    await expect(validateHost("::1", { allowPrivate: true })).resolves.toBeUndefined();
+  });
+
   test("keeps loopback blocked by default", async () => {
     await expect(validateHost("127.0.0.1")).rejects.toBeInstanceOf(SSRFError);
     await expect(validateHost("localhost")).rejects.toBeInstanceOf(SSRFError);
@@ -83,6 +91,94 @@ describe("safeFetch SSRF protections", () => {
         body: "payload",
       });
       await expect(response.text()).resolves.toBe("ok");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("does not forward request bodies to redirect origins outside the allowlist", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response(null, {
+        status: 307,
+        headers: { location: "http://93.184.216.35/collect" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await expect(safeFetch("http://93.184.216.34/broker", {
+        method: "POST",
+        body: "private text",
+        allowedOrigins: ["http://93.184.216.34"],
+      })).rejects.toThrow(/origin is not allowed/);
+      expect(calls).toEqual(["http://93.184.216.34/broker"]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("safeFetch User-Agent", () => {
+  test("propagates caller cancellation after response headers have arrived", async () => {
+    const originalFetch = globalThis.fetch;
+    const controller = new AbortController();
+    let receivedSignal: AbortSignal | null | undefined;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      receivedSignal = init?.signal;
+      return new Response("ok");
+    }) as typeof fetch;
+    try {
+      await safeFetch("http://93.184.216.34/model", { signal: controller.signal });
+      expect(receivedSignal?.aborted).toBe(false);
+      controller.abort();
+      expect(receivedSignal?.aborted).toBe(true);
+      await expect(safeFetch("http://93.184.216.34/model", { signal: controller.signal })).rejects.toThrow();
+    } finally { globalThis.fetch = originalFetch; }
+  });
+  test("sends a product/version User-Agent when the caller omitted one", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("user-agent")).toMatch(/^Lumiverse\/\S+$/);
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    try {
+      await safeFetch("http://93.184.216.34/image.png");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("replaces a blank User-Agent so hosts that RST empty tokens still accept the request", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("user-agent")).toMatch(/^Lumiverse\/\S+$/);
+      expect(new Headers(init?.headers).get("accept")).toBe("image/*");
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    try {
+      await safeFetch("http://93.184.216.34/image.png", {
+        headers: { Accept: "image/*", "User-Agent": "" },
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("keeps an explicit caller User-Agent", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("user-agent")).toBe("Lumiverse");
+      return new Response("ok");
+    }) as unknown as typeof fetch;
+
+    try {
+      await safeFetch("http://93.184.216.34/image.png", {
+        headers: { "User-Agent": "Lumiverse" },
+      });
     } finally {
       globalThis.fetch = originalFetch;
     }

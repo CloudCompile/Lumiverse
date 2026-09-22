@@ -1,8 +1,8 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from 'react'
+import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
 
-import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink, TriangleAlert, GripVertical } from 'lucide-react'
+import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink, TriangleAlert, ShieldAlert, GripVertical, Power, PowerOff, ListChecks, Square, CheckSquare } from 'lucide-react'
 import {
   DndContext,
   MouseSensor,
@@ -22,6 +22,7 @@ import {
 } from '@dnd-kit/sortable'
 import { useScaledSortableStyle } from '@/lib/dndUiScale'
 import { Button } from '@/components/shared/FormComponents'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
@@ -31,12 +32,17 @@ import { Toggle } from '@/components/shared/Toggle'
 import { Badge } from '@/components/shared/Badge'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { RegexScript, RegexScope, RegexPerformanceMetadata } from '@/types/regex'
+import {
+  clearRegexScriptQuarantine,
+  getRegexEvidenceVersion,
+  isRegexScriptQuarantined,
+  subscribeRegexEvidence,
+} from '@/lib/regex/evidence'
+import { resolveRegexCreateScope, type RegexPanelScopeFilterValue } from './regexPanelScope'
 import styles from './RegexPanel.module.css'
 import clsx from 'clsx'
 
-type ScopeFilterValue = 'all' | 'global' | 'character' | 'chat' | 'preset'
-
-const SCOPE_FILTER_LABEL_KEYS: Record<ScopeFilterValue, string> = {
+const SCOPE_FILTER_LABEL_KEYS: Record<RegexPanelScopeFilterValue, string> = {
   all: 'regexPanel.scopeAll',
   global: 'regexPanel.scopeGlobal',
   character: 'regexPanel.scopeThisChar',
@@ -84,7 +90,69 @@ function getRegexPerformanceMetadata(script: RegexScript): RegexPerformanceMetad
   const raw = script.metadata?.regex_performance
   if (!raw || typeof raw !== 'object') return null
   if (raw.slow !== true || typeof raw.version !== 'number') return null
+  if (raw.engine_version !== 2) return null
   return raw as RegexPerformanceMetadata
+}
+
+type RemotePresetVersion = { source: 'lumihub' | 'illarin'; version: string }
+
+function getRemotePresetVersions(
+  scripts: RegexScript[],
+  presets: Record<string, { metadata?: Record<string, unknown> }>,
+): RemotePresetVersion[] {
+  const versions = new Map<string, RemotePresetVersion>()
+  for (const script of scripts) {
+    let attributed = false
+    for (const source of ['lumihub', 'illarin'] as const) {
+      const key = source === 'lumihub' ? '_lumiverse_lumihub_preset' : '_lumiverse_illarin_preset'
+      const attribution = script.metadata?.[key]
+      const attributedVersion = attribution && typeof attribution === 'object'
+        && 'version' in attribution && typeof attribution.version === 'string'
+        ? attribution.version.trim()
+        : ''
+      if (attributedVersion) {
+        versions.set(`${source}:${attributedVersion}`, { source, version: attributedVersion })
+        attributed = true
+      }
+    }
+    if (attributed) continue
+
+    const preset = script.preset_id ? presets[script.preset_id] : undefined
+    const source = preset?.metadata?._lumiverse_install_source
+    if (source !== 'lumihub' && source !== 'illarin') continue
+    const version = typeof preset.metadata._lumiverse_preset_version === 'string'
+      ? preset.metadata._lumiverse_preset_version.trim()
+      : ''
+    if (version) versions.set(`${source}:${version}`, { source, version })
+  }
+  return [...versions.values()].sort((left, right) => (
+    left.source.localeCompare(right.source)
+    || left.version.localeCompare(right.version, undefined, { numeric: true, sensitivity: 'base' })
+  ))
+}
+
+function getSpindleExtensionFolderVersions(
+  scripts: RegexScript[],
+): Array<{ identifier: string; version: string }> {
+  const versions = new Map<string, { identifier: string; version: string }>()
+  for (const script of scripts) {
+    const owner = script.owner_extension_identifier?.trim()
+    if (!owner || !script.folder.trim()) continue
+    const attribution = script.metadata?._lumiverse_spindle_extension
+    if (!attribution || typeof attribution !== 'object') continue
+    const identifier = typeof attribution.identifier === 'string' ? attribution.identifier.trim() : ''
+    const version = typeof attribution.version === 'string' ? attribution.version.trim() : ''
+    if (!identifier || identifier !== owner || !version) continue
+    versions.set(`${identifier}\u0000${version}`, { identifier, version })
+  }
+  return [...versions.values()].sort((left, right) => {
+    const byVersion = left.version.localeCompare(right.version, undefined, { numeric: true, sensitivity: 'base' })
+    return byVersion || left.identifier.localeCompare(right.identifier)
+  })
+}
+
+function formatVersionLabel(version: string): string {
+  return /^v/i.test(version) ? version : `v${version}`
 }
 
 export default function RegexPanel() {
@@ -98,13 +166,16 @@ export default function RegexPanel() {
   const removeRegexScript = useStore((s) => s.removeRegexScript)
   const bulkRemoveRegexScripts = useStore((s) => s.bulkRemoveRegexScripts)
   const toggleRegexScript = useStore((s) => s.toggleRegexScript)
+  const toggleSelectedRegexScripts = useStore((s) => s.toggleSelectedRegexScripts)
+  const toggleRegexFolder = useStore((s) => s.toggleRegexFolder)
   const reorderRegexScripts = useStore((s) => s.reorderRegexScripts)
   const openModal = useStore((s) => s.openModal)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
   const activeLoomPresetId = useStore((s) => s.activeLoomPresetId)
+  const presets = useStore((s) => s.presets)
 
-  const [scopeFilter, setScopeFilter] = useState<ScopeFilterValue>('all')
+  const [scopeFilter, setScopeFilter] = useState<RegexPanelScopeFilterValue>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
   const [showCreatePopover, setShowCreatePopover] = useState(false)
@@ -112,10 +183,14 @@ export default function RegexPanel() {
   const [creatingFolderMode, setCreatingFolderMode] = useState(false)
   const [deleteScriptTarget, setDeleteScriptTarget] = useState<RegexScript | null>(null)
   const [deleteGroupTarget, setDeleteGroupTarget] = useState<{ scripts: RegexScript[]; folder: string } | null>(null)
+  const [deleteBulkTarget, setDeleteBulkTarget] = useState<string[] | null>(null)
+  const [bulkMode, setBulkMode] = useState(false)
+  const [bulkPending, setBulkPending] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const popoverRef = useRef<HTMLDivElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
 
-  const { folders, createFolder } = useFolders('regexScriptFolders', regexScripts)
+  const { folders, createFolder, deleteFolder } = useFolders('regexScriptFolders', regexScripts)
 
   useEffect(() => {
     loadRegexScripts()
@@ -164,12 +239,38 @@ export default function RegexPanel() {
     return true
   })
 
+  const filteredScriptIds = useMemo(() => filteredScripts.map((s) => s.id), [filteredScripts])
+  const selectedCount = filteredScriptIds.reduce((count, id) => count + (selectedIds.has(id) ? 1 : 0), 0)
+  const allFilteredSelected = filteredScriptIds.length > 0 && selectedCount === filteredScriptIds.length
+
+  useEffect(() => {
+    setSelectedIds(new Set())
+  }, [scopeFilter])
+
+  // Drop IDs removed by another tab or a completed bulk delete.
+  useEffect(() => {
+    const validIds = new Set(regexScripts.map((script) => script.id))
+    setSelectedIds((previous) => {
+      const next = new Set([...previous].filter((id) => validIds.has(id)))
+      return next.size === previous.size ? previous : next
+    })
+  }, [regexScripts])
+
   const groupedScripts = useMemo(() => {
-    if (filteredScripts.length === 0) return null
     // Keep the uncategorized bucket under a folder-style header too, so it can
     // expose the same bulk actions as named folders.
     const groups: Array<{ folder: string; scripts: RegexScript[] }> = []
     const folderMap = new Map<string, RegexScript[]>()
+    // `folders` also contains names persisted by useFolders that do not have a
+    // script yet. They are useful empty drop targets in the complete library,
+    // but scoped views must only show folders containing a matching script.
+    // Otherwise every library folder appears with a misleading zero count.
+    if (scopeFilter === 'all') {
+      for (const folder of folders) {
+        folderMap.set(folder, [])
+        groups.push({ folder, scripts: folderMap.get(folder)! })
+      }
+    }
     for (const s of filteredScripts) {
       const key = s.folder || ''
       if (!folderMap.has(key)) {
@@ -185,7 +286,7 @@ export default function RegexPanel() {
       return a.folder.localeCompare(b.folder)
     })
     return groups
-  }, [filteredScripts])
+  }, [filteredScripts, folders, scopeFilter])
 
   const toggleFolder = useCallback((folder: string) => {
     setCollapsedFolders((prev) => {
@@ -283,18 +384,30 @@ export default function RegexPanel() {
   }, [regexScripts, renderedScriptIds, reorderRegexScripts, t])
 
   const handleAdd = useCallback(async (folder?: string) => {
+    const createScope = resolveRegexCreateScope(scopeFilter, activeCharacterId, activeChatId)
+    if (createScope.ok === false) {
+      const errorMessage = createScope.error === 'missingCharacter'
+        ? i18n.t('modals:regexEditor.saveErrorCharacterScope')
+        : i18n.t('modals:regexEditor.saveErrorChatScope')
+      toast.error(
+        errorMessage,
+      )
+      return
+    }
+
     try {
       const script = await addRegexScript({
         name: t('regexPanel.newScript'),
         find_regex: '',
         flags: 'gi',
         folder: folder || '',
+        ...createScope.input,
       })
       setExpandedId(script.id)
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [addRegexScript])
+  }, [scopeFilter, activeCharacterId, activeChatId, addRegexScript, t])
 
   const handleCreateFolder = useCallback(() => {
     const trimmed = creatingFolderName.trim()
@@ -313,11 +426,14 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [removeRegexScript, expandedId])
+  }, [removeRegexScript, expandedId, t])
 
-  const handleDeleteGroup = useCallback(async (scripts: RegexScript[]) => {
+  const handleDeleteGroup = useCallback(async (scripts: RegexScript[], folder: string) => {
     setDeleteGroupTarget(null)
-    if (scripts.length === 0) return
+    if (scripts.length === 0) {
+      if (folder) deleteFolder(folder)
+      return
+    }
     const ids = scripts.map((s) => s.id)
     try {
       const deleted = await bulkRemoveRegexScripts(ids)
@@ -325,12 +441,37 @@ export default function RegexPanel() {
       if (deleted < ids.length) {
         toast.error(t('regexPanel.deleteSomeFailed', { count: ids.length - deleted }))
       } else {
+        if (folder) deleteFolder(folder)
         toast.success(t('regexPanel.deletedScripts', { count: deleted }))
       }
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [bulkRemoveRegexScripts, expandedId])
+  }, [bulkRemoveRegexScripts, deleteFolder, expandedId, t])
+
+  const handleDeleteBulk = useCallback(async (ids: string[]) => {
+    setDeleteBulkTarget(null)
+    if (ids.length === 0) return
+    setBulkPending(true)
+    try {
+      const deleted = await bulkRemoveRegexScripts(ids)
+      if (expandedId && ids.includes(expandedId)) setExpandedId(null)
+      setSelectedIds((previous) => {
+        const next = new Set(previous)
+        ids.forEach((id) => next.delete(id))
+        return next
+      })
+      if (deleted < ids.length) {
+        toast.error(t('regexPanel.deleteSomeFailed', { count: ids.length - deleted }))
+      } else {
+        toast.success(t('regexPanel.deletedScripts', { count: deleted }))
+      }
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    } finally {
+      setBulkPending(false)
+    }
+  }, [bulkRemoveRegexScripts, expandedId, t])
 
   const handleToggle = useCallback(async (id: string, disabled: boolean, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -339,7 +480,52 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [toggleRegexScript])
+  }, [toggleRegexScript, t])
+
+  const handleToggleSelected = useCallback(async (disabled: boolean) => {
+    const ids = filteredScriptIds.filter((id) => selectedIds.has(id))
+    if (ids.length === 0) return
+    setBulkPending(true)
+    try {
+      const result = await toggleSelectedRegexScripts(ids, disabled)
+      if (result.changedIds.length > 0) {
+        toast.success(t(disabled ? 'regexPanel.disabledSelected' : 'regexPanel.enabledSelected', {
+          count: result.changedIds.length,
+        }))
+      } else if (result.skippedIds.length === 0) {
+        toast.info(t(disabled ? 'regexPanel.selectedAlreadyDisabled' : 'regexPanel.selectedAlreadyEnabled'))
+      }
+      if (result.skippedIds.length > 0) {
+        toast.info(t('regexPanel.selectedToggleSkipped', { count: result.skippedIds.length }))
+      }
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    } finally {
+      setBulkPending(false)
+    }
+  }, [filteredScriptIds, selectedIds, toggleSelectedRegexScripts, t])
+
+  const handleToggleFolder = useCallback(async (scripts: RegexScript[], folder: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (scripts.length === 0) return
+    const allEnabled = scripts.every((s) => !s.disabled)
+    const nextDisabled = allEnabled
+    const actionKey = nextDisabled ? 'disableFolder' : 'enableFolder'
+    try {
+      const result = await toggleRegexFolder(folder, nextDisabled)
+      const changedCount = result.changedIds.length
+      const skippedCount = result.skippedIds.length
+      if (changedCount > 0) {
+        toast.success(t(`regexPanel.${actionKey}`, { folder, count: changedCount }))
+      } else if (skippedCount > 0) {
+        toast.info(t('regexPanel.folderToggleSkipped', { folder, count: skippedCount }))
+      } else {
+        toast.info(t(`regexPanel.${actionKey}None`, { folder }))
+      }
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    }
+  }, [toggleRegexFolder, t])
 
   const handleBindToPreset = useCallback(async (script: RegexScript, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -354,7 +540,7 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [activeLoomPresetId, updateRegexScript])
+  }, [activeLoomPresetId, updateRegexScript, t])
 
   const handleBindFolderToPreset = useCallback(async (scripts: RegexScript[], folderLabel: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -372,7 +558,7 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [activeLoomPresetId, updateRegexScript])
+  }, [activeLoomPresetId, updateRegexScript, t])
 
   const handleExport = useCallback(async () => {
     try {
@@ -387,7 +573,7 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
-  }, [])
+  }, [t])
 
   const handleExportFolder = useCallback(async (folder: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -403,7 +589,69 @@ export default function RegexPanel() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
     }
+  }, [t])
+
+  const handleExportSelected = useCallback(async () => {
+    const ids = filteredScriptIds.filter((id) => selectedIds.has(id))
+    if (ids.length === 0) return
+    setBulkPending(true)
+    try {
+      const data = await regexApi.exportScripts(ids)
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = t('regexPanel.selectedExportFilename')
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    } finally {
+      setBulkPending(false)
+    }
+  }, [filteredScriptIds, selectedIds, t])
+
+  const toggleBulkMode = useCallback(() => {
+    const nextEnabled = !bulkMode
+    setBulkMode(nextEnabled)
+    setSelectedIds(new Set())
+    if (nextEnabled) {
+      setExpandedId(null)
+      setShowCreatePopover(false)
+      setCreatingFolderMode(false)
+      setCreatingFolderName('')
+    }
+  }, [bulkMode])
+
+  const toggleScriptSelection = useCallback((id: string) => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
   }, [])
+
+  const toggleGroupSelection = useCallback((scripts: RegexScript[]) => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous)
+      const allSelected = scripts.length > 0 && scripts.every((script) => next.has(script.id))
+      scripts.forEach((script) => {
+        if (allSelected) next.delete(script.id)
+        else next.add(script.id)
+      })
+      return next
+    })
+  }, [])
+
+  const toggleAllFiltered = useCallback(() => {
+    setSelectedIds((previous) => {
+      const next = new Set(previous)
+      if (allFilteredSelected) filteredScriptIds.forEach((id) => next.delete(id))
+      else filteredScriptIds.forEach((id) => next.add(id))
+      return next
+    })
+  }, [allFilteredSelected, filteredScriptIds])
 
   const handleImport = useCallback(() => {
     openModal('regexImport')
@@ -433,6 +681,16 @@ export default function RegexPanel() {
       <div className={styles.topBar}>
         <span className={styles.topBarTitle}>{t('regexPanel.title')}</span>
         <div className={styles.topBarActions}>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            className={clsx(bulkMode && styles.bulkModeButtonActive)}
+            onClick={toggleBulkMode}
+            title={t(bulkMode ? 'regexPanel.exitBulkSelect' : 'regexPanel.bulkSelect')}
+            aria-label={t(bulkMode ? 'regexPanel.exitBulkSelect' : 'regexPanel.bulkSelect')}
+          >
+            {bulkMode ? <X size={14} /> : <ListChecks size={14} />}
+          </Button>
           <Button size="icon-sm" variant="ghost" onClick={handleImport} title={t('actions.import', { ns: 'common' })}>
             <Upload size={14} />
           </Button>
@@ -515,7 +773,7 @@ export default function RegexPanel() {
           'character',
           'chat',
           ...(presetHasRegexes ? (['preset'] as const) : []),
-        ] as ScopeFilterValue[]).map((v) => (
+        ] as RegexPanelScopeFilterValue[]).map((v) => (
           <button
             key={v}
             className={clsx(styles.scopePill, scopeFilter === v && styles.scopePillActive)}
@@ -526,8 +784,65 @@ export default function RegexPanel() {
         ))}
       </div>
 
+      {bulkMode && (
+        <div className={styles.bulkBar}>
+          <div className={styles.bulkSummary}>
+            <button
+              type="button"
+              className={styles.bulkSelectAll}
+              onClick={toggleAllFiltered}
+              disabled={filteredScriptIds.length === 0 || bulkPending}
+            >
+              {allFilteredSelected ? <CheckSquare size={14} /> : <Square size={14} />}
+              {t(allFilteredSelected ? 'regexPanel.deselectAll' : 'regexPanel.selectAll')}
+            </button>
+            <span className={styles.bulkCount}>
+              {t('regexPanel.selectedCount', { selected: selectedCount, total: filteredScriptIds.length })}
+            </span>
+          </div>
+          <div className={styles.bulkActions}>
+            <button
+              type="button"
+              className={styles.bulkActionBtn}
+              onClick={() => { void handleToggleSelected(false) }}
+              disabled={selectedCount === 0 || bulkPending}
+              title={t('regexPanel.enableSelected')}
+            >
+              <Power size={13} /> {t('regexPanel.enable')}
+            </button>
+            <button
+              type="button"
+              className={styles.bulkActionBtn}
+              onClick={() => { void handleToggleSelected(true) }}
+              disabled={selectedCount === 0 || bulkPending}
+              title={t('regexPanel.disableSelected')}
+            >
+              <PowerOff size={13} /> {t('regexPanel.disable')}
+            </button>
+            <button
+              type="button"
+              className={styles.bulkActionBtn}
+              onClick={() => { void handleExportSelected() }}
+              disabled={selectedCount === 0 || bulkPending}
+              title={t('regexPanel.exportSelected')}
+            >
+              <Download size={13} /> {t('regexPanel.export')}
+            </button>
+            <button
+              type="button"
+              className={clsx(styles.bulkActionBtn, styles.bulkDeleteBtn)}
+              onClick={() => setDeleteBulkTarget(filteredScriptIds.filter((id) => selectedIds.has(id)))}
+              disabled={selectedCount === 0 || bulkPending}
+              title={t('regexPanel.deleteSelected')}
+            >
+              <Trash2 size={13} /> {t('regexPanel.delete')}
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className={styles.scriptList}>
-        {filteredScripts.length === 0 ? (
+        {groupedScripts.length === 0 ? (
           <div className={styles.emptyState}>
             <p>{t('regexPanel.noScripts')}</p>
             <p>{t('regexPanel.clickPlus')}</p>
@@ -535,24 +850,84 @@ export default function RegexPanel() {
         ) : (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
             <SortableContext items={renderedScriptIds} strategy={verticalListSortingStrategy}>
-              {groupedScripts ? (
-                groupedScripts.map((group) => {
-                  const folderKey = group.folder || UNCATEGORIZED_KEY
-                  const isCollapsed = collapsedFolders.has(folderKey)
-                  const folderLabel = group.folder || t('shared:uncategorized')
-                  const isNamedFolder = Boolean(group.folder)
-                  return (
-                    <div key={folderKey}>
-                      <DroppableFolderHeader folderKey={folderKey} dropDisabled={!isCollapsed} onToggle={() => toggleFolder(folderKey)}>
-                        <ChevronRight
-                          size={12}
-                          className={clsx(styles.folderChevron, !isCollapsed && styles.folderChevronOpen)}
-                        />
+              {groupedScripts.map((group) => {
+                const folderKey = group.folder || UNCATEGORIZED_KEY
+                const isCollapsed = collapsedFolders.has(folderKey)
+                const folderLabel = group.folder || t('shared:uncategorized')
+                const isNamedFolder = Boolean(group.folder)
+                const presetVersions = getRemotePresetVersions(group.scripts, presets)
+                const spindleVersions = getSpindleExtensionFolderVersions(group.scripts)
+                return (
+                  <div key={folderKey}>
+                      <DroppableFolderHeader
+                        folderKey={folderKey}
+                        dropDisabled={!isCollapsed && group.scripts.length > 0}
+                        onToggle={() => toggleFolder(folderKey)}
+                      >
+                        {bulkMode ? (
+                          <button
+                            type="button"
+                            className={styles.selectionBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleGroupSelection(group.scripts)
+                            }}
+                            aria-label={t(group.scripts.every((script) => selectedIds.has(script.id))
+                              ? 'regexPanel.deselectFolder'
+                              : 'regexPanel.selectFolder', { folder: folderLabel })}
+                          >
+                            {group.scripts.every((script) => selectedIds.has(script.id))
+                              ? <CheckSquare size={15} />
+                              : <Square size={15} />}
+                          </button>
+                        ) : (
+                          <ChevronRight
+                            size={12}
+                            className={clsx(styles.folderChevron, !isCollapsed && styles.folderChevronOpen)}
+                          />
+                        )}
                         <span className={styles.folderName}>
                           {folderLabel}
                         </span>
+                        {presetVersions.map(({ source, version }) => (
+                          <span
+                            key={`${source}:${version}`}
+                            className={styles.folderVersionBadge}
+                            title={t(source === 'illarin' ? 'regexPanel.illarinPresetVersion' : 'regexPanel.lumihubPresetVersion', {
+                              version: formatVersionLabel(version),
+                            })}
+                          >
+                            <Badge color="info" size="sm">{formatVersionLabel(version)}</Badge>
+                          </span>
+                        ))}
+                        {spindleVersions.map(({ identifier, version }) => (
+                          <span
+                            key={`${identifier}:${version}`}
+                            className={styles.folderVersionBadge}
+                            title={t('regexPanel.spindleExtensionVersion', { identifier, version: formatVersionLabel(version) })}
+                          >
+                            <Badge color="primary" size="sm">{formatVersionLabel(version)}</Badge>
+                          </span>
+                        ))}
                         <span className={styles.folderCount}>{group.scripts.length}</span>
-                        <div className={styles.folderActions}>
+                        {!bulkMode && <div className={styles.folderActions}>
+                          {group.scripts.length > 0 && (
+                            <button
+                              className={clsx(
+                                styles.folderActionBtn,
+                                group.scripts.every((s) => !s.disabled) && styles.folderToggleActive,
+                              )}
+                              onClick={(e) => handleToggleFolder(group.scripts, group.folder, e)}
+                              title={group.scripts.every((s) => !s.disabled)
+                                ? t('regexPanel.disableFolderTitle', { folder: folderLabel })
+                                : t('regexPanel.enableFolderTitle', { folder: folderLabel })}
+                              aria-label={group.scripts.every((s) => !s.disabled)
+                                ? t('regexPanel.disableFolderAria', { folder: folderLabel })
+                                : t('regexPanel.enableFolderAria', { folder: folderLabel })}
+                            >
+                              <Power size={12} />
+                            </button>
+                          )}
                           {isNamedFolder && activeLoomPresetId && (
                             <button
                               className={styles.folderActionBtn}
@@ -581,14 +956,14 @@ export default function RegexPanel() {
                             className={clsx(styles.folderActionBtn, styles.folderDeleteBtn)}
                             onClick={(e) => {
                               e.stopPropagation()
-                              setDeleteGroupTarget({ scripts: group.scripts, folder: folderLabel })
+                              setDeleteGroupTarget({ scripts: group.scripts, folder: group.folder })
                             }}
                             title={t('regexPanel.deleteFolderScripts', { folder: folderLabel })}
                             aria-label={t('regexPanel.deleteFolderScriptsAria', { folder: folderLabel })}
                           >
                             <Trash2 size={12} />
                           </button>
-                        </div>
+                        </div>}
                       </DroppableFolderHeader>
                       {!isCollapsed &&
                         group.scripts.map((script) => (
@@ -597,6 +972,9 @@ export default function RegexPanel() {
                             script={script}
                             expanded={expandedId === script.id}
                             onToggleExpand={() => setExpandedId(expandedId === script.id ? null : script.id)}
+                            selectionMode={bulkMode}
+                            selected={selectedIds.has(script.id)}
+                            onSelect={() => toggleScriptSelection(script.id)}
                             onDelete={(e) => { e.stopPropagation(); setDeleteScriptTarget(script) }}
                             onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
                             onBindPreset={(e) => handleBindToPreset(script, e)}
@@ -609,29 +987,9 @@ export default function RegexPanel() {
                             activePresetId={activeLoomPresetId}
                           />
                         ))}
-                    </div>
-                  )
-                })
-              ) : (
-                filteredScripts.map((script) => (
-                  <ScriptRow
-                    key={script.id}
-                    script={script}
-                    expanded={expandedId === script.id}
-                    onToggleExpand={() => setExpandedId(expandedId === script.id ? null : script.id)}
-                    onDelete={(e) => { e.stopPropagation(); setDeleteScriptTarget(script) }}
-                    onToggle={(disabled, e) => handleToggle(script.id, disabled, e)}
-                    onBindPreset={(e) => handleBindToPreset(script, e)}
-                    onUpdate={(updates) => updateRegexScript(script.id, updates)}
-                    onOpenModal={() => openModal('regexEditor', { scriptId: script.id })}
-                    targetBadge={targetBadge(script.target)}
-                    scopeIcon={scopeIcon(script.scope)}
-                    folders={folders}
-                    onCreateFolder={createFolder}
-                    activePresetId={activeLoomPresetId}
-                  />
-                ))
-              )}
+                  </div>
+                )
+              })}
             </SortableContext>
           </DndContext>
         )}
@@ -653,11 +1011,26 @@ export default function RegexPanel() {
         <ConfirmationModal
           isOpen={true}
           title={t('regexPanel.deleteFolderTitle')}
-          message={t('regexPanel.deleteFolderConfirm', { count: deleteGroupTarget.scripts.length, folder: deleteGroupTarget.folder })}
+          message={t('regexPanel.deleteFolderConfirm', {
+            count: deleteGroupTarget.scripts.length,
+            folder: deleteGroupTarget.folder || t('shared:uncategorized'),
+          })}
           variant="danger"
           confirmText={tc('actions.delete')}
-          onConfirm={() => { void handleDeleteGroup(deleteGroupTarget.scripts) }}
+          onConfirm={() => { void handleDeleteGroup(deleteGroupTarget.scripts, deleteGroupTarget.folder) }}
           onCancel={() => setDeleteGroupTarget(null)}
+        />
+      )}
+
+      {deleteBulkTarget && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('regexPanel.deleteSelectedTitle')}
+          message={t('regexPanel.deleteSelectedConfirm', { count: deleteBulkTarget.length })}
+          variant="danger"
+          confirmText={tc('actions.delete')}
+          onConfirm={() => { void handleDeleteBulk(deleteBulkTarget) }}
+          onCancel={() => setDeleteBulkTarget(null)}
         />
       )}
     </div>
@@ -665,10 +1038,10 @@ export default function RegexPanel() {
 }
 
 /** Folder header that doubles as a drop target, so a regex dragged onto a
- *  collapsed folder moves into it. The droppable is disabled while the folder is
- *  expanded — its visible rows are the precise drop targets then, and an active
- *  header droppable would otherwise "win" the collision when dragging toward the
- *  folder's top and bounce the row to the bottom. */
+ *  collapsed or empty folder moves into it. The droppable is disabled while a
+ *  non-empty folder is expanded — its visible rows are the precise drop targets
+ *  then, and an active header droppable would otherwise "win" the collision when
+ *  dragging toward the folder's top and bounce the row to the bottom. */
 function DroppableFolderHeader({
   folderKey,
   dropDisabled,
@@ -699,6 +1072,9 @@ function ScriptRow({
   script,
   expanded,
   onToggleExpand,
+  selectionMode,
+  selected,
+  onSelect,
   onDelete,
   onToggle,
   onBindPreset,
@@ -713,6 +1089,9 @@ function ScriptRow({
   script: RegexScript
   expanded: boolean
   onToggleExpand: () => void
+  selectionMode: boolean
+  selected: boolean
+  onSelect: () => void
   onDelete: (e: React.MouseEvent) => void
   onToggle: (disabled: boolean, e: React.MouseEvent) => void
   onBindPreset: (e: React.MouseEvent) => void
@@ -727,7 +1106,10 @@ function ScriptRow({
   const { t } = useTranslation('panels')
   const replaceRef = useRef<HTMLTextAreaElement>(null)
 
-  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id: script.id })
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({
+    id: script.id,
+    disabled: selectionMode,
+  })
   const { setNodeRef, style: scaledStyle } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
   const rowStyle = {
     ...scaledStyle,
@@ -747,6 +1129,7 @@ function ScriptRow({
   }))
   const pendingRef = useRef<Record<string, any>>({})
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const nameInputFocusedRef = useRef(false)
   const onUpdateRef = useRef(onUpdate)
   onUpdateRef.current = onUpdate
 
@@ -761,10 +1144,27 @@ function ScriptRow({
     )
   }, [script.name, script.find_regex, script.replace_string])
 
-  const flushDraft = useCallback(() => {
+  const flushDraft = useCallback((force = false) => {
     clearTimeout(saveTimer.current)
-    const pending = pendingRef.current
-    pendingRef.current = {}
+    const pending = { ...pendingRef.current }
+
+    // The backend trims script names. If we save while the user has just typed
+    // a space, the response replaces the local draft with the trimmed value and
+    // makes it impossible to continue typing the next word after a pause. Keep
+    // that trailing space local until it becomes internal whitespace, or until
+    // the field is blurred/unmounted.
+    if (
+      !force
+      && nameInputFocusedRef.current
+      && typeof pending.name === 'string'
+      && /\s$/.test(pending.name)
+    ) {
+      pendingRef.current = { name: pending.name }
+      delete pending.name
+    } else {
+      pendingRef.current = {}
+    }
+
     if (Object.keys(pending).length === 0) return
     void Promise.resolve(onUpdateRef.current(pending)).catch((err: any) => {
       toast.error(err.body?.error || err.message || i18n.t('regexPanel.requestFailed', { ns: 'panels' }))
@@ -780,7 +1180,7 @@ function ScriptRow({
 
   // Persist trailing edits when the row unmounts (folder collapse, scope
   // filter change, panel close).
-  useEffect(() => () => flushDraft(), [flushDraft])
+  useEffect(() => () => flushDraft(true), [flushDraft])
 
   const performance = getRegexPerformanceMetadata(script)
   const warningText = performance
@@ -789,29 +1189,74 @@ function ScriptRow({
       : t('regexPanel.slowDetected', { seconds: (performance.elapsed_ms / 1000).toFixed(1) })
     : null
 
+  // Quarantine can be set by the display pipeline mid-session, outside any
+  // store write, so the row subscribes to the evidence module instead of
+  // reading script.metadata. The overlay is the source of truth: it also
+  // reflects a clear that has not been refetched from the server yet.
+  useSyncExternalStore(
+    subscribeRegexEvidence,
+    getRegexEvidenceVersion,
+    getRegexEvidenceVersion,
+  )
+  const quarantined = isRegexScriptQuarantined(script)
+  const [clearingQuarantine, setClearingQuarantine] = useState(false)
+  const loadRegexScripts = useStore((s) => s.loadRegexScripts)
+
+  const handleClearQuarantine = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setClearingQuarantine(true)
+    try {
+      await clearRegexScriptQuarantine(script)
+      // Refetch so script.metadata.regex_evidence matches the cleared row.
+      // updateRegexScript() was rejected for this: it would issue a write (and
+      // bump updated_at) purely to read state back.
+      await loadRegexScripts()
+      toast.success(t('regexPanel.quarantineCleared', { name: script.name }))
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    } finally {
+      setClearingQuarantine(false)
+    }
+  }, [script, loadRegexScripts, t])
+
   return (
     <div ref={setNodeRef} style={rowStyle}>
       <div
         className={clsx(
           styles.scriptRow,
           expanded && styles.scriptRowExpanded,
+          selected && styles.scriptRowSelected,
           performance && styles.scriptRowSlow,
         )}
-        onClick={onToggleExpand}
+        onClick={selectionMode ? onSelect : onToggleExpand}
       >
-        <button
-          type="button"
-          className={styles.dragHandle}
-          title={t('regexPanel.dragToReorder')}
-          aria-label={t('regexPanel.dragToFolderAria')}
-          tabIndex={-1}
-          onClick={(e) => e.stopPropagation()}
-          onContextMenu={(e) => e.preventDefault()}
-          {...attributes}
-          {...listeners}
-        >
-          <GripVertical size={13} />
-        </button>
+        {selectionMode ? (
+          <button
+            type="button"
+            className={styles.selectionBtn}
+            onClick={(e) => {
+              e.stopPropagation()
+              onSelect()
+            }}
+            aria-label={t(selected ? 'regexPanel.deselectScript' : 'regexPanel.selectScript', { name: draft.name })}
+          >
+            {selected ? <CheckSquare size={15} /> : <Square size={15} />}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.dragHandle}
+            title={t('regexPanel.dragToReorder')}
+            aria-label={t('regexPanel.dragToFolderAria')}
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+            onContextMenu={(e) => e.preventDefault()}
+            {...attributes}
+            {...listeners}
+          >
+            <GripVertical size={13} />
+          </button>
+        )}
         <Badge size="sm">{scopeIcon}</Badge>
         <span className={clsx(styles.scriptName, script.disabled && styles.scriptNameDisabled)}>
           {draft.name}
@@ -821,14 +1266,23 @@ function ScriptRow({
             <TriangleAlert size={12} /> {t('regexPanel.slow')}
           </span>
         )}
+        {quarantined && (
+          <span
+            className={styles.slowBadge}
+            title={t('regexPanel.quarantinedDetail')}
+            aria-label={t('regexPanel.quarantinedDetail')}
+          >
+            <ShieldAlert size={12} /> {t('regexPanel.quarantined')}
+          </span>
+        )}
         {targetBadge}
-        <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center' }}>
+        {!selectionMode && <div onClick={(e) => e.stopPropagation()} style={{ display: 'flex', alignItems: 'center' }}>
           <Toggle.Switch
             checked={!script.disabled}
             onChange={(v) => onToggle(!v, { stopPropagation: () => {} } as React.MouseEvent)}
           />
-        </div>
-        {activePresetId && (
+        </div>}
+        {!selectionMode && activePresetId && (
           <Button
             size="icon-sm"
             variant="ghost"
@@ -839,12 +1293,15 @@ function ScriptRow({
             {script.preset_id === activePresetId ? <Unlink size={13} /> : <Link size={13} />}
           </Button>
         )}
-        <Button size="icon-sm" variant="danger-ghost" className={styles.deleteBtn} onClick={onDelete} title={i18n.t('actions.delete', { ns: 'common' })}>
-          <Trash2 size={13} />
-        </Button>
+        {!selectionMode && (
+          <Button size="icon-sm" variant="danger-ghost" className={styles.deleteBtn} onClick={onDelete} title={i18n.t('actions.delete', { ns: 'common' })}>
+            <Trash2 size={13} />
+          </Button>
+        )}
+        <span data-spindle-mount="regex_entry_row" data-spindle-scope={`regex-entry:${script.id}:row`} style={{ display: 'contents' }} />
       </div>
 
-      {expanded && (
+      {expanded && !selectionMode && (
         <div className={styles.inlineEditor}>
           <div className={styles.field}>
               <label className={styles.fieldLabel}>{t('regexPanel.name')}</label>
@@ -852,6 +1309,11 @@ function ScriptRow({
               className={styles.fieldInput}
               value={draft.name}
               onChange={(e) => queueDraftUpdate({ name: e.target.value })}
+              onFocus={() => { nameInputFocusedRef.current = true }}
+              onBlur={() => {
+                nameInputFocusedRef.current = false
+                flushDraft(true)
+              }}
             />
           </div>
           {performance && (
@@ -862,6 +1324,22 @@ function ScriptRow({
                   ? t('regexPanel.timedOutDetail')
                   : t('regexPanel.slowDetail', { seconds: (performance.elapsed_ms / 1000).toFixed(1) })}
               </span>
+            </div>
+          )}
+          {quarantined && (
+            <div className={styles.warningBox}>
+              <ShieldAlert size={14} />
+              <span>{t('regexPanel.quarantinedDetail')}</span>
+              <Button
+                size="sm"
+                variant="ghost"
+                className={styles.warningBoxAction}
+                onClick={handleClearQuarantine}
+                loading={clearingQuarantine}
+                aria-label={t('regexPanel.clearQuarantineAria', { name: script.name })}
+              >
+                {t('regexPanel.clearQuarantine')}
+              </Button>
             </div>
           )}
           <div className={styles.field}>
@@ -878,11 +1356,14 @@ function ScriptRow({
               Find
               <span className={styles.fieldHint}>{t('regexPanel.findHint')}</span>
             </label>
-            <input
-              className={styles.fieldInputMono}
+            <ExpandableTextarea
+              className={styles.fieldTextarea}
               value={draft.find_regex}
-              onChange={(e) => queueDraftUpdate({ find_regex: e.target.value })}
+              onChange={(value) => queueDraftUpdate({ find_regex: value })}
+              title="Find"
               placeholder={t('regexPanel.findPlaceholder')}
+              rows={2}
+              spellCheck={false}
             />
           </div>
           <div className={styles.field}>
@@ -917,13 +1398,15 @@ function ScriptRow({
                 </button>
               ))}
             </div>
-            <textarea
+            <ExpandableTextarea
               ref={replaceRef}
               className={styles.fieldTextarea}
               value={draft.replace_string}
-              onChange={(e) => queueDraftUpdate({ replace_string: e.target.value })}
+              onChange={(value) => queueDraftUpdate({ replace_string: value })}
+              title={t('regexPanel.replaceWith')}
               placeholder={t('regexPanel.replacePlaceholder')}
               rows={2}
+              spellCheck={false}
             />
           </div>
           <div className={styles.fieldRow}>

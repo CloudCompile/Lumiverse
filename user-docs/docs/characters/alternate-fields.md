@@ -54,11 +54,23 @@ Give your character multiple avatar options — different outfits, different art
 
 The selected avatar is stored per-chat, so different conversations can show different looks for the same character.
 
+### Linking Avatars to Character State
+
+An avatar can optionally remember a description, personality, scenario, and greeting selection:
+
+1. Open the character editor and go to the avatar section
+2. Use the link button on an avatar
+3. Choose a variant for each field you want the avatar to control
+4. Leave a field on **Keep current** when switching the avatar should not change it
+
+Selecting a linked avatar applies all of its configured fields together. Selecting a field or greeting that is uniquely linked to an avatar also switches to that avatar. Unlinked selections leave the current avatar unchanged.
+
 ---
 
 ## How It Works Behind the Scenes
 
 - Alternate fields are stored in the character's extensions data — no extra database tables needed
 - Per-chat selections are stored in the chat's metadata
+- Avatar bindings are stored in the character's extensions and reference stable avatar and field variant IDs
 - During prompt assembly, selected variants override the base fields before macros are resolved
 - When exporting as CHARX, all alternate fields and avatars are included in the `lumiverse_modules.json` bundle

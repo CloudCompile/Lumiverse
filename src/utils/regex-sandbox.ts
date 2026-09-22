@@ -1,6 +1,3 @@
-import { shouldUseBunWorkers, warnBunWorkerFallback } from "./bun-worker-guard";
-import { runRegexRequest } from "./regex-sandbox-core";
-
 /**
  * Worker-backed regex sandbox.
  *
@@ -20,6 +17,7 @@ import { runRegexRequest } from "./regex-sandbox-core";
 
 const DEFAULT_TIMEOUT_MS = 500;
 const DEFAULT_POOL_SIZE = 2;
+export const REGEX_WORKER_START_TIMEOUT_MS = 5_000;
 
 export class RegexTimeoutError extends Error {
   constructor(public readonly timeoutMs: number) {
@@ -35,15 +33,36 @@ export class RegexSandboxError extends Error {
   }
 }
 
+/** Expected cancellation raised when the process tears down the worker pool. */
+export class RegexSandboxShutdownError extends RegexSandboxError {
+  constructor() {
+    super("Regex sandbox shut down");
+    this.name = "RegexSandboxShutdownError";
+  }
+}
+
+export class RegexWorkerStartupTimeoutError extends RegexSandboxError {
+  constructor(public readonly timeoutMs: number) {
+    super(`Regex worker did not acknowledge the request within ${timeoutMs}ms`);
+    this.name = "RegexWorkerStartupTimeoutError";
+  }
+}
+
 export interface SandboxMatch {
   fullMatch: string;
   index: number;
   groups: (string | undefined)[];
-  namedGroups?: Record<string, string>;
+  namedGroups?: Record<string, string | undefined>;
+}
+
+export interface SandboxCaptureReplacement {
+  index: number;
+  matchLength: number;
+  replacement: string;
 }
 
 interface QueueItem {
-  op: "replace" | "test" | "collect";
+  op: "replace" | "test" | "collect" | "capture-replacements";
   payload: Record<string, unknown>;
   timeoutMs: number;
   resolve: (value: unknown) => void;
@@ -52,19 +71,44 @@ interface QueueItem {
 
 interface InFlight {
   id: string;
-  timer: ReturnType<typeof setTimeout>;
+  timer: unknown;
+  phase: "startup" | "execution";
   resolve: (value: unknown) => void;
   reject: (err: Error) => void;
   timeoutMs: number;
 }
 
-class RegexWorkerPool {
+export interface RegexWorkerPoolDeps {
+  createWorker(): Worker;
+  scheduleTimer(fn: () => void, ms: number): unknown;
+  cancelTimer(timer: unknown): void;
+  createRequestId(): string;
+  startupTimeoutMs: number;
+}
+
+function defaultWorkerPoolDeps(): RegexWorkerPoolDeps {
+  return {
+    createWorker: () => new Worker(
+      new URL("./regex-sandbox.worker.ts", import.meta.url).href,
+      { type: "module" },
+    ),
+    scheduleTimer: (fn, ms) => setTimeout(fn, ms),
+    cancelTimer: (timer) => clearTimeout(timer as ReturnType<typeof setTimeout>),
+    createRequestId: () => crypto.randomUUID(),
+    startupTimeoutMs: REGEX_WORKER_START_TIMEOUT_MS,
+  };
+}
+
+export class RegexWorkerPool {
   private workers = new Set<Worker>();
   private idle: Worker[] = [];
   private inflight = new Map<Worker, InFlight>();
   private queue: QueueItem[] = [];
 
-  constructor(private readonly maxSize: number) {}
+  constructor(
+    private readonly maxSize: number,
+    private readonly deps: RegexWorkerPoolDeps = defaultWorkerPoolDeps(),
+  ) {}
 
   run<T>(op: QueueItem["op"], payload: Record<string, unknown>, timeoutMs: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
@@ -94,10 +138,7 @@ class RegexWorkerPool {
   }
 
   private spawn(): Worker {
-    const worker = new Worker(
-      new URL("./regex-sandbox.worker.ts", import.meta.url).href,
-      { type: "module" },
-    );
+    const worker = this.deps.createWorker();
     worker.addEventListener("message", (e) => this.onMessage(worker, e as MessageEvent));
     worker.addEventListener("error", (e) => this.onError(worker, e as ErrorEvent));
     this.workers.add(worker);
@@ -105,11 +146,18 @@ class RegexWorkerPool {
   }
 
   private dispatch(worker: Worker, item: QueueItem): void {
-    const id = crypto.randomUUID();
-    const timer = setTimeout(() => this.onTimeout(worker), item.timeoutMs);
+    const id = this.deps.createRequestId();
+    // Worker construction, module loading and event-loop scheduling are not
+    // regex execution. Give that phase its own watchdog and start the regex
+    // budget only after the worker acknowledges this request.
+    const timer = this.deps.scheduleTimer(
+      () => this.onTimeout(worker),
+      this.deps.startupTimeoutMs,
+    );
     this.inflight.set(worker, {
       id,
       timer,
+      phase: "startup",
       resolve: item.resolve,
       reject: item.reject,
       timeoutMs: item.timeoutMs,
@@ -118,11 +166,27 @@ class RegexWorkerPool {
   }
 
   private onMessage(worker: Worker, event: MessageEvent): void {
-    const data = event.data as { id: string; ok: boolean; result?: unknown; error?: string };
+    const data = event.data as {
+      id: string;
+      type?: "started";
+      ok?: boolean;
+      result?: unknown;
+      error?: string;
+    };
     const flight = this.inflight.get(worker);
     if (!flight || flight.id !== data.id) return; // stale; ignore
+    if (data.type === "started") {
+      if (flight.phase !== "startup") return;
+      this.deps.cancelTimer(flight.timer);
+      flight.phase = "execution";
+      flight.timer = this.deps.scheduleTimer(
+        () => this.onTimeout(worker),
+        flight.timeoutMs,
+      );
+      return;
+    }
     this.inflight.delete(worker);
-    clearTimeout(flight.timer);
+    this.deps.cancelTimer(flight.timer);
     if (data.ok) flight.resolve(data.result);
     else flight.reject(new RegexSandboxError(data.error || "Regex evaluation failed"));
     this.release(worker);
@@ -132,7 +196,7 @@ class RegexWorkerPool {
     const flight = this.inflight.get(worker);
     if (flight) {
       this.inflight.delete(worker);
-      clearTimeout(flight.timer);
+      this.deps.cancelTimer(flight.timer);
       flight.reject(new RegexSandboxError(`Regex worker crashed: ${event.message || "unknown"}`));
     }
     this.discard(worker);
@@ -143,7 +207,11 @@ class RegexWorkerPool {
     const flight = this.inflight.get(worker);
     if (flight) {
       this.inflight.delete(worker);
-      flight.reject(new RegexTimeoutError(flight.timeoutMs));
+      if (flight.phase === "execution") {
+        flight.reject(new RegexTimeoutError(flight.timeoutMs));
+      } else {
+        flight.reject(new RegexWorkerStartupTimeoutError(this.deps.startupTimeoutMs));
+      }
     }
     try { worker.terminate(); } catch { /* ignore */ }
     this.discard(worker);
@@ -174,6 +242,17 @@ class RegexWorkerPool {
     }
   }
 
+  releaseIdle(): number {
+    if (this.queue.length > 0) return 0;
+    const idle = this.idle;
+    this.idle = [];
+    for (const worker of idle) {
+      this.workers.delete(worker);
+      try { worker.terminate(); } catch { /* ignore */ }
+    }
+    return idle.length;
+  }
+
   /** Tear down the pool — call from shutdown hooks. */
   shutdown(): void {
     for (const w of this.workers) {
@@ -182,66 +261,36 @@ class RegexWorkerPool {
     this.workers.clear();
     this.idle = [];
     for (const flight of this.inflight.values()) {
-      clearTimeout(flight.timer);
-      flight.reject(new RegexSandboxError("Regex sandbox shut down"));
+      this.deps.cancelTimer(flight.timer);
+      flight.reject(new RegexSandboxShutdownError());
     }
     this.inflight.clear();
     for (const item of this.queue) {
-      item.reject(new RegexSandboxError("Regex sandbox shut down"));
+      item.reject(new RegexSandboxShutdownError());
     }
     this.queue = [];
   }
 }
 
 let _pool: RegexWorkerPool | null = null;
+let sandboxShutDown = false;
 
 function getPool(): RegexWorkerPool {
+  if (sandboxShutDown) throw new RegexSandboxShutdownError();
   if (!_pool) _pool = new RegexWorkerPool(DEFAULT_POOL_SIZE);
   return _pool;
 }
 
-function runRegexInline<T>(
-  op: QueueItem["op"],
-  payload: Record<string, unknown>,
-): Promise<T> {
-  // Windows Bun worker crashes are worse than losing timeout isolation here.
-  warnBunWorkerFallback("regex sandbox");
-  if (op === "replace") {
-    return Promise.resolve(runRegexRequest({
-      id: "inline",
-      op,
-      pattern: String(payload.pattern ?? ""),
-      flags: String(payload.flags ?? ""),
-      input: String(payload.input ?? ""),
-      replacement: String(payload.replacement ?? ""),
-    }) as T);
-  }
-
-  if (op === "test") {
-    return Promise.resolve(runRegexRequest({
-      id: "inline",
-      op,
-      pattern: String(payload.pattern ?? ""),
-      flags: String(payload.flags ?? ""),
-      input: String(payload.input ?? ""),
-      replacement: String(payload.replacement ?? ""),
-    }) as T);
-  }
-
-  return Promise.resolve(runRegexRequest({
-    id: "inline",
-    op,
-    pattern: String(payload.pattern ?? ""),
-    flags: String(payload.flags ?? ""),
-    input: String(payload.input ?? ""),
-  }) as T);
-}
-
 export function shutdownRegexSandbox(): void {
+  sandboxShutDown = true;
   if (_pool) {
     _pool.shutdown();
     _pool = null;
   }
+}
+
+export function releaseIdleRegexWorkers(): number {
+  return _pool?.releaseIdle() ?? 0;
 }
 
 /** Validate the pattern compiles before sending to a worker. */
@@ -260,9 +309,6 @@ export async function regexReplaceSandboxed(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<string> {
   assertCompilable(pattern, flags);
-  if (!shouldUseBunWorkers()) {
-    return runRegexInline<string>("replace", { pattern, flags, input, replacement });
-  }
   return getPool().run<string>(
     "replace",
     { pattern, flags, input, replacement },
@@ -275,14 +321,32 @@ export async function regexCollectSandboxed(
   flags: string,
   input: string,
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  maxMatches?: number,
 ): Promise<SandboxMatch[]> {
   assertCompilable(pattern, flags);
-  if (!shouldUseBunWorkers()) {
-    return runRegexInline<SandboxMatch[]>("collect", { pattern, flags, input });
-  }
   return getPool().run<SandboxMatch[]>(
     "collect",
-    { pattern, flags, input },
+    { pattern, flags, input, maxMatches },
+    timeoutMs,
+  );
+}
+
+/**
+ * Collect raw-mode replacement templates with captures already interpolated.
+ * This keeps large capture arrays inside the worker instead of cloning them
+ * across the worker boundary.
+ */
+export async function regexCaptureReplacementsSandboxed(
+  pattern: string,
+  flags: string,
+  input: string,
+  replacement: string,
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+): Promise<SandboxCaptureReplacement[]> {
+  assertCompilable(pattern, flags);
+  return getPool().run<SandboxCaptureReplacement[]>(
+    "capture-replacements",
+    { pattern, flags, input, replacement },
     timeoutMs,
   );
 }
@@ -295,14 +359,6 @@ export async function regexTestSandboxed(
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
 ): Promise<{ result: string; matches: number }> {
   assertCompilable(pattern, flags);
-  if (!shouldUseBunWorkers()) {
-    return runRegexInline<{ result: string; matches: number }>("test", {
-      pattern,
-      flags,
-      input,
-      replacement,
-    });
-  }
   return getPool().run<{ result: string; matches: number }>(
     "test",
     { pattern, flags, input, replacement },

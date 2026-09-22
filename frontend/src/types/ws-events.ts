@@ -4,11 +4,13 @@ export enum EventType {
   CHARACTER_CREATED = 'CHARACTER_CREATED',
   CHARACTER_EDITED = 'CHARACTER_EDITED',
   CHARACTER_DELETED = 'CHARACTER_DELETED',
+  CHARACTER_LIBRARY_CHANGED = 'CHARACTER_LIBRARY_CHANGED',
   PERSONA_CHANGED = 'PERSONA_CHANGED',
   MESSAGE_SENT = 'MESSAGE_SENT',
   MESSAGE_EDITED = 'MESSAGE_EDITED',
   MESSAGE_DELETED = 'MESSAGE_DELETED',
   MESSAGE_SWIPED = 'MESSAGE_SWIPED',
+  CHAT_FORKED = 'CHAT_FORKED',
   CHAT_CHANGED = 'CHAT_CHANGED',
   CHAT_SWITCHED = 'CHAT_SWITCHED',
   GENERATION_STARTED = 'GENERATION_STARTED',
@@ -55,9 +57,12 @@ export enum EventType {
 
   // World Info
   WORLD_INFO_ACTIVATED = 'WORLD_INFO_ACTIVATED',
+  CONNECTION_PROFILE_LOADED = 'CONNECTION_PROFILE_LOADED',
+  PRESET_PROFILE_CHANGED = 'PRESET_PROFILE_CHANGED',
 
   // World Books (lorebook editor live-sync — mirror src/ws/events.ts)
   WORLD_BOOK_CHANGED = 'WORLD_BOOK_CHANGED',
+  WORLD_BOOK_LIBRARY_CHANGED = 'WORLD_BOOK_LIBRARY_CHANGED',
   WORLD_BOOK_DELETED = 'WORLD_BOOK_DELETED',
   WORLD_BOOK_ENTRY_CHANGED = 'WORLD_BOOK_ENTRY_CHANGED',
   WORLD_BOOK_ENTRY_DELETED = 'WORLD_BOOK_ENTRY_DELETED',
@@ -73,11 +78,15 @@ export enum EventType {
   SPINDLE_BULK_UPDATE_COMPLETE = 'SPINDLE_BULK_UPDATE_COMPLETE',
   SPINDLE_FRONTEND_MSG = 'SPINDLE_FRONTEND_MSG',
   SPINDLE_FRONTEND_PROCESS = 'SPINDLE_FRONTEND_PROCESS',
+  SPINDLE_FRONTEND_RUNTIME_CAPABILITY_CHANGED = 'SPINDLE_FRONTEND_RUNTIME_CAPABILITY_CHANGED',
   SPINDLE_TOAST = 'SPINDLE_TOAST',
   MESSAGE_TAG_INTERCEPTED = 'MESSAGE_TAG_INTERCEPTED',
 
   // Spindle command palette commands
   SPINDLE_COMMANDS_CHANGED = 'SPINDLE_COMMANDS_CHANGED',
+
+  // Spindle provider registry (recipient-scoped; never a system broadcast)
+  SPINDLE_PROVIDER_CHANGED = 'SPINDLE_PROVIDER_CHANGED',
 
   // Spindle UI automation (extension navigates the user to a tab/settings/etc.)
   SPINDLE_UI_NAVIGATE = 'SPINDLE_UI_NAVIGATE',
@@ -109,9 +118,11 @@ export enum EventType {
 
   // Expressions
   EXPRESSION_CHANGED = 'EXPRESSION_CHANGED',
+  MULTI_CHARACTER_EXPRESSIONS_CHANGED = 'MULTI_CHARACTER_EXPRESSIONS_CHANGED',
 
   // Avatar
   CHARACTER_AVATAR_CHANGED = 'CHARACTER_AVATAR_CHANGED',
+  CHARACTER_EXPORT_PROGRESS = 'CHARACTER_EXPORT_PROGRESS',
 
   // Wallpaper uploads
   WALLPAPER_UPLOAD_PROGRESS = 'WALLPAPER_UPLOAD_PROGRESS',
@@ -151,6 +162,8 @@ export enum EventType {
   OPERATOR_LOG = 'OPERATOR_LOG',
   OPERATOR_STATUS = 'OPERATOR_STATUS',
   OPERATOR_PROGRESS = 'OPERATOR_PROGRESS',
+  IMAGE_THUMBNAIL_QUEUE = 'IMAGE_THUMBNAIL_QUEUE',
+
 
   // Memory Cortex
   CORTEX_REBUILD_PROGRESS = 'CORTEX_REBUILD_PROGRESS',
@@ -170,6 +183,7 @@ export enum EventType {
 
   // System health
   SYSTEM_DISK_LOW = 'SYSTEM_DISK_LOW',
+  SYSTEM_SMART_ALERT = 'SYSTEM_SMART_ALERT',
 }
 
 export interface SystemDiskLowPayload {
@@ -181,6 +195,19 @@ export interface SystemDiskLowPayload {
   /** 0..1, the threshold that was crossed */
   thresholdPercent: number
   thresholdFreeBytes: number
+}
+
+export interface SystemSmartAlertPayload {
+  checkedAt: string
+  drives: Array<{
+    device: string
+    model: string | null
+    status: 'warning' | 'failing'
+    conditions: Array<{
+      severity: 'warning' | 'failing'
+      message: string
+    }>
+  }>
 }
 
 export interface WallpaperUploadProgressPayload {
@@ -253,6 +280,26 @@ export interface OperatorProgressPayload {
   message: string
 }
 
+export interface ImageThumbnailQueuePayload {
+  processed: number
+  remaining: number
+  total: number
+  active: number
+  queued: number
+}
+
+export type ProviderRegistryChangeAction = 'add' | 'remove' | 'change'
+export type ProviderRegistryAction = ProviderRegistryChangeAction | 'snapshot'
+
+export interface ProviderRegistryChangedPayload {
+  userId: string
+  scope: string
+  action: ProviderRegistryAction
+  generation: number
+  revision: number
+  payload: unknown
+}
+
 export interface SpindlePreGenerationActivityPayload {
   chatId: string
   phase: 'message_content_processor' | 'context_handler' | 'interceptor'
@@ -298,6 +345,10 @@ export interface ContextClipStats {
   tokenizerUsed: string
   budgetInvalid?: boolean
   fixedOverBudget?: boolean
+  anchorActive?: boolean
+  protectedHistoryTokens?: number
+  remainingBeforeAnchor?: number
+  anchorOverflow?: boolean
 }
 
 export interface GenerationStartedPayload {
@@ -338,6 +389,10 @@ export interface GenerationMetrics {
   wasStreaming: boolean
   model?: string
   provider?: string
+  /** Preset identity captured when this swipe was generated. */
+  presetId?: string
+  /** Preset display name captured when this swipe was generated. */
+  presetName?: string
 }
 
 export interface GenerationEndedPayload {
@@ -346,6 +401,12 @@ export interface GenerationEndedPayload {
   messageId?: string
   content?: string
   error?: string
+  errorCode?: string
+  errorMessage?: string
+  connectionName?: string
+  finish_reason?: string
+  stop_details?: { type: string; category?: string | null; explanation?: string | null } | null
+  stop_sequence?: string | null
   generationType?: string
   tokenCount?: number
   generationMetrics?: GenerationMetrics
@@ -353,7 +414,7 @@ export interface GenerationEndedPayload {
 
 /**
  * Follow-up to GENERATION_ENDED carrying the deferred metrics (token count,
- * TTFT/TPS, model/provider) once they've been computed and persisted. `swipeId`
+ * TTFT/TPS, model/provider/preset) once they've been computed and persisted. `swipeId`
  * is the swipe these metrics belong to, so the client can avoid patching them
  * onto a different swipe the user navigated to mid-stream.
  */
@@ -602,6 +663,10 @@ export interface MigrationFailedPayload {
 export interface WorldBookChangedPayload {
   id: string
   worldBook: import('./api').WorldBook
+}
+export interface WorldBookLibraryChangedPayload {
+  reason: string
+  imported: number
 }
 export interface WorldBookDeletedPayload {
   id: string

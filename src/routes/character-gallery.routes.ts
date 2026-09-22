@@ -121,4 +121,30 @@ app.patch("/:itemId", async (c) => {
   return c.json(item);
 });
 
+// PATCH /:itemId/reference — assign a custom portable gallery:// name
+app.patch("/:itemId/reference", async (c) => {
+  const userId = c.get("userId");
+  const characterId = c.req.param("characterId");
+  const itemId = c.req.param("itemId");
+  if (!characterId) return c.json({ error: "characterId is required" }, 400);
+  const body = await c.req.json<{ name?: unknown }>();
+  if (typeof body.name !== "string") {
+    return c.json({ error: "name is required" }, 400);
+  }
+
+  try {
+    const item = svc.renameGalleryReference(userId, characterId, itemId, body.name);
+    if (!item) return c.json({ error: "Not found" }, 404);
+    return c.json(item);
+  } catch (error) {
+    if (error instanceof svc.GalleryReferenceConflictError) {
+      return c.json({ error: error.message }, 409);
+    }
+    if (error instanceof svc.InvalidGalleryReferenceNameError) {
+      return c.json({ error: error.message }, 400);
+    }
+    throw error;
+  }
+});
+
 export { app as characterGalleryRoutes };

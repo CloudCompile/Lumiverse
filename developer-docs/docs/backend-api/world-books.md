@@ -143,6 +143,7 @@ const entryDeleted = await spindle.world_books.entries.delete(newEntry.id)
   group_weight: number         // weight for group selection
   probability: number          // activation probability (0-100)
   scan_depth: number | null    // how many messages to scan for keywords
+  exclude_greeting: boolean    // exclude the opening greeting from keyword scans
   case_sensitive: boolean      // case-sensitive keyword matching
   match_whole_words: boolean   // match whole words only
   automation_id: string | null // automation identifier
@@ -178,6 +179,7 @@ All fields are optional. Common fields you'll typically set:
 | `selective` | `boolean` | Require secondary keys to also match |
 | `constant` | `boolean` | Always active regardless of keywords |
 | `disabled` | `boolean` | Disable this entry |
+| `exclude_greeting` | `boolean` | Exclude the opening greeting from keyword scans |
 | `order_value` | `number` | Sort order within position bucket (default 100) |
 | `priority` | `number` | Activation priority (default 10) |
 

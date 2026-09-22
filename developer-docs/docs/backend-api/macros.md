@@ -2,6 +2,26 @@
 
 Register custom macros that users can use in their prompts and preset blocks with `{{macro_name}}` syntax.
 
+Macro names are ownership-protected. An extension may replace or unregister only its own registrations. System macros always take precedence; preset/request dynamic macros take precedence over extension macros with the same name.
+
+Built-in macro resolution supports scoped blocks and control flow:
+
+```txt
+{{if::condition}}...{{elseif::other}}...{{else}}...{{/if}}
+{{unless::condition}}...{{else}}...{{/unless}}
+
+{{switch::value}}
+{{case::a}}A branch{{/case}}
+{{case::b::c}}B/C branch{{/case}}
+{{default}}Fallback{{/default}}
+{{/switch}}
+
+{{let::name::value}}temporary local vars{{/let}}
+{{map::a,b,c::x}}{{upper::{{.x}}}}{{/map}}
+```
+
+Only selected conditional/switch branches are resolved, so side-effect macros in unselected branches do not run.
+
 ## Push Model (recommended)
 
 The push model lets your extension proactively send the latest macro value to the host. During prompt assembly the host returns the cached value instantly — no RPC roundtrip to the worker, no risk of stalling generation.
@@ -78,6 +98,9 @@ This is primarily useful when your macro has separate display-only and state-mut
     **Doesn't need the flag (auto invalidates):** variable reads via `.get(key)` / `.has(key)` (the fingerprint records the dependency and the cache invalidates when that var changes), static fields on `env` (character, persona, scenario), and computed-from-tracked-inputs handlers (math, conditionals, string ops) where args evaluate through the same fingerprint mechanism so dependencies propagate.
     Rule of thumb: if the handler only touches `ctx.args` and `env.variables.<scope>.get(...)`, leave the flag off. If it reaches for `Date`, `Math.random`, or mutates state, set it.
 
+!!! note "Resolution limits"
+    Macro resolution is guarded by a work budget rather than a fixed shallow nesting-depth cap. Deep finite macro chains can resolve beyond 1000 levels, but recursive/explosive expansion is halted with diagnostics. List-style generators and iteration helpers still cap generated/iterated item counts at 1000.
+
 ## Methods
 
 | Method | Description |
@@ -87,6 +110,14 @@ This is primarily useful when your macro has separate display-only and state-mut
 | `updateMacroValue(name, value)` | Push the latest value for a registered macro (fire-and-forget) |
 
 ---
+
+## Macro Interceptors
+
+`spindle.registerMacroInterceptor(handler, priority?, opts?)` requires the `macro_interceptor` permission. The async handler receives `ctx.template` and a read-only environment snapshot before native macro parsing. It returns a string, `{ text, touchedVars?, volatile? }`, or `void` to pass through. Lower priorities run first; the default is `100`. Registering again replaces your extension's previous handler.
+
+Set `opts.handlesOwnedSources: true` to exclusively resolve macro-bearing regex templates whose `owner_extension_identifier` matches your extension. These calls include `ctx.sourceOwner.extensionIdentifier` and receive the unmodified template. Return a string or a result object: the host uses its text verbatim without native evaluation or other interceptors. A missing result, thrown error, or timeout rejects the owned evaluation. Templates without macros skip dispatch; other templates retain normal chain behavior, which logs interceptor failures and continues.
+
+With this opt-in, stored messages on characters whose extension namespace has `display_owner: true` also remain verbatim for the extension's [display pipeline](../frontend-api/display-resolver.md#ownership).
 
 ## Resolving Macros Programmatically
 

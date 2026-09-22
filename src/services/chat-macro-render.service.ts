@@ -28,7 +28,7 @@ export async function resolveRenderedChatMessages(
 }> {
   const targetIds = [...new Set(input.messageIds.filter(Boolean))];
   const resolvedById = new Map<string, string>();
-  if (!input.macroEnvSeed || targetIds.length === 0) return { resolvedById };
+  if (!input.macroEnvSeed || input.macroEnvSeed.extra.preserveMessageSource || targetIds.length === 0) return { resolvedById };
 
   const targetSet = new Set(targetIds);
   let lastTargetIdx = -1;
@@ -65,7 +65,7 @@ export async function resolveRenderedMessageContent(
   content: string,
   env: MacroEnv,
 ): Promise<string> {
-  if (!HAS_MACRO_RE.test(content)) return content;
+  if (env.extra.preserveMessageSource || !HAS_MACRO_RE.test(content)) return content;
   initMacros();
   return healFormattingArtifacts((await evaluate(content, env, registry)).text);
 }

@@ -529,6 +529,7 @@ export type WeaverVisualProvider =
   | "nanogpt"
   | "google_gemini"
   | "pollinations"
+  | "openrouter"
   | "sdapi"
   | "swarmui";
 

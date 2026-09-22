@@ -19,8 +19,7 @@ An Author's Note is a short piece of text inserted into the prompt at a configur
 1. In an active chat, click the **Author's Note** button (or find it in the chat controls)
 2. Write your instruction
 3. Configure:
-    - **Depth** — How many messages from the end to insert it (default: 4). Lower numbers = closer to the end = more influence.
-    - **Position** — Where relative to the insertion point
+    - **Depth from latest message** — How many chat messages back to insert it, counting from the most recent message (default: 4).
     - **Role** — The message role (system, user, or assistant)
 
 ### Example Author's Notes
@@ -34,11 +33,14 @@ An Author's Note is a short piece of text inserted into the prompt at a configur
 
 ## How Depth Works
 
-Depth controls where the Author's Note appears in the message list:
+Depth counts backward from the most recent chat message. Only chat messages count; other prompt instructions and injected lore do not affect the depth:
 
-- **Depth 0** — Right at the end, just before the AI generates (strongest influence)
-- **Depth 4** — Four messages back from the end (default, balanced)
-- **Depth 10** — Ten messages back (subtler influence)
+- **Depth 0** — Immediately after the latest chat message
+- **Depth 1** — Immediately before the latest chat message
+- **Depth 4** — Before the four most recent chat messages (default)
+- **Depth 10** — Before the ten most recent chat messages
+
+If the depth exceeds the number of chat messages, the note goes before the oldest included chat message. If there are no chat messages, it is appended to the prompt.
 
 Think of it like recency — the closer to the end, the more the AI "remembers" it when writing.
 

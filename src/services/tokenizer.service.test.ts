@@ -3,8 +3,10 @@ import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import {
   _getCachedTokenizerIdsForTests,
   _resetForTests,
+  countBreakdown,
   countWithTokenizer,
   prewarm,
+  releaseTokenizerMemory,
 } from "./tokenizer.service";
 
 function createTokenizerTables(): void {
@@ -146,5 +148,39 @@ describe("tokenizer instance cache", () => {
 
     await countWithTokenizer("tok-5", "five");
     expect(_getCachedTokenizerIdsForTests()).toEqual(["tok-1", "tok-3", "tok-4", "tok-2", "tok-5"]);
+  });
+
+  test("releases reconstructable tokenizer instances under memory pressure", async () => {
+    insertApproximateTokenizer("tok-pressure");
+    await countWithTokenizer("tok-pressure", "reconstructable");
+    expect(_getCachedTokenizerIdsForTests()).toEqual(["tok-pressure"]);
+
+    releaseTokenizerMemory();
+
+    expect(_getCachedTokenizerIdsForTests()).toEqual([]);
+  });
+});
+
+describe("prompt breakdown accounting", () => {
+  test("attributes marker-expanded WI to World Info instead of its preset block", async () => {
+    insertApproximateTokenizer("tok-breakdown");
+    insertPattern("pat-breakdown", "tok-breakdown", "^model-breakdown$", 100);
+
+    const result = await countBreakdown("model-breakdown", [
+      {
+        type: "block",
+        name: "Activated WI (Marker Mode)",
+        content: "12345678ABCDEFGH",
+        tokenCountContent: "12345678",
+      },
+      {
+        type: "world_info",
+        name: "WI At Marker: Entry",
+        content: "ABCDEFGH",
+      },
+    ]);
+
+    expect(result.total_tokens).toBe(4);
+    expect(result.breakdown.map((entry) => entry.tokens)).toEqual([2, 2]);
   });
 });

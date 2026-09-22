@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronRight } from 'lucide-react'
+import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
+import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { Toggle } from '@/components/shared/Toggle'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
@@ -10,7 +11,8 @@ import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { useFolders } from '@/hooks/useFolders'
 import FolderDropdown from '@/components/shared/FolderDropdown'
-import type { RegexPlacement, RegexTarget, RegexScope, RegexMacroMode } from '@/types/regex'
+import type { RegexPlacement, RegexTarget, RegexScope, RegexMacroMode, RegexAction, RegexActionEffect, RegexPromptActivation } from '@/types/regex'
+import RegexPromptActivationEditor from './RegexPromptActivationEditor'
 import styles from './RegexEditorModal.module.css'
 import clsx from 'clsx'
 
@@ -54,6 +56,49 @@ const FIND_PRESET_DEFS = [
 ] as const
 
 const REGEX_FLAG_KEYS = ['g', 'i', 'm', 's', 'u', 'v', 'd', 'y'] as const
+type RegexMoveSelection = 'replace' | 'move_top' | 'move_bottom'
+type RegexRepeatPosition = 'end' | 'start' | 'end_nl' | 'start_nl'
+
+function readRegexActions(metadata: Record<string, any> | undefined): string[] {
+  return Array.isArray(metadata?.match_actions)
+    ? metadata.match_actions.filter((action: unknown): action is string => typeof action === 'string')
+    : []
+}
+
+function updateRegexMetadata(
+  metadata: Record<string, any> | undefined,
+  moveBehavior: RegexMoveSelection,
+  repeatBack: boolean,
+  repeatPosition: RegexRepeatPosition,
+  repeatRawMatch: boolean,
+): Record<string, any> {
+  const next = { ...(metadata ?? {}) }
+  const actions = readRegexActions(metadata).filter(
+    (action) =>
+      action !== 'move_top'
+      && action !== 'move_bottom'
+      && action !== 'repeat_back',
+  )
+  if (moveBehavior !== 'replace') actions.push(moveBehavior)
+  if (repeatBack) actions.push('repeat_back')
+  if (actions.length > 0) next.match_actions = actions
+  else delete next.match_actions
+  if (repeatBack) next.repeat_position = repeatPosition
+  else delete next.repeat_position
+  if (repeatBack && repeatRawMatch) next.repeat_raw_match = true
+  else delete next.repeat_raw_match
+  return next
+}
+
+function readRepeatPosition(
+  metadata: Record<string, any> | undefined,
+  replaceString: string,
+): RegexRepeatPosition {
+  const value = metadata?.repeat_position ?? replaceString.split(' ', 2)[1]
+  return value === 'start' || value === 'end_nl' || value === 'start_nl'
+    ? value
+    : 'end'
+}
 
 export default function RegexEditorModal() {
   const { t: tr } = useTranslation('modals', { keyPrefix: 'regexEditor' })
@@ -65,6 +110,8 @@ export default function RegexEditorModal() {
   const updateRegexScript = useStore((s) => s.updateRegexScript)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
+  const activePersonaId = useStore((s) => s.activePersonaId)
+  const activeProfileId = useStore((s) => s.activeProfileId)
 
   const findPresets = useMemo(
     () =>
@@ -114,6 +161,8 @@ export default function RegexEditorModal() {
   const [userScriptId, setUserScriptId] = useState('')
   const [findRegex, setFindRegex] = useState('')
   const [replaceString, setReplaceString] = useState('')
+  const [actions, setActions] = useState<RegexAction[]>([])
+  const [promptActivation, setPromptActivation] = useState<RegexPromptActivation | null>(null)
   const [flags, setFlags] = useState('gi')
   const [placement, setPlacement] = useState<RegexPlacement[]>(['ai_output'])
   const [target, setTarget] = useState<RegexTarget[]>(['response'])
@@ -121,16 +170,23 @@ export default function RegexEditorModal() {
   const [minDepth, setMinDepth] = useState<string>('')
   const [maxDepth, setMaxDepth] = useState<string>('')
   const [substituteMacros, setSubstituteMacros] = useState<RegexMacroMode>('none')
+  const [moveBehavior, setMoveBehavior] = useState<RegexMoveSelection>('replace')
+  const [repeatBack, setRepeatBack] = useState(false)
+  const [repeatPosition, setRepeatPosition] = useState<RegexRepeatPosition>('end')
+  const [repeatRawMatch, setRepeatRawMatch] = useState(false)
   const [trimStrings, setTrimStrings] = useState('')
+  const [sortOrder, setSortOrder] = useState('')
   const [runOnEdit, setRunOnEdit] = useState(false)
   const [description, setDescription] = useState('')
   const [folder, setFolder] = useState('')
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [presetsOpen, setPresetsOpen] = useState(false)
+  const [actionsOpen, setActionsOpen] = useState(false)
 
   // Live test
   const [testInput, setTestInput] = useState('')
   const [testResult, setTestResult] = useState<{ result: string; matches: number; error?: string } | null>(null)
+  const [resolvedActivationFind, setResolvedActivationFind] = useState<string | null>(null)
 
   useEffect(() => {
     if (script) {
@@ -138,6 +194,8 @@ export default function RegexEditorModal() {
       setUserScriptId(script.script_id || '')
       setFindRegex(script.find_regex)
       setReplaceString(script.replace_string)
+      setActions(script.actions || [])
+      setPromptActivation(script.preset_id ? script.metadata?.prompt_activation ?? null : null)
       setFlags(script.flags)
       setPlacement([...script.placement])
       setTarget([...script.target])
@@ -145,7 +203,19 @@ export default function RegexEditorModal() {
       setMinDepth(script.min_depth != null ? String(script.min_depth) : '')
       setMaxDepth(script.max_depth != null ? String(script.max_depth) : '')
       setSubstituteMacros(script.substitute_macros)
+      const regexActions = readRegexActions(script.metadata)
+      setMoveBehavior(
+        regexActions.includes('move_top')
+          ? 'move_top'
+          : regexActions.includes('move_bottom')
+            ? 'move_bottom'
+            : 'replace',
+      )
+      setRepeatBack(regexActions.includes('repeat_back'))
+      setRepeatPosition(readRepeatPosition(script.metadata, script.replace_string))
+      setRepeatRawMatch(script.metadata?.repeat_raw_match === true)
       setTrimStrings(script.trim_strings.join(', '))
+      setSortOrder(script.sort_order != null ? String(script.sort_order) : '')
       setRunOnEdit(script.run_on_edit)
       setDescription(script.description)
       setFolder(script.folder || '')
@@ -154,20 +224,33 @@ export default function RegexEditorModal() {
 
   // Live test effect
   useEffect(() => {
-    if (!testInput || !findRegex) {
+    let current = true
+    setTestResult(null)
+    const testPattern = promptActivation && script?.preset_id && findRegex.includes('{{') ? resolvedActivationFind : findRegex
+    if (!testInput || !testPattern) {
       setTestResult(null)
       return
     }
     const timer = setTimeout(async () => {
       try {
-        const res = await regexApi.testRegex({ find_regex: findRegex, replace_string: replaceString, flags, content: testInput })
-        setTestResult(res)
+        const matchActions = [
+          ...(moveBehavior === 'replace' ? [] : [moveBehavior]),
+          ...(repeatBack ? ['repeat_back'] : []),
+        ]
+        const res = await regexApi.testRegex({
+          find_regex: testPattern,
+          replace_string: replaceString,
+          flags,
+          content: testInput,
+          match_actions: matchActions,
+        })
+        if (current) setTestResult(res)
       } catch {
-        setTestResult(null)
+        if (current) setTestResult(null)
       }
     }, 300)
-    return () => clearTimeout(timer)
-  }, [testInput, findRegex, replaceString, flags])
+    return () => { current = false; clearTimeout(timer) }
+  }, [testInput, findRegex, replaceString, flags, moveBehavior, repeatBack, promptActivation, script?.preset_id, resolvedActivationFind])
 
   const handleSave = useCallback(async () => {
     if (!scriptId) return
@@ -192,6 +275,7 @@ export default function RegexEditorModal() {
         script_id: userScriptId,
         find_regex: findRegex,
         replace_string: replaceString,
+        actions,
         flags,
         placement,
         target,
@@ -200,7 +284,15 @@ export default function RegexEditorModal() {
         min_depth: minDepth ? parseInt(minDepth) : null,
         max_depth: maxDepth ? parseInt(maxDepth) : null,
         substitute_macros: substituteMacros,
+        metadata: { ...updateRegexMetadata(
+          script.metadata,
+          moveBehavior,
+          repeatBack,
+          repeatPosition,
+          repeatRawMatch,
+        ), prompt_activation: promptActivation },
         trim_strings: trimStrings ? trimStrings.split(',').map((s) => s.trim()).filter(Boolean) : [],
+        sort_order: sortOrder === '' ? 0 : (parseInt(sortOrder, 10) || 0),
         run_on_edit: runOnEdit,
         description,
         folder,
@@ -209,7 +301,7 @@ export default function RegexEditorModal() {
     } catch (err: any) {
       toast.error(err.body?.error || err.message)
     }
-  }, [scriptId, script, activeCharacterId, activeChatId, name, userScriptId, findRegex, replaceString, flags, placement, target, scope, minDepth, maxDepth, substituteMacros, trimStrings, runOnEdit, description, folder, updateRegexScript, closeModal])
+  }, [scriptId, script, activeCharacterId, activeChatId, name, userScriptId, findRegex, replaceString, actions, promptActivation, flags, placement, target, scope, minDepth, maxDepth, substituteMacros, moveBehavior, repeatBack, repeatPosition, repeatRawMatch, trimStrings, sortOrder, runOnEdit, description, folder, updateRegexScript, closeModal, tr])
 
   if (!script) return null
 
@@ -226,11 +318,73 @@ export default function RegexEditorModal() {
     setReplaceString(replace)
   }
 
+  const addAction = () => {
+    let index = actions.length + 1
+    let id = `choice_${index}`
+    const existing = new Set(actions.map((action) => action.id))
+    while (existing.has(id)) id = `choice_${++index}`
+    setActions((current) => [...current, {
+      id,
+      type: 'send',
+      multi_select: false,
+      cost: '1',
+      limit: '3',
+      title: '',
+      subtitle: '',
+      content: '',
+    }])
+    setTarget((current) => current.includes('display') ? current : [...current, 'display'])
+    setActionsOpen(true)
+  }
+
+  const updateAction = (index: number, updates: Partial<RegexAction>) => {
+    setActions((current) => current.map((action, i) => i === index ? { ...action, ...updates } : action))
+  }
+
+  const addStateEffect = (actionIndex: number) => {
+    setActions((current) => current.map((action, index) => index === actionIndex
+      ? { ...action, effects: [...(action.effects ?? []), { type: 'set_state', key: '', value: '' }] }
+      : action))
+  }
+
+  const addDraftEffect = (actionIndex: number) => {
+    setActions((current) => current.map((action, index) => index === actionIndex
+      ? { ...action, effects: [...(action.effects ?? []), { type: 'draft', content: '', mode: 'replace' }] }
+      : action))
+  }
+
+  const addForkEffect = (actionIndex: number) => {
+    setActions((current) => current.map((action, index) => index === actionIndex
+      ? { ...action, effects: [...(action.effects ?? []), { type: 'fork' }] }
+      : action))
+  }
+
+  const updateActionEffect = (
+    actionIndex: number,
+    effectIndex: number,
+    updates: Partial<{ key: string; value: string; content: string; mode: 'replace' | 'append' }>,
+  ) => {
+    setActions((current) => current.map((action, index) => index === actionIndex
+      ? {
+          ...action,
+          effects: (action.effects ?? []).map((effect, i) => i === effectIndex
+            ? { ...effect, ...updates } as RegexActionEffect
+            : effect),
+        }
+      : action))
+  }
+
+  const removeActionEffect = (actionIndex: number, effectIndex: number) => {
+    setActions((current) => current.map((action, index) => index === actionIndex
+      ? { ...action, effects: (action.effects ?? []).filter((_, i) => i !== effectIndex) }
+      : action))
+  }
+
   return (
     <ModalShell
       isOpen={true}
       onClose={closeModal}
-      maxWidth={720}
+      maxWidth="min(720px, calc(var(--app-scaled-viewport-width, calc(100vw / var(--lumiverse-ui-scale, 1))) - 40px))"
       maxHeight="calc(88vh / var(--lumiverse-ui-scale, 1))"
       zIndex={10001}
       className={styles.modal}
@@ -319,12 +473,14 @@ export default function RegexEditorModal() {
                   ))}
                 </div>
               </div>
-              <textarea
+              <ExpandableTextarea
                 className={styles.monoInput}
                 value={findRegex}
-                onChange={(e) => setFindRegex(e.target.value)}
+                onChange={setFindRegex}
+                title={tr('pattern')}
                 placeholder={tr('regexPlaceholder')}
                 rows={2}
+                spellCheck={false}
               />
             </div>
             <div className={styles.field}>
@@ -355,15 +511,258 @@ export default function RegexEditorModal() {
                   </button>
                 ))}
               </div>
-              <textarea
+              <ExpandableTextarea
                 ref={replaceRef}
                 className={styles.monoInput}
                 value={replaceString}
-                onChange={(e) => setReplaceString(e.target.value)}
+                onChange={setReplaceString}
+                title={tr('replaceWith')}
                 placeholder={tr('replacePlaceholder')}
                 rows={2}
+                spellCheck={false}
               />
             </div>
+          </div>
+
+          <RegexPromptActivationEditor
+            presetId={script.preset_id ?? null}
+            value={promptActivation}
+            onChange={setPromptActivation}
+            findRegex={findRegex}
+            flags={flags}
+            testInput={testInput}
+            chatId={activeChatId ?? undefined}
+            characterId={activeCharacterId ?? undefined}
+            personaId={activePersonaId ?? undefined}
+            connectionId={activeProfileId ?? undefined}
+            onInsertFindInput={(token) => setFindRegex((pattern) => pattern + token)}
+            onResolvedFindPattern={setResolvedActivationFind}
+            onExample={(source) => {
+              setFindRegex(source === 'user_input' ? '\\b(fight|combat)\\b' : '<prompt-state>(?<mode>[^<]+)</prompt-state>')
+              setFlags('gi')
+              setReplaceString('$&')
+              setPromptActivation({ source, lifetime: 'latest', mappings: [{
+                capture: source === 'user_input' ? '0' : 'mode', value: source === 'user_input' ? ['combat', 'fight'] : 'combat',
+                block_ids: promptActivation?.mappings[0]?.block_ids ?? [], enabled: true,
+              }] })
+              setTestInput(source === 'user_input' ? 'Prepare for combat.' : 'The battle begins.\n<prompt-state>combat</prompt-state>')
+            }}
+          />
+
+          {/* Associative actions */}
+          <div className={styles.section}>
+            <div className={styles.actionSectionHeader}>
+              <button type="button" className={styles.sectionToggle} onClick={() => setActionsOpen(!actionsOpen)}>
+                {actionsOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                <span>{tr('actions')}</span>
+                {actions.length > 0 && <span className={styles.actionCount}>{actions.length}</span>}
+              </button>
+              <button type="button" className={styles.addActionButton} onClick={addAction}>
+                <Plus size={13} /> {tr('addAction')}
+              </button>
+            </div>
+            {actionsOpen && (
+              <div className={styles.actionList}>
+                <div className={styles.actionHint}>{tr('actionsHint')}</div>
+                {actions.map((action, index) => (
+                  <div className={styles.actionCard} key={index}>
+                    <div className={styles.actionCardHeader}>
+                      <div className={styles.field}>
+                        <label className={styles.fieldLabel}>{tr('actionId')}</label>
+                        <input
+                          className={clsx(styles.fieldInput, styles.monoText)}
+                          value={action.id}
+                          onChange={(event) => updateAction(index, {
+                            id: event.target.value.replace(/^[^A-Za-z]+/, '').replace(/[^A-Za-z0-9_:.-]/g, '').slice(0, 64),
+                          })}
+                          placeholder="choice_1"
+                        />
+                      </div>
+                      <div className={styles.actionType}>
+                        <button
+                          type="button"
+                          className={clsx(styles.segmentedBtn, action.type === 'send' && styles.segmentedBtnActive)}
+                          onClick={() => updateAction(index, { type: 'send' })}
+                        >
+                          {tr('actionSend')}
+                        </button>
+                        <button
+                          type="button"
+                          className={clsx(styles.segmentedBtn, action.type === 'append' && styles.segmentedBtnActive)}
+                          onClick={() => updateAction(index, { type: 'append' })}
+                        >
+                          {tr('actionAppend')}
+                        </button>
+                        <button
+                          type="button"
+                          className={clsx(styles.segmentedBtn, action.type === 'effects' && styles.segmentedBtnActive)}
+                          onClick={() => updateAction(index, { type: 'effects', multi_select: false })}
+                        >
+                          {tr('actionEffects')}
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        className={styles.removeActionButton}
+                        onClick={() => setActions((current) => current.filter((_, i) => i !== index))}
+                        title={tr('removeAction')}
+                        aria-label={tr('removeAction')}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                    {action.type !== 'effects' && (
+                      <Toggle.Checkbox
+                        checked={action.multi_select}
+                        onChange={(checked) => updateAction(index, { multi_select: checked })}
+                        label={tr('actionMultiSelect')}
+                        hint={tr('actionMultiSelectHint')}
+                      />
+                    )}
+                    {action.multi_select && (
+                      <div className={styles.actionTitleRow}>
+                        <div className={styles.field}>
+                          <label className={styles.fieldLabel}>{tr('actionCost')}</label>
+                          <input
+                            className={styles.fieldInput}
+                            value={action.cost}
+                            onChange={(event) => updateAction(index, { cost: event.target.value })}
+                            placeholder={tr('actionCostPlaceholder')}
+                          />
+                        </div>
+                        <div className={styles.field}>
+                          <label className={styles.fieldLabel}>{tr('actionLimit')}</label>
+                          <input
+                            className={styles.fieldInput}
+                            value={action.limit}
+                            onChange={(event) => updateAction(index, { limit: event.target.value })}
+                            placeholder={tr('actionLimitPlaceholder')}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    <div className={styles.actionTitleRow}>
+                      <div className={styles.field}>
+                        <label className={styles.fieldLabel}>{tr('actionTitle')}</label>
+                        <input className={styles.fieldInput} value={action.title} onChange={(event) => updateAction(index, { title: event.target.value })} placeholder={tr('actionTitlePlaceholder')} />
+                      </div>
+                      <div className={styles.field}>
+                        <label className={styles.fieldLabel}>{tr('actionSubtitle')}</label>
+                        <input className={styles.fieldInput} value={action.subtitle} onChange={(event) => updateAction(index, { subtitle: event.target.value })} placeholder={tr('actionSubtitlePlaceholder')} />
+                      </div>
+                    </div>
+                    {action.type !== 'effects' && <div className={styles.field}>
+                      <label className={styles.fieldLabel}>
+                        {tr('actionContent')}
+                        <span className={styles.fieldHint}>{tr(
+                          action.multi_select
+                            ? (action.type === 'send' ? 'actionContentMultiSendHint' : 'actionContentMultiAppendHint')
+                            : (action.type === 'send' ? 'actionContentSendHint' : 'actionContentAppendHint'),
+                        )}</span>
+                      </label>
+                      <ExpandableTextarea
+                        className={styles.monoInput}
+                        value={action.content}
+                        onChange={(value) => updateAction(index, { content: value })}
+                        title={tr('actionContent')}
+                        placeholder={tr('actionContentPlaceholder')}
+                        rows={2}
+                      />
+                    </div>}
+                    {(action.effects ?? []).map((effect, effectIndex) => (
+                      <div className={styles.actionTitleRow} key={`${effect.type}-${effectIndex}`}>
+                        {effect.type === 'set_state' && <>
+                          <div className={styles.field}>
+                          <label className={styles.fieldLabel}>{tr('actionStateKey')}</label>
+                          <input
+                            className={clsx(styles.fieldInput, styles.monoText)}
+                            value={effect.key}
+                            onChange={(event) => updateActionEffect(index, effectIndex, {
+                              key: event.target.value.replace(/^[^A-Za-z]+/, '').replace(/[^A-Za-z0-9_:.-]/g, '').slice(0, 128),
+                            })}
+                            placeholder={tr('actionStateKeyPlaceholder')}
+                          />
+                          </div>
+                          <div className={styles.field}>
+                          <label className={styles.fieldLabel}>{tr('actionStateValue')}</label>
+                          <input
+                            className={clsx(styles.fieldInput, styles.monoText)}
+                            value={effect.value}
+                            onChange={(event) => updateActionEffect(index, effectIndex, { value: event.target.value })}
+                            placeholder={tr('actionStateValuePlaceholder')}
+                          />
+                          </div>
+                        </>}
+                        {effect.type === 'draft' && <>
+                          <div className={styles.field}>
+                            <label className={styles.fieldLabel}>{tr('actionDraftContent')}</label>
+                            <input
+                              className={clsx(styles.fieldInput, styles.monoText)}
+                              value={effect.content}
+                              onChange={(event) => updateActionEffect(index, effectIndex, { content: event.target.value })}
+                              placeholder={tr('actionDraftContentPlaceholder')}
+                            />
+                          </div>
+                          <div className={styles.actionType}>
+                            <button
+                              type="button"
+                              className={clsx(styles.segmentedBtn, effect.mode === 'replace' && styles.segmentedBtnActive)}
+                              onClick={() => updateActionEffect(index, effectIndex, { mode: 'replace' })}
+                            >
+                              {tr('actionDraftReplace')}
+                            </button>
+                            <button
+                              type="button"
+                              className={clsx(styles.segmentedBtn, effect.mode === 'append' && styles.segmentedBtnActive)}
+                              onClick={() => updateActionEffect(index, effectIndex, { mode: 'append' })}
+                            >
+                              {tr('actionDraftAppend')}
+                            </button>
+                          </div>
+                        </>}
+                        {effect.type === 'fork' && (
+                          <div className={styles.field}>
+                            <label className={styles.fieldLabel}>{tr('actionFork')}</label>
+                            <span className={styles.fieldHint}>{tr('actionForkHint')}</span>
+                          </div>
+                        )}
+                        <button
+                          type="button"
+                          className={styles.removeActionButton}
+                          onClick={() => removeActionEffect(index, effectIndex)}
+                          title={tr('removeEffect')}
+                          aria-label={tr('removeEffect')}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    ))}
+                    <div className={styles.actionEffectButtons}>
+                      <button type="button" className={styles.addActionButton} onClick={() => addStateEffect(index)}>
+                        <Plus size={13} /> {tr('addStateEffect')}
+                      </button>
+                      {action.type === 'effects' && <button
+                        type="button"
+                        className={styles.addActionButton}
+                        disabled={(action.effects ?? []).some((effect) => effect.type === 'draft')}
+                        onClick={() => addDraftEffect(index)}
+                      >
+                        <Plus size={13} /> {tr('addDraftEffect')}
+                      </button>}
+                      {action.type === 'effects' && <button
+                        type="button"
+                        className={styles.addActionButton}
+                        disabled={(action.effects ?? []).some((effect) => effect.type === 'fork')}
+                        onClick={() => addForkEffect(index)}
+                      >
+                        <Plus size={13} /> {tr('addForkEffect')}
+                      </button>}
+                    </div>
+                  </div>
+                ))}
+                {actions.length === 0 && <div className={styles.actionEmpty}>{tr('actionsEmpty')}</div>}
+              </div>
+            )}
           </div>
 
           {/* Targeting — compact 2-col grid */}
@@ -401,6 +800,25 @@ export default function RegexEditorModal() {
                         onClick={() => setScope(s)}
                       >
                         {scopeLabels[s]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>{tr('matchBehavior')}</label>
+                  <div className={styles.segmented}>
+                    {([
+                      { value: 'replace' as const, label: tr('behaviorReplace') },
+                      { value: 'move_top' as const, label: tr('behaviorMoveTop') },
+                      { value: 'move_bottom' as const, label: tr('behaviorMoveBottom') },
+                    ]).map(({ value, label }) => (
+                      <button
+                        key={value}
+                        type="button"
+                        className={clsx(styles.segmentedBtn, moveBehavior === value && styles.segmentedBtnActive)}
+                        onClick={() => setMoveBehavior(value)}
+                      >
+                        {label}
                       </button>
                     ))}
                   </div>
@@ -457,6 +875,7 @@ export default function RegexEditorModal() {
                     <div className={styles.segmented}>
                       {([
                         { m: 'none' as const, label: tr('macroNone') },
+                        { m: 'find' as const, label: tr('macroFind') },
                         { m: 'raw' as const, label: tr('macroRaw') },
                         { m: 'escaped' as const, label: tr('macroEscaped') },
                         { m: 'after' as const, label: tr('macroAfter') },
@@ -479,12 +898,61 @@ export default function RegexEditorModal() {
                     className={styles.inlineToggle}
                   />
                 </div>
+                <div className={styles.advancedRow}>
+                  <div className={styles.field}>
+                    <label className={styles.fieldLabel}>{tr('behaviorRepeatPrevious')}</label>
+                    <div className={styles.segmented}>
+                      {([
+                        { value: 'none' as const, label: tr('repeatNone') },
+                        { value: 'start' as const, label: tr('repeatStart') },
+                        { value: 'end' as const, label: tr('repeatEnd') },
+                        { value: 'start_nl' as const, label: tr('repeatStartNewline') },
+                        { value: 'end_nl' as const, label: tr('repeatEndNewline') },
+                      ]).map(({ value, label }) => {
+                        const active = value === 'none'
+                          ? !repeatBack
+                          : repeatBack && repeatPosition === value
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            className={clsx(styles.segmentedBtn, active && styles.segmentedBtnActive)}
+                            onClick={() => {
+                              if (value === 'none') {
+                                setRepeatBack(false)
+                              } else {
+                                setRepeatBack(true)
+                                setRepeatPosition(value)
+                              }
+                            }}
+                          >
+                            {label}
+                          </button>
+                        )
+                      })}
+                    </div>
+                  </div>
+                  <Toggle.Checkbox
+                    checked={repeatRawMatch}
+                    onChange={setRepeatRawMatch}
+                    label={tr('repeatRawMatch')}
+                    disabled={!repeatBack}
+                    className={styles.inlineToggle}
+                  />
+                </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>
                     {tr('trimStrings')}
                     <span className={styles.fieldHint}>{tr('trimHint')}</span>
                   </label>
                   <input className={styles.fieldInput} value={trimStrings} onChange={(e) => setTrimStrings(e.target.value)} placeholder={tr('trimPlaceholder')} />
+                </div>
+                <div className={styles.field}>
+                  <label className={styles.fieldLabel}>
+                    {tr('sortOrder')}
+                    <span className={styles.fieldHint}>{tr('sortOrderHint')}</span>
+                  </label>
+                  <input className={styles.fieldInput} type="number" step="1" value={sortOrder} onChange={(e) => setSortOrder(e.target.value)} placeholder="0" />
                 </div>
                 <div className={styles.field}>
                   <label className={styles.fieldLabel}>{tr('notes')}</label>

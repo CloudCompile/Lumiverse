@@ -1,4 +1,4 @@
-import { createBrowserRouter } from 'react-router'
+import { createBrowserRouter, Outlet } from 'react-router'
 import App from './App'
 import LandingPage from './components/landing/LandingPage'
 import ChatView from './components/chat/ChatView'
@@ -7,28 +7,59 @@ import CharacterProfile from './components/panels/CharacterProfile'
 import LoginPage from './components/auth/LoginPage'
 import SignupPage from './components/auth/SignupPage'
 import VerifyEmailPage from './components/auth/VerifyEmailPage'
+import SsoCompletePage from './components/auth/SsoCompletePage'
+import OAuthConsentPage from './components/auth/OAuthConsentPage'
+import StreamDeckHandoffPage from './components/StreamDeckHandoffPage'
+import DesktopPwaTitlebar from './components/shared/DesktopPwaTitlebar'
+import { isDesktopFloatingWidgetWindow } from './lib/desktop-floating-widget'
+
+function WindowShell() {
+  return (
+    <>
+      {!isDesktopFloatingWidgetWindow() && <DesktopPwaTitlebar />}
+      <Outlet />
+    </>
+  )
+}
 
 const routes = [
   {
-    path: '/login',
-    element: <LoginPage />,
-  },
-  {
-    path: '/signup',
-    element: <SignupPage />,
-  },
-  {
-    path: '/verify-email',
-    element: <VerifyEmailPage />,
-  },
-  {
-    path: '/',
-    element: <App />,
+    element: <WindowShell />,
     children: [
-      { index: true, element: <LandingPage /> },
-      { path: 'chat/:chatId', element: <ChatView /> },
-      { path: 'characters', element: <CharacterBrowser /> },
-      { path: 'characters/:id', element: <CharacterProfile /> },
+      {
+        path: '/login',
+        element: <LoginPage />,
+      },
+      {
+        path: '/signup',
+        element: <SignupPage />,
+      },
+      {
+        path: '/verify-email',
+        element: <VerifyEmailPage />,
+      },
+      {
+        path: '/sso-complete',
+        element: <SsoCompletePage />,
+      },
+      {
+        path: '/oauth/consent',
+        element: <OAuthConsentPage />,
+      },
+      {
+        path: '/stream-deck/open/chat/:chatId',
+        element: <StreamDeckHandoffPage />,
+      },
+      {
+        path: '/',
+        element: <App />,
+        children: [
+          { index: true, element: <LandingPage /> },
+          { path: 'chat/:chatId', element: <ChatView /> },
+          { path: 'characters', element: <CharacterBrowser /> },
+          { path: 'characters/:id', element: <CharacterProfile /> },
+        ],
+      },
     ],
   },
 ]

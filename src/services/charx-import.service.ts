@@ -25,6 +25,10 @@ import { LANDING_PERSPECTIVE_LAYERS_KEY } from "./characters.service";
 import { mapWithConcurrency } from "../utils/concurrency";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import {
+  galleryReferenceFromArchivePath,
+  remapGreetingBackgrounds,
+} from "../utils/gallery-image-reference";
 
 const GALLERY_UPLOAD_CONCURRENCY = 6;
 
@@ -148,6 +152,7 @@ export async function applyCharxModulesAndAssets(
       if (Object.keys(exprMappings).length > 0) {
         extensions.expressions = {
           enabled: lumiverseModules.expressions.enabled,
+          useAsAvatar: exprSvc.getExpressionConfig(userId, character.id)?.useAsAvatar ?? false,
           defaultExpression: lumiverseModules.expressions.defaultExpression,
           mappings: exprMappings,
         };
@@ -185,11 +190,15 @@ export async function applyCharxModulesAndAssets(
     // Alternate avatars
     const altAvatars: Array<{ id: string; image_id: string; label: string }> = [];
     if (Array.isArray(lumiverseModules.alternate_avatars)) {
-      for (const av of lumiverseModules.alternate_avatars) {
+      for (const [position, av] of lumiverseModules.alternate_avatars.entries()) {
         const assetFile = assetFiles.get(av.path);
         if (assetFile) {
           const img = await images.uploadImage(userId, assetFile);
-          altAvatars.push({ id: av.id || crypto.randomUUID(), image_id: img.id, label: av.label });
+          altAvatars.push({
+            id: cardSvc.stableCharxAlternateAvatarId(av.id, position),
+            image_id: img.id,
+            label: av.label,
+          });
           consumedPaths.add(av.path);
           assetImageMap.set(av.path, img.id);
         }
@@ -197,6 +206,10 @@ export async function applyCharxModulesAndAssets(
       if (altAvatars.length > 0) {
         extensions.alternate_avatars = altAvatars;
       }
+    }
+
+    if (lumiverseModules.avatar_bindings && typeof lumiverseModules.avatar_bindings === "object") {
+      extensions.avatar_bindings = lumiverseModules.avatar_bindings;
     }
 
     // Landing perspective layers (ordered back → front)
@@ -293,7 +306,7 @@ export async function applyCharxModulesAndAssets(
   await mapWithConcurrency(remainingGalleryEntries, GALLERY_UPLOAD_CONCURRENCY, async ({ path, file: gf }) => {
     try {
       const img = await images.uploadImage(userId, gf);
-      gallerySvc.addToGallery(userId, character.id, img.id);
+      gallerySvc.addToGallery(userId, character.id, img.id, undefined, { registerReference: false });
       assetImageMap.set(path, img.id);
     } catch { /* skip individual failures */ }
     galleryCompleted++;
@@ -329,15 +342,29 @@ export async function applyCharxModulesAndAssets(
       svc.updateCharacter(userId, character.id, resolvedFields);
     }
 
+    const portableToLocal = new Map<string, string>();
     for (const [archivePath, imageId] of assetImageMap) {
-      const stem = cardSvc.fileStem(archivePath);
-      if (!risuAssetMap[stem]) risuAssetMap[stem] = imageId;
+      const galleryReference = galleryReferenceFromArchivePath(archivePath);
+      const key = galleryReference ?? cardSvc.fileStem(archivePath);
+      if (!risuAssetMap[key]) risuAssetMap[key] = imageId;
+      if (galleryReference) portableToLocal.set(galleryReference, imageId);
     }
     if (Object.keys(risuAssetMap).length > 0) {
       const char = svc.getCharacter(userId, character.id);
       if (char) {
+        const extensions: Record<string, any> = {
+          ...(char.extensions || {}),
+          risu_asset_map: risuAssetMap,
+        };
+        const greetingBackgrounds = remapGreetingBackgrounds(
+          extensions.greeting_backgrounds,
+          portableToLocal,
+        );
+        if (greetingBackgrounds !== extensions.greeting_backgrounds) {
+          extensions.greeting_backgrounds = greetingBackgrounds;
+        }
         svc.updateCharacter(userId, character.id, {
-          extensions: { ...(char.extensions || {}), risu_asset_map: risuAssetMap },
+          extensions,
         });
       }
     }

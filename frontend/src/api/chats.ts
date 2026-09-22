@@ -1,16 +1,58 @@
-import { get, post, put, patch, del, upload } from './client'
+import { get, post, put, patch, del, upload, type RequestOptions } from './client'
 import type {
   Chat, CreateChatInput, CreateGroupChatInput, RecentChat, Message,
   CreateMessageInput, UpdateMessageInput, PaginatedResult,
-  GroupedRecentChat, ChatSummary, ChatTreeNode
+  GroupedRecentChat, HiddenRecentChat, ChatSummary, ChatTreeNode, ChatMessageSearchResult
 } from '@/types/api'
+import type { RegexActionEffect } from '@/types/regex'
+
+export interface EditAndSendInput {
+  messageId: string
+  content: string
+  expectedVersion: number
+  requestId: string
+  branchChatOnEditAndSend?: boolean
+}
+
+export interface EditAndSendResult {
+  branchChatId: string
+  editedMessageId: string
+  immediateAssistantId: string | null
+  generationCursor: {
+    generationId: string
+    chatId: string
+    requestId: string
+    mode: 'swipe' | 'normal'
+  }
+}
+
+export type ChatAppearanceAction =
+  | { type: 'avatar'; avatar_entry_id: string; character_id?: string }
+  | { type: 'field'; field: 'description' | 'personality' | 'scenario'; variant_id: string | null; character_id?: string }
+  | { type: 'greeting'; greeting_index: number; character_id?: string }
+
+export interface ChatAppearanceResult {
+  chat: Chat
+  greeting_message?: Message
+}
+
+/** Use the user's local date and time so automatically named chats are easy to distinguish. */
+export function createTimestampedChatName(now = new Date()): string {
+  return now.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'medium' })
+}
 
 export const chatsApi = {
   list(params?: { characterId?: string; limit?: number; offset?: number }) {
     return get<PaginatedResult<Chat>>('/chats', params)
   },
 
-  listRecent(params?: { limit?: number; offset?: number }) {
+  listRecent(params?: {
+    limit?: number
+    offset?: number
+    search?: string
+    sort?: 'name' | 'recent' | 'created'
+    direction?: 'asc' | 'desc'
+  }) {
     return get<PaginatedResult<RecentChat>>('/chats/recent', params)
   },
 
@@ -20,8 +62,14 @@ export const chatsApi = {
     search?: string
     sort?: 'name' | 'recent' | 'created'
     direction?: 'asc' | 'desc'
+    favorite_ids?: string
+    hidden_character_ids?: string
   }) {
     return get<PaginatedResult<GroupedRecentChat>>('/chats/recent-grouped', params)
+  },
+
+  listHiddenFromRecent() {
+    return get<HiddenRecentChat[]>('/chats/hidden-from-recent')
   },
 
   listCharacterChats(characterId: string) {
@@ -39,7 +87,10 @@ export const chatsApi = {
   },
 
   create(input: CreateChatInput) {
-    return post<Chat>('/chats', input)
+    return post<Chat>('/chats', {
+      ...input,
+      name: input.name?.trim() || createTimestampedChatName(),
+    })
   },
 
   /**
@@ -70,8 +121,28 @@ export const chatsApi = {
     return patch<Chat>(`/chats/${id}/metadata`, partial)
   },
 
+  applyAppearance(id: string, action: ChatAppearanceAction) {
+    return patch<ChatAppearanceResult>(`/chats/${id}/appearance`, action)
+  },
+
+  /**
+   * Toggle one persona add-on for this chat. The server also records toggle
+   * recency so competing avatar overrides resolve deterministically.
+   */
+  setPersonaAddonState(chatId: string, personaId: string, addonId: string, enabled: boolean) {
+    return put<Chat>(`/chats/${chatId}/persona-addons/${personaId}/${addonId}`, { enabled })
+  },
+
   delete(id: string) {
     return del<void>(`/chats/${id}`)
+  },
+
+  bulkDeleteChats(ids: string[]) {
+    return post<{ deleted: string[]; count: number }>('/chats/bulk-delete', { ids })
+  },
+
+  exportChat(id: string) {
+    return get<{ chat: Chat; messages: Message[] }>(`/chats/${id}/export`)
   },
 
   deleteCharacterChats(characterId: string) {
@@ -79,7 +150,10 @@ export const chatsApi = {
   },
 
   createGroup(input: CreateGroupChatInput) {
-    return post<Chat>('/chats/group', input)
+    return post<Chat>('/chats/group', {
+      ...input,
+      name: input.name?.trim() || createTimestampedChatName(),
+    })
   },
 
   convertToGroup(id: string) {
@@ -119,12 +193,25 @@ export const chatsApi = {
     )
   },
 
-  branch(chatId: string, messageId: string) {
-    return post<Chat>(`/chats/${chatId}/branch`, { message_id: messageId })
+  branch(chatId: string, messageId: string, name?: string) {
+    return post<Chat>(`/chats/${chatId}/branch`, {
+      message_id: messageId,
+      ...(name?.trim() ? { name: name.trim() } : {}),
+    })
   },
 
   getTree(chatId: string) {
     return get<ChatTreeNode>(`/chats/${chatId}/tree`)
+  },
+
+  /**
+   * Apply an edit and durably dispatch generation, either in a new branch or
+   * in place according to branchChatOnEditAndSend. When a branch is returned,
+   * the client must navigate to it and recover its generation; it must not
+   * update the source message or start a second generation itself.
+   */
+  editAndSend(chatId: string, input: EditAndSendInput, options?: RequestOptions) {
+    return post<EditAndSendResult>(`/chats/${chatId}/edit-and-send`, input, options)
   },
 
   importChat(characterId: string, exportData: { chat: any; messages: any[] }) {
@@ -152,8 +239,12 @@ export const chatsApi = {
 }
 
 export const messagesApi = {
-  list(chatId: string, params?: { limit?: number; offset?: number; tail?: boolean }) {
-    return get<PaginatedResult<Message>>(`/chats/${chatId}/messages`, params)
+  list(chatId: string, params?: { limit?: number; offset?: number; tail?: boolean }, options?: RequestOptions) {
+    return get<PaginatedResult<Message>>(`/chats/${chatId}/messages`, params, options)
+  },
+
+  search(chatId: string, query: string, options?: RequestOptions) {
+    return get<ChatMessageSearchResult>(`/chats/${chatId}/messages/search`, { q: query }, options)
   },
 
   get(chatId: string, messageId: string) {
@@ -162,6 +253,31 @@ export const messagesApi = {
 
   create(chatId: string, input: CreateMessageInput) {
     return post<Message>(`/chats/${chatId}/messages`, input)
+  },
+
+  claimRegexAction(chatId: string, messageId: string, input: {
+    script_id: string
+    action_id: string
+    instance_id: string
+  }) {
+    return post<{
+      message: Message
+      usage: { script_id: string; action_id: string; used_at: number }
+      effects?: RegexActionEffect[]
+      forked_chat?: Chat
+    }>(`/chats/${chatId}/messages/${messageId}/regex-action`, input)
+  },
+
+  claimRegexActions(chatId: string, selections: Array<{
+    message_id: string
+    script_id: string
+    action_id: string
+    instance_id: string
+  }>) {
+    return post<{
+      messages: Message[]
+      usages: Array<{ script_id: string; action_id: string; used_at: number }>
+    }>(`/chats/${chatId}/messages/regex-actions/claim`, { selections })
   },
 
   update(chatId: string, messageId: string, input: UpdateMessageInput) {

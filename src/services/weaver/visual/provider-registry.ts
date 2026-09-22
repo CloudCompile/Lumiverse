@@ -9,6 +9,7 @@ const adapters = new Map<WeaverVisualProvider, VisualProviderAdapter>([
   ["nanogpt", createSimpleProviderAdapter("nanogpt")],
   ["google_gemini", createSimpleProviderAdapter("google_gemini")],
   ["pollinations", createSimpleProviderAdapter("pollinations")],
+  ["openrouter", createSimpleProviderAdapter("openrouter")],
   ["sdapi", createSimpleProviderAdapter("sdapi")],
   ["swarmui", swarmUIProviderAdapter],
   ["comfyui", comfyUIProviderAdapter],

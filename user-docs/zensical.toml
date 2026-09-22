@@ -13,11 +13,13 @@ Copyright &copy; 2026 Lumiverse
 """
 
 extra_css = ["stylesheets/extra.css"]
+extra_javascript = ["javascripts/redirect-legacy-markdown-urls.js"]
 
 nav = [
   { "Home" = "index.md" },
   { "Getting Started" = [
     { "Installation" = "getting-started/installation.md" },
+    { "Desktop Tray Companion" = "getting-started/desktop-tray.md" },
     { "First Steps" = "getting-started/first-steps.md" },
     { "Interface Overview" = "getting-started/interface-overview.md" },
   ] },
@@ -66,10 +68,11 @@ nav = [
     { "Setting Up a Connection" = "connections/setting-up.md" },
     { "Supported Providers" = "connections/providers.md" },
   ] },
-  { "Reasoning" = [
+  { "Presets" = [
     { "Overview" = "presets/index.md" },
     { "Understanding Presets" = "presets/understanding-presets.md" },
     { "Prompt Blocks" = "presets/prompt-blocks.md" },
+    { "Prompt Variables" = "presets/prompt-variables.md" },
     { "Sampler Settings" = "presets/sampler-settings.md" },
     { "Preset Profiles" = "presets/preset-profiles.md" },
     { "Macros Reference" = "presets/macros-reference.md" },
@@ -103,15 +106,18 @@ nav = [
   { "Customization" = [
     { "Theme" = "customization/themes.md" },
     { "Wallpaper" = "customization/wallpapers.md" },
+    { "Productivity & Quick Toolbar" = "customization/productivity.md" },
     { "Regex Scripts" = "customization/regex-scripts.md" },
     { "Macros" = "customization/macros.md" },
     { "Display Modes" = "customization/display-modes.md" },
   ] },
   { "Settings" = [
+    { "Disk Health & SMART" = "settings/disk-health.md" },
     { "Embeddings" = "settings/embeddings.md" },
     { "Web Search" = "settings/web-search.md" },
     { "Notifications" = "settings/push-notifications.md" },
     { "LumiHub" = "settings/lumihub.md" },
+    { "Illarin" = "settings/illarin.md" },
     { "Single Sign-On" = "settings/sso.md" },
     { "User Management" = "settings/users.md" },
   ] },

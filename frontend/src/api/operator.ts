@@ -1,5 +1,5 @@
 import { get, post, put, del } from './client'
-import type { OperatorLogEntry, OperatorStatusPayload } from '@/types/ws-events'
+import type { ImageThumbnailQueuePayload, OperatorLogEntry, OperatorStatusPayload } from '@/types/ws-events'
 
 export type OperatorStatus = OperatorStatusPayload
 
@@ -32,6 +32,9 @@ export interface SharpSettings {
   cacheMemoryMb?: number | null
   cacheFiles?: number | null
   cacheItems?: number | null
+  thumbnailCodec?: 'webp' | 'avif' | null
+  webpQuality?: number | null
+  avifQuality?: number | null
 }
 
 export interface ResolvedSharpSettings {
@@ -39,6 +42,15 @@ export interface ResolvedSharpSettings {
   cacheMemoryMb: number
   cacheFiles: number
   cacheItems: number
+  thumbnailCodec: 'webp' | 'avif'
+  webpQuality: number
+  avifQuality: number
+}
+
+export interface ThumbnailQueueRecovery {
+  pending: number
+  process: number
+  rebuild: number
 }
 
 export interface OperatorSharpStatus {
@@ -46,6 +58,14 @@ export interface OperatorSharpStatus {
   configuredSettings: SharpSettings
   effectiveSettings: ResolvedSharpSettings
   defaults: ResolvedSharpSettings
+  automaticConcurrency?: Record<'webp' | 'avif', number>
+  thumbnailQueue?: ImageThumbnailQueuePayload
+  thumbnailRecovery?: ThumbnailQueueRecovery
+}
+
+export interface ThumbnailQueueSnapshot {
+  queue: ImageThumbnailQueuePayload
+  recovery: ThumbnailQueueRecovery
 }
 
 export interface DnsSettings {
@@ -69,6 +89,87 @@ export interface OperatorDiskWarningStatus {
   configuredSettings: DiskWarningSettings
   effectiveSettings: ResolvedDiskWarningSettings
   defaults: ResolvedDiskWarningSettings
+}
+
+export type SmartctlAvailability = 'available' | 'installable' | 'manual' | 'unsupported'
+export type SmartDriveStatus = 'ok' | 'warning' | 'failing' | 'unavailable' | 'standby'
+export type SmartDriveKind = 'ssd' | 'hdd' | 'unknown'
+export type SmartAlertSeverity = 'warning' | 'failing'
+
+export interface SmartctlBinary {
+  path: string
+  version: string | null
+}
+
+export interface SmartctlInstallPlan {
+  manager: 'apt-get' | 'dnf' | 'yum' | 'apk' | 'pacman' | 'zypper' | 'brew' | 'choco'
+  command: string[]
+  requiresElevation: boolean
+}
+
+export interface SmartDriveSummary {
+  device: string
+  protocol: string | null
+  kind: SmartDriveKind
+  model: string | null
+  serialNumber: string | null
+  status: SmartDriveStatus
+  temperatureC: number | null
+  exitStatus: number
+  percentageUsed: number | null
+  criticalWarning: number | null
+  ataAttributes: {
+    reallocatedSectors: number | null
+    pendingSectors: number | null
+    uncorrectableSectors: number | null
+  }
+  alertConditions: Array<{
+    severity: SmartAlertSeverity
+    message: string
+  }>
+  ssd: {
+    percentageUsed: number | null
+    percentageRemaining: number | null
+    availableSparePercent: number | null
+    availableSpareThresholdPercent: number | null
+    dataWrittenBytes: number | null
+    powerOnHours: number | null
+    powerCycles: number | null
+    unsafeShutdowns: number | null
+    mediaErrors: number | null
+    wearLevelingCount: number | null
+    reservedBlocksUsed: number | null
+    programFailures: number | null
+    eraseFailures: number | null
+  } | null
+  hdd: {
+    powerOnHours: number | null
+    powerCycles: number | null
+    startStopCount: number | null
+    loadCycleCount: number | null
+  } | null
+  message: string | null
+}
+
+export interface SmartctlSnapshot {
+  checkedAt: string
+  drives: SmartDriveSummary[]
+  error: string | null
+}
+
+export interface OperatorSmartctlStatus {
+  availability: SmartctlAvailability
+  binary: SmartctlBinary | null
+  installPlan: SmartctlInstallPlan | null
+  message: string
+  latestSnapshot: SmartctlSnapshot | null
+  snapshot: SmartctlSnapshot
+}
+
+export interface SmartctlInstallResult {
+  installed: boolean
+  status: Omit<OperatorSmartctlStatus, 'snapshot'>
+  error: string | null
 }
 
 export interface ResolvedDnsSettings {
@@ -190,6 +291,7 @@ export interface DatabaseMaintenanceResult {
   optimized: boolean
   analyzed: boolean
   vacuumed: boolean
+  staleBreakdownsDeleted: number
   state: DatabaseMaintenanceState | null
 }
 
@@ -212,17 +314,31 @@ export interface TrustedHostsUpdateResponse {
   baseline: TrustedHostEntry[]
 }
 
+export interface BrokerOriginsResponse {
+  configured: string[]
+}
+
+export interface BrokerOriginsUpdateResponse {
+  configured: string[]
+}
+
 export const operatorApi = {
   getStatus: () => get<OperatorStatus>('/operator/status'),
   getTrustedHosts: (fresh = false) => get<TrustedHostsResponse>('/operator/trusted-hosts', fresh ? { fresh: 1 } : undefined),
   putTrustedHosts: (hosts: string[]) => put<TrustedHostsUpdateResponse>('/operator/trusted-hosts', { hosts }),
+  getBrokerOrigins: () => get<BrokerOriginsResponse>('/operator/broker-origins'),
+  putBrokerOrigins: (origins: string[]) => put<BrokerOriginsUpdateResponse>('/operator/broker-origins', { origins }),
   getDatabase: () => get<OperatorDatabaseStatus>('/operator/database'),
   getSharp: () => get<OperatorSharpStatus>('/operator/sharp'),
   putSharp: (settings: SharpSettings) => put<OperatorSharpStatus>('/operator/sharp', settings),
+  recoverThumbnailQueue: () => post<ThumbnailQueueSnapshot>('/operator/sharp/queue/recover'),
+  discardThumbnailQueue: () => post<ThumbnailQueueSnapshot>('/operator/sharp/queue/discard'),
   getDns: () => get<OperatorDnsStatus>('/operator/dns'),
   putDns: (settings: DnsSettings) => put<OperatorDnsStatus>('/operator/dns', settings),
   getDiskWarning: () => get<OperatorDiskWarningStatus>('/operator/disk-warning'),
   putDiskWarning: (settings: DiskWarningSettings) => put<OperatorDiskWarningStatus>('/operator/disk-warning', settings),
+  getSmartctl: (refresh = false) => get<OperatorSmartctlStatus>('/operator/smartctl', refresh ? { refresh: 1 } : undefined),
+  installSmartctl: () => post<SmartctlInstallResult>('/operator/smartctl/install'),
   getLogs: (limit = 150) => get<OperatorLogsResponse>('/operator/logs', { limit }),
   subscribeLogs: () => post<{ subscribed: boolean }>('/operator/logs/subscribe'),
   unsubscribeLogs: () => del<{ subscribed: boolean }>('/operator/logs/subscribe'),

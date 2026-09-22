@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Handler } from "hono";
 import { cors } from "hono/cors";
 import { compress } from "./middleware/compress";
 import { bodyLimit } from "hono/body-limit";
@@ -6,6 +6,7 @@ import { serveStatic } from "hono/bun";
 import { websocket } from "hono/bun";
 import { env } from "./env";
 import { auth } from "./auth";
+import { rewriteLegacySsoCallbackPath } from "./auth/callback-compat";
 import { requireAuth } from "./auth/middleware";
 import { settingsRoutes } from "./routes/settings.routes";
 import { charactersRoutes } from "./routes/characters.routes";
@@ -17,6 +18,7 @@ import { secretsRoutes } from "./routes/secrets.routes";
 import { presetsRoutes } from "./routes/presets.routes";
 import { connectionsRoutes } from "./routes/connections.routes";
 import { generateRoutes } from "./routes/generate.routes";
+import { requestHistoryRoutes } from "./routes/request-history.routes";
 import { multiplayerRoutes } from "./routes/multiplayer.routes";
 import { imagesRoutes } from "./routes/images.routes";
 import { audioRoutes } from "./routes/audio.routes";
@@ -25,6 +27,7 @@ import { macrosRoutes } from "./routes/macros.routes";
 import { spindleRoutes } from "./routes/spindle.routes";
 import { uploadsRoutes } from "./routes/uploads.routes";
 import { usersRoutes } from "./routes/users.routes";
+import { ssoProvidersRoutes } from "./routes/sso-providers.routes";
 import { packsRoutes } from "./routes/packs.routes";
 import { councilRoutes } from "./routes/council.routes";
 import { weaverRoutes } from "./routes/weaver.routes";
@@ -35,16 +38,20 @@ import { embeddingsRoutes } from "./routes/embeddings.routes";
 import { tokenizersRoutes } from "./routes/tokenizers.routes";
 import { spindleOAuthRoutes } from "./routes/spindle-oauth.routes";
 import { lumihubCallbackRoute, lumihubRoutes } from "./routes/lumihub.routes";
+import { illarinRoutes } from "./routes/illarin.routes";
 import { systemRoutes } from "./routes/system.routes";
 import { migrateRoutes } from "./routes/migrate.routes";
 import { stMigrationRoutes } from "./routes/st-migration.routes";
 import { googleDriveRoutes } from "./routes/google-drive.routes";
 import { dropboxRoutes } from "./routes/dropbox.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
+import { docsRoutes } from "./routes/docs.routes";
 import { loadoutsRoutes } from "./routes/loadouts.routes";
 import { regexScriptsRoutes } from "./routes/regex-scripts.routes";
 import { expressionsRoutes } from "./routes/expressions.routes";
 import { pushRoutes } from "./routes/push.routes";
+import { desktopNotificationTransportRoutes } from "./routes/desktop-notifications.routes";
+import { desktopApiRoutes } from "./routes/desktop-api.routes";
 import { memoryCortexRoutes } from "./routes/memory-cortex.routes";
 import { operatorRoutes } from "./routes/operator.routes";
 import { openrouterRoutes } from "./routes/openrouter.routes";
@@ -63,6 +70,7 @@ import { bootstrapRoutes } from "./routes/bootstrap.routes";
 import { signupRoutes } from "./routes/signup.routes";
 import { userDataRoutes } from "./routes/user-data.routes";
 import { leaderboardRoutes } from "./routes/leaderboard.routes";
+import { streamDeckIntegrationRoutes, streamDeckManagementRoutes } from "./routes/stream-deck.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
 import { rateLimit } from "./middleware/rate-limit";
@@ -72,7 +80,17 @@ import {
   isOriginAllowed,
 } from "./services/trusted-hosts.service";
 import { authLockoutService } from "./services/auth-lockout.service";
-import { getClientIp } from "./utils/client-ip";
+import {
+  getClientIp,
+  isConnectionFromExplicitTrustedProxy,
+} from "./utils/client-ip";
+import {
+  requestAtResolvedOrigin,
+  resolveDesktopRequestOrigin,
+} from "./auth/request-origin";
+import { listSsoLoginOptions } from "./services/sso-providers.service";
+import { userMediaServingHeaders } from "./utils/user-media-headers";
+import { getImageFilePathPublic } from "./services/images.service";
 
 const app = new Hono();
 const SIGN_IN_AUTH_PATTERN = /^\/api\/auth\/sign-in(?:\/|$)/;
@@ -101,6 +119,7 @@ const PUBLIC_POST_PREFIXES = [
   "/api/v1/lumihub",
   "/api/v1/openrouter/oauth-landing",
   "/api/v1/nanogpt/oauth-landing",
+  "/api/desktop-notifications/v1",
 ];
 app.use("/api/*", async (c, next) => {
   const clientId = getClientIp(c);
@@ -160,7 +179,21 @@ app.use("/api/*", async (c, next) => {
 app.use("/api/*", async (c, next) => {
   const clientId = getClientIp(c);
   const origin = c.req.header("origin");
-  if (!env.trustAnyOrigin && origin && !isOriginAllowed(origin)) {
+  const notificationTicket = c.req.query("notificationTicket");
+  const desktopNotificationWs = c.req.path === "/api/ws"
+    && typeof notificationTicket === "string"
+    && notificationTicket.length > 0
+    && (
+      origin === "http://tauri.localhost"
+      || origin === "tauri://localhost"
+      || origin === "http://localhost:1430"
+      || origin === "http://127.0.0.1:1430"
+    );
+  // The bundled tray host has a Tauri-local origin rather than the backend's
+  // origin. Only the notification-only, single-use-ticket upgrade may cross
+  // this boundary; ordinary API and user WebSocket traffic stays on the
+  // trusted-origin allowlist.
+  if (!env.trustAnyOrigin && origin && !isOriginAllowed(origin) && !desktopNotificationWs) {
     const result = authLockoutService.recordFailure(clientId, "origin", {
       method: c.req.method,
       path: c.req.path,
@@ -278,34 +311,45 @@ app.use("/api/auth/*", async (c, next) => {
 // frame-src / child-src are enforced via the frontend HTML meta tag as well;
 // these headers complement it by preventing the app from being embedded in
 // external frames and hardening the overall document boundary.
+// Exempt localhost resources so the desktop tray wrapper can iframe the UI.
+//
+// Use the Host header (set on every HTTP request, including top-level
+// navigations and same-origin fetches) rather than Origin, which browsers
+// omit for same-origin requests — the Tauri wrapper's iframe to
+// http://127.0.0.1:<port> arrives here with no Origin header, so the prior
+// Origin-based check incorrectly applied DENY and Chromium showed the
+// "Reload" error page in the iframe.
 app.use("*", async (c, next) => {
   await next();
-  c.res.headers.set("X-Frame-Options", "DENY");
-  c.res.headers.set("Content-Security-Policy", "frame-ancestors 'none';");
+  const host = c.req.header("host") ?? "";
+  const isLocal = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  if (!isLocal) {
+    c.res.headers.set("X-Frame-Options", "DENY");
+    c.res.headers.set("Content-Security-Policy", "frame-ancestors 'none';");
+  }
 });
 
 // Public signup routes — BEFORE BetterAuth handler
 app.route("/api/auth/signup", signupRoutes);
 
 // BetterAuth handler — BEFORE auth middleware
-// Rewrite the request URL to use the actual Host header so BetterAuth
-// constructs the correct redirect URLs and cookie domains when accessed via
-// a LAN IP instead of localhost. Respect X-Forwarded-Proto/Host from reverse
-// proxies (Cloudflare, nginx, HuggingFace Spaces) so BetterAuth generates
-// https:// callback URLs when served behind TLS termination.
-app.on(["POST", "GET"], "/api/auth/*", (c) => {
+// Better Auth receives a URL rebuilt from an approved public origin. Forwarded
+// host/proto are considered only for an explicitly trusted socket peer, then
+// removed so downstream middleware cannot reinterpret attacker input.
+const betterAuthHandler: Handler = (c) => {
   if (c.req.path === "/api/auth/sign-up/email") {
     return c.json({ error: "Not found" }, 404);
   }
-  const host = c.req.header("x-forwarded-host") || c.req.header("host");
-  const proto = c.req.header("x-forwarded-proto") || "http";
-  if (host) {
-    const url = new URL(c.req.url);
-    const rewritten = new URL(url.pathname + url.search, `${proto}://${host}`);
-    return auth.handler(new Request(rewritten.toString(), c.req.raw));
-  }
-  return auth.handler(c.req.raw);
-});
+  const url = new URL(c.req.url);
+  const pathname = rewriteLegacySsoCallbackPath(url.pathname);
+  const origin = resolveDesktopRequestOrigin(
+    c.req.raw,
+    isConnectionFromExplicitTrustedProxy(c),
+  );
+  return auth.handler(requestAtResolvedOrigin(c.req.raw, origin, pathname + url.search));
+};
+app.get("/api/auth/*", betterAuthHandler);
+app.post("/api/auth/*", betterAuthHandler);
 
 // OAuth callback route — unauthenticated, before auth middleware
 app.route("/api/spindle-oauth", spindleOAuthRoutes);
@@ -422,21 +466,51 @@ if (error) {
 
 // Image gen results — unauthenticated, public access for push notifications and embeds
 app.get("/api/v1/image-gen/results/:id", async (c) => {
-  const { getImageFilePathPublic } = await import("./services/images.service");
   const id = c.req.param("id");
   const size = c.req.query("size") as "sm" | "lg" | undefined;
   const tier = size === "sm" || size === "lg" ? size : undefined;
   const filepath = await getImageFilePathPublic(id, tier);
   if (!filepath) return c.json({ error: "Not found" }, 404);
-  const response = new Response(Bun.file(filepath));
+  const file = Bun.file(filepath);
+  const response = new Response(file);
   response.headers.set("Cache-Control", "public, max-age=86400");
+  // This route is unauthenticated: apply the stored-XSS boundary (sandbox CSP,
+  // nosniff, active-content demotion) before the bytes reach any browser.
+  for (const [key, value] of Object.entries(userMediaServingHeaders(file.type))) {
+    response.headers.set(key, value);
+  }
   return response;
 });
 
 // Auth middleware — AFTER auth handler, BEFORE routes
+// Stream Deck uses dedicated, hashed, revocable tokens rather than browser
+// sessions. Keep this deliberately narrow and outside the general v1 API.
+app.route("/api/integrations/stream-deck/v1", streamDeckIntegrationRoutes);
+// The desktop companion exchanges a durable, narrowly-scoped credential for
+// a single-use notification WebSocket ticket. This deliberately sits outside
+// browser-session auth so a desktop rebuild or WebView cookie loss does not
+// silently unregister the native destination.
+app.route("/api/desktop-notifications/v1", desktopNotificationTransportRoutes);
+// OAuth-protected, read-only desktop API. It performs scope and live role
+// checks independently of the browser-session API below.
+app.route("/api/desktop/v1", desktopApiRoutes);
+
+app.get("/api/v1/sso-providers/login-options", (c) => {
+  return c.json(listSsoLoginOptions());
+});
+
+// Public, non-sensitive startup configuration needed before the authenticated
+// app mounts. Safe-theme mode must be known before persisted CSS/overrides can
+// render, otherwise it cannot reliably recover an inaccessible interface.
+app.get("/api/v1/runtime-config", (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json({ safeThemeMode: env.safeThemeMode });
+});
+
 app.use("/api/v1/*", requireAuth);
 
 app.route("/api/v1/settings", settingsRoutes);
+app.route("/api/v1/docs", docsRoutes);
 app.route("/api/v1/characters", charactersRoutes);
 app.route("/api/v1/chats", chatsRoutes);
 app.route("/api/v1/personas", personasRoutes);
@@ -452,12 +526,14 @@ app.route("/api/v1/audio", audioRoutes);
 app.route("/api/v1/theme-assets", themeAssetsRoutes);
 app.route("/api/v1/notification-sounds", notificationSoundsRoutes);
 app.route("/api/v1/generate", generateRoutes);
+app.route("/api/v1/request-history", requestHistoryRoutes);
 app.route("/api/v1/multiplayer", multiplayerRoutes);
 app.route("/api/v1/providers", providersRoutes);
 app.route("/api/v1/macros", macrosRoutes);
 app.route("/api/v1/spindle", spindleRoutes);
 app.route("/api/v1/spindle-uploads", uploadsRoutes);
 app.route("/api/v1/users", usersRoutes);
+app.route("/api/v1/sso-providers", ssoProvidersRoutes);
 app.route("/api/v1/packs", packsRoutes);
 app.route("/api/v1/council", councilRoutes);
 app.route("/api/v1/weaver", weaverRoutes);
@@ -477,6 +553,7 @@ app.route("/api/v1/regex-scripts", regexScriptsRoutes);
 app.route("/api/v1/characters/:characterId/expressions", expressionsRoutes);
 app.route("/api/v1/push", pushRoutes);
 app.route("/api/v1/lumihub", lumihubRoutes);
+app.route("/api/v1/illarin", illarinRoutes);
 app.route("/api/v1/memory-cortex", memoryCortexRoutes);
 app.route("/api/v1/operator", operatorRoutes);
 app.route("/api/v1/tts-connections", ttsConnectionsRoutes);
@@ -490,6 +567,7 @@ app.route("/api/v1/global-addons", globalAddonsRoutes);
 app.route("/api/v1/bootstrap", bootstrapRoutes);
 app.route("/api/v1/user-data", userDataRoutes);
 app.route("/api/v1/leaderboard", leaderboardRoutes);
+app.route("/api/v1/stream-deck", streamDeckManagementRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)
 app.post("/api/v1/ws-ticket", (c) => {

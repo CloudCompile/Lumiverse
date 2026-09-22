@@ -11,7 +11,7 @@
 
 import { Hono } from "hono";
 import { requireOwner } from "../auth/middleware";
-import { getSecret, putSecret, deleteSecret } from "../services/secrets.service";
+import { getSecret, getSecretForStatus, putSecret, deleteSecret } from "../services/secrets.service";
 import { env } from "../env";
 
 const app = new Hono();
@@ -253,10 +253,10 @@ app.post("/auth/callback", async (c) => {
 // GET /auth/status — check if user has valid Google Drive auth
 app.get("/auth/status", async (c) => {
   const userId = c.get("userId");
-  const clientId = await getClientId(userId);
-  const customClientId = await getSecret(userId, GDRIVE_CLIENT_ID_KEY);
-  const customSecret = await getSecret(userId, GDRIVE_CLIENT_SECRET_KEY);
-  const refreshToken = await getSecret(userId, REFRESH_TOKEN_KEY);
+  const customClientId = await getSecretForStatus(userId, GDRIVE_CLIENT_ID_KEY);
+  const customSecret = await getSecretForStatus(userId, GDRIVE_CLIENT_SECRET_KEY);
+  const refreshToken = await getSecretForStatus(userId, REFRESH_TOKEN_KEY);
+  const clientId = customClientId || DEFAULT_CLIENT_ID || null;
 
   return c.json({
     configured: !!clientId,
@@ -302,7 +302,7 @@ app.delete("/auth/credentials", async (c) => {
 // POST /auth/revoke — revoke and delete stored tokens
 app.post("/auth/revoke", async (c) => {
   const userId = c.get("userId");
-  const accessToken = await getSecret(userId, ACCESS_TOKEN_KEY);
+  const accessToken = await getSecretForStatus(userId, ACCESS_TOKEN_KEY);
 
   // Best-effort revoke at Google
   if (accessToken) {

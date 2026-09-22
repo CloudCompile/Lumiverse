@@ -16,6 +16,7 @@ import {
   Globe,
   Plus,
   X,
+  Play,
 } from 'lucide-react'
 import { Toggle } from '@/components/shared/Toggle'
 import NumericInput from '@/components/shared/NumericInput'
@@ -32,13 +33,18 @@ import {
   type OperatorDiskWarningStatus,
   type OperatorDnsStatus,
   type OperatorSharpStatus,
+  type OperatorSmartctlStatus,
   type OperatorStatus,
   type SharpSettings,
+  type SmartDriveStatus,
   type TrustedHostEntry,
   type TrustedHostsResponse,
+  type BrokerOriginsResponse,
 } from '@/api/operator'
 import { settingsApi } from '@/api/settings'
+import { imagesApi } from '@/api/images'
 import { ApiError } from '@/api/client'
+import { sectionAnchorId } from '@/lib/settings-tab-registry'
 import {
   embeddingsApi,
   type UpdateVectorStoreConfigInput,
@@ -74,6 +80,7 @@ const OPERATOR_OPERATION_LABELS: Record<string, string> = {
 
 /** Operations that cause the server to restart and require reconnection handling. */
 const RESTART_OPERATIONS = new Set(['updating', 'switching branch', 'restarting', 'toggling remote', 'rebuilding frontend'])
+const LUMIVERSE_COMMITS_URL = 'https://github.com/prolix-oc/Lumiverse/commits'
 
 function normalizeOperatorOperation(operation: string | null | undefined): string | null {
   if (!operation) return null
@@ -125,6 +132,27 @@ function formatBytes(bytes: number): string {
 function formatTimestamp(ts: number | null | undefined): string {
   if (!ts) return '—'
   return new Date(ts).toLocaleString()
+}
+
+function formatIsoTimestamp(timestamp: string | null | undefined): string {
+  if (!timestamp) return '—'
+  const value = new Date(timestamp)
+  return Number.isNaN(value.getTime()) ? '—' : value.toLocaleString()
+}
+
+function formatSmartNumber(value: number | null): string {
+  return value == null ? '—' : value.toLocaleString()
+}
+
+function smartStatusTranslationKey(status: SmartDriveStatus): string {
+  const keys: Record<SmartDriveStatus, string> = {
+    ok: 'operator.smartStatusOk',
+    warning: 'operator.smartStatusWarning',
+    failing: 'operator.smartStatusFailing',
+    unavailable: 'operator.smartStatusUnavailable',
+    standby: 'operator.smartStatusStandby',
+  }
+  return keys[status]
 }
 
 function normalizeDatabaseTuning(input: DatabaseTuningSettings): DatabaseTuningSettings {
@@ -264,7 +292,7 @@ function vectorTuningProfileHint(profile: VectorStoreTuningProfile): string {
   }
 }
 
-function vectorStoreErrorMessage(err: unknown, fallback: string): string {
+function apiErrorMessage(err: unknown, fallback: string): string {
   if (err instanceof ApiError) {
     const body = err.body as { error?: unknown; message?: unknown } | undefined
     if (typeof body?.error === 'string' && body.error.trim()) return body.error
@@ -297,6 +325,9 @@ function normalizeSharpSettings(input: SharpSettings): SharpSettings {
     cacheMemoryMb: normalizeInt(input.cacheMemoryMb, 8, 512),
     cacheFiles: normalizeInt(input.cacheFiles, 0, 2048),
     cacheItems: normalizeInt(input.cacheItems, 1, 4096),
+    thumbnailCodec: input.thumbnailCodec === 'avif' ? 'avif' : input.thumbnailCodec === 'webp' ? 'webp' : null,
+    webpQuality: normalizeInt(input.webpQuality, 1, 100),
+    avifQuality: normalizeInt(input.avifQuality, 1, 100),
   }
 }
 
@@ -434,6 +465,10 @@ export default function OperatorPanel() {
   const [dbMaintenanceSettings, setDbMaintenanceSettings] = useState<DatabaseMaintenanceSettings>({})
   const [diskWarningStatus, setDiskWarningStatus] = useState<OperatorDiskWarningStatus | null>(null)
   const [diskWarningSettings, setDiskWarningSettings] = useState<DiskWarningSettings>({})
+  const [smartctlStatus, setSmartctlStatus] = useState<OperatorSmartctlStatus | null>(null)
+  const [smartctlError, setSmartctlError] = useState<string | null>(null)
+  const [smartctlRefreshing, setSmartctlRefreshing] = useState(false)
+  const [smartctlInstalling, setSmartctlInstalling] = useState(false)
   const [sharpStatus, setSharpStatus] = useState<OperatorSharpStatus | null>(null)
   const [sharpSettings, setSharpSettings] = useState<SharpSettings>({})
   const [dnsStatus, setDnsStatus] = useState<OperatorDnsStatus | null>(null)
@@ -456,9 +491,35 @@ export default function OperatorPanel() {
   const [trustedHostsLoading, setTrustedHostsLoading] = useState(true)
   const [trustedHostsError, setTrustedHostsError] = useState<string | null>(null)
   const [hostDraft, setHostDraft] = useState('')
+  const [brokerOrigins, setBrokerOrigins] = useState<BrokerOriginsResponse | null>(null)
+  const [brokerOriginsLoading, setBrokerOriginsLoading] = useState(true)
+  const [brokerOriginsError, setBrokerOriginsError] = useState<string | null>(null)
+  const [originDraft, setOriginDraft] = useState('')
   const storeBusy = useStore((s) => s.operatorBusy)
   const storeProgressMessage = useStore((s) => s.operatorProgressMessage)
+  const thumbnailQueue = useStore((s) => s.thumbnailQueue)
+  const setThumbnailQueue = useStore((s) => s.setThumbnailQueue)
+  const thumbnailSettings = useStore((s) => s.thumbnailSettings)
+  const setSetting = useStore((s) => s.setSetting)
   const addToast = useStore((s) => s.addToast)
+  const [rebuildingThumbnails, setRebuildingThumbnails] = useState(false)
+  const [thumbnailRecovery, setThumbnailRecovery] = useState({ pending: 0, process: 0, rebuild: 0 })
+  const [queueAction, setQueueAction] = useState<'recover' | 'discard' | null>(null)
+  const smallSize = thumbnailSettings?.smallSize ?? 300
+  const largeSize = thumbnailSettings?.largeSize ?? 700
+  const activeThumbnailCodec = sharpSettings.thumbnailCodec
+    ?? sharpStatus?.effectiveSettings.thumbnailCodec
+    ?? 'webp'
+  const activeAutomaticConcurrency = sharpStatus?.automaticConcurrency?.[activeThumbnailCodec]
+    ?? (activeThumbnailCodec === 'avif'
+      ? Math.min(4, sharpStatus?.defaults.concurrency ?? 4)
+      : sharpStatus?.defaults.concurrency ?? 4)
+  const activeThumbnailQuality = activeThumbnailCodec === 'avif'
+    ? sharpSettings.avifQuality
+    : sharpSettings.webpQuality
+  const activeThumbnailQualityDefault = activeThumbnailCodec === 'avif'
+    ? sharpStatus?.defaults.avifQuality ?? 54
+    : sharpStatus?.defaults.webpQuality ?? 80
 
   // Track the operation that triggered a server restart so we can
   // show "Reconnecting..." once the WS drops and recover on reconnect.
@@ -583,12 +644,17 @@ export default function OperatorPanel() {
         cacheMemoryMb: next.configuredSettings.cacheMemoryMb ?? null,
         cacheFiles: next.configuredSettings.cacheFiles ?? null,
         cacheItems: next.configuredSettings.cacheItems ?? null,
+        thumbnailCodec: next.configuredSettings.thumbnailCodec ?? null,
+        webpQuality: next.configuredSettings.webpQuality ?? null,
+        avifQuality: next.configuredSettings.avifQuality ?? null,
       })
+      if (next.thumbnailQueue) setThumbnailQueue(next.thumbnailQueue)
+      setThumbnailRecovery(next.thumbnailRecovery ?? { pending: 0, process: 0, rebuild: 0 })
       return next
     } catch {
       return null
     }
-  }, [])
+  }, [setThumbnailQueue])
 
   const refreshDnsSettings = useCallback(async () => {
     try {
@@ -617,6 +683,18 @@ export default function OperatorPanel() {
       return null
     }
   }, [])
+
+  const refreshSmartctl = useCallback(async (force = false) => {
+    try {
+      const next = await operatorApi.getSmartctl(force)
+      setSmartctlStatus(next)
+      setSmartctlError(null)
+      return next
+    } catch (err) {
+      setSmartctlError(err instanceof Error ? err.message : t('operator.smartRefreshFailed'))
+      return null
+    }
+  }, [t])
 
   const saveTrustedHosts = useCallback(async (nextConfigured: string[]) => {
     try {
@@ -649,6 +727,49 @@ export default function OperatorPanel() {
     const current = trustedHosts?.configured ?? []
     saveTrustedHosts(current.filter((h) => h !== host))
   }, [saveTrustedHosts, trustedHosts])
+
+  const refreshBrokerOrigins = useCallback(async (showLoader = false) => {
+    if (showLoader) setBrokerOriginsLoading(true)
+    try {
+      const res = await operatorApi.getBrokerOrigins()
+      setBrokerOrigins(res)
+      setBrokerOriginsError(null)
+    } catch (err) {
+      setBrokerOriginsError(err instanceof Error ? err.message : t('operator.loadBrokerOriginsFailed'))
+    } finally {
+      setBrokerOriginsLoading(false)
+    }
+  }, [t])
+
+  const saveBrokerOrigins = useCallback(async (nextConfigured: string[]) => {
+    try {
+      const res = await operatorApi.putBrokerOrigins(nextConfigured)
+      setBrokerOrigins({ configured: res.configured })
+      setBrokerOriginsError(null)
+      addToast({ type: 'success', message: t('operator.brokerOriginsUpdated') })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t('operator.updateBrokerOriginsFailed')
+      addToast({ type: 'error', message })
+      await refreshBrokerOrigins()
+    }
+  }, [addToast, refreshBrokerOrigins, t])
+
+  const handleAddOrigin = useCallback((value: string) => {
+    const trimmed = value.trim()
+    if (!trimmed) return
+    const current = brokerOrigins?.configured ?? []
+    if (current.some((o) => o.toLowerCase() === trimmed.toLowerCase())) {
+      setOriginDraft('')
+      return
+    }
+    setOriginDraft('')
+    saveBrokerOrigins([...current, trimmed])
+  }, [brokerOrigins, saveBrokerOrigins])
+
+  const handleRemoveOrigin = useCallback((origin: string) => {
+    const current = brokerOrigins?.configured ?? []
+    saveBrokerOrigins(current.filter((o) => o !== origin))
+  }, [brokerOrigins, saveBrokerOrigins])
 
   const refreshVectorHealth = useCallback(async () => {
     try {
@@ -695,7 +816,7 @@ export default function OperatorPanel() {
       addToast({ type: result.ok ? 'success' : 'error', message: result.ok ? 'Vector store connection OK' : (result.error || 'Vector store connection failed') })
     } catch (err) {
       const result = vectorStoreTestResultFromError(err, vectorDraft.provider)
-      const message = result?.error || vectorStoreErrorMessage(err, 'Vector store connection failed')
+      const message = result?.error || apiErrorMessage(err, 'Vector store connection failed')
       setVectorTestResult(result ?? { ok: false, provider: vectorDraft.provider, error: message })
       addToast({ type: 'error', message })
     } finally {
@@ -721,7 +842,7 @@ export default function OperatorPanel() {
           : 'Vector store switched.',
       })
     } catch (err) {
-      const message = vectorStoreErrorMessage(err, 'Failed to switch vector store')
+      const message = apiErrorMessage(err, 'Failed to switch vector store')
       addToast({ type: 'error', message })
     } finally {
       setVectorConfigBusy(null)
@@ -749,7 +870,7 @@ export default function OperatorPanel() {
       await refreshVectorHealth()
       addToast({ type: 'success', message: 'Vector store runtime tuning saved.' })
     } catch (err) {
-      const message = vectorStoreErrorMessage(err, 'Failed to save vector store runtime tuning')
+      const message = apiErrorMessage(err, 'Failed to save vector store runtime tuning')
       addToast({ type: 'error', message })
     } finally {
       setVectorConfigBusy(null)
@@ -801,6 +922,7 @@ export default function OperatorPanel() {
         refreshSharpSettings(),
         refreshDnsSettings(),
         refreshDiskWarningSettings(),
+        refreshSmartctl(),
       ])
       if (mounted && s) setLoading(false)
       else if (mounted) setLoading(false)
@@ -808,7 +930,7 @@ export default function OperatorPanel() {
     fetchStatus()
     const interval = setInterval(fetchStatus, 30_000)
     return () => { mounted = false; clearInterval(interval) }
-  }, [refreshDatabase, refreshDiskWarningSettings, refreshDnsSettings, refreshSharpSettings, refreshStatus, refreshVectorConfig, refreshVectorHealth])
+  }, [refreshDatabase, refreshDiskWarningSettings, refreshDnsSettings, refreshSharpSettings, refreshSmartctl, refreshStatus, refreshVectorConfig, refreshVectorHealth])
 
   useEffect(() => {
     const timeout = window.setTimeout(() => {
@@ -822,6 +944,15 @@ export default function OperatorPanel() {
       window.clearInterval(interval)
     }
   }, [refreshTrustedHosts])
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      refreshBrokerOrigins()
+    }, 0)
+    return () => {
+      window.clearTimeout(timeout)
+    }
+  }, [refreshBrokerOrigins])
 
   // Tick uptime every second (paused while reconnecting or shut down)
   useEffect(() => {
@@ -864,7 +995,9 @@ export default function OperatorPanel() {
       refreshDiskWarningSettings()
       refreshSharpSettings()
       refreshDnsSettings()
+      refreshSmartctl()
       refreshTrustedHosts()
+      refreshBrokerOrigins()
 
       // Re-subscribe to log streaming
       operatorApi.subscribeLogs().catch(() => {})
@@ -874,7 +1007,7 @@ export default function OperatorPanel() {
       clearInterval(disconnectPoll)
       unsub()
     }
-  }, [reconnecting, refreshDatabase, refreshDiskWarningSettings, refreshDnsSettings, refreshSharpSettings, refreshStatus, refreshTrustedHosts])
+  }, [reconnecting, refreshBrokerOrigins, refreshDatabase, refreshDiskWarningSettings, refreshDnsSettings, refreshSharpSettings, refreshSmartctl, refreshStatus, refreshTrustedHosts])
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
@@ -883,6 +1016,15 @@ export default function OperatorPanel() {
     pendingRestartOp.current = opName
     setBusy(opName)
   }, [])
+
+  const failRestartPreflight = useCallback((err: unknown, fallback: string) => {
+    pendingRestartOp.current = null
+    setReconnecting(false)
+    setBusy(null)
+    useStore.getState().setOperatorBusy(null)
+    useStore.getState().setOperatorProgressMessage(null)
+    addToast({ type: 'error', message: apiErrorMessage(err, fallback) })
+  }, [addToast])
 
   const handleCheckUpdate = useCallback(async () => {
     setBusy('checking')
@@ -906,10 +1048,12 @@ export default function OperatorPanel() {
         startRestartOperation('updating')
         try {
           await operatorApi.applyUpdate()
-        } catch { /* server will restart */ }
+        } catch (err) {
+          failRestartPreflight(err, 'Update could not start')
+        }
       },
     })
-  }, [status?.commitsBehind, startRestartOperation, t])
+  }, [failRestartPreflight, status?.commitsBehind, startRestartOperation, t])
 
   const handleSwitchBranch = useCallback((target: string) => {
     setConfirm({
@@ -922,10 +1066,12 @@ export default function OperatorPanel() {
         startRestartOperation('switching branch')
         try {
           await operatorApi.switchBranch(target)
-        } catch { /* server will restart */ }
+        } catch (err) {
+          failRestartPreflight(err, 'Branch switch could not start')
+        }
       },
     })
-  }, [startRestartOperation, t])
+  }, [failRestartPreflight, startRestartOperation, t])
 
   const handleRestart = useCallback(() => {
     setConfirm({
@@ -1088,6 +1234,9 @@ export default function OperatorPanel() {
         cacheMemoryMb: next.configuredSettings.cacheMemoryMb ?? null,
         cacheFiles: next.configuredSettings.cacheFiles ?? null,
         cacheItems: next.configuredSettings.cacheItems ?? null,
+        thumbnailCodec: next.configuredSettings.thumbnailCodec ?? null,
+        webpQuality: next.configuredSettings.webpQuality ?? null,
+        avifQuality: next.configuredSettings.avifQuality ?? null,
       })
       addToast({ type: 'success', message: t('operator.sharpApplySuccess') })
     } catch (err) {
@@ -1106,6 +1255,9 @@ export default function OperatorPanel() {
         cacheMemoryMb: null,
         cacheFiles: null,
         cacheItems: null,
+        thumbnailCodec: null,
+        webpQuality: null,
+        avifQuality: null,
       })
       addToast({ type: 'success', message: t('operator.sharpResetSuccess') })
     } catch (err) {
@@ -1113,6 +1265,69 @@ export default function OperatorPanel() {
     }
     setBusy(null)
   }, [addToast, t])
+
+  const formatRebuildParts = useCallback((generated: number, skipped: number, failed: number) => {
+    const parts: string[] = []
+    if (generated > 0) parts.push(t('operator.sharpRebuildGenerated', { count: generated }))
+    if (skipped > 0) parts.push(t('operator.sharpRebuildSkipped', { count: skipped }))
+    if (failed > 0) parts.push(t('operator.sharpRebuildFailedCount', { count: failed }))
+    return parts.join(', ')
+  }, [t])
+
+  const updateThumbnailTiers = useCallback((patch: { smallSize?: number, largeSize?: number }) => {
+    setSetting('thumbnailSettings', { smallSize, largeSize, ...patch })
+  }, [largeSize, setSetting, smallSize])
+
+  const handleRebuildThumbnails = useCallback(async () => {
+    if (rebuildingThumbnails) return
+    setRebuildingThumbnails(true)
+    addToast({ type: 'success', message: t('operator.sharpRebuildStarting') })
+    try {
+      const result = await imagesApi.rebuildThumbnails()
+      const summary = formatRebuildParts(result.generated, result.skipped, result.failed)
+      addToast({
+        type: result.failed > 0 ? 'error' : 'success',
+        message: t('operator.sharpRebuildDone', { summary: summary || String(result.total) }),
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : t('operator.sharpRebuildUnknownError')
+      addToast({ type: 'error', message: t('operator.sharpRebuildFailed', { error: message }) })
+    } finally {
+      setRebuildingThumbnails(false)
+    }
+  }, [addToast, formatRebuildParts, rebuildingThumbnails, t])
+
+  const applyThumbnailSnapshot = useCallback((snapshot: { queue: typeof thumbnailQueue, recovery: typeof thumbnailRecovery }) => {
+    setThumbnailQueue(snapshot.queue)
+    setThumbnailRecovery(snapshot.recovery)
+  }, [setThumbnailQueue])
+
+  const handleRecoverThumbnailQueue = useCallback(async () => {
+    if (queueAction) return
+    setQueueAction('recover')
+    try {
+      applyThumbnailSnapshot(await operatorApi.recoverThumbnailQueue())
+      addToast({ type: 'success', message: t('operator.sharpQueueRecoverStarted') })
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : t('operator.sharpQueueRecoverFailed') })
+    } finally {
+      setQueueAction(null)
+    }
+  }, [addToast, applyThumbnailSnapshot, queueAction, t])
+
+  const handleDiscardThumbnailQueue = useCallback(async () => {
+    if (queueAction) return
+    setQueueAction('discard')
+    try {
+      applyThumbnailSnapshot(await operatorApi.discardThumbnailQueue())
+      await refreshSharpSettings()
+      addToast({ type: 'success', message: t('operator.sharpQueueDiscarded') })
+    } catch (err) {
+      addToast({ type: 'error', message: err instanceof Error ? err.message : t('operator.sharpQueueDiscardFailed') })
+    } finally {
+      setQueueAction(null)
+    }
+  }, [addToast, applyThumbnailSnapshot, queueAction, refreshSharpSettings, t])
 
   const handleSaveDnsSettings = useCallback(async (override?: DnsSettings) => {
     setBusy('saving dns settings')
@@ -1219,6 +1434,43 @@ export default function OperatorPanel() {
     }
   }, [refreshDatabase])
 
+  const handleRefreshSmartctl = useCallback(async () => {
+    setSmartctlRefreshing(true)
+    try {
+      const next = await refreshSmartctl(true)
+      if (!next) addToast({ type: 'error', message: t('operator.smartRefreshFailed') })
+    } finally {
+      setSmartctlRefreshing(false)
+    }
+  }, [addToast, refreshSmartctl, t])
+
+  const handleInstallSmartctl = useCallback(async () => {
+    setSmartctlInstalling(true)
+    try {
+      const result = await operatorApi.installSmartctl()
+      setSmartctlStatus((prev) => prev ? { ...prev, ...result.status, snapshot: prev.snapshot } : null)
+      if (result.installed) {
+        addToast({ type: 'success', message: t('operator.smartInstallSuccess') })
+        await refreshSmartctl(true)
+      } else {
+        setSmartctlError(result.error ?? t('operator.smartInstallFailed'))
+      }
+    } catch (err) {
+      const body = err instanceof ApiError ? err.body : null
+      if (body && typeof body === 'object' && 'status' in body) {
+        const result = body as { status?: Omit<OperatorSmartctlStatus, 'snapshot'>; error?: string }
+        if (result.status) {
+          setSmartctlStatus((prev) => prev ? { ...prev, ...result.status, snapshot: prev.snapshot } : prev)
+        }
+        setSmartctlError(result.error ?? t('operator.smartInstallFailed'))
+      } else {
+        setSmartctlError(err instanceof Error ? err.message : t('operator.smartInstallFailed'))
+      }
+    } finally {
+      setSmartctlInstalling(false)
+    }
+  }, [addToast, refreshSmartctl, t])
+
   const hostSourceLabel = useCallback(
     (source: TrustedHostEntry['source']) => t(hostSourceKey(source)),
     [t],
@@ -1253,6 +1505,7 @@ export default function OperatorPanel() {
 
   const currentBranch = status?.branch ?? 'unknown'
   const otherBranch = currentBranch === 'main' ? 'staging' : 'main'
+  const latestCommitsUrl = `${LUMIVERSE_COMMITS_URL}/${encodeURIComponent(currentBranch)}`
   const mmapSupported = dbStatus?.effectiveTuning.mmapSource !== 'disabled'
   const dbStats = dbStatus?.stats
   const effectiveTuning = dbStatus?.effectiveTuning
@@ -1260,6 +1513,7 @@ export default function OperatorPanel() {
   const maintenanceState = dbStatus?.maintenanceState
   const vacuumDiskWarning = dbStats?.vacuumHasEnoughFreeBytes === false
   const trustedHostsReady = !!trustedHosts
+  const smartSnapshot = smartctlStatus?.snapshot ?? smartctlStatus?.latestSnapshot
 
   return (
     <div className={styles.container}>
@@ -1298,11 +1552,16 @@ export default function OperatorPanel() {
 
       {/* Update badge */}
       {status?.updateAvailable && (
-        <div className={styles.updateBadge}>
+        <a
+          className={styles.updateBadge}
+          href={latestCommitsUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
           <Download size={12} />
           {t('operator.updatesAvailable', { count: status.commitsBehind ?? 0 })}
           {status.latestUpdateMessage ? ` — ${status.latestUpdateMessage}` : ''}
-        </div>
+        </a>
       )}
 
       {/* Reconnecting banner */}
@@ -1594,6 +1853,319 @@ export default function OperatorPanel() {
               {!trustedHostsReady ? t('operator.hostsLoadSnapshotHint') : ''}
             </span>
           </div>
+        </div>
+      </div>
+
+      {/* Approved Broker Origins */}
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <span className={styles.sectionTitle}>{t('operator.brokerOrigins')}</span>
+        </div>
+        <div className={styles.sectionBody}>
+          <span className={styles.remoteHint}>{t('operator.brokerOriginsHint')}</span>
+
+          {brokerOriginsLoading && !brokerOrigins && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--lumiverse-text-dim)', fontSize: 12 }}>
+              <Loader2 size={14} className={spinClass} /> {t('operator.brokerOriginsLoading')}
+            </div>
+          )}
+
+          {brokerOriginsError && (
+            <div className={styles.disabledHint}>
+              {t('operator.brokerOriginsRefreshFailed', { error: brokerOriginsError })}
+            </div>
+          )}
+
+          {brokerOrigins && (
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.fieldLabel}>{t('operator.brokerOriginsConfigured')}</span>
+              {brokerOrigins.configured.length > 0 ? (
+                <div className={styles.hostChipGroup}>
+                  {brokerOrigins.configured.map((origin) => (
+                    <span key={origin} className={styles.hostChip}>
+                      {origin}
+                      <button
+                        type="button"
+                        className={styles.hostChipRemove}
+                        onClick={() => handleRemoveOrigin(origin)}
+                        aria-label={t('operator.brokerOriginsRemove', { origin })}
+                      >
+                        <X size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <span className={styles.hostEmpty}>{t('operator.brokerOriginsEmpty')}</span>
+              )}
+            </div>
+          )}
+
+          {!brokerOrigins && !brokerOriginsLoading && !brokerOriginsError && (
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.hostEmpty}>{t('operator.brokerOriginsNotLoaded')}</span>
+            </div>
+          )}
+
+          <div className={styles.dbInfoBlock}>
+            <span className={styles.fieldLabel}>{t('operator.brokerOriginsAddManually')}</span>
+            <form
+              className={styles.hostInputRow}
+              onSubmit={(e) => {
+                e.preventDefault()
+                handleAddOrigin(originDraft)
+              }}
+            >
+              <input
+                type="text"
+                className={styles.hostInput}
+                placeholder={t('operator.brokerOriginsPlaceholder')}
+                value={originDraft}
+                onChange={(e) => setOriginDraft(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                type="submit"
+                className={styles.controlBtnPrimary}
+                disabled={!originDraft.trim()}
+              >
+                <Globe size={14} />
+                {t('operator.brokerOriginsAdd')}
+              </button>
+              <button
+                type="button"
+                className={styles.controlBtn}
+                onClick={() => refreshBrokerOrigins(true)}
+                disabled={brokerOriginsLoading}
+              >
+                <RefreshCw size={14} className={brokerOriginsLoading ? spinClass : undefined} />
+                {t('operator.brokerOriginsRefresh')}
+              </button>
+            </form>
+            <span className={styles.fieldHint}>{t('operator.brokerOriginsPortHint')}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Disk Health */}
+      <div className={styles.section}>
+        <div className={styles.sectionHeader}>
+          <span className={styles.sectionTitle}>{t('operator.diskHealth')}</span>
+          <div className={styles.controls}>
+            {smartctlStatus?.availability === 'installable' && (
+              <button
+                className={styles.controlBtnPrimary}
+                disabled={smartctlInstalling || smartctlRefreshing}
+                onClick={handleInstallSmartctl}
+              >
+                {smartctlInstalling ? <Loader2 size={14} className={spinClass} /> : <Download size={14} />}
+                {smartctlInstalling ? t('operator.smartInstalling') : t('operator.smartInstall')}
+              </button>
+            )}
+            <button
+              className={styles.controlBtn}
+              disabled={smartctlRefreshing || smartctlInstalling}
+              onClick={handleRefreshSmartctl}
+            >
+              <RefreshCw size={14} className={smartctlRefreshing ? spinClass : undefined} />
+              {t('operator.smartRefresh')}
+            </button>
+          </div>
+        </div>
+        <div className={styles.sectionBody}>
+          <div className={styles.smartAvailability}>
+            <span className={clsx(styles.smartAvailabilityDot, smartctlStatus?.availability === 'available' ? styles.smartOk : styles.smartUnavailable)} />
+            <span>
+              {smartctlStatus?.binary
+                ? t('operator.smartAvailable', {
+                  version: smartctlStatus.binary.version ? `v${smartctlStatus.binary.version}` : 'smartctl',
+                  path: smartctlStatus.binary.path,
+                })
+                : smartctlStatus?.message ?? t('operator.smartLoading')}
+            </span>
+          </div>
+
+          {smartctlError && <div className={styles.warningBanner}>{smartctlError}</div>}
+          {smartctlStatus?.installPlan && (
+            <span className={styles.fieldHint}>
+              {t('operator.smartInstallCommand', { command: smartctlStatus.installPlan.command.join(' ') })}
+            </span>
+          )}
+          {smartSnapshot?.error && <div className={styles.warningBanner}>{t('operator.smartCheckError', { error: smartSnapshot.error })}</div>}
+
+          {smartSnapshot && !smartSnapshot.error && (
+            <>
+              <span className={styles.fieldHint}>{t('operator.smartLastChecked', { time: formatIsoTimestamp(smartSnapshot.checkedAt) })}</span>
+              {smartSnapshot.drives.length === 0 ? (
+                <div className={styles.disabledHint}>{t('operator.smartNoDrives')}</div>
+              ) : (
+                <div className={styles.smartDriveList}>
+                  {smartSnapshot.drives.map((drive) => {
+                    const ssd = drive.kind === 'ssd' ? drive.ssd : null
+                    const hdd = drive.kind === 'hdd' ? drive.hdd : null
+                    return (
+                    <div className={styles.smartDrive} key={drive.device}>
+                      <div className={styles.smartDriveHeader}>
+                        <div>
+                          <div className={styles.smartDriveName}>{drive.model ?? drive.device}</div>
+                          <div className={styles.dbMono}>{drive.device}{drive.protocol ? ` · ${drive.protocol}` : ''}{drive.kind && drive.kind !== 'unknown' ? ` · ${drive.kind.toUpperCase()}` : ''}</div>
+                        </div>
+                        <span className={clsx(
+                          styles.smartBadge,
+                          drive.status === 'ok' && styles.smartOk,
+                          drive.status === 'warning' && styles.smartWarning,
+                          drive.status === 'failing' && styles.smartFailing,
+                          (drive.status === 'unavailable' || drive.status === 'standby') && styles.smartUnavailable,
+                        )}>
+                          {t(smartStatusTranslationKey(drive.status))}
+                        </span>
+                      </div>
+
+                      <div className={styles.smartMetrics}>
+                        <div className={styles.smartMetric}>
+                          <span>{t('operator.smartTemperature')}</span>
+                          <strong>{drive.temperatureC == null ? '—' : t('operator.smartTemperatureValue', { value: drive.temperatureC })}</strong>
+                        </div>
+                        {hdd?.powerOnHours != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartPowerOnHours')}</span>
+                            <strong>{formatSmartNumber(hdd.powerOnHours)}</strong>
+                          </div>
+                        )}
+                        {hdd?.powerCycles != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartPowerCycles')}</span>
+                            <strong>{formatSmartNumber(hdd.powerCycles)}</strong>
+                          </div>
+                        )}
+                        {hdd?.startStopCount != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartStartStopCount')}</span>
+                            <strong>{formatSmartNumber(hdd.startStopCount)}</strong>
+                          </div>
+                        )}
+                        {hdd?.loadCycleCount != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartLoadCycleCount')}</span>
+                            <strong>{formatSmartNumber(hdd.loadCycleCount)}</strong>
+                          </div>
+                        )}
+                        {ssd?.percentageUsed != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartWearUsed')}</span>
+                            <strong>{t('operator.smartPercentValue', { value: ssd.percentageUsed })}</strong>
+                          </div>
+                        )}
+                        {ssd?.percentageRemaining != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartEnduranceRemaining')}</span>
+                            <strong>{t('operator.smartPercentValue', { value: ssd.percentageRemaining })}</strong>
+                          </div>
+                        )}
+                        {ssd?.availableSparePercent != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{ssd.availableSpareThresholdPercent == null
+                              ? t('operator.smartAvailableSpare')
+                              : t('operator.smartAvailableSpareThreshold', { threshold: ssd.availableSpareThresholdPercent })}</span>
+                            <strong>{t('operator.smartPercentValue', { value: ssd.availableSparePercent })}</strong>
+                          </div>
+                        )}
+                        {ssd?.dataWrittenBytes != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartDataWritten')}</span>
+                            <strong>{formatBytes(ssd.dataWrittenBytes)}</strong>
+                          </div>
+                        )}
+                        {ssd?.powerOnHours != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartPowerOnHours')}</span>
+                            <strong>{formatSmartNumber(ssd.powerOnHours)}</strong>
+                          </div>
+                        )}
+                        {ssd?.powerCycles != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartPowerCycles')}</span>
+                            <strong>{formatSmartNumber(ssd.powerCycles)}</strong>
+                          </div>
+                        )}
+                        {ssd?.mediaErrors != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartMediaErrors')}</span>
+                            <strong>{formatSmartNumber(ssd.mediaErrors)}</strong>
+                          </div>
+                        )}
+                        {ssd?.unsafeShutdowns != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartUnsafeShutdowns')}</span>
+                            <strong>{formatSmartNumber(ssd.unsafeShutdowns)}</strong>
+                          </div>
+                        )}
+                        {ssd?.wearLevelingCount != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartWearLeveling')}</span>
+                            <strong>{formatSmartNumber(ssd.wearLevelingCount)}</strong>
+                          </div>
+                        )}
+                        {ssd?.reservedBlocksUsed != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartReservedBlocksUsed')}</span>
+                            <strong>{formatSmartNumber(ssd.reservedBlocksUsed)}</strong>
+                          </div>
+                        )}
+                        {ssd?.programFailures != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartProgramFailures')}</span>
+                            <strong>{formatSmartNumber(ssd.programFailures)}</strong>
+                          </div>
+                        )}
+                        {ssd?.eraseFailures != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartEraseFailures')}</span>
+                            <strong>{formatSmartNumber(ssd.eraseFailures)}</strong>
+                          </div>
+                        )}
+                        {drive.criticalWarning != null && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartCriticalWarning')}</span>
+                            <strong>{formatSmartNumber(drive.criticalWarning)}</strong>
+                          </div>
+                        )}
+                        {(drive.kind !== 'ssd' || drive.ataAttributes.reallocatedSectors != null) && (
+                          <div className={styles.smartMetric}>
+                            <span>{drive.kind === 'ssd' ? t('operator.smartNandReallocated') : t('operator.smartReallocated')}</span>
+                            <strong>{formatSmartNumber(drive.ataAttributes.reallocatedSectors)}</strong>
+                          </div>
+                        )}
+                        {(drive.kind !== 'ssd' || drive.ataAttributes.pendingSectors != null) && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartPending')}</span>
+                            <strong>{formatSmartNumber(drive.ataAttributes.pendingSectors)}</strong>
+                          </div>
+                        )}
+                        {(drive.kind !== 'ssd' || drive.ataAttributes.uncorrectableSectors != null) && (
+                          <div className={styles.smartMetric}>
+                            <span>{t('operator.smartUncorrectable')}</span>
+                            <strong>{formatSmartNumber(drive.ataAttributes.uncorrectableSectors)}</strong>
+                          </div>
+                        )}
+                      </div>
+
+                      {drive.alertConditions?.length > 0 && (
+                        <div className={styles.warningBanner}>
+                          {drive.alertConditions.map((condition, index) => (
+                            <div key={`${condition.severity}-${condition.message}-${index}`}>{condition.message}</div>
+                          ))}
+                        </div>
+                      )}
+                      {drive.message && <div className={styles.fieldHint}>{drive.message}</div>}
+                    </div>
+                    )
+                  })}
+                </div>
+              )}
+            </>
+          )}
         </div>
       </div>
 
@@ -1995,7 +2567,7 @@ export default function OperatorPanel() {
 
       {/* Image Processing */}
       <div className={styles.section}>
-        <div className={styles.sectionHeader}>
+        <div className={styles.sectionHeader} id={sectionAnchorId('operator', 'imageProcessing')}>
           <span className={styles.sectionTitle}>{t('operator.imageProcessing')}</span>
         </div>
         <div className={styles.sectionBody}>
@@ -2018,14 +2590,71 @@ export default function OperatorPanel() {
               <span className={styles.dbInlineText}>
                 {sharpStatus
                   ? t('operator.sharpEffectiveValue', {
-                    concurrency: sharpStatus.defaults.concurrency,
+                    concurrency: activeAutomaticConcurrency,
                     cacheMb: sharpStatus.defaults.cacheMemoryMb,
                     cacheFiles: sharpStatus.defaults.cacheFiles,
                     cacheItems: sharpStatus.defaults.cacheItems,
                   })
+                : '—'}
+              </span>
+            </div>
+            <div className={styles.dbInfoBlock}>
+              <span className={styles.statusLabel}>{t('operator.thumbnailEncodingEffective')}</span>
+              <span className={styles.dbInlineText}>
+                {sharpStatus
+                  ? t('operator.thumbnailEncodingEffectiveValue', {
+                    codec: sharpStatus.effectiveSettings.thumbnailCodec.toUpperCase(),
+                    quality: sharpStatus.effectiveSettings.thumbnailCodec === 'avif'
+                      ? sharpStatus.effectiveSettings.avifQuality
+                      : sharpStatus.effectiveSettings.webpQuality,
+                  })
                   : '—'}
               </span>
             </div>
+          </div>
+
+          <div className={styles.toggleRow}>
+            <div className={styles.remoteInfo}>
+              <span className={styles.remoteLabel}>{t('operator.thumbnailUseAvif')}</span>
+              <span className={styles.remoteHint}>{t('operator.thumbnailUseAvifHint')}</span>
+            </div>
+            <Toggle.Switch
+              checked={activeThumbnailCodec === 'avif'}
+              onChange={(checked) => setSharpSettings((prev) => ({
+                ...prev,
+                thumbnailCodec: checked ? 'avif' : 'webp',
+              }))}
+              disabled={!!effectiveBusy}
+              aria-label={t('operator.thumbnailUseAvif')}
+            />
+          </div>
+
+          <div className={styles.tuningGrid}>
+            <label key={activeThumbnailCodec} className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>
+                {t(activeThumbnailCodec === 'avif'
+                  ? 'operator.thumbnailAvifQuality'
+                  : 'operator.thumbnailWebpQuality')}
+              </span>
+              <NumericInput
+                min={1}
+                max={100}
+                step={1}
+                className={styles.fieldInput}
+                placeholder={t('operator.placeholderDefault', { value: activeThumbnailQualityDefault })}
+                value={activeThumbnailQuality ?? null}
+                integer
+                allowEmpty
+                onChange={(value) => setSharpSettings((prev) => activeThumbnailCodec === 'avif'
+                  ? { ...prev, avifQuality: value }
+                  : { ...prev, webpQuality: value })}
+              />
+              <span className={styles.fieldHint}>
+                {t(activeThumbnailCodec === 'avif'
+                  ? 'operator.thumbnailAvifQualityHint'
+                  : 'operator.thumbnailWebpQualityHint')}
+              </span>
+            </label>
           </div>
 
           <div className={styles.tuningGrid}>
@@ -2036,13 +2665,18 @@ export default function OperatorPanel() {
                 max={16}
                 step={1}
                 className={styles.fieldInput}
-                placeholder={t('operator.placeholderDefault', { value: sharpStatus?.defaults.concurrency ?? 4 })}
+                placeholder={t('operator.placeholderDefault', { value: activeAutomaticConcurrency })}
                 value={sharpSettings.concurrency ?? null}
                 integer
                 allowEmpty
                 onChange={(value) => setSharpSettings((prev) => ({ ...prev, concurrency: value }))}
               />
-              <span className={styles.fieldHint}>{t('operator.sharpConcurrencyHint')}</span>
+              <span className={styles.fieldHint}>
+                {t('operator.sharpConcurrencyHint', {
+                  codec: activeThumbnailCodec.toUpperCase(),
+                  value: activeAutomaticConcurrency,
+                })}
+              </span>
             </label>
 
             <label className={styles.fieldGroup}>
@@ -2090,6 +2724,123 @@ export default function OperatorPanel() {
               />
             </label>
           </div>
+
+          <div className={styles.tuningGrid}>
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>{t('operator.sharpSmallTier')}</span>
+              <NumericInput
+                min={100}
+                max={600}
+                step={10}
+                className={styles.fieldInput}
+                value={smallSize}
+                integer
+                onChange={(value) => {
+                  if (value != null) updateThumbnailTiers({ smallSize: value })
+                }}
+              />
+              <span className={styles.fieldHint}>{t('operator.sharpSmallTierHint')}</span>
+            </label>
+
+            <label className={styles.fieldGroup}>
+              <span className={styles.fieldLabel}>{t('operator.sharpLargeTier')}</span>
+              <NumericInput
+                min={400}
+                max={1200}
+                step={10}
+                className={styles.fieldInput}
+                value={largeSize}
+                integer
+                onChange={(value) => {
+                  if (value != null) updateThumbnailTiers({ largeSize: value })
+                }}
+              />
+              <span className={styles.fieldHint}>{t('operator.sharpLargeTierHint')}</span>
+            </label>
+          </div>
+
+          <div className={styles.controls}>
+            <button
+              className={styles.controlBtn}
+              disabled={rebuildingThumbnails || !!effectiveBusy}
+              onClick={handleRebuildThumbnails}
+            >
+              {rebuildingThumbnails ? <Loader2 size={14} className={spinClass} /> : <RefreshCw size={14} />}
+              {rebuildingThumbnails ? t('operator.sharpRebuilding') : t('operator.sharpRebuild')}
+            </button>
+          </div>
+          <p className={styles.thumbnailQueueHint}>{t('operator.sharpRebuildHint')}</p>
+
+          <div
+            className={styles.thumbnailQueue}
+            role="status"
+            aria-live="polite"
+            aria-label={t('operator.sharpThumbnailTitle')}
+          >
+            <div className={styles.thumbnailQueueHeader}>
+              <span className={styles.thumbnailQueueTitle}>{t('operator.sharpThumbnailTitle')}</span>
+              <span className={styles.thumbnailQueueCounts}>
+                {thumbnailQueue.remaining > 0
+                  ? t('operator.sharpThumbnailCounts', {
+                      processed: thumbnailQueue.processed,
+                      remaining: thumbnailQueue.remaining,
+                      total: thumbnailQueue.total,
+                    })
+                  : t('operator.sharpThumbnailIdle')}
+              </span>
+            </div>
+            <div
+              className={styles.thumbnailQueueTrack}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={Math.max(thumbnailQueue.total, 1)}
+              aria-valuenow={thumbnailQueue.processed}
+            >
+              <div
+                className={`${styles.thumbnailQueueFill}${thumbnailQueue.remaining > 0 ? ` ${styles.thumbnailQueueFillActive}` : ''}`}
+                style={{
+                  width: thumbnailQueue.remaining > 0 && thumbnailQueue.total > 0
+                    ? `${Math.min(100, (thumbnailQueue.processed / thumbnailQueue.total) * 100)}%`
+                    : '0%',
+                }}
+              />
+            </div>
+            <p className={styles.thumbnailQueueHint}>{t('operator.sharpThumbnailHint')}</p>
+          </div>
+
+          {thumbnailRecovery.pending > 0 && (
+            <div className={styles.thumbnailQueue} role="status">
+              <div className={styles.thumbnailQueueHeader}>
+                <span className={styles.thumbnailQueueTitle}>{t('operator.sharpQueueLeftoversTitle')}</span>
+                <span className={styles.thumbnailQueueCounts}>
+                  {t('operator.sharpQueueLeftoversCounts', {
+                    pending: thumbnailRecovery.pending,
+                    process: thumbnailRecovery.process,
+                    rebuild: thumbnailRecovery.rebuild,
+                  })}
+                </span>
+              </div>
+              <p className={styles.thumbnailQueueHint}>{t('operator.sharpQueueLeftoversHint')}</p>
+              <div className={styles.controls}>
+                <button
+                  className={styles.controlBtnPrimary}
+                  disabled={!!queueAction || rebuildingThumbnails || !!effectiveBusy}
+                  onClick={handleRecoverThumbnailQueue}
+                >
+                  {queueAction === 'recover' ? <Loader2 size={14} className={spinClass} /> : <Play size={14} />}
+                  {t('operator.sharpQueueRecover')}
+                </button>
+                <button
+                  className={styles.controlBtn}
+                  disabled={!!queueAction || rebuildingThumbnails || !!effectiveBusy}
+                  onClick={handleDiscardThumbnailQueue}
+                >
+                  {queueAction === 'discard' ? <Loader2 size={14} className={spinClass} /> : <Trash2 size={14} />}
+                  {t('operator.sharpQueueDiscard')}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className={styles.controls}>
             <button

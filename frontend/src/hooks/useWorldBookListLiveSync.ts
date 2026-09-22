@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { wsClient, WS_OPEN } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { upsertById } from '@/lib/worldBookList'
 import type { WorldBookChangedPayload, WorldBookDeletedPayload } from '@/types/ws-events'
 import type { WorldBook } from '@/types/api'
 
@@ -59,20 +60,20 @@ export function useWorldBookListLiveSync({
       // Don't overwrite the metadata fields the user is actively editing — their
       // own debounced save echoes back here, and re-seeding would fight the input.
       if (p.id === selectedRef.current && Date.now() - lastLocalEditAt.current < SELF_EDIT_WINDOW_MS) return
-      setBooksRef.current((prev) =>
-        prev.some((b) => b.id === p.id)
-          ? prev.map((b) => (b.id === p.id ? p.worldBook : b))
-          : [p.worldBook, ...prev],
-      )
+      setBooksRef.current((prev) => upsertById(prev, p.worldBook))
     })
     const offDeleted = wsClient.on(EventType.WORLD_BOOK_DELETED, (p: WorldBookDeletedPayload) => {
       if (!p?.id) return
       setBooksRef.current((prev) => prev.filter((b) => b.id !== p.id))
       if (p.id === selectedRef.current) onDeletedRef.current()
     })
+    const offLibraryChanged = wsClient.on(EventType.WORLD_BOOK_LIBRARY_CHANGED, () => {
+      void refreshRef.current?.()
+    })
     return () => {
       offChanged()
       offDeleted()
+      offLibraryChanged()
     }
   }, [])
 

@@ -79,6 +79,7 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
       if (feedback) {
         genOpts.regen_feedback = feedback
         genOpts.regen_feedback_position = regenFeedback.position
+        genOpts.regen_feedback_format = regenFeedback.format
       }
       const res = await generateApi.start(genOpts)
       if (regenerateNonceRef.current !== nonce) return
@@ -98,6 +99,7 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
     activeCharacterId,
     getActivePresetForGeneration,
     regenFeedback.position,
+    regenFeedback.format,
     beginStreaming,
     startStreaming,
     setStreamingError,
@@ -107,13 +109,14 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
     if (isStreaming) return
     if (regenFeedback.enabled) {
       openModal('regenFeedback', {
+        chatId,
         onSubmit: (feedback: string) => doRegenerate(feedback),
         onSkip: () => doRegenerate(),
       })
     } else {
       doRegenerate()
     }
-  }, [isStreaming, regenFeedback.enabled, openModal, doRegenerate])
+  }, [isStreaming, regenFeedback.enabled, openModal, doRegenerate, chatId])
 
   const handleSwipe = useCallback(
     async (direction: 'left' | 'right') => {
@@ -174,6 +177,7 @@ export async function executeSwipe(message: Message, chatId: string, direction: 
         if (feedback) {
           genOpts.regen_feedback = feedback
           genOpts.regen_feedback_position = regenFeedback.position
+          genOpts.regen_feedback_format = regenFeedback.format
         }
         const res = await generateApi.start(genOpts)
         startStreaming(res.generationId, message.id, 'swipe')
@@ -185,6 +189,7 @@ export async function executeSwipe(message: Message, chatId: string, direction: 
 
     if (regenFeedback.enabled) {
       openModal('regenFeedback', {
+        chatId,
         onSubmit: (feedback: string) => doRegen(feedback),
         onSkip: () => doRegen(),
       })

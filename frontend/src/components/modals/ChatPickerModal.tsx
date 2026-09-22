@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
-import { motion, AnimatePresence } from 'motion/react'
 import { formatRelativeTime } from '@/lib/formatRelativeTime'
 import { previewText } from '@/lib/previewText'
 import { Check, MessageSquare, Plus, MoreHorizontal, Pencil, Download, Trash2, Sparkles, Gamepad2 } from 'lucide-react'
@@ -300,14 +299,13 @@ export default function ChatPickerModal({
           </button>
 
           {/* List of existing chats */}
-          <AnimatePresence initial={false}>
           {!loading && items.map((item, i) => {
             const isActive = i === 0 // The first one is implicitly the most recent
             const isRenaming = renamingId === item.id
             const isMenuOpen = activeMenuId === item.id
 
             return (
-              <motion.div
+              <div
                 key={item.id}
                 className={clsx(styles.card, isActive && styles.cardActive)}
                 style={{ animationDelay: `${Math.min(i * 40, 200)}ms`, zIndex: isMenuOpen ? 10 : undefined }}
@@ -325,9 +323,6 @@ export default function ChatPickerModal({
                     onSelect(item.id)
                   }
                 }}
-                exit={{ opacity: 0, x: -16, transition: { duration: 0.18 } }}
-                whileHover={{ scale: isMenuOpen ? 1 : 1.01 }}
-                whileTap={{ scale: isMenuOpen ? 1 : 0.99 }}
               >
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitleRow}>
@@ -399,10 +394,9 @@ export default function ChatPickerModal({
                     </span>
                   </div>
                 </div>
-              </motion.div>
+              </div>
             )
           })}
-          </AnimatePresence>
         </div>
       </ModalShell>
 

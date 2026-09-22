@@ -4,6 +4,7 @@ import * as qwenSvc from "../services/qwen-tts.service";
 import { getTtsProviderList } from "../tts/registry";
 import { parsePagination } from "../services/pagination";
 import { clampErrorMessage, describeProviderError } from "../utils/provider-errors";
+import { withReadableApiKeyStatus, withReadableApiKeyStatuses } from "../services/connection-secret-status";
 
 // Side-effect import: registers all TTS providers in the registry
 import "../tts/index";
@@ -27,7 +28,8 @@ function qwenVoiceMutationStatus(
 
 /** List all TTS providers with capabilities */
 app.get("/providers", (c) => {
-  const providers = getTtsProviderList().map((p) => ({
+  const userId = c.get("userId");
+  const providers = getTtsProviderList(userId).map((p) => ({
     id: p.name,
     name: p.displayName,
     capabilities: p.capabilities,
@@ -36,10 +38,15 @@ app.get("/providers", (c) => {
 });
 
 /** List TTS connections (paginated) */
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listConnections(userId, pagination));
+  const result = await withReadableApiKeyStatuses(
+    userId,
+    svc.listConnections(userId, pagination),
+    svc.ttsConnectionSecretKey,
+  );
+  return c.json(result);
 });
 
 /** Create TTS connection */
@@ -70,11 +77,11 @@ app.post("/models/preview", async (c) => {
 });
 
 /** Get TTS connection by ID */
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const userId = c.get("userId");
   const conn = svc.getConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.ttsConnectionSecretKey));
 });
 
 /** Update TTS connection */
@@ -83,7 +90,7 @@ app.put("/:id", async (c) => {
   const body = await c.req.json();
   const conn = await svc.updateConnection(userId, c.req.param("id"), body);
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.ttsConnectionSecretKey));
 });
 
 /** Delete TTS connection */
@@ -194,7 +201,7 @@ app.post("/:id/duplicate", async (c) => {
   const userId = c.get("userId");
   const conn = await svc.duplicateConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn, 201);
+  return c.json(await withReadableApiKeyStatus(userId, conn, svc.ttsConnectionSecretKey), 201);
 });
 
 export { app as ttsConnectionsRoutes };

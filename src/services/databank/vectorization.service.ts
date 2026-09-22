@@ -223,7 +223,7 @@ async function vectorizeChunks(
   signal: AbortSignal,
 ): Promise<void> {
   const failures: Error[] = [];
-  await embeddingsSvc.embedWithAdaptiveBatching(
+  await embeddingsSvc.embedInBatches(
     userId,
     chunks,
     // Respect the user's configured embedding batch size (clamped) instead of a

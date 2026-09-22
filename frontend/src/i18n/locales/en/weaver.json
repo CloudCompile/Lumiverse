@@ -106,6 +106,27 @@
   },
   "import": {
     "eyebrow": "Weaver · Import",
+    "sourceLabel": "Import source",
+    "sources": {
+      "gallery": "Your characters",
+      "file": "Upload a file"
+    },
+    "gallery": {
+      "title": "Choose a character",
+      "heading": "Build from your gallery",
+      "help": "Select an existing character as the source for a new Weaver build.",
+      "search": "Search your characters…",
+      "loading": "Loading characters…",
+      "more": "Load more",
+      "empty": "Your character gallery is empty.",
+      "noResults": "No characters match that search.",
+      "noDetails": "No description",
+      "loadFailed": "Could not load your characters",
+      "inspectFailed": "Could not read this character",
+      "another": "Different character",
+      "noteOriginal": "The selected character stays in your library untouched.",
+      "cardFoot": "The selected character remains untouched. The Weaver creates a separate rebuilt card."
+    },
     "titleDrop": "Bring a file",
     "back": "Back to the studio",
     "drop": "Drop a card or worldbook",
@@ -421,6 +442,9 @@
     "replaceEditBody": "This field is hand-edited. Re-rendering overwrites your text with a fresh pass from the Bible.",
     "keepEdit": "Keep my edit",
     "replaceEdit": "Replace it",
+    "keptEditsTitle": "Your hand-edits were kept",
+    "keptEditsBody": "Render all again left these fields untouched so it wouldn't overwrite your edits: {{fields}}. Open a field and choose Replace it to regenerate it from the Bible.",
+    "keptEditsDismiss": "Dismiss",
     "fieldsRail": "Card fields · {{count}}",
     "fieldFlaggedSubject": "The {{field}} field",
     "fieldFlaggedFix": "Re-render it on its own, or strengthen the Bible entries it draws from, then render again.",

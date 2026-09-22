@@ -13,6 +13,7 @@ import {
   type ChatChunkVectorizationBatchResult,
   type ChatChunkVectorizationTask,
 } from "./chat-chunk-vectorization-runner";
+import { isLanceDbMaintenanceRunning } from "./lancedb-maintenance-supervisor";
 import type { WorldBookEntry, WorldBookVectorIndexStatus } from "../types/world-book";
 import {
   desiredWorldBookVectorIndexStatus,
@@ -28,12 +29,17 @@ interface VectorizationJob {
   chatId: string;
   chunkId?: string;
   worldBookEntryId?: string;
+  supersedesIndexed?: boolean;
   queuedAt: number;
 }
 
 const WORLD_BOOK_SWEEP_INTERVAL_MS = 60_000;
 const WORLD_BOOK_SWEEP_LIMIT_PER_USER = 100;
 const CHAT_CHUNK_REQUEUE_LIMIT = 500;
+/** Coalesce lorebook-edit reindexes so typing does not native-write LanceDB each save. */
+const WORLD_BOOK_VECTOR_SETTLE_MS = 2_500;
+const WORLD_BOOK_VECTOR_MAX_WAIT_MS = 15_000;
+const WORLD_BOOK_MAINTENANCE_POLL_MS = 250;
 
 function normalizeWorldBookVectorIndexStatus(row: any): WorldBookVectorIndexStatus {
   if (
@@ -49,6 +55,37 @@ function normalizeWorldBookVectorIndexStatus(row: any): WorldBookVectorIndexStat
     disabled: !!row.disabled,
     content: typeof row.content === "string" ? row.content : "",
   });
+}
+function mergeVectorizationJobs(existing: VectorizationJob, incoming: VectorizationJob): void {
+  existing.priority = Math.max(existing.priority, incoming.priority);
+  existing.supersedesIndexed = !!(existing.supersedesIndexed || incoming.supersedesIndexed);
+}
+
+function remainingWorldBookSettleMs(queuedAt: number, now: number): number {
+  const age = now - queuedAt;
+  if (age >= WORLD_BOOK_VECTOR_MAX_WAIT_MS) return 0;
+  return Math.max(0, WORLD_BOOK_VECTOR_SETTLE_MS - age);
+}
+
+function worldBookJobsHaveSettled(jobs: Array<Pick<VectorizationJob, "type" | "queuedAt">>, now: number): boolean {
+  const worldBookJobs = jobs.filter((job) => job.type === "world_book_entry");
+  if (worldBookJobs.length === 0) return true;
+  const oldest = Math.min(...worldBookJobs.map((job) => job.queuedAt));
+  if (now - oldest >= WORLD_BOOK_VECTOR_MAX_WAIT_MS) return true;
+  return worldBookJobs.every((job) => remainingWorldBookSettleMs(job.queuedAt, now) === 0);
+}
+
+function nextProcessDelayMs(jobs: Array<Pick<VectorizationJob, "type" | "queuedAt">>, now: number): number {
+  let delay = 100;
+  for (const job of jobs) {
+    if (job.type !== "world_book_entry") continue;
+    delay = Math.max(delay, remainingWorldBookSettleMs(job.queuedAt, now));
+  }
+  return delay;
+}
+
+function shouldProcessWorldBookVectorizationJob(row: any, job: VectorizationJob | undefined): boolean {
+  return normalizeWorldBookVectorIndexStatus(row) !== "indexed" || job?.supersedesIndexed === true;
 }
 
 function rowToWorldBookEntry(row: any): WorldBookEntry {
@@ -104,11 +141,13 @@ class VectorizationQueue {
         j.userId === job.userId &&
         j.chatId === job.chatId &&
         j.chunkId === job.chunkId &&
-        j.worldBookEntryId === job.worldBookEntryId
+        j.worldBookEntryId === job.worldBookEntryId,
     );
 
     if (existing >= 0) {
-      this.queue[existing].priority = Math.max(this.queue[existing].priority, job.priority);
+      mergeVectorizationJobs(this.queue[existing], job);
+      this.queue[existing].queuedAt = job.queuedAt;
+      this.scheduleProcessing();
       return;
     }
 
@@ -118,11 +157,23 @@ class VectorizationQueue {
   }
 
   private scheduleProcessing() {
-    if (this.processingTimer) return;
+    if (this.processingTimer) {
+      clearTimeout(this.processingTimer);
+      this.processingTimer = null;
+    }
+    const delayMs = nextProcessDelayMs(this.queue, Date.now());
     this.processingTimer = setTimeout(() => {
       this.processingTimer = null;
       this.processQueue();
-    }, 100);
+    }, delayMs);
+  }
+
+  private async awaitLanceMaintenanceIdle(): Promise<void> {
+    while (isLanceDbMaintenanceRunning()) {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, WORLD_BOOK_MAINTENANCE_POLL_MS);
+      await promise;
+    }
   }
 
   private async processQueue() {
@@ -131,6 +182,18 @@ class VectorizationQueue {
 
     try {
       while (this.queue.length > 0) {
+        if (this.queue[0].type === "world_book_entry") {
+          if (!worldBookJobsHaveSettled(this.queue, Date.now())) {
+            this.scheduleProcessing();
+            return;
+          }
+          await this.awaitLanceMaintenanceIdle();
+          if (this.queue.length === 0 || this.queue[0].type !== "world_book_entry") continue;
+          if (!worldBookJobsHaveSettled(this.queue, Date.now())) {
+            this.scheduleProcessing();
+            return;
+          }
+        }
         const userId = this.queue[0].userId;
         let maxBatch = 10;
         try {
@@ -145,7 +208,9 @@ class VectorizationQueue {
           await this.processWorldBookEntryBatch(batch);
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, 100);
+        await promise;
       }
     } finally {
       this.processing = false;
@@ -234,17 +299,18 @@ class VectorizationQueue {
         JOIN world_books wb ON wb.id = e.world_book_id
         WHERE wb.user_id = ?
           AND e.id IN (${placeholders})
-          AND (e.vector_index_status != 'indexed' OR e.vector_index_status IS NULL)
         ORDER BY wb.name COLLATE NOCASE, e.updated_at ASC
       `)
       .all(jobs[0].userId, ...entryIds) as any[];
 
-    if (rows.length === 0) return;
+    const jobsByEntryId = new Map(jobs.map((job) => [job.worldBookEntryId, job] as const));
+    const rowsToProcess = rows.filter((row) => shouldProcessWorldBookVectorizationJob(row, jobsByEntryId.get(String(row.id))));
+    if (rowsToProcess.length === 0) return;
 
-    const entries = rows.map(rowToWorldBookEntry);
+    const entries = rowsToProcess.map(rowToWorldBookEntry);
     const settingsFingerprint = worldBookVectorSettingsFingerprint(loadWorldBookVectorSettings(jobs[0].userId));
     const bookCounts = new Map<string, number>();
-    for (const row of rows) {
+    for (const row of rowsToProcess) {
       const name = String(row.world_book_name || "Untitled world book");
       bookCounts.set(name, (bookCounts.get(name) ?? 0) + 1);
     }
@@ -258,6 +324,7 @@ class VectorizationQueue {
       configFingerprint = embeddingsSvc.getWorldBookVectorWriteFingerprint(cfg);
       await embeddingsSvc.reindexWorldBookEntries(jobs[0].userId, entries, {
         batchSize: Math.max(1, Math.min(cfg.batch_size, entries.length, 200)),
+        force: true,
         optimizeAfter: false,
         rebuildVectorIndex: false,
       });
@@ -307,7 +374,11 @@ export function queuePendingChatChunkVectorization(userId: string, chatId: strin
     `SELECT id
      FROM chat_chunks
      WHERE chat_id = ? AND vectorized_at IS NULL
-     ORDER BY updated_at ASC, created_at ASC`,
+     ORDER BY updated_at ASC,
+              message_range_start IS NULL ASC,
+              message_range_start ASC,
+              message_range_end ASC,
+              id ASC`,
   ).all(chatId) as Array<{ id: string }>;
 
   for (const row of rows) {
@@ -323,7 +394,12 @@ export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEU
      FROM chat_chunks cc
      JOIN chats c ON c.id = cc.chat_id
      WHERE cc.vectorized_at IS NULL
-     ORDER BY c.updated_at DESC, cc.updated_at ASC, cc.created_at ASC
+     ORDER BY c.updated_at DESC,
+              cc.updated_at ASC,
+              cc.message_range_start IS NULL ASC,
+              cc.message_range_start ASC,
+              cc.message_range_end ASC,
+              cc.id ASC
      LIMIT ?`,
   ).all(Math.max(1, limit)) as Array<{ id: string; chat_id: string; user_id: string }>;
 
@@ -344,13 +420,19 @@ export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEU
   return queued;
 }
 
-export function queueWorldBookEntryVectorization(userId: string, entryId: string, priority = 4) {
+export function queueWorldBookEntryVectorization(
+  userId: string,
+  entryId: string,
+  priority = 4,
+  supersedesIndexed = false,
+) {
   queue.add({
     type: "world_book_entry",
     priority,
     userId,
     chatId: "",
     worldBookEntryId: entryId,
+    supersedesIndexed,
     queuedAt: Date.now(),
   });
 }
@@ -401,6 +483,16 @@ function sweepWorldBookVectorizationQueue() {
 export function getQueueStatus() {
   return queue.getStatus();
 }
+
+export const __test__ = {
+  mergeVectorizationJobs,
+  shouldProcessWorldBookVectorizationJob,
+  WORLD_BOOK_VECTOR_SETTLE_MS,
+  WORLD_BOOK_VECTOR_MAX_WAIT_MS,
+  worldBookJobsHaveSettled,
+  remainingWorldBookSettleMs,
+  nextProcessDelayMs,
+};
 
 /**
  * Clean up expired query vector cache entries.

@@ -5,9 +5,9 @@
  */
 import type { LumiHubWSMessage } from "./types";
 import { installCharacter, installPreset, installTheme, installWorldbook } from "./installer";
-import { buildInstallManifest } from "./manifest";
-import { updateLastConnected } from "../services/lumihub-link.service";
-import { getFirstUserId } from "../auth/seed";
+import { buildInstallManifest, selectLumiHubManifestEntries } from "./manifest";
+import { buildStatsSyncPayload } from "./usage-stats";
+import { updateLastConnected, isStatsSharingEnabled } from "../services/lumihub-link.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import {
@@ -16,17 +16,20 @@ import {
   validateInstallThemePayload,
   validateInstallWorldbookPayload,
 } from "./payload-validation";
+import { getLumiHubInstanceInfo } from "./instance-info";
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const INITIAL_RECONNECT_MS = 1_000;
 const MAX_RECONNECT_MS = 60_000;
 const MANIFEST_SYNC_DEBOUNCE_MS = 5_000;
+const STATS_SYNC_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 // Fail fast if LumiHub doesn't complete the WebSocket handshake in time.
 // Without this, an unreachable host can leave the socket stuck in CONNECTING
 // (no close/error fires) and no reconnect is ever scheduled.
 const CONNECT_TIMEOUT_MS = 15_000;
 
 class LumiHubWSClient {
+  private readonly userId: string;
   private ws: WebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -37,7 +40,13 @@ class LumiHubWSClient {
   private wsUrl: string = "";
   private linkToken: string = "";
   private manifestSyncTimer: ReturnType<typeof setTimeout> | null = null;
+  private statsSyncTimer: ReturnType<typeof setInterval> | null = null;
   private eventListenersRegistered = false;
+  private eventListenerDisposers: Array<() => void> = [];
+
+  constructor(userId: string) {
+    this.userId = userId;
+  }
 
   /** Open a WebSocket connection to LumiHub. */
   connect(wsUrl: string, linkToken: string): void {
@@ -51,6 +60,13 @@ class LumiHubWSClient {
   disconnect(): void {
     this.intentionalClose = true;
     this.cleanup();
+  }
+
+  destroy(): void {
+    this.disconnect();
+    for (const dispose of this.eventListenerDisposers) dispose();
+    this.eventListenerDisposers = [];
+    this.eventListenersRegistered = false;
   }
 
   isConnected(): boolean {
@@ -79,25 +95,28 @@ class LumiHubWSClient {
       }, CONNECT_TIMEOUT_MS);
 
       ws.addEventListener("open", () => {
+        if (this.ws !== ws) return;
         this.clearConnectTimeout();
         console.log("[LumiHub WS] Connected");
         this.connected = true;
         this.reconnectDelay = INITIAL_RECONNECT_MS;
         this.startHeartbeat();
-        updateLastConnected();
-        eventBus.emit(EventType.LUMIHUB_CONNECTION_CHANGED, { connected: true });
+        updateLastConnected(this.userId);
+        eventBus.emit(EventType.LUMIHUB_CONNECTION_CHANGED, { connected: true }, this.userId);
       });
 
       ws.addEventListener("message", (event) => {
+        if (this.ws !== ws) return;
         this.handleMessage(event.data as string);
       });
 
       ws.addEventListener("close", (event) => {
+        if (this.ws !== ws) return;
         this.clearConnectTimeout();
         console.log(`[LumiHub WS] Closed: ${event.code} ${event.reason}`);
         this.connected = false;
         this.stopHeartbeat();
-        eventBus.emit(EventType.LUMIHUB_CONNECTION_CHANGED, { connected: false });
+        eventBus.emit(EventType.LUMIHUB_CONNECTION_CHANGED, { connected: false }, this.userId);
 
         if (!this.intentionalClose) {
           this.scheduleReconnect();
@@ -105,6 +124,7 @@ class LumiHubWSClient {
       });
 
       ws.addEventListener("error", (event) => {
+        if (this.ws !== ws) return;
         console.error("[LumiHub WS] Error:", event);
         // Defensive: some runtimes fire `error` without a subsequent `close`
         // when the handshake fails pre-upgrade. scheduleReconnect short-circuits
@@ -143,18 +163,14 @@ class LumiHubWSClient {
 
       case "auth_ok":
         console.log("[LumiHub WS] Authenticated successfully");
-        // Send instance info
-        this.send({
-          type: "instance_info",
-          id: crypto.randomUUID(),
-          payload: {
-            capabilities: ["character_import", "chub_import", "worldbook_import", "theme_import", "preset_import", "manifest_sync"],
-            version: "1.0.0",
-          },
-          timestamp: Date.now(),
-        });
+        // Version/capability negotiation is additive; older LumiHub servers can
+        // continue reading the legacy `version` and `capabilities` fields.
+        void this.sendInstanceInfo();
         // Send initial install manifest
         this.syncManifest();
+        // Send usage counters (no-op unless pted in)
+        this.syncStats();
+        this.startStatsSyncTimer();
         // Register event listeners for character mutations (once)
         this.registerManifestListeners();
         break;
@@ -181,6 +197,18 @@ class LumiHubWSClient {
     }
   }
 
+  private async sendInstanceInfo(): Promise<void> {
+    const socket = this.ws;
+    const payload = await getLumiHubInstanceInfo();
+    if (this.ws !== socket || !this.connected) return;
+    this.send({
+      type: "instance_info",
+      id: crypto.randomUUID(),
+      payload,
+      timestamp: Date.now(),
+    });
+  }
+
   private async handleInstallCharacter(msg: LumiHubWSMessage): Promise<void> {
     const validation = validateInstallCharacterPayload(msg.payload);
     if (!validation.ok) {
@@ -201,9 +229,9 @@ class LumiHubWSClient {
     eventBus.emit(EventType.LUMIHUB_INSTALL_STARTED, {
       characterName: payload.characterName,
       source: payload.source,
-    });
+    }, this.userId);
 
-    const result = await installCharacter(msg.id, payload);
+    const result = await installCharacter(msg.id, this.userId, payload);
 
     // Send result back to LumiHub
     this.send({
@@ -218,7 +246,7 @@ class LumiHubWSClient {
       eventBus.emit(EventType.LUMIHUB_INSTALL_FAILED, {
         characterName: payload.characterName,
         error: result.error,
-      });
+      }, this.userId);
     }
   }
 
@@ -241,9 +269,9 @@ class LumiHubWSClient {
     eventBus.emit(EventType.LUMIHUB_INSTALL_STARTED, {
       characterName: payload.worldbookName,
       source: payload.source,
-    });
+    }, this.userId);
 
-    const result = await installWorldbook(msg.id, payload);
+    const result = await installWorldbook(msg.id, this.userId, payload);
 
     this.send({
       type: "install_result",
@@ -257,7 +285,7 @@ class LumiHubWSClient {
       eventBus.emit(EventType.LUMIHUB_INSTALL_FAILED, {
         characterName: payload.worldbookName,
         error: result.error,
-      });
+      }, this.userId);
     }
   }
 
@@ -281,9 +309,9 @@ class LumiHubWSClient {
       characterName: payload.themeName,
       source: payload.source,
       type: "theme",
-    });
+    }, this.userId);
 
-    const result = await installTheme(msg.id, payload);
+    const result = await installTheme(msg.id, this.userId, payload);
 
     this.send({
       type: "install_result",
@@ -298,7 +326,7 @@ class LumiHubWSClient {
         characterName: payload.themeName,
         error: result.error,
         type: "theme",
-      });
+      }, this.userId);
     }
   }
 
@@ -322,9 +350,9 @@ class LumiHubWSClient {
       characterName: payload.presetName,
       source: payload.source,
       type: "preset",
-    });
+    }, this.userId);
 
-    const result = await installPreset(msg.id, payload);
+    const result = await installPreset(msg.id, this.userId, payload);
 
     this.send({
       type: "install_result",
@@ -339,25 +367,52 @@ class LumiHubWSClient {
         characterName: payload.presetName,
         error: result.error,
         type: "preset",
-      });
+      }, this.userId);
     }
   }
 
   /** Build and send the install manifest to LumiHub. */
   private syncManifest(): void {
     try {
-      const userId = getFirstUserId();
-      if (!userId) return;
-      const entries = buildInstallManifest(userId);
+      const entries = selectLumiHubManifestEntries(buildInstallManifest(this.userId));
       this.send({
         type: "manifest_sync",
         id: crypto.randomUUID(),
         payload: { entries },
         timestamp: Date.now(),
       });
-      console.log(`[LumiHub WS] Sent manifest sync (${entries.length} entries)`);
+      console.log(`[LumiHub WS] Sent manifest sync (${entries.length} LumiHub entries)`);
     } catch (err) {
       console.warn("[LumiHub WS] Failed to build/send manifest:", err);
+    }
+  }
+
+  syncStats(): void {
+    try {
+      if (!this.connected || !isStatsSharingEnabled(this.userId)) return;
+      const payload = buildStatsSyncPayload(this.userId);
+      if (!payload) return;
+      this.send({
+        type: "stats_sync",
+        id: crypto.randomUUID(),
+        payload,
+        timestamp: Date.now(),
+      });
+      console.log(`[LumiHub WS] Sent stats sync (${payload.days.length} days)`);
+    } catch (err) {
+      console.warn("[LumiHub WS] Failed to build/send stats:", err);
+    }
+  }
+
+  private startStatsSyncTimer(): void {
+    this.stopStatsSyncTimer();
+    this.statsSyncTimer = setInterval(() => this.syncStats(), STATS_SYNC_INTERVAL_MS);
+  }
+
+  private stopStatsSyncTimer(): void {
+    if (this.statsSyncTimer) {
+      clearInterval(this.statsSyncTimer);
+      this.statsSyncTimer = null;
     }
   }
 
@@ -374,13 +429,18 @@ class LumiHubWSClient {
   private registerManifestListeners(): void {
     if (this.eventListenersRegistered) return;
     this.eventListenersRegistered = true;
-    const trigger = () => this.debouncedManifestSync();
-    eventBus.on(EventType.CHARACTER_CREATED, trigger);
-    eventBus.on(EventType.CHARACTER_EDITED, trigger);
-    eventBus.on(EventType.CHARACTER_DELETED, trigger);
-    eventBus.on(EventType.PRESET_CHANGED, trigger);
-    eventBus.on(EventType.PRESET_DELETED, trigger);
-    eventBus.on(EventType.LUMIHUB_INSTALL_COMPLETED, trigger);
+    const trigger = (event: { userId?: string }) => {
+      if (event.userId === this.userId) this.debouncedManifestSync();
+    };
+    this.eventListenerDisposers.push(
+      eventBus.on(EventType.CHARACTER_CREATED, trigger),
+      eventBus.on(EventType.CHARACTER_EDITED, trigger),
+      eventBus.on(EventType.CHARACTER_DELETED, trigger),
+      eventBus.on(EventType.CHARACTER_LIBRARY_CHANGED, trigger),
+      eventBus.on(EventType.PRESET_CHANGED, trigger),
+      eventBus.on(EventType.PRESET_DELETED, trigger),
+      eventBus.on(EventType.LUMIHUB_INSTALL_COMPLETED, trigger),
+    );
   }
 
   private send(msg: Partial<LumiHubWSMessage>): void {
@@ -420,6 +480,7 @@ class LumiHubWSClient {
 
   private cleanup(): void {
     this.stopHeartbeat();
+    this.stopStatsSyncTimer();
     this.clearConnectTimeout();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -433,14 +494,26 @@ class LumiHubWSClient {
   }
 }
 
-// Singleton instance
-let _client: LumiHubWSClient | null = null;
+// One independent connection per Lumiverse user.
+const clients = new Map<string, LumiHubWSClient>();
 
-export function getLumiHubClient(): LumiHubWSClient {
-  if (!_client) {
-    _client = new LumiHubWSClient();
+export function getLumiHubClient(userId: string): LumiHubWSClient {
+  let client = clients.get(userId);
+  if (!client) {
+    client = new LumiHubWSClient(userId);
+    clients.set(userId, client);
   }
-  return _client;
+  return client;
+}
+
+export function deleteLumiHubClient(userId: string): void {
+  clients.get(userId)?.destroy();
+  clients.delete(userId);
+}
+
+export function disconnectAllLumiHubClients(): void {
+  for (const client of clients.values()) client.destroy();
+  clients.clear();
 }
 
 /**
@@ -448,14 +521,15 @@ export function getLumiHubClient(): LumiHubWSClient {
  * Called at startup from index.ts.
  */
 export async function autoConnect(): Promise<void> {
-  const { getLinkConfig } = await import("../services/lumihub-link.service");
-  const config = await getLinkConfig();
-  if (!config) {
+  const { listLinkConfigs } = await import("../services/lumihub-link.service");
+  const configs = await listLinkConfigs();
+  if (configs.length === 0) {
     console.log("[LumiHub] No link configured — skipping auto-connect");
     return;
   }
 
-  console.log(`[LumiHub] Auto-connecting to ${config.lumihubUrl}...`);
-  const client = getLumiHubClient();
-  client.connect(config.wsUrl, config.linkToken);
+  for (const config of configs) {
+    console.log(`[LumiHub] Auto-connecting user ${config.userId} to ${config.lumihubUrl}...`);
+    getLumiHubClient(config.userId).connect(config.wsUrl, config.linkToken);
+  }
 }

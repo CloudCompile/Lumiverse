@@ -10,10 +10,14 @@
   transition: width 0.2s ease, height 0.2s ease;
 }
 
+.panel.resizing {
+  transition: none;
+}
+
 /* ── Edge positions ── */
 
 .left {
-  top: 0;
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
   bottom: 0;
   left: 0;
   flex-direction: row;
@@ -23,7 +27,7 @@
 }
 
 .right {
-  top: 0;
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
   bottom: 0;
   right: 0;
   flex-direction: row-reverse;
@@ -33,25 +37,13 @@
 }
 
 .top {
-  top: 0;
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
   left: 0;
   right: 0;
   flex-direction: column;
   border-top: none;
   border-left: none;
   border-right: none;
-}
-
-:global(html[data-ios-pwa]) .top {
-  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
-}
-
-@media (display-mode: window-controls-overlay) {
-  .left,
-  .right,
-  .top {
-    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
-  }
 }
 
 .bottom {
@@ -62,6 +54,17 @@
   border-bottom: none;
   border-left: none;
   border-right: none;
+}
+
+/* Vertical docks retain the extension's preferred size in state, but never
+   render through the window chrome. If the viewport later grows, the
+   preferred size becomes visible again without a persistence migration. */
+.top,
+.bottom {
+  max-height: var(
+    --app-interactive-viewport-height,
+    calc(calc(100vh / var(--lumiverse-ui-scale, 1)) - var(--app-interactive-safe-top, 0px))
+  );
 }
 
 /* ── Collapsed ── */
@@ -140,49 +143,85 @@
   min-height: 0;
 }
 
+/* Opt-in extension-owned presentation. Existing dock panels retain host chrome. */
+.panel.chromeless {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.panel.centerContent > .content {
+  display: grid;
+  place-items: center;
+}
+
 /* ── Resize handles ── */
 
 .resizeHandle {
-  position: absolute;
+  position: relative;
   z-index: 1;
+  flex-shrink: 0;
   touch-action: none;
+  outline: none;
 }
 
-.resize_left {
-  top: 0;
-  bottom: 0;
-  right: 0;
-  width: 4px;
+.resizeLeft,
+.resizeRight {
+  width: 12px;
+  min-width: 12px;
   cursor: ew-resize;
 }
 
-.resize_right {
-  top: 0;
-  bottom: 0;
-  left: 0;
-  width: 4px;
-  cursor: ew-resize;
-}
-
-.resize_top {
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 4px;
+.resizeTop,
+.resizeBottom {
+  height: 12px;
+  min-height: 12px;
   cursor: ns-resize;
 }
 
-.resize_bottom {
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 4px;
-  cursor: ns-resize;
+.resizeHandle::after {
+  content: '';
+  position: absolute;
+  background: transparent;
+  transition:
+    background var(--lumiverse-transition-fast),
+    opacity var(--lumiverse-transition-fast);
 }
 
-.resizeHandle:hover {
-  background: var(--lumiverse-accent);
-  opacity: 0.3;
+.resizeLeft::after,
+.resizeRight::after {
+  top: 0;
+  bottom: 0;
+  width: 2px;
+}
+
+.resizeLeft::after {
+  right: 0;
+}
+
+.resizeRight::after {
+  left: 0;
+}
+
+.resizeTop::after,
+.resizeBottom::after {
+  left: 0;
+  right: 0;
+  height: 2px;
+}
+
+.resizeTop::after {
+  bottom: 0;
+}
+
+.resizeBottom::after {
+  top: 0;
+}
+
+.resizeHandle:hover::after,
+.resizeHandle:focus-visible::after {
+  background: var(--lumiverse-primary);
+  opacity: 0.55;
 }
 
 /* ── Mobile ── */
@@ -190,7 +229,7 @@
 @media (max-width: 600px) {
   .left,
   .right {
-    top: 0 !important;
+    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) !important;
     bottom: auto !important;
     left: 0 !important;
     right: 0 !important;
@@ -200,12 +239,6 @@
     border: 1px solid var(--lumiverse-border);
     border-top: none;
     max-height: calc(60vh / var(--lumiverse-ui-scale, 1));
-  }
-
-  :global(html[data-ios-pwa]) .left,
-  :global(html[data-ios-pwa]) .right,
-  :global(html[data-ios-pwa]) .top {
-    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) !important;
   }
 
   .collapsed.left,
@@ -227,10 +260,10 @@
   }
 }
 
-@media (max-width: 600px) and (display-mode: window-controls-overlay) {
-  .left,
-  .right,
-  .top {
-    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px)) !important;
+@media (max-width: 600px) {
+  .panel.chromeless {
+    background: transparent;
+    border: none;
+    border-radius: 0;
   }
 }

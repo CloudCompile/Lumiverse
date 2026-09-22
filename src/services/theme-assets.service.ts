@@ -1,10 +1,10 @@
-import sharp from "../utils/sharp-config";
 import { mkdirSync, existsSync, unlinkSync } from "fs";
 import { extname, join, resolve, sep } from "path";
 import { env } from "../env";
 import { getDb } from "../db/connection";
 import type { ThemeAsset } from "../types/theme-asset";
 import * as imagesSvc from "./images.service";
+import { convertImageToWebp } from "../utils/image-pipeline";
 
 type StorageType = ThemeAsset["storage_type"];
 
@@ -393,7 +393,7 @@ export async function optimizeThemeAssetToWebp(userId: string, id: string): Prom
   const originalBuffer = Buffer.from(await Bun.file(originalPath).arrayBuffer());
   let optimizedBuffer: Buffer;
   try {
-    optimizedBuffer = await sharp(originalBuffer).webp({ quality: 80 }).toBuffer();
+    optimizedBuffer = await convertImageToWebp(originalBuffer, 80);
   } catch {
     throw new Error("This image could not be converted to WebP.");
   }

@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { evaluate, buildEnv, resolveGroupCharacterNames, resolvePersonaPronouns, registry, initMacros } from "../macros";
+import { evaluate, buildEnv, resolveGroupCharacterNames, registry, initMacros, withPromptBlockContext } from "../macros";
 import { getEffectiveCharacterName, makeAssistantCharacter } from "../types/character";
 import { isTemporaryChatMetadata } from "../types/chat";
 import type { Chat } from "../types/chat";
@@ -14,6 +14,7 @@ import * as connectionsSvc from "../services/connections.service";
 import * as memoryCortex from "../services/memory-cortex";
 import {
   normalizePromptBlockText,
+  resolvePromptBlockPlacements,
   populateLumiaLoomContext,
   resolvePromptVariables,
 } from "../services/prompt-assembly.service";
@@ -35,8 +36,11 @@ app.post("/resolve", async (c) => {
     character_id?: string;
     persona_id?: string;
     connection_id?: string;
+    user_input?: string;
     dynamic_macros?: Record<string, string>;
     prompt_blocks?: PromptBlock[];
+    /** The prompt block whose content is being previewed. */
+    prompt_block_id?: string;
     prompt_variables?: Record<string, Record<string, PromptVariableValue>>;
     // When true, leading/trailing whitespace is stripped from the resolved
     // text. This mirrors the per-block trim the assembly applies to a prompt
@@ -55,7 +59,7 @@ app.post("/resolve", async (c) => {
   const env = await buildEnvFromIds(userId, body);
   seedPromptVariablesForPreview(env, body);
 
-  const result = await evaluate(body.template, env, registry);
+  const result = await evaluateWithPromptBlockContext(body.template, env, body);
   return c.json({
     text: body.trim ? normalizePromptBlockText(result.text) : result.text,
     diagnostics: result.diagnostics,
@@ -78,8 +82,11 @@ app.post("/resolve-batch", async (c) => {
     character_id?: string;
     persona_id?: string;
     connection_id?: string;
+    user_input?: string;
     dynamic_macros?: Record<string, string>;
     prompt_blocks?: PromptBlock[];
+    /** Block id for each template key when batch-previewing prompt blocks. */
+    prompt_block_ids?: Record<string, string>;
     prompt_variables?: Record<string, Record<string, PromptVariableValue>>;
   }>();
 
@@ -111,7 +118,11 @@ app.post("/resolve-batch", async (c) => {
       cacheable[key] = true;
       continue;
     }
-    const result = await evaluate(template, env, registry);
+    const result = await evaluateWithPromptBlockContext(template, env, {
+      prompt_blocks: body.prompt_blocks,
+      prompt_block_id: body.prompt_block_ids?.[key],
+      prompt_variables: body.prompt_variables,
+    });
     resolved[key] = result.text;
     touchedVars[key] = Array.from(result.touchedVars);
     cacheable[key] = result.cacheable;
@@ -156,6 +167,7 @@ async function buildEnvFromIds(userId: string, body: {
   character_id?: string;
   persona_id?: string;
   connection_id?: string;
+  user_input?: string;
   dynamic_macros?: Record<string, string>;
 }): Promise<MacroEnv> {
   // Try to load from chat context first
@@ -163,9 +175,24 @@ async function buildEnvFromIds(userId: string, body: {
     const chat = chatsSvc.getChat(userId, body.chat_id);
     if (chat) {
       const messages = chatsSvc.getMessages(userId, body.chat_id);
-      const character = chat.character_id
+      const isGroup = !!chat.metadata?.group;
+      const groupCharacterIds =
+        isGroup && Array.isArray(chat.metadata?.character_ids)
+          ? (chat.metadata.character_ids as string[])
+          : [];
+      const targetCharacterId =
+        isGroup &&
+        typeof body.character_id === "string" &&
+        groupCharacterIds.includes(body.character_id)
+          ? body.character_id
+          : undefined;
+      const defaultCharacter = chat.character_id
         ? charactersSvc.getCharacter(userId, chat.character_id)
         : makeAssistantCharacter();
+      const focusedCharacter = targetCharacterId
+        ? charactersSvc.getCharacter(userId, targetCharacterId) ?? defaultCharacter
+        : defaultCharacter;
+      const character = focusedCharacter;
       if (character) {
         const persona = isTemporaryChatMetadata(chat.metadata)
           ? null
@@ -181,16 +208,18 @@ async function buildEnvFromIds(userId: string, body: {
           const c = charactersSvc.getCharacter(userId, cid);
           return c ? getEffectiveCharacterName(c) : undefined;
         });
-        const isGroup = !!chat.metadata?.group;
         const env = buildEnv({
           character,
+          focusedCharacter,
           persona,
           chat,
           messages,
           generationType: "normal",
           connection,
           dynamicMacros: body.dynamic_macros,
+          userInput: body.user_input,
           groupCharacterNames,
+          targetCharacterId,
           targetCharacterName: isGroup ? getEffectiveCharacterName(character) : undefined,
         });
         populateLumiaLoomContext(env, userId, chat);
@@ -229,6 +258,7 @@ async function buildEnvFromIds(userId: string, body: {
         generationType: "normal",
         connection,
         dynamicMacros: body.dynamic_macros,
+        userInput: body.user_input,
       });
       populateLumiaLoomContext(env, userId, chat);
       return env;
@@ -240,35 +270,25 @@ async function buildEnvFromIds(userId: string, body: {
     personasSvc.resolvePersonaOrDefault(userId, body.persona_id),
     null,
   );
-  const personaPronouns = resolvePersonaPronouns(persona);
   const connection = connectionsSvc.resolveConnection(userId);
-
-  return {
-    commit: true,
-    names: {
-      user: persona?.name || "User", char: "", group: "", groupNotMuted: "", notChar: persona?.name || "User",
-      charGroupFocused: "", groupOthers: "", groupMemberCount: "0", isGroupChat: "no", isNarrator: persona?.is_narrator ? "yes" : "no", groupLastSpeaker: "", groupCardMode: "solo",
-    },
-    character: {
-      name: "", description: "", personality: "", scenario: "", persona: persona?.description || "",
-      personaSubjectivePronoun: personaPronouns.subjective,
-      personaObjectivePronoun: personaPronouns.objective,
-      personaPossessivePronoun: personaPronouns.possessive,
-      mesExamples: "", mesExamplesRaw: "", systemPrompt: "", postHistoryInstructions: "",
-      depthPrompt: "", creatorNotes: "", version: "", creator: "", firstMessage: "",
-    },
-    chat: {
-      id: "", messageCount: 0, lastMessage: "", lastMessageName: "", lastUserMessage: "",
-      lastCharMessage: "", lastMessageId: -1, firstIncludedMessageId: -1, lastSwipeId: 0, currentSwipeId: 0, rejectedSwipe: "",
-    },
-    system: {
-      model: connection?.model || "", maxPrompt: 0, maxContext: 0, maxResponse: 0,
-      lastGenerationType: "normal", isMobile: false,
-    },
-    variables: { local: new Map(), global: new Map(), chat: new Map() },
-    dynamicMacros: body.dynamic_macros || {},
-    extra: {},
+  const chat: Chat = {
+    id: "",
+    character_id: null,
+    name: "",
+    metadata: {},
+    created_at: 0,
+    updated_at: 0,
   };
+  return buildEnv({
+    character: makeAssistantCharacter(),
+    persona,
+    chat,
+    messages: [],
+    generationType: "normal",
+    connection,
+    dynamicMacros: body.dynamic_macros,
+    userInput: body.user_input,
+  });
 }
 
 function seedCortexPreviewContext(
@@ -277,7 +297,8 @@ function seedCortexPreviewContext(
   env: MacroEnv,
 ): void {
   const config = memoryCortex.getCortexConfig(userId);
-  if (!config.enabled) return;
+  const chat = chatsSvc.getChat(userId, chatId);
+  if (!memoryCortex.isCortexEnabledForChat(config, chat?.metadata)) return;
 
   const cached = memoryCortex.getCachedCortexResult(chatId);
   const colorMap = memoryCortex.formatColorMapForPrompt(chatId);
@@ -403,6 +424,24 @@ function seedPromptVariablesForPreview(env: MacroEnv, body: {
     updated_at: 0,
   } satisfies Preset;
   resolvePromptVariables(env, body.prompt_blocks, preset);
+}
+
+async function evaluateWithPromptBlockContext(
+  template: string,
+  env: MacroEnv,
+  body: {
+    prompt_blocks?: PromptBlock[];
+    prompt_block_id?: string;
+    prompt_variables?: Record<string, Record<string, PromptVariableValue>>;
+  },
+) {
+  if (!body.prompt_blocks?.length) return evaluate(template, env, registry);
+  const effectiveBlocks = resolvePromptBlockPlacements(body.prompt_blocks, {
+    metadata: { promptVariables: body.prompt_variables ?? {} },
+  });
+  const block = effectiveBlocks.find((candidate) => candidate.id === body.prompt_block_id);
+  if (!block) return evaluate(template, env, registry);
+  return withPromptBlockContext(env, block, () => evaluate(template, env, registry));
 }
 
 export { app as macrosRoutes };

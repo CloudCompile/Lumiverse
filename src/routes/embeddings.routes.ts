@@ -15,6 +15,11 @@ app.get("/config", async (c) => {
   return c.json(await embeddingsSvc.getEmbeddingConfig(userId));
 });
 
+app.get("/providers", (c) => {
+  const userId = c.get("userId");
+  return c.json({ providers: embeddingsSvc.listEmbeddingDrivers({ userId }) });
+});
+
 app.put("/config", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
@@ -37,6 +42,21 @@ app.post("/models/preview", async (c) => {
   return c.json(result);
 });
 
+app.post("/connections/:id/test", async (c) => {
+  const userId = c.get("userId");
+  const body: { text?: string } = await c.req.json<{ text?: string }>().catch(() => ({}));
+  try {
+    const result = await embeddingsSvc.testEmbeddingConnection(
+      userId,
+      c.req.param("id"),
+      body.text?.trim() || "Lumiverse embedding connectivity test.",
+    );
+    return c.json({ success: true, message: "Connection successful", ...result });
+  } catch (err: any) {
+    return c.json({ success: false, message: err?.message || "Connection test failed" }, 502);
+  }
+});
+
 app.post("/test", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json<{ text?: string }>();
@@ -56,8 +76,14 @@ app.post("/test", async (c) => {
     return c.json({ success: true, ...result, applied_dimensions: result.dimension });
   } catch (err: any) {
     const msg = err?.message || "Embedding test failed";
-    const status = /disabled|not configured/i.test(msg) ? 400 : 502;
-    return c.json({ error: msg }, status);
+    const code = typeof err?.code === "string" ? err.code : undefined;
+    const status = /disabled|not configured/i.test(msg)
+      ? 400
+      : code === embeddingsSvc.EMBEDDING_ERROR_CODES.PROVIDER_UNAVAILABLE
+        || code === embeddingsSvc.EMBEDDING_ERROR_CODES.FALLBACK_EXHAUSTED
+        ? 502
+        : 502;
+    return c.json(code ? { error: msg, code } : { error: msg }, status);
   }
 });
 
@@ -186,17 +212,25 @@ app.post("/force-reset", requireOwnerStrict, async (c) => {
   }
 });
 
-app.post("/optimize", async (c) => {
+app.post("/optimize", requireOwnerStrict, async (c) => {
   try {
     const store = await getActiveVectorStore();
-    await store.optimize(["embeddings", "embeddings_world_books"]);
+    if (store.id === "lancedb") {
+      const { runLanceDbMaintenanceInChild } = await import("../services/lancedb-maintenance-supervisor");
+      await runLanceDbMaintenanceInChild({
+        mode: "optimize",
+        tableNames: ["embeddings", "embeddings_world_books"],
+      });
+    } else {
+      await store.optimize(["embeddings", "embeddings_world_books"]);
+    }
     return c.json({ success: true });
   } catch (err: any) {
     return c.json({ error: err.message || "Optimize failed" }, 500);
   }
 });
 
-app.get("/health", async (c) => {
+app.get("/health", requireOwnerStrict, async (c) => {
   try {
     const store = await getActiveVectorStore();
     const collections: CollectionName[] = ["embeddings", "embeddings_world_books"];
@@ -230,7 +264,7 @@ function combineVectorHealth(tables: Record<CollectionName, TableHealth>) {
 
 // --- Vector Store (database backend) configuration — owner-gated, global ---
 
-app.get("/vector-store/config", async (c) => {
+app.get("/vector-store/config", requireOwnerStrict, async (c) => {
   try {
     return c.json(await vectorStoreCfg.getVectorStoreConfigForApi());
   } catch (err: any) {
@@ -238,7 +272,7 @@ app.get("/vector-store/config", async (c) => {
   }
 });
 
-app.put("/vector-store/config", async (c) => {
+app.put("/vector-store/config", requireOwnerStrict, async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json().catch(() => ({}));
   try {
@@ -252,13 +286,14 @@ app.put("/vector-store/config", async (c) => {
   }
 });
 
-app.post("/vector-store/test", async (c) => {
+app.post("/vector-store/test", requireOwnerStrict, async (c) => {
+  const userId = c.get("userId");
   const body = await c.req.json().catch(() => ({}));
-  const result = await vectorStoreCfg.testVectorStoreConnection(body);
+  const result = await vectorStoreCfg.testVectorStoreConnection(userId, body);
   return c.json(result, result.ok ? 200 : 400);
 });
 
-app.post("/vector-store/switch", async (c) => {
+app.post("/vector-store/switch", requireOwnerStrict, async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json().catch(() => ({}));
   try {

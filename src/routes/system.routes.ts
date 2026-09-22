@@ -39,6 +39,14 @@ function getDiskUsage(): { total: number; used: number } | null {
 }
 
 app.get("/info", async (c) => {
+  // Hostname, OS release, CPU, memory, disk and git details are operator
+  // material — they fingerprint the machine. Regular (authenticated) users
+  // only get what the Diagnostics panel genuinely needs to report a version
+  // mismatch: app version, runtime, platform and arch. Redacted fields come
+  // back as empty values so the response shape stays stable for the frontend.
+  const role = c.get("session")?.user?.role;
+  const privileged = role === "owner" || role === "admin";
+
   const cpu = cpus();
   const disk = getDiskUsage();
 
@@ -46,24 +54,23 @@ app.get("/info", async (c) => {
     os: {
       platform: platform(),
       arch: arch(),
-      release: release(),
-      // H-24: hostname omitted — exposes internal server identity and is not
-      // needed by the UI for any functional purpose.
+      release: privileged ? release() : "",
+      // H-24: hostname is privileged-only — it exposes internal server
+      // identity and is not needed by the UI for any functional purpose.
+      hostname: privileged ? hostname() : "",
     },
-    cpu: {
-      model: cpu[0]?.model ?? "unknown",
-      cores: cpu.length,
-    },
-    memory: {
-      total: totalmem(),
-      free: freemem(),
-    },
-    disk,
+    cpu: privileged
+      ? { model: cpu[0]?.model ?? "unknown", cores: cpu.length }
+      : { model: "", cores: 0 },
+    memory: privileged
+      ? { total: totalmem(), free: freemem() }
+      : { total: 0, free: 0 },
+    disk: privileged ? disk : null,
     backend: {
       version: await getBackendVersion(),
       runtime: `Bun ${Bun.version}`,
     },
-    git: await getGitInfo(),
+    git: privileged ? getGitInfo() : { branch: "", commit: "" },
   });
 });
 

@@ -40,14 +40,18 @@ interface SwitchProps {
   size?: 'sm' | 'md'
   disabled?: boolean
   className?: string
+  title?: string
+  'aria-label'?: string
 }
 
-function Switch({ checked, onChange, size = 'md', disabled, className }: SwitchProps) {
+function Switch({ checked, onChange, size = 'md', disabled, className, title, 'aria-label': ariaLabel }: SwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={ariaLabel}
+      title={title}
       disabled={disabled}
       className={clsx(
         styles.switch,

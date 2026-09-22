@@ -369,7 +369,7 @@ function launchTrackedCortexRebuild(
           ? { action: "skip", reason: "aborted_before_start" }
           : { action: "run" }
       ),
-      run: () => memoryCortex.rebuildCortex(
+      run: (laneSignal) => memoryCortex.rebuildCortex(
         userId,
         chatId,
         characterNames,
@@ -390,7 +390,11 @@ function launchTrackedCortexRebuild(
           }, userId);
         },
         descriptionAliases,
-        { resumable: source === "warmup", warmupSignature: snapshot.rebuildSignature, signal: abort.signal },
+        {
+          resumable: source === "warmup",
+          warmupSignature: snapshot.rebuildSignature,
+          signal: AbortSignal.any([abort.signal, laneSignal]),
+        },
       ),
     }).then((scheduled) => {
       if (scheduled.status !== "completed" || !scheduled.value) return;
@@ -415,6 +419,7 @@ function launchTrackedCortexRebuild(
       eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
         chatId,
         status: "error",
+        updatedAt: Date.now(),
         ...(source ? { source } : {}),
         error: err?.message || (source === "warmup" ? "Warmup failed" : "Rebuild failed"),
       }, userId);
@@ -508,7 +513,8 @@ async function performChatWarmup(userId: string, chatId: string, force: boolean)
 
   const embeddings = await embeddingsSvc.getEmbeddingConfig(userId);
   const config = memoryCortex.getCortexConfig(userId);
-  const allowPassiveChunkRebuild = !config.enabled || config.autoWarmup;
+  const cortexEnabledForChat = memoryCortex.isCortexEnabledForChat(config, chat.metadata);
+  const allowPassiveChunkRebuild = !cortexEnabledForChat || config.autoWarmup;
 
   // Compute the LTCM config hash once and thread it through downstream helpers.
   // Previously this was awaited 2-3× per warmup (warmLongTermChatMemory,
@@ -544,7 +550,7 @@ async function performChatWarmup(userId: string, chatId: string, force: boolean)
   const chatMemoryFresh = !!currentChatMemoryHash && storedChatMemoryHash === currentChatMemoryHash;
 
   let cortex: WarmupComponentResult;
-  if (!config.enabled) {
+  if (!memoryCortex.isCortexEnabledForChat(config, freshChat.metadata)) {
     cortex = { status: "skipped", reason: "cortex_disabled" };
   } else if (!force && !config.autoWarmup) {
     cortex = { status: "skipped", reason: "cortex_auto_warmup_disabled" };
@@ -668,38 +674,182 @@ function startPassiveChatWarmup(userId: string, chatId: string): boolean {
   return true;
 }
 
-function resolveCortexSidecarAdapter(
+type CortexSidecarUnavailableReason =
+  | "sidecar_not_configured"
+  | "sidecar_connection_missing"
+  | "sidecar_provider_missing"
+  | "sidecar_api_key_missing";
+
+export interface CortexSidecarEndpointHealth {
+  connectionProfileId: string | null;
+  connectionName: string | null;
+  provider: string | null;
+  model: string | null;
+  hasApiKey: boolean;
+  ready: boolean;
+  unavailableReason?: CortexSidecarUnavailableReason;
+}
+
+function inspectCortexSidecarEndpoint(
+  userId: string,
+  endpoint: { connectionProfileId: string | null; model: string | null } | null | undefined,
+): CortexSidecarEndpointHealth {
+  const connectionProfileId = endpoint?.connectionProfileId || null;
+  if (!connectionProfileId) {
+    return {
+      connectionProfileId: null,
+      connectionName: null,
+      provider: null,
+      model: endpoint?.model ?? null,
+      hasApiKey: false,
+      ready: false,
+      unavailableReason: "sidecar_not_configured",
+    };
+  }
+
+  const sidecarConn = connectionsSvc.resolveConnection(userId, connectionProfileId);
+  if (!sidecarConn) {
+    return {
+      connectionProfileId,
+      connectionName: null,
+      provider: null,
+      model: endpoint?.model ?? null,
+      hasApiKey: false,
+      ready: false,
+      unavailableReason: "sidecar_connection_missing",
+    };
+  }
+
+  const provider = getProvider(sidecarConn.provider);
+  if (!provider) {
+    return {
+      connectionProfileId,
+      connectionName: sidecarConn.name ?? null,
+      provider: sidecarConn.provider,
+      model: endpoint?.model || sidecarConn.model || null,
+      hasApiKey: false,
+      ready: false,
+      unavailableReason: "sidecar_provider_missing",
+    };
+  }
+
+  const apiKeyRequired = provider.capabilities.apiKeyRequired ?? true;
+  const hasApiKey = !apiKeyRequired || !!sidecarConn.has_api_key;
+  if (!hasApiKey) {
+    return {
+      connectionProfileId,
+      connectionName: sidecarConn.name ?? null,
+      provider: sidecarConn.provider,
+      model: endpoint?.model || sidecarConn.model || null,
+      hasApiKey: false,
+      ready: false,
+      unavailableReason: "sidecar_api_key_missing",
+    };
+  }
+
+  return {
+    connectionProfileId,
+    connectionName: sidecarConn.name ?? null,
+    provider: sidecarConn.provider,
+    model: endpoint?.model || sidecarConn.model || null,
+    hasApiKey: true,
+    ready: true,
+  };
+}
+
+function collectConfiguredSidecarEndpoints(cortexConfig: memoryCortex.MemoryCortexConfig) {
+  const listed = memoryCortex.listCortexSidecarEndpoints(cortexConfig);
+  const legacyPrimary = {
+    connectionProfileId: cortexConfig.sidecar?.connectionProfileId ?? null,
+    model: cortexConfig.sidecar?.model ?? null,
+  };
+  return [
+    listed.queryGeneration.primary.connectionProfileId ? listed.queryGeneration.primary : legacyPrimary,
+    listed.queryGeneration.secondary,
+    ...(listed.queryGeneration.fallbacks ?? []),
+    listed.memorySummarization.primary,
+    listed.memorySummarization.secondary,
+    ...(listed.memorySummarization.fallbacks ?? []),
+  ].filter((endpoint): endpoint is { connectionProfileId: string | null; model: string | null } =>
+    !!endpoint?.connectionProfileId,
+  );
+}
+
+export function resolveCortexSidecarAdapter(
   userId: string,
   cortexConfig: memoryCortex.MemoryCortexConfig,
 ): {
   generateRawFn?: CortexGenerateRawFn;
   sidecarConnectionId?: string;
-  unavailableReason?: string;
+  unavailableReason?: CortexSidecarUnavailableReason;
 } {
   if (!memoryCortex.shouldUseCortexSidecar(cortexConfig)) return {};
 
-  const configuredSidecarConnectionId = cortexConfig.sidecar?.connectionProfileId || undefined;
-  if (!configuredSidecarConnectionId) return { unavailableReason: "sidecar_not_configured" };
+  const candidates = collectConfiguredSidecarEndpoints(cortexConfig);
+  if (candidates.length === 0) return { unavailableReason: "sidecar_not_configured" };
 
-  const sidecarConn = connectionsSvc.resolveConnection(userId, configuredSidecarConnectionId);
-  if (!sidecarConn) return { unavailableReason: "sidecar_connection_missing" };
-
-  const provider = getProvider(sidecarConn.provider);
-  if (!provider) return { unavailableReason: "sidecar_provider_missing" };
-
-  const apiKeyRequired = provider.capabilities.apiKeyRequired ?? true;
-  if (apiKeyRequired && !sidecarConn.has_api_key) {
-    return { unavailableReason: "sidecar_api_key_missing" };
+  let lastUnavailable: CortexSidecarUnavailableReason = "sidecar_not_configured";
+  let firstReady: CortexSidecarEndpointHealth | null = null;
+  for (const endpoint of candidates) {
+    const inspected = inspectCortexSidecarEndpoint(userId, endpoint);
+    if (inspected.ready && inspected.connectionProfileId) {
+      firstReady = inspected;
+      break;
+    }
+    if (inspected.unavailableReason) lastUnavailable = inspected.unavailableReason;
+  }
+  if (!firstReady?.connectionProfileId || !firstReady.provider) {
+    return { unavailableReason: lastUnavailable };
   }
 
-  const sidecarProvider = sidecarConn.provider;
   const generateRawFn: CortexGenerateRawFn = memoryCortex.createCortexSidecarGenerateRawAdapter({
     userId,
-    sidecarProvider,
+    sidecarProvider: firstReady.provider,
     cortexConfig,
   });
 
-  return { generateRawFn, sidecarConnectionId: sidecarConn.id };
+  return { generateRawFn, sidecarConnectionId: firstReady.connectionProfileId };
+}
+
+export function describeCortexSidecarHealth(
+  userId: string,
+  cortexConfig: memoryCortex.MemoryCortexConfig,
+): {
+  queryGeneration: {
+    primary: CortexSidecarEndpointHealth;
+    secondary: CortexSidecarEndpointHealth | null;
+    fallbacks: CortexSidecarEndpointHealth[];
+  };
+  memorySummarization: {
+    primary: CortexSidecarEndpointHealth;
+    secondary: CortexSidecarEndpointHealth | null;
+    fallbacks: CortexSidecarEndpointHealth[];
+  };
+  availability: "ok" | "unavailable";
+} {
+  const listed = memoryCortex.listCortexSidecarEndpoints(cortexConfig);
+  const queryPrimary = inspectCortexSidecarEndpoint(userId, listed.queryGeneration.primary);
+  const queryFallbacks = (listed.queryGeneration.fallbacks ?? []).map((endpoint) =>
+    inspectCortexSidecarEndpoint(userId, endpoint),
+  );
+  const querySecondary = listed.queryGeneration.secondary
+    ? inspectCortexSidecarEndpoint(userId, listed.queryGeneration.secondary)
+    : null;
+  const summaryPrimary = inspectCortexSidecarEndpoint(userId, listed.memorySummarization.primary);
+  const summaryFallbacks = (listed.memorySummarization.fallbacks ?? []).map((endpoint) =>
+    inspectCortexSidecarEndpoint(userId, endpoint),
+  );
+  const summarySecondary = listed.memorySummarization.secondary
+    ? inspectCortexSidecarEndpoint(userId, listed.memorySummarization.secondary)
+    : null;
+  const inspected = [queryPrimary, querySecondary, ...queryFallbacks, summaryPrimary, summarySecondary, ...summaryFallbacks];
+  const anyReady = inspected.some((item) => item?.ready);
+  const anyConfigured = inspected.some((item) => item?.connectionProfileId);
+  return {
+    queryGeneration: { primary: queryPrimary, secondary: querySecondary, fallbacks: queryFallbacks },
+    memorySummarization: { primary: summaryPrimary, secondary: summarySecondary, fallbacks: summaryFallbacks },
+    availability: !anyConfigured || anyReady ? (anyReady ? "ok" : "unavailable") : "unavailable",
+  };
 }
 
 // ─── Configuration ─────────────────────────────────────────────
@@ -708,6 +858,13 @@ function resolveCortexSidecarAdapter(
 app.get("/config", (c) => {
   const userId = c.get("userId");
   return c.json(memoryCortex.getCortexConfig(userId));
+});
+
+/** GET /providers — Configured sidecar endpoints plus live registry sidecars. */
+app.get("/providers", (c) => {
+  const userId = c.get("userId");
+  const config = memoryCortex.getCortexConfig(userId);
+  return c.json({ providers: memoryCortex.listCortexSidecarProviders({ userId, config }) });
 });
 
 /** PUT /config — Update cortex configuration (partial merge) */
@@ -858,7 +1015,10 @@ app.get("/health", async (c) => {
     }
   })();
 
-  const sidecarConnectionId = config.sidecar?.connectionProfileId || null;
+  const sidecarEndpoints = describeCortexSidecarHealth(userId, config);
+  const sidecarConnectionId = sidecarEndpoints.queryGeneration.primary.connectionProfileId
+    || config.sidecar?.connectionProfileId
+    || null;
   const sidecarRequired =
     config.entityExtractionMode === "sidecar" ||
     config.salienceScoringMode === "sidecar" ||
@@ -872,7 +1032,7 @@ app.get("/health", async (c) => {
   const sidecarHasApiKey = sidecarProfile
     ? (!sidecarApiKeyRequired || !!sidecarProfile.has_api_key)
     : false;
-  const sidecarReady = !sidecarRequired || !!(sidecarProfile && sidecarProvider && sidecarHasApiKey);
+  const sidecarReady = !sidecarRequired || sidecarEndpoints.availability === "ok";
 
   if (sidecarRequired && !sidecarConnectionId) {
     pushCheck(
@@ -1176,6 +1336,11 @@ app.get("/health", async (c) => {
       model: config.sidecar?.model || sidecarProfile?.model || null,
       hasApiKey: sidecarHasApiKey,
       ready: sidecarReady,
+      availability: sidecarConnectivity.timedOut
+        ? "timeout"
+        : sidecarEndpoints.availability,
+      queryGeneration: sidecarEndpoints.queryGeneration,
+      memorySummarization: sidecarEndpoints.memorySummarization,
       connectivity: sidecarConnectivity,
     },
     chat: chatReport,
@@ -1207,15 +1372,32 @@ app.get("/chats/:chatId/entities", (c) => {
     ? entities.filter((e) => e.status === status)
     : entities;
 
-  // Enrich each entity with its most recent mention excerpt so the UI
-  // can show the actual chunk text that triggered classification
+  // Enrich each entity with its most recent mention excerpt and the source
+  // messages behind it. A single query avoids an extra query for every entity.
   const { getDb } = require("../db/connection");
   const db = getDb();
-  const enriched = filtered.map((e) => {
-    const mention = db.query(
-      "SELECT excerpt FROM memory_mentions WHERE entity_id = ? AND excerpt IS NOT NULL ORDER BY created_at DESC LIMIT 1",
-    ).get(e.id) as any;
-    return { ...e, latestExcerpt: mention?.excerpt ?? null };
+  const mentions = db.query(
+    `SELECT entity_id, excerpt, message_ids FROM (
+       SELECT mm.entity_id, mm.excerpt, cc.message_ids,
+              ROW_NUMBER() OVER (PARTITION BY mm.entity_id ORDER BY mm.created_at DESC) AS row_number
+       FROM memory_mentions mm
+       LEFT JOIN chat_chunks cc ON cc.id = mm.chunk_id
+       WHERE mm.chat_id = ? AND mm.excerpt IS NOT NULL
+     )
+     WHERE row_number = 1`,
+  ).all(chatId) as Array<{ entity_id: string; excerpt: string; message_ids: string | null }>;
+  const mentionReferences = resolveChunkMessageReferences(db, chatId, mentions);
+  const mentionByEntity = new Map(mentions.map((mention, index) => [
+    mention.entity_id,
+    { excerpt: mention.excerpt, messageReferences: mentionReferences[index] },
+  ]));
+  const enriched = filtered.map((entity) => {
+    const mention = mentionByEntity.get(entity.id);
+    return {
+      ...entity,
+      latestExcerpt: mention?.excerpt ?? null,
+      latestMessageReferences: mention?.messageReferences ?? [],
+    };
   });
 
   return c.json({
@@ -1693,10 +1875,119 @@ app.get("/chats/:chatId/consolidations", (c) => {
   if (!owned.ok) return owned.response;
   const tier = c.req.query("tier") ? parseInt(c.req.query("tier")!, 10) : undefined;
   const consolidations = memoryCortex.getConsolidations(chatId, tier);
-  return c.json({ data: consolidations, total: consolidations.length });
+  const data = enrichConsolidationsWithMessageReferences(getDb(), chatId, consolidations);
+  return c.json({ data, total: data.length });
 });
 
 // ─── Chunks ────────────────────────────────────────────────────
+
+type CortexChunkMessageReference = {
+  messageId: string;
+  /** The number shown on the source chat message, when it still exists. */
+  messageNumber: number | null;
+};
+
+function parseChunkMessageIds(raw: unknown): string[] {
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resolve stored chunk message IDs to the numbers users see in a chat.  A
+ * missing message is intentional here: vaults and old/trimmed history can
+ * retain an ID after its source message is gone, so callers can fall back to
+ * that ID instead of presenting a misleading number.
+ */
+function resolveChunkMessageReferences(
+  db: ReturnType<typeof getDb>,
+  chatId: string,
+  rows: Array<{ message_ids?: string | null }>,
+): CortexChunkMessageReference[][] {
+  const idsByRow = rows.map((row) => parseChunkMessageIds(row.message_ids));
+  const uniqueIds = [...new Set(idsByRow.flat())];
+  const messageNumbers = new Map<string, number>();
+
+  // Keep each query comfortably beneath SQLite's bound-parameter limit.
+  for (const ids of chunksOf(uniqueIds, 500)) {
+    if (ids.length === 0) continue;
+    const placeholders = ids.map(() => "?").join(", ");
+    const messages = db.query(
+      `SELECT id, index_in_chat FROM messages WHERE chat_id = ? AND id IN (${placeholders})`,
+    ).all(chatId, ...ids) as Array<{ id: string; index_in_chat: number }>;
+    for (const message of messages) messageNumbers.set(message.id, message.index_in_chat);
+  }
+
+  return idsByRow.map((ids) => ids.map((messageId) => ({
+    messageId,
+    messageNumber: messageNumbers.get(messageId) ?? null,
+  })));
+}
+
+/** Resolve every source chunk beneath a consolidation, including arc tiers. */
+function enrichConsolidationsWithMessageReferences(
+  db: ReturnType<typeof getDb>,
+  chatId: string,
+  consolidations: Array<{ id: string }>,
+) {
+  const chunkMessageIds = new Map<string, string[]>();
+
+  // A consolidation can point to raw chunks (tier 1) or other
+  // consolidations (tier 2). The recursive query reaches the raw evidence in
+  // either case, and preserves archived-source IDs for the UI fallback.
+  for (const ids of chunksOf(consolidations.map((consolidation) => consolidation.id), 500)) {
+    if (ids.length === 0) continue;
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = db.query(
+      `WITH RECURSIVE source_tree(root_id, consolidation_id) AS (
+         SELECT id, id
+         FROM memory_consolidations
+         WHERE chat_id = ? AND id IN (${placeholders})
+         UNION
+         SELECT source_tree.root_id, json_each.value
+         FROM source_tree
+         JOIN memory_consolidations parent ON parent.id = source_tree.consolidation_id
+         JOIN json_each(parent.source_consolidation_ids)
+         WHERE parent.chat_id = ?
+       )
+       SELECT source_tree.root_id, cc.message_ids
+       FROM source_tree
+       JOIN memory_consolidations leaf ON leaf.id = source_tree.consolidation_id
+       JOIN json_each(leaf.source_chunk_ids)
+       JOIN chat_chunks cc ON cc.id = json_each.value AND cc.chat_id = ?
+       WHERE leaf.chat_id = ?
+       ORDER BY source_tree.root_id,
+                cc.message_range_start IS NULL ASC,
+                cc.message_range_start ASC,
+                cc.message_range_end ASC,
+                cc.id ASC`,
+    ).all(chatId, ...ids, chatId, chatId, chatId) as Array<{ root_id: string; message_ids: string | null }>;
+
+    for (const row of rows) {
+      const sourceIds = chunkMessageIds.get(row.root_id) ?? [];
+      sourceIds.push(...parseChunkMessageIds(row.message_ids));
+      chunkMessageIds.set(row.root_id, sourceIds);
+    }
+  }
+
+  const references = resolveChunkMessageReferences(
+    db,
+    chatId,
+    consolidations.map((consolidation) => ({
+      message_ids: JSON.stringify(chunkMessageIds.get(consolidation.id) ?? []),
+    })),
+  );
+  return consolidations.map((consolidation, index) => ({
+    ...consolidation,
+    messageReferences: references[index],
+  }));
+}
 
 /** GET /chats/:chatId/chunks — List memory chunks with salience data */
 app.get("/chats/:chatId/chunks", (c) => {
@@ -1713,16 +2004,24 @@ app.get("/chats/:chatId/chunks", (c) => {
     `SELECT cc.id, cc.chat_id, cc.content, cc.token_count, cc.message_count,
             cc.retrieval_count, cc.last_retrieved_at, cc.vectorized_at,
             cc.salience_score, cc.emotional_tags, cc.entity_ids,
-            cc.created_at, cc.updated_at
+            cc.message_ids, cc.created_at, cc.updated_at
      FROM chat_chunks cc
      WHERE cc.chat_id = ?
-     ORDER BY cc.created_at DESC
+     ORDER BY cc.message_range_start IS NULL ASC,
+              cc.message_range_start DESC,
+              cc.message_range_end DESC,
+              cc.id DESC
      LIMIT ? OFFSET ?`,
   ).all(chatId, limit, offset);
 
   const countRow = db.query("SELECT COUNT(*) as c FROM chat_chunks WHERE chat_id = ?").get(chatId) as any;
+  const messageReferences = resolveChunkMessageReferences(db, chatId, rows);
+  const data = rows.map((row: any, index: number) => {
+    const { message_ids: _messageIds, ...chunk } = row;
+    return { ...chunk, messageReferences: messageReferences[index] };
+  });
 
-  return c.json({ data: rows, total: countRow?.c ?? 0, limit, offset });
+  return c.json({ data, total: countRow?.c ?? 0, limit, offset });
 });
 
 // ─── Salience ──────────────────────────────────────────────────
@@ -1762,6 +2061,63 @@ app.get("/chats/:chatId/cortex-stats", (c) => {
   const stats = memoryCortex.getCortexUsageStats(chatId);
   const telemetry = memoryCortex.getIngestionTelemetry(chatId);
   return c.json({ ...stats, ingestionTelemetry: telemetry, scheduler: getChatPipelineStatus(chatId) });
+});
+
+/** GET /chats/:chatId/settings — Get the Cortex state for one chat. */
+app.get("/chats/:chatId/settings", (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const chat = getChat(owned.userId, chatId)!;
+  const config = memoryCortex.getCortexConfig(owned.userId);
+  const chatSettings = isRecord(chat.metadata?.cortex_settings)
+    ? chat.metadata.cortex_settings
+    : null;
+  return c.json({
+    enabled: memoryCortex.isCortexEnabledForChat(config, chat.metadata),
+    globalEnabled: config.enabled,
+    disabledByChat: chatSettings?.enabled === false,
+  });
+});
+
+/** PUT /chats/:chatId/settings — Enable or disable Cortex for one chat. */
+app.put("/chats/:chatId/settings", async (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const body = await c.req.json<{ enabled?: unknown }>();
+  if (typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled must be a boolean" }, 400);
+  }
+
+  const chat = getChat(owned.userId, chatId)!;
+  const existingSettings = isRecord(chat.metadata?.cortex_settings)
+    ? { ...chat.metadata.cortex_settings }
+    : {};
+  if (body.enabled) delete existingSettings.enabled;
+  else existingSettings.enabled = false;
+
+  const updated = chatsSvc.mergeChatMetadata(
+    owned.userId,
+    chatId,
+    { cortex_settings: Object.keys(existingSettings).length ? existingSettings : undefined },
+  );
+  if (!updated) return c.json({ error: "Chat not found" }, 404);
+
+  // Do not delete derived data: re-enabling should preserve the chat's graph.
+  // Dropping warm results makes the opt-out take effect immediately.
+  memoryCortex.invalidateCortexCache(chatId);
+  memoryCortex.invalidateLinkedCortexCache(chatId);
+
+  const config = memoryCortex.getCortexConfig(owned.userId);
+  const updatedSettings = isRecord(updated.metadata?.cortex_settings)
+    ? updated.metadata.cortex_settings
+    : null;
+  return c.json({
+    enabled: memoryCortex.isCortexEnabledForChat(config, updated.metadata),
+    globalEnabled: config.enabled,
+    disabledByChat: updatedSettings?.enabled === false,
+  });
 });
 
 app.get("/chats/:chatId/ingestion-status", (c) => {
@@ -1810,7 +2166,7 @@ app.post("/chats/:chatId/rebuild", async (c) => {
   if (!chat) return c.json({ error: "Chat not found" }, 404);
 
   const cortexConfig = memoryCortex.getCortexConfig(userId);
-  if (!cortexConfig.enabled) {
+  if (!memoryCortex.isCortexEnabledForChat(cortexConfig, chat.metadata)) {
     return c.json({ status: "skipped", reason: "cortex_disabled", chatId });
   }
 

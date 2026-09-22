@@ -65,13 +65,13 @@ function sourceForKind(kind: WeaverResponseKind): WeaverFactSource {
 
 const QUESTION_ATTEMPTS = 3;
 
-export function getTaste(userId: string): WeaverTasteProfile {
+export function getTaste(userId: string, sessionId: string): WeaverTasteProfile {
   const row = getDb()
-    .prepare(`SELECT profile FROM weaver_taste WHERE user_id = ?`)
-    .get(userId) as { profile?: string } | undefined;
-  if (!row?.profile) return { steers: [] };
+    .prepare(`SELECT taste_profile FROM weaver_sessions WHERE id = ? AND user_id = ?`)
+    .get(sessionId, userId) as { taste_profile?: string } | undefined;
+  if (!row?.taste_profile) return { steers: [] };
   try {
-    const parsed = JSON.parse(row.profile);
+    const parsed = JSON.parse(row.taste_profile);
     const steers = Array.isArray(parsed?.steers)
       ? parsed.steers.filter((s: unknown) => typeof s === "string" && s.trim())
       : [];
@@ -83,18 +83,18 @@ export function getTaste(userId: string): WeaverTasteProfile {
 
 const MAX_STEERS = 24;
 
-export function addSteer(userId: string, steer: string): void {
+export function addSteer(userId: string, sessionId: string, steer: string): void {
   const trimmed = steer.trim();
   if (!trimmed) return;
-  const taste = getTaste(userId);
+  const taste = getTaste(userId, sessionId);
   const steers = [...taste.steers.filter((s) => s !== trimmed), trimmed].slice(-MAX_STEERS);
   getDb()
     .prepare(
-      `INSERT INTO weaver_taste (user_id, profile, updated_at)
-       VALUES (?, ?, unixepoch())
-       ON CONFLICT(user_id) DO UPDATE SET profile = excluded.profile, updated_at = excluded.updated_at`,
+      `UPDATE weaver_sessions
+          SET taste_profile = ?, updated_at = unixepoch()
+        WHERE id = ? AND user_id = ?`,
     )
-    .run(userId, JSON.stringify({ steers }));
+    .run(JSON.stringify({ steers }), sessionId, userId);
 }
 
 function rowToTurn(row: any): WeaverInterviewTurn {
@@ -380,7 +380,7 @@ export async function generateQuestion(
   }
 
   const facts = extraction.committed_facts;
-  const taste = getTaste(userId);
+  const taste = getTaste(userId, sessionId);
   const turns = listTurns(userId, sessionId);
   const asked = turns
     .filter((t) => t.question.prompt)
@@ -542,7 +542,7 @@ export async function answerQuestion(
       JSON.stringify(content),
     );
 
-  if (input.steer && input.steer.trim()) addSteer(userId, input.steer);
+  if (input.steer && input.steer.trim()) addSteer(userId, sessionId, input.steer);
 
   await harvestSpillover(
     userId,
@@ -578,7 +578,7 @@ export async function sparkQuestion(
       why: typeof q.why === "string" ? q.why.trim() : "",
       dream: session.seed.text,
       facts: extraction.committed_facts,
-      taste: getTaste(userId),
+      taste: getTaste(userId, sessionId),
       steer: input.steer,
       avoid: input.avoid,
       source_noun: seedSourceNoun(session.seed.type),

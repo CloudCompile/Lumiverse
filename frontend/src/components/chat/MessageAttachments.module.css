@@ -89,6 +89,15 @@
   border-radius: var(--lcs-radius-sm, 8px);
 }
 
+.videoAttachment {
+  display: block;
+  width: min(100%, 360px);
+  max-height: 280px;
+  background: #000;
+  border: 1px solid var(--lumiverse-border, rgba(255, 255, 255, 0.1));
+  border-radius: var(--lcs-radius, 14px);
+}
+
 /* ── Mobile: scale images down ── */
 @media (max-width: 480px) {
   .imageThumbUser,
@@ -101,5 +110,9 @@
     max-width: 180px;
     max-height: 180px;
   }
-}
 
+  .videoAttachment {
+    width: min(100%, 280px);
+    max-height: 220px;
+  }
+}

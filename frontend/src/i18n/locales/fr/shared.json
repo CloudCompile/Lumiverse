@@ -46,7 +46,11 @@
     "searchFolders": "Rechercher des dossiers...",
     "none": "Aucun",
     "folderNamePlaceholder": "Nom du dossier...",
-    "createNew": "Créer un nouveau dossier..."
+    "createNew": "Créer un nouveau dossier...",
+    "renameFolder": "Renommer {{name}}",
+    "deleteFolder": "Supprimer {{name}}",
+    "confirmRename": "Confirmer le renommage",
+    "cancelRename": "Annuler le renommage"
   },
   "imageLightbox": {
     "loadFailed": "Échec du chargement image",
@@ -91,6 +95,8 @@
     "expandEditor": "Agrandir l'éditeur",
     "hideMacros": "Masquer les macros",
     "insertMacro": "Insérer une macro",
+    "previewMarkdown": "Aperçu Markdown",
+    "editMarkdown": "Modifier le Markdown",
     "searchMacros": "Rechercher des macros..."
   },
   "spindle": {

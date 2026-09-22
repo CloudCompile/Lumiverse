@@ -43,6 +43,15 @@ const uploaded = await spindle.images.upload({
   owner_chat_id: 'chat-id',
 })
 
+// Preserve an already-optimized asset exactly as uploaded. Thumbnail URLs for
+// this asset serve the original file and never create derivative WebPs.
+const bakedAsset = await spindle.images.upload({
+  data: avifBytes,
+  filename: 'card.avif',
+  mime_type: 'image/avif',
+  skip_thumbnail_processing: true,
+})
+
 // Persist raw video bytes, including output from spindle.media.*, back into
 // the shared asset store.
 const storedVideo = await spindle.images.upload({
@@ -69,6 +78,9 @@ const generated = await spindle.images.uploadFromDataUrl(dataUrl, {
 
 // Delete an asset
 await spindle.images.delete(uploaded.id)
+
+// Bulk delete by ID
+const deletedCount = await spindle.images.deleteMany(imageIds)
 ```
 
 ## Methods
@@ -80,7 +92,8 @@ await spindle.images.delete(uploaded.id)
 | `upload(input)` | `Promise<ImageDTO>` | Upload raw image or video bytes. The host automatically tags the stored asset with the current extension identifier. |
 | `uploadMany(items, options?)` | `Promise<Array<{ id?: string; error?: string }>>` | Batch upload multiple assets in a single IPC call. Per-item failures captured as `{error}` rather than throwing. Options: `{ userId?, concurrency? }` (concurrency capped at 32, default 16). |
 | `uploadFromDataUrl(dataUrl, options?)` | `Promise<ImageDTO>` | Upload a base64 image data URL. The host automatically tags the stored asset with the current extension identifier. |
-| `delete(imageId)` | `Promise<boolean>` | Delete an asset by ID. Returns `true` when deleted. |
+| `delete(imageId)` | `Promise<boolean>` | Delete an asset by ID. Returns `true` when deleted. Emits `IMAGE_DELETED`. |
+| `deleteMany(imageIds, options?)` | `Promise<number>` | Bulk delete by ID. Returns the number of assets deleted (missing IDs are skipped). Does not emit per-image `IMAGE_DELETED` events. Options: `{ userId? }`. |
 
 ## ImageListOptionsDTO
 
@@ -126,6 +139,7 @@ Same ownership and `specificity` fields as `ImageListOptionsDTO`, minus paginati
 | `mime_type` | `string` | No | MIME type. Defaults to `image/png` when omitted and not inferable. |
 | `owner_character_id` | `string` | No | Optional character ownership tag stored with the asset. |
 | `owner_chat_id` | `string` | No | Optional chat ownership tag stored with the asset. |
+| `skip_thumbnail_processing` | `boolean` | No | Persist the original without generating thumbnail derivatives. Small and large thumbnail URLs serve the original asset. Defaults to `false`. |
 | `strip_audio` | `boolean` | No | For video uploads, strip any audio tracks from the stored output when possible. |
 | `transcode_video_codec` | `'h264' \| 'hevc'` | No | For video uploads, transcode the primary stored asset to this codec. |
 | `sidecar_video_codecs` | `Array<'h264' \| 'hevc'>` | No | Generate additional stored video variants alongside the primary asset. |
@@ -137,6 +151,7 @@ Same ownership and `specificity` fields as `ImageListOptionsDTO`, minus paginati
 | `originalFilename` | `string` | Optional filename to persist with the asset. |
 | `owner_character_id` | `string` | Optional character ownership tag stored with the asset. |
 | `owner_chat_id` | `string` | Optional chat ownership tag stored with the asset. |
+| `skip_thumbnail_processing` | `boolean` | Persist the original without generating thumbnail derivatives. Defaults to `false`. |
 | `userId` | `string` | **Required for operator-scoped extensions.** |
 
 ## Ownership Model
@@ -155,7 +170,7 @@ Same ownership and `specificity` fields as `ImageListOptionsDTO`, minus paginati
 ## Notes
 
 - `spindle.images.get()` returns metadata plus a URL, not the binary asset bytes themselves.
-- Thumbnail generation is supported automatically. `has_thumbnail` tells you whether thumbnails are available or can be lazily generated. `uploadMany` defers thumbnail (and width/height) generation to a background job for throughput; the underlying row populates these fields asynchronously after the call returns.
+- Thumbnail generation is supported automatically. `has_thumbnail` tells you whether thumbnails are available or can be lazily generated. `uploadMany` defers thumbnail (and width/height) generation to a background job for throughput; the underlying row populates these fields asynchronously after the call returns. Assets uploaded with `skip_thumbnail_processing: true` keep `has_thumbnail: false` and `width`/`height` as `null`, and all thumbnail-sized URLs serve the original asset.
 - Video assets stored here can be used as `spindle.media` inputs via `source: { kind: "image", image_id }`. Despite the source name, that media source kind accepts still images and video assets from this store.
 - Generated images persisted through `spindle.imageGen.generate()` also participate in this ownership model when `owner_character_id` or `owner_chat_id` are supplied.
 

@@ -6,6 +6,7 @@ import { getDb } from "../db/connection";
 import * as managerSvc from "../spindle/manager.service";
 import { PRIVILEGED_PERMISSIONS } from "../spindle/manager.service";
 import * as bulkUpdateSvc from "../spindle/bulk-update.service";
+import * as updateCheckSvc from "../spindle/update-check.service";
 import type { ExtensionInfo } from "lumiverse-spindle-types";
 import * as lifecycle from "../spindle/lifecycle";
 import { toolRegistry } from "../spindle/tool-registry";
@@ -17,6 +18,8 @@ import {
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { ifNoneMatchSatisfies } from "../utils/http-cache";
+import { getFrontendRuntimeCapabilities } from "../spindle/frontend-runtime-capabilities";
+import { reportLibraryToAll } from "../illarin/extensions";
 
 const app = new Hono();
 
@@ -44,9 +47,7 @@ app.get("/", async (c) => {
   const viewer = getViewer(c);
   const extensions = (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ({
     ...ext,
-    // L-07: Both branches of the ternary returned "stopped", so the "running"
-    // state was never surfaced to clients.  Fix: "disabled" for non-enabled
-    // extensions, "stopped" only for enabled ones that aren't currently running.
+    frontend_runtime_capabilities: getFrontendRuntimeCapabilities(ext.id),
     status: lifecycle.isRunning(ext.id)
       ? "running"
       : ext.enabled
@@ -55,6 +56,22 @@ app.get("/", async (c) => {
   }));
   const isPrivileged = viewer.role === "owner" || viewer.role === "admin";
   return c.json({ extensions, isPrivileged });
+});
+
+// GET /api/v1/spindle/updates — Return the cached update set filtered to
+// extensions the current viewer is allowed to manage.
+app.get("/updates", async (c) => {
+  const viewer = getViewer(c);
+  const manageableIds = new Set(
+    managerSvc.getManageableExtensionIdsForUser(viewer.userId, viewer.role)
+  );
+  const snapshot = updateCheckSvc.getExtensionUpdateSnapshot();
+  return c.json({
+    ...snapshot,
+    updates: snapshot.updates.filter((update) =>
+      manageableIds.has(update.extensionId)
+    ),
+  });
 });
 
 // GET /api/v1/spindle/ephemeral/overview — Admin overview with reservations
@@ -215,6 +232,7 @@ app.post("/install", requireOwner, async (c) => {
       installedByUserId,
       branch,
     });
+    updateCheckSvc.clearCachedExtensionUpdate(ext.id);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -238,11 +256,11 @@ app.post("/import-local", requireOwner, async (c) => {
   }
 });
 
-// POST /api/v1/spindle/update-all — Git pull + rebuild every extension the
+// POST /api/v1/spindle/update-all — Remote reset + rebuild every extension the
 // caller can manage, sequentially, in a background task. Returns immediately
 // (HTTP 202). Progress streams via SPINDLE_BULK_UPDATE_PROGRESS / _COMPLETE
 // WS events; per-extension status streams via SPINDLE_EXTENSION_STATUS.
-app.post("/update-all", async (c) => {
+app.post("/update-all", requireOwner, async (c) => {
   try {
     const viewer = getViewer(c);
     if (!viewer.userId) {
@@ -261,8 +279,12 @@ app.post("/update-all", async (c) => {
   }
 });
 
-// POST /api/v1/spindle/:id/update — Git pull + rebuild
-app.post("/:id/update", async (c) => {
+// POST /api/v1/spindle/:id/update — Remote reset + rebuild.
+// Owner-only because a rebuild runs `bun install` (dependency lifecycle
+// scripts) and restarts the backend bundle from repository content — whoever
+// controls the branch controls server-side code execution. Install is already
+// owner-only; mutating the code supply chain must match.
+app.post("/:id/update", requireOwner, async (c) => {
   try {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
@@ -277,9 +299,12 @@ app.post("/:id/update", async (c) => {
     // Stop if running
     if (lifecycle.isRunning(ext.id)) {
       await lifecycle.stopExtension(ext.id);
+      await lifecycle.settleRuntimeBoundary();
     }
 
     await managerSvc.update(ext.identifier);
+    updateCheckSvc.clearCachedExtensionUpdate(ext.id);
+    await lifecycle.settleRuntimeBoundary();
 
     // Restart if was enabled
     if (ext.enabled) {
@@ -321,6 +346,8 @@ app.delete("/:id", async (c) => {
     }
 
     managerSvc.remove(ext.identifier);
+    updateCheckSvc.clearCachedExtensionUpdate(ext.id);
+    if (ext.metadata?.illarin) void reportLibraryToAll();
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -348,6 +375,7 @@ app.post("/:id/enable", requireOwner, async (c) => {
     });
 
     managerSvc.enable(ext.identifier);
+    void updateCheckSvc.refreshExtensionUpdate(ext.id);
     await lifecycle.startExtension(ext.id);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
@@ -379,6 +407,7 @@ app.post("/:id/disable", async (c) => {
       await lifecycle.stopExtension(ext.id);
     }
     managerSvc.disable(ext.identifier);
+    updateCheckSvc.clearCachedExtensionUpdate(ext.id);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -494,7 +523,12 @@ app.get("/:id/manifest", async (c) => {
 
     const manifest = await managerSvc.getManifest(ext.identifier);
     const frontendCacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
-    return c.json(frontendCacheKey ? { ...manifest, frontend_cache_key: frontendCacheKey } : manifest);
+    const widgetFrontendCacheKey = await managerSvc.getWidgetFrontendBundleCacheKey(ext.identifier);
+    return c.json({
+      ...manifest,
+      ...(frontendCacheKey ? { frontend_cache_key: frontendCacheKey } : {}),
+      ...(widgetFrontendCacheKey ? { frontend_widget_cache_key: widgetFrontendCacheKey } : {}),
+    });
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -514,7 +548,7 @@ app.get("/:id/branches", async (c) => {
 });
 
 // POST /api/v1/spindle/:id/switch-branch — Switch to a different branch
-app.post("/:id/switch-branch", async (c) => {
+app.post("/:id/switch-branch", requireOwner, async (c) => {
   try {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
@@ -528,9 +562,12 @@ app.post("/:id/switch-branch", async (c) => {
     // Stop if running
     if (lifecycle.isRunning(ext.id)) {
       await lifecycle.stopExtension(ext.id);
+      await lifecycle.settleRuntimeBoundary();
     }
 
     await managerSvc.switchBranch(ext.identifier, body.branch);
+    updateCheckSvc.clearCachedExtensionUpdate(ext.id);
+    await lifecycle.settleRuntimeBoundary();
 
     // Restart if was enabled
     if (ext.enabled) {
@@ -554,6 +591,44 @@ app.get("/tools", async (c) => {
     (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ext.id)
   );
   return c.json(toolRegistry.getTools().filter((tool) => visibleIds.has(tool.extension_id)));
+});
+
+// GET /api/v1/spindle/:id/frontend/widget — Serve the lightweight native-widget bundle
+app.get("/:id/frontend/widget", async (c) => {
+  const ext = await getVisibleExtension(c, c.req.param("id"));
+  if (!ext) return c.json({ error: "Not found" }, 404);
+
+  const bundlePath = await managerSvc.getWidgetFrontendBundlePath(ext.identifier);
+  if (!bundlePath || !(await Bun.file(bundlePath).exists())) {
+    return c.json({ error: "No widget frontend bundle" }, 404);
+  }
+
+  const cacheKey = await managerSvc.getWidgetFrontendBundleCacheKey(ext.identifier);
+  const etag = cacheKey ? `"spindle-widget-frontend-${ext.id}-${cacheKey}"` : undefined;
+  const versioned = !!cacheKey && c.req.query("v") === cacheKey;
+  const cacheControl = versioned
+    ? "private, max-age=31536000, immutable"
+    : "private, no-cache";
+
+  if (etag && ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": cacheControl,
+      },
+    });
+  }
+
+  const response = new Response(Bun.file(bundlePath), {
+    headers: {
+      "Content-Type": "application/javascript",
+      "Cache-Control": cacheControl,
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; upgrade-insecure-requests;",
+    },
+  });
+  if (etag) response.headers.set("ETag", etag);
+  return response;
 });
 
 // GET /api/v1/spindle/:id/frontend — Serve the extension's frontend bundle

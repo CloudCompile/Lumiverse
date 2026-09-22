@@ -130,11 +130,11 @@ export async function prefetchAssemblyData(ctx: AssemblyContext): Promise<Prefet
 
   // No-preset temp chats skip preset loading entirely (assembly re-checks the
   // same flag and falls back to the raw legacy message mapping).
-  const resolvedPresetId = isNoPresetChatMetadata(chat.metadata)
+  const resolvedPresetId = isNoPresetChatMetadata(chat.metadata) && !ctx.presetOverride
     ? null
     : ctx.presetId || connection?.preset_id;
   const preset = profiler.measureSync("preset", () =>
-    resolvedPresetId ? presetsSvc.getPreset(ctx.userId, resolvedPresetId) : null
+    ctx.presetOverride ?? (resolvedPresetId ? presetsSvc.getPreset(ctx.userId, resolvedPresetId) : null)
   );
 
   // ── 3. Embedding config (1 setting + 1 secret decrypt — only async op) ─
@@ -182,7 +182,7 @@ export async function prefetchAssemblyData(ctx: AssemblyContext): Promise<Prefet
         // (AsyncHTTP.onAsyncHTTPCallback). The embedding service's internal
         // timeout still bounds the request.
         void embeddingsSvc
-          .cachedEmbedTexts(ctx.userId, [databankQueryPreview])
+          .cachedEmbedTexts(ctx.userId, [databankQueryPreview], { inputType: "query" })
           .catch(() => {
             /* Surface errors at the consumer site, not the warm-up. */
           });

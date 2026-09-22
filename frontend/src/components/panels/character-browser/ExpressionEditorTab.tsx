@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Plus, Upload, Image as ImageIcon, Ghost, Trash2, Users } from 'lucide-react'
+import { Plus, Upload, Image as ImageIcon, Ghost, Trash2, Users, Download } from 'lucide-react'
 import { expressionsApi } from '@/api/expressions'
+import { charactersApi } from '@/api/characters'
 import { characterGalleryApi } from '@/api/character-gallery'
 import { fetchConnectionModels } from '@/api/connectionModels'
 import { imagesApi } from '@/api/images'
@@ -13,6 +14,8 @@ import NumericInput from '@/components/shared/NumericInput'
 import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import { Toggle } from '@/components/shared/Toggle'
+import { Spinner } from '@/components/shared/Spinner'
+import { toast } from '@/lib/toast'
 import type { ExpressionConfig, ExpressionSlot, ExpressionGroups } from '@/types/expressions'
 import type { CharacterGalleryItem } from '@/types/api'
 import styles from './ExpressionEditorTab.module.css'
@@ -31,6 +34,8 @@ const DETECTION_DEFAULTS: DetectionSettings = { mode: 'auto', contextWindow: 5 }
 
 interface Props {
   characterId: string
+  /** Resolved `creator/character` path when this card came from Chub, else null. */
+  chubSourcePath?: string | null
 }
 
 function toExpressionLabel(fileName: string, fallback: string) {
@@ -38,11 +43,12 @@ function toExpressionLabel(fileName: string, fallback: string) {
   return baseName || fallback
 }
 
-export default function ExpressionEditorTab({ characterId }: Props) {
+export default function ExpressionEditorTab({ characterId, chubSourcePath }: Props) {
   const { t } = useTranslation('panels')
   const { t: tc } = useTranslation('common')
   const defaultExpressionLabel = t('characterEditor.expressionEditor.defaultExpressionLabel')
   const [config, setConfig] = useState<ExpressionConfig | null>(null)
+  const [fetchingChub, setFetchingChub] = useState(false)
   const [groups, setGroups] = useState<ExpressionGroups | null>(null)
   const [activeGroup, setActiveGroup] = useState<string | null>(null)
   const [deleteLabelTarget, setDeleteLabelTarget] = useState<{ label: string; group: string | null } | null>(null)
@@ -74,9 +80,36 @@ export default function ExpressionEditorTab({ characterId }: Props) {
         setActiveGroup(Object.keys(grps).filter((n) => n !== '_default')[0] || Object.keys(grps)[0] || null)
       }
     }).finally(() => setLoading(false))
-  }, [characterId])
+  }, [activeGroup, characterId])
 
   useEffect(() => { fetchConfig() }, [fetchConfig])
+
+  /**
+   * Re-pull this character's pack from the Chub card it was imported from.
+   *
+   * Expressions only — the card's own fields are never re-read, so local edits
+   * survive. Labels already mapped are skipped rather than replaced.
+   */
+  const handleFetchChub = useCallback(async () => {
+    setFetchingChub(true)
+    try {
+      const result = await charactersApi.fetchChubExpressions(characterId)
+      if (result.sourceMissing) {
+        toast.info(t('characterEditor.expressionEditor.chubSourceMissing'))
+      } else if (result.available === 0) {
+        toast.info(t('characterEditor.expressionEditor.chubNone'))
+      } else if (result.imported === 0) {
+        toast.info(t('characterEditor.expressionEditor.chubAlreadyPresent', { count: result.skipped }))
+      } else {
+        toast.success(t('characterEditor.expressionEditor.chubImported', { count: result.imported }))
+        fetchConfig()
+      }
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || t('characterEditor.expressionEditor.chubFailed'))
+    } finally {
+      setFetchingChub(false)
+    }
+  }, [characterId, fetchConfig, t])
 
   // Load detection settings (global, not per-character)
   useEffect(() => {
@@ -131,6 +164,11 @@ export default function ExpressionEditorTab({ characterId }: Props) {
   const handleToggleEnabled = useCallback(() => {
     if (!config) return
     saveConfig({ ...config, enabled: !config.enabled })
+  }, [config, saveConfig])
+
+  const handleToggleAvatar = useCallback((useAsAvatar: boolean) => {
+    if (!config) return
+    saveConfig({ ...config, useAsAvatar })
   }, [config, saveConfig])
 
   const handleDefaultChange = useCallback(
@@ -222,7 +260,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
         setUploading(false)
       }
     },
-    [characterId, config, saveConfig, defaultExpressionLabel]
+    [config, saveConfig, defaultExpressionLabel]
   )
 
   const openGalleryPicker = useCallback(() => {
@@ -257,7 +295,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
   const handleConvertToGroups = useCallback(() => {
     expressionsApi.convertToGroups(characterId).then((grps) => {
       setGroups(grps)
-      setConfig({ enabled: false, defaultExpression: '', mappings: {} })
+      setConfig((previous) => ({ enabled: false, useAsAvatar: previous?.useAsAvatar ?? false, defaultExpression: '', mappings: {} }))
       setActiveGroup(Object.keys(grps)[0] || null)
     }).catch(() => {})
   }, [characterId])
@@ -744,6 +782,21 @@ export default function ExpressionEditorTab({ characterId }: Props) {
 
   const hasSlots = slots.length > 0
 
+  // One definition, two homes: the empty state (where a fetch is the obvious
+  // next action and the row has space) and the toolbar (for topping up a
+  // partial pack). Five buttons in the toolbar wrapped awkwardly.
+  const fetchChubButton = (
+    <button
+      type="button"
+      className={styles.controlBtn}
+      onClick={handleFetchChub}
+      disabled={fetchingChub}
+    >
+      {fetchingChub ? <Spinner size={14} /> : <Download size={14} />}{' '}
+      {t('characterEditor.expressionEditor.fetchFromChub')}
+    </button>
+  )
+
   return (
     <div>
       <div className={styles.header}>
@@ -756,6 +809,15 @@ export default function ExpressionEditorTab({ characterId }: Props) {
           checked={config?.enabled ?? false}
           onChange={handleToggleEnabled}
           label={t('characterEditor.expressionEditor.enableDisplay')}
+        />
+      </div>
+      <div className={styles.enableRow}>
+        <Toggle.Checkbox
+          checked={config?.useAsAvatar ?? false}
+          onChange={handleToggleAvatar}
+          disabled={!config?.enabled}
+          label={t('characterEditor.expressionEditor.useAsAvatar')}
+          hint={t('characterEditor.expressionEditor.useAsAvatarHint')}
         />
       </div>
 
@@ -810,6 +872,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
         <button type="button" className={styles.controlBtn} onClick={openGalleryPicker}>
           <ImageIcon size={14} /> {t('characterEditor.expressionEditor.addFromGallery')}
         </button>
+        {chubSourcePath && hasSlots && fetchChubButton}
         <button type="button" className={styles.controlBtn} onClick={() => uploadRef.current?.click()}>
           <Plus size={14} /> {t('characterEditor.expressionEditor.uploadImages')}
         </button>
@@ -834,6 +897,7 @@ export default function ExpressionEditorTab({ characterId }: Props) {
             <button type="button" className={styles.controlBtn} onClick={() => uploadRef.current?.click()}>
               <Plus size={14} /> {t('characterEditor.expressionEditor.uploadImages')}
             </button>
+            {chubSourcePath && fetchChubButton}
           </div>
         </div>
       )}

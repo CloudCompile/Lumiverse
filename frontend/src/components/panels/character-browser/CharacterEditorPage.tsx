@@ -4,7 +4,25 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'motion/react'
-import { X, Upload, Trash2, Copy, MessageSquare, User, UserPlus, Plus, ImagePlus, Download, Code2, GripVertical } from 'lucide-react'
+import {
+  X,
+  Upload,
+  Trash2,
+  Copy,
+  MessageSquare,
+  User,
+  UserPlus,
+  Plus,
+  ImagePlus,
+  Download,
+  Code2,
+  GripVertical,
+  ExternalLink,
+  Hash,
+  MoreHorizontal,
+  CircleHelp,
+  Pencil,
+} from 'lucide-react'
 import {
   DndContext,
   closestCenter,
@@ -39,6 +57,7 @@ import { uuidv7 } from '@/lib/uuid'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import ImageCropModal from '@/components/shared/ImageCropModal'
+import ImageLightbox from '@/components/shared/ImageLightbox'
 import LazyImage from '@/components/shared/LazyImage'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -46,16 +65,24 @@ import { useLongPress } from '@/hooks/useLongPress'
 import type { Character, CharacterGalleryItem, WorldBook } from '@/types/api'
 import type { WallpaperRef } from '@/types/store'
 import { toast } from '@/lib/toast'
+import { copyTextToClipboard } from '@/lib/clipboard'
+import { galleryImageMarkdown } from '@/lib/galleryImageReference'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/ws/events'
 import { Button } from '@/components/shared/FormComponents'
 import { RangeSlider } from '@/components/shared/RangeSlider'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import VoicePicker from '@/components/shared/VoicePicker'
+import FolderDropdown from '@/components/shared/FolderDropdown'
 import SpindleCharacterEditorTabContent from '@/components/spindle/SpindleCharacterEditorTabContent'
 import { ttsConnectionsApi } from '@/api/tts-connections'
 import type { VoiceRef } from '@/types/api'
 import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { useFolders } from '@/hooks/useFolders'
 import { setCharacterEditorController, syncCharacterEditorState } from '@/lib/spindle/character-editor-helper'
+import { applyChatAppearance } from '@/lib/chatAppearance'
+import type { AvatarBindings } from '@/lib/avatarBindings'
 import styles from './CharacterEditorPage.module.css'
 import clsx from 'clsx'
 import {
@@ -68,12 +95,40 @@ import CharacterLoraTab from './CharacterLoraTab'
 import AlternateFieldEditor from './AlternateFieldEditor'
 import AlternateAvatarManager from './AlternateAvatarManager'
 import type { AlternateAvatarEntry } from './AlternateAvatarManager'
+import CharacterTokenReportModal, { type CharacterTokenReportItem } from './CharacterTokenReportModal'
+import { GuideViewer } from '@/components/shared/GuideViewer'
+import {
+  getGreetingTitle,
+  moveAlternateGreetingMetadata,
+  remapGreetingIndexForMove,
+  removeAlternateGreetingMetadata,
+  setGreetingTitle,
+} from '@/lib/greetingMetadata'
+import {
+  parseCharacterSourceInput,
+  readCharacterSourceUrl,
+  readChubFullPath,
+  setCharacterSource,
+} from '@/lib/characterSource'
 
 const DEBOUNCE_MS = 2000
 const MAX_PERSPECTIVE_LAYERS = 5
 const GALLERY_MIN_ITEM_WIDTH = 120
 const GALLERY_GAP = 8
+
+interface CharxExportProgress {
+  characterId?: string
+  exportId?: string
+  phase: 'preparing' | 'collecting_assets' | 'compressing' | 'complete' | 'failed'
+  completed?: number
+  total?: number
+  error?: string
+}
 const GALLERY_OVERSCAN = 3
+const MD_IMAGE_RE = /!\[[^\]]*\]\(([^)]+)\)/g
+const HTML_IMG_RE = /<img[^>]+src=["']([^"']+)["']/gi
+const BARE_URL_RE = /\bhttps?:\/\/[^\s<>"']+/gi
+const IMAGE_PATH_RE = /\.(?:apng|avif|bmp|gif|heic|heif|ico|jpe?g|jfif|pjp|pjpeg|png|svg|webp)$/i
 
 type BuiltInTabId = 'core' | 'system' | 'greetings' | 'identity' | 'gallery' | 'expressions' | 'voice' | 'imageLora' | 'advanced'
 type TabId = BuiltInTabId | string
@@ -82,26 +137,47 @@ interface GalleryGridItemProps {
   item: CharacterGalleryItem
   onRemove: (itemId: string) => void
   onOpenMenu: (item: CharacterGalleryItem, pos: ContextMenuPos) => void
+  onPreview: (item: CharacterGalleryItem) => void
 }
 
-function GalleryGridItem({ item, onRemove, onOpenMenu }: GalleryGridItemProps) {
+function GalleryGridItem({ item, onRemove, onOpenMenu, onPreview }: GalleryGridItemProps) {
   const { t } = useTranslation('panels')
   const longPress = useLongPress({
     onLongPress: (pos) => onOpenMenu(item, pos),
   })
 
   return (
-    <div className={styles.galleryItem} {...longPress}>
+    <div
+      className={styles.galleryItem}
+      role="button"
+      tabIndex={0}
+      aria-label={item.caption || t('characterEditor.galleryImage')}
+      onClick={() => onPreview(item)}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onPreview(item)
+        }
+      }}
+      {...longPress}
+    >
       <LazyImage
         src={characterGalleryApi.smallUrl(item.image_id)}
         alt={item.caption || t('characterEditor.galleryImage')}
         className={styles.galleryThumb}
         fallback={<div className={styles.galleryThumbPlaceholder} />}
       />
+      <span className={styles.galleryReferenceBadge} title={item.reference}>
+        {item.reference.replace(/^gallery:\/\//, '')}
+      </span>
       <button
         type="button"
         className={styles.galleryRemoveBtn}
-        onClick={() => onRemove(item.id)}
+        onClick={(e) => {
+          e.stopPropagation()
+          onRemove(item.id)
+        }}
         title={t('characterEditor.removeFromGallery')}
       >
         <X size={12} />
@@ -186,8 +262,132 @@ function SortablePerspectiveLayer({ layer, index, disabled, onLabelChange, onInt
   )
 }
 
+function SortableGreetingItem({
+  id,
+  disabled,
+  children,
+}: {
+  id: string
+  disabled: boolean
+  children: React.ReactNode
+}) {
+  const { t } = useTranslation('panels')
+  const { attributes, listeners, setNodeRef: setSortableRef, transform, transition, isDragging } = useSortable({ id, disabled })
+  const { setNodeRef, style } = useScaledSortableStyle({ setNodeRef: setSortableRef, transform, transition, isDragging })
+
+  return (
+    <div
+      ref={setNodeRef}
+      style={style}
+      className={clsx(styles.greetingItem, styles.greetingItemSortable, isDragging && styles.greetingItemDragging)}
+    >
+      <button
+        type="button"
+        className={styles.greetingDragHandle}
+        disabled={disabled}
+        title={t('characterEditor.reorderGreeting')}
+        aria-label={t('characterEditor.reorderGreeting')}
+        {...attributes}
+        {...listeners}
+      >
+        <GripVertical size={15} />
+      </button>
+      {children}
+    </div>
+  )
+}
+
+function GreetingNameInput({
+  value,
+  resetKey,
+  placeholder,
+  ariaLabel,
+  onChange,
+}: {
+  value: string
+  resetKey: string
+  placeholder: string
+  ariaLabel?: string
+  onChange: (value: string) => void
+}) {
+  const [draft, setDraft] = useState(value)
+
+  useEffect(() => {
+    setDraft(value)
+  }, [resetKey, value])
+
+  return (
+    <input
+      type="text"
+      className={styles.greetingNameInput}
+      value={draft}
+      onChange={(event) => {
+        setDraft(event.target.value)
+        onChange(event.target.value)
+      }}
+      onBlur={() => setDraft(value)}
+      placeholder={placeholder}
+      aria-label={ariaLabel}
+    />
+  )
+}
+
 function isRecord(value: unknown): value is Record<string, any> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function trimTrailingUrlPunctuation(url: string): string {
+  let trimmed = url.trim()
+
+  while (/[.,!?;:]$/.test(trimmed)) {
+    trimmed = trimmed.slice(0, -1)
+  }
+
+  while (trimmed.endsWith(')') && ((trimmed.match(/\(/g)?.length ?? 0) < (trimmed.match(/\)/g)?.length ?? 0))) {
+    trimmed = trimmed.slice(0, -1)
+  }
+
+  while (trimmed.endsWith(']') && ((trimmed.match(/\[/g)?.length ?? 0) < (trimmed.match(/\]/g)?.length ?? 0))) {
+    trimmed = trimmed.slice(0, -1)
+  }
+
+  return trimmed
+}
+
+function isDirectImageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && IMAGE_PATH_RE.test(parsed.pathname)
+  } catch {
+    return false
+  }
+}
+
+function extractEmbeddedImageUrls(text: string): string[] {
+  const seen = new Set<string>()
+  const urls: string[] = []
+  let match: RegExpExecArray | null
+
+  const push = (url: string) => {
+    if (!seen.has(url)) {
+      seen.add(url)
+      urls.push(url)
+    }
+  }
+
+  MD_IMAGE_RE.lastIndex = 0
+  while ((match = MD_IMAGE_RE.exec(text)) !== null) push(match[1])
+
+  HTML_IMG_RE.lastIndex = 0
+  while ((match = HTML_IMG_RE.exec(text)) !== null) push(match[1])
+
+  BARE_URL_RE.lastIndex = 0
+  while ((match = BARE_URL_RE.exec(text)) !== null) {
+    const candidate = trimTrailingUrlPunctuation(match[0])
+    if (isDirectImageUrl(candidate)) push(candidate)
+  }
+
+  return urls
 }
 
 function readPerspectiveLayers(raw: unknown): CharacterPerspectiveLayerInput[] {
@@ -268,7 +468,6 @@ export default function CharacterEditorPage() {
   const activeChatId = useStore((s) => s.activeChatId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatAvatarId = useStore((s) => s.activeChatAvatarId)
-  const setActiveChatAvatarId = useStore((s) => s.setActiveChatAvatarId)
   const setActiveChatWallpaper = useStore((s) => s.setActiveChatWallpaper)
   const setSceneBackground = useStore((s) => s.setSceneBackground)
   const updateCharInStore = useStore((s) => s.updateCharacter)
@@ -277,6 +476,7 @@ export default function CharacterEditorPage() {
   const loadRegexScripts = useStore((s) => s.loadRegexScripts)
   const updateRegexScript = useStore((s) => s.updateRegexScript)
   const browser = useCharacterBrowser()
+  const { folders: characterFolders, createFolder: createCharacterFolder } = useFolders('characterFolders', allCharacters)
 
   const character = allCharacters.find((c) => c.id === editingCharacterId) ?? null
   const isOpen = !!editingCharacterId
@@ -287,24 +487,35 @@ export default function CharacterEditorPage() {
 
   const [activeTab, setActiveTab] = useState<TabId>('core')
   const [name, setName] = useState('')
+  const [folder, setFolder] = useState('')
   const [fields, setFields] = useState<Record<string, string>>({})
   const [tags, setTags] = useState<string[]>([])
   const [newTag, setNewTag] = useState('')
+  const [guideOpen, setGuideOpen] = useState(false)
   const [alternateGreetings, setAlternateGreetings] = useState<string[]>([])
+  const [alternateGreetingIds, setAlternateGreetingIds] = useState<string[]>([])
+  const [greetingBackgroundPickerIndex, setGreetingBackgroundPickerIndex] = useState<number | null>(null)
   const [alternateCharacterName, setAlternateCharacterName] = useState('')
+  const [sourceLinkDraft, setSourceLinkDraft] = useState('')
+  const [sourceLinkError, setSourceLinkError] = useState<string | null>(null)
   const [extensionsJson, setExtensionsJson] = useState('')
   const [jsonError, setJsonError] = useState<string | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [showTokenReport, setShowTokenReport] = useState(false)
   const [avatarKey, setAvatarKey] = useState(0)
   const [lorebookImporting, setLorebookImporting] = useState(false)
   const [lorebookResult, setLorebookResult] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [galleryItems, setGalleryItems] = useState<CharacterGalleryItem[]>([])
+  const [galleryLightboxSrc, setGalleryLightboxSrc] = useState<string | null>(null)
   const [worldBooks, setWorldBooks] = useState<Array<Pick<WorldBook, 'id' | 'name' | 'folder' | 'metadata'>>>([])
   const [galleryUploading, setGalleryUploading] = useState(false)
   const [extracting, setExtracting] = useState(false)
   const [creatingPersona, setCreatingPersona] = useState(false)
+  const [replacingCard, setReplacingCard] = useState(false)
   const [galleryContextMenu, setGalleryContextMenu] = useState<{ pos: ContextMenuPos; item: CharacterGalleryItem } | null>(null)
+  const [galleryRenameItem, setGalleryRenameItem] = useState<CharacterGalleryItem | null>(null)
+  const [galleryRenaming, setGalleryRenaming] = useState(false)
   const [avatarUploadProgress, setAvatarUploadProgress] = useState<number | null>(null)
   const [altAvatarUploadProgress, setAltAvatarUploadProgress] = useState<number | null>(null)
   const [perspectiveLayerProgress, setPerspectiveLayerProgress] = useState<number | null>(null)
@@ -316,6 +527,7 @@ export default function CharacterEditorPage() {
   const layerSaveLockRef = useRef<Promise<void> | null>(null)
   const timers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const fileRef = useRef<HTMLInputElement>(null)
+  const cardReplaceFileRef = useRef<HTMLInputElement>(null)
   const perspectiveLayerFileRef = useRef<HTMLInputElement>(null)
   const galleryFileRef = useRef<HTMLInputElement>(null)
   const galleryScrollRef = useRef<HTMLDivElement>(null)
@@ -340,14 +552,23 @@ export default function CharacterEditorPage() {
     return () => document.removeEventListener('keydown', handleEscape)
   }, [isOpen, close])
 
+  /// Guide Viewer 
+  useEffect(() => {
+  setGuideOpen(false)
+}, [activeTab])
+
   // Reset tab and force re-sync when switching to a different character.
   // Keyed on editingCharacterId (a stable string) so store-driven object
   // reference changes can never accidentally reset the active tab.
   useEffect(() => {
     lastSyncedId.current = null
+    setGalleryContextMenu(null)
+    setGalleryRenameItem(null)
+    setGalleryLightboxSrc(null)
     if (editingCharacterId) {
       setActiveTab('core')
     }
+    setShowTokenReport(false)
   }, [editingCharacterId])
 
   useEffect(() => {
@@ -363,6 +584,7 @@ export default function CharacterEditorPage() {
     if (lastSyncedId.current === character.id) return
     lastSyncedId.current = character.id
     setName(character.name)
+    setFolder(character.folder || '')
     setFields({
       description: character.description || '',
       personality: character.personality || '',
@@ -376,7 +598,11 @@ export default function CharacterEditorPage() {
     })
     setTags(character.tags || [])
     setAlternateGreetings(character.alternate_greetings || [])
+    setAlternateGreetingIds((character.alternate_greetings || []).map(() => uuidv7()))
+    setGreetingBackgroundPickerIndex(null)
     setAlternateCharacterName(character.extensions?.alternate_character_name || '')
+    setSourceLinkDraft(readCharacterSourceUrl(character.extensions) || '')
+    setSourceLinkError(null)
     setExtensionsJson(JSON.stringify(character.extensions || {}, null, 2))
     setJsonError(null)
     pendingExtensionsRef.current = null
@@ -390,6 +616,19 @@ export default function CharacterEditorPage() {
     clearTimeout(savingTimer.current)
     savingTimer.current = setTimeout(() => setSaving(false), 1000)
   }, [])
+
+  const handleFolderChange = useCallback(async (value: string) => {
+    if (!character) return
+    const previous = folder
+    setFolder(value)
+    showSaving()
+    try {
+      await browser.updateCharacter(character.id, { folder: value })
+    } catch (err: any) {
+      setFolder(previous)
+      toast.error(err?.body?.error || err?.message || t('characterEditor.folderSaveFailed'))
+    }
+  }, [browser, character, folder, showSaving, t])
 
   // Gallery
   const fetchGallery = useCallback(() => {
@@ -502,8 +741,10 @@ export default function CharacterEditorPage() {
       }
     }
     loadWorldBooks()
+    const offLibraryChanged = wsClient.on(EventType.WORLD_BOOK_LIBRARY_CHANGED, loadWorldBooks)
     return () => {
       cancelled = true
+      offLibraryChanged()
     }
   }, [editingCharacterId])
 
@@ -563,7 +804,49 @@ export default function CharacterEditorPage() {
     }
   }, [activeChatId, setActiveChatWallpaper, setSceneBackground, t])
 
+  const copyGalleryImageReference = useCallback((item: CharacterGalleryItem) => {
+    const markdown = galleryImageMarkdown(item, t('characterEditor.galleryImage'))
+    setGalleryContextMenu(null)
+    void copyTextToClipboard(markdown)
+      .then(() => toast.success(t('characterEditor.imageReferenceCopied')))
+      .catch(() => toast.error(t('characterEditor.imageReferenceCopyFailed')))
+  }, [t])
+
+  const handleGalleryReferenceRename = useCallback(async (name: string) => {
+    if (!editingCharacterId || !galleryRenameItem) return
+    setGalleryRenaming(true)
+    try {
+      const updated = await characterGalleryApi.renameReference(
+        editingCharacterId,
+        galleryRenameItem.id,
+        name,
+      )
+      setGalleryItems((current) => current.map((item) => item.id === updated.id ? updated : item))
+      setGalleryRenameItem(null)
+      toast.success(t('characterEditor.galleryReferenceRenamed', { reference: updated.reference }))
+    } catch (err: any) {
+      toast.error(err?.body?.error || err?.message || t('characterEditor.galleryReferenceRenameFailed'))
+    } finally {
+      setGalleryRenaming(false)
+    }
+  }, [editingCharacterId, galleryRenameItem, t])
+
   const galleryContextMenuItems: ContextMenuEntry[] = galleryContextMenu ? [
+    {
+      key: 'rename-image-reference',
+      label: t('characterEditor.renameImageReference'),
+      icon: <Pencil size={14} />,
+      onClick: () => {
+        setGalleryRenameItem(galleryContextMenu.item)
+        setGalleryContextMenu(null)
+      },
+    },
+    {
+      key: 'copy-image-reference',
+      label: t('characterEditor.copyImageReference'),
+      icon: <Copy size={14} />,
+      onClick: () => copyGalleryImageReference(galleryContextMenu.item),
+    },
     {
       key: 'set-chat-background',
       label: t('characterEditor.setAsChatBackground'),
@@ -587,8 +870,6 @@ export default function CharacterEditorPage() {
 
   const embeddedImageCount = useMemo(() => {
     if (!character) return 0
-    const MD_RE = /!\[[^\]]*\]\([^)]+\)/g
-    const IMG_RE = /<img[^>]+src=["'][^"']+["']/gi
     const texts = [
       character.first_mes,
       character.description,
@@ -604,14 +885,7 @@ export default function CharacterEditorPage() {
     const seen = new Set<string>()
     for (const t of texts) {
       if (!t) continue
-      for (const m of t.matchAll(MD_RE)) {
-        const url = m[0].match(/\(([^)]+)\)/)?.[1]
-        if (url && (url.startsWith('http') || url.startsWith('data:'))) seen.add(url)
-      }
-      for (const m of t.matchAll(IMG_RE)) {
-        const url = m[0].match(/src=["']([^"']+)["']/)?.[1]
-        if (url && (url.startsWith('http') || url.startsWith('data:'))) seen.add(url)
-      }
+      for (const url of extractEmbeddedImageUrls(t)) seen.add(url)
     }
     return seen.size
   }, [character])
@@ -625,7 +899,7 @@ export default function CharacterEditorPage() {
         browser.updateCharacter(editingCharacterId, { [field]: value })
       }, DEBOUNCE_MS)
     },
-    [editingCharacterId, browser.updateCharacter, showSaving]
+    [editingCharacterId, browser, showSaving]
   )
 
   // ── Atomic extensions mutation pipeline ──────────────────────────────
@@ -650,6 +924,63 @@ export default function CharacterEditorPage() {
 
     return pendingExtensionsRef.current ?? character?.extensions ?? {}
   }, [extensionsJson, character?.extensions])
+  const attributionUrl = useMemo(() => readCharacterSourceUrl(workingExtensions), [workingExtensions])
+  // Only Chub-sourced cards can be backfilled, so the button hides otherwise.
+  const chubSourcePath = useMemo(() => readChubFullPath(workingExtensions), [workingExtensions])
+
+  // This report intentionally uses the editor's local draft state rather than
+  // the saved card, so it remains useful while the user is still typing.
+  const tokenReportItems = useMemo<CharacterTokenReportItem[]>(() => {
+    const baseFields = [
+      ['description', t('characterEditor.description')],
+      ['personality', t('characterEditor.personality')],
+      ['scenario', t('characterEditor.scenario')],
+      ['system_prompt', t('characterEditor.systemPrompt')],
+      ['post_history_instructions', t('characterEditor.postHistory')],
+      ['mes_example', t('characterEditor.messageExamples')],
+    ] as const
+    const items: CharacterTokenReportItem[] = baseFields.map(([field, label]) => ({
+      id: `base:${field}`,
+      label,
+      text: fields[field] || '',
+      group: 'base',
+    }))
+
+    const alternateFields = isRecord(workingExtensions.alternate_fields) ? workingExtensions.alternate_fields : {}
+    for (const [field, baseLabel] of baseFields.slice(0, 3)) {
+      const variants = Array.isArray(alternateFields[field]) ? alternateFields[field] : []
+      variants.forEach((variant: unknown, index: number) => {
+        if (!isRecord(variant)) return
+        const label = typeof variant.label === 'string' && variant.label.trim()
+          ? variant.label
+          : `${t('characterEditor.alternateField.default')} ${index + 1}`
+        items.push({
+          id: `variant:${field}:${typeof variant.id === 'string' ? variant.id : index}`,
+          label: `${baseLabel} — ${label}`,
+          text: typeof variant.content === 'string' ? variant.content : '',
+          group: 'variant',
+        })
+      })
+    }
+
+    items.push({
+      id: 'greeting:first',
+      label: getGreetingTitle(workingExtensions, 0) || t('characterEditor.firstMessage'),
+      text: fields.first_mes || '',
+      group: 'greeting',
+    })
+    alternateGreetings.forEach((greeting, index) => {
+      items.push({
+        id: `greeting:${index}`,
+        label: getGreetingTitle(workingExtensions, index + 1)
+          || t('characterEditor.greetingNumber', { n: index + 1 }),
+        text: greeting,
+        group: 'greeting',
+      })
+    })
+
+    return items
+  }, [alternateGreetings, fields, t, workingExtensions])
 
 
   const flushExtensionsSave = useCallback(async () => {
@@ -661,7 +992,7 @@ export default function CharacterEditorPage() {
     pendingExtensionsRef.current = null
     showSaving()
     await browser.updateCharacter(editingCharacterId, { extensions: next })
-  }, [editingCharacterId, browser.updateCharacter, showSaving])
+  }, [editingCharacterId, browser, showSaving])
 
   const mutateExtensions = useCallback(
     (mutator: (ext: Record<string, any>) => Record<string, any>, immediate: boolean) => {
@@ -785,6 +1116,18 @@ export default function CharacterEditorPage() {
     [mutateExtensions]
   )
 
+  const handleAvatarBindingsChange = useCallback(
+    (bindings: AvatarBindings) => {
+      mutateExtensions((ext) => {
+        const next = { ...ext }
+        if (Object.keys(bindings).length > 0) next.avatar_bindings = bindings
+        else delete next.avatar_bindings
+        return next
+      }, false)
+    },
+    [mutateExtensions]
+  )
+
   const handleAlternateCharacterNameChange = useCallback(
     (value: string) => {
       setAlternateCharacterName(value)
@@ -798,19 +1141,40 @@ export default function CharacterEditorPage() {
     [mutateExtensions]
   )
 
+  const commitSourceLink = useCallback(() => {
+    const value = sourceLinkDraft.trim()
+    if (!value) {
+      setSourceLinkDraft('')
+      setSourceLinkError(null)
+      mutateExtensions((ext) => setCharacterSource(ext, null), true)
+      return
+    }
+
+    const source = parseCharacterSourceInput(value)
+    if (!source) {
+      setSourceLinkError(t('characterEditor.originalSourceInvalid'))
+      return
+    }
+
+    setSourceLinkDraft(source.url)
+    setSourceLinkError(null)
+    mutateExtensions((ext) => setCharacterSource(ext, source), true)
+  }, [mutateExtensions, sourceLinkDraft, t])
+
+
   const handleAvatarSelect = useCallback(
-    async (imageId: string | null) => {
-      if (!activeChatId) return
-      setActiveChatAvatarId(imageId)
+    async (avatarEntryId: string) => {
+      if (!activeChatId || !character) return
       try {
-        // Atomic merge — server re-reads the latest chat row so background
-        // writers can't clobber this avatar binding.
-        await chatsApi.patchMetadata(activeChatId, { active_avatar_id: imageId ?? null })
+        await flushExtensionsSave()
+        const latestCharacter = useStore.getState().characters.find((entry) => entry.id === character.id) || character
+        await applyChatAppearance(activeChatId, latestCharacter, { type: 'avatar', avatar_entry_id: avatarEntryId })
       } catch (err) {
         console.error('[Editor] Avatar select failed:', err)
+        toast.error(err instanceof Error ? err.message : 'Failed to change avatar')
       }
     },
-    [activeChatId, setActiveChatAvatarId]
+    [activeChatId, character, flushExtensionsSave]
   )
 
   const handleAddTag = useCallback(() => {
@@ -822,7 +1186,7 @@ export default function CharacterEditorPage() {
     setNewTag('')
     showSaving()
     browser.updateCharacter(editingCharacterId, { tags: updated })
-  }, [newTag, tags, editingCharacterId, browser.updateCharacter, showSaving])
+  }, [newTag, tags, editingCharacterId, browser, showSaving])
 
   const handleRemoveTag = useCallback(
     (tag: string) => {
@@ -832,7 +1196,7 @@ export default function CharacterEditorPage() {
       showSaving()
       browser.updateCharacter(editingCharacterId, { tags: updated })
     },
-    [tags, editingCharacterId, browser.updateCharacter, showSaving]
+    [tags, editingCharacterId, browser, showSaving]
   )
 
   const handleGreetingChange = useCallback(
@@ -845,25 +1209,142 @@ export default function CharacterEditorPage() {
     [alternateGreetings, debouncedSave]
   )
 
+  const handleGreetingTitleChange = useCallback(
+    (greetingIndex: number, value: string) => {
+      mutateExtensions((ext) => setGreetingTitle(ext, greetingIndex, value), false)
+    },
+    [mutateExtensions]
+  )
+
+  const handleGreetingBackgroundChange = useCallback(
+    (greetingIndex: number, imageId: string | null) => {
+      mutateExtensions((ext) => {
+        const next = { ...ext }
+        const backgrounds = isRecord(ext.greeting_backgrounds)
+          ? { ...ext.greeting_backgrounds }
+          : {}
+        if (imageId) backgrounds[greetingIndex] = imageId
+        else delete backgrounds[greetingIndex]
+        if (Object.keys(backgrounds).length > 0) next.greeting_backgrounds = backgrounds
+        else delete next.greeting_backgrounds
+        return next
+      }, false)
+      setGreetingBackgroundPickerIndex(null)
+    },
+    [mutateExtensions]
+  )
+
   const handleAddGreeting = useCallback(() => {
+    clearTimeout(timers.current['alternate_greetings'])
     const updated = [...alternateGreetings, '']
     setAlternateGreetings(updated)
+    setAlternateGreetingIds((current) => [...current, uuidv7()])
     if (editingCharacterId) {
       showSaving()
       browser.updateCharacter(editingCharacterId, { alternate_greetings: updated })
     }
-  }, [alternateGreetings, editingCharacterId, browser.updateCharacter, showSaving])
+  }, [alternateGreetings, editingCharacterId, browser, showSaving])
 
   const handleRemoveGreeting = useCallback(
     (index: number) => {
+      clearTimeout(timers.current['alternate_greetings'])
       const updated = alternateGreetings.filter((_, i) => i !== index)
       setAlternateGreetings(updated)
+      setAlternateGreetingIds((current) => current.filter((_, i) => i !== index))
+      setGreetingBackgroundPickerIndex(null)
+      const removedGreetingIndex = index + 1
+      mutateExtensions((ext) => {
+        const nextBindings: AvatarBindings = {}
+        for (const [avatarId, rawBinding] of Object.entries(isRecord(ext.avatar_bindings) ? ext.avatar_bindings : {})) {
+          if (!isRecord(rawBinding)) continue
+          const binding = { ...rawBinding } as AvatarBindings[string]
+          if (binding.greeting_index === removedGreetingIndex) delete binding.greeting_index
+          else if (typeof binding.greeting_index === 'number' && binding.greeting_index > removedGreetingIndex) {
+            binding.greeting_index -= 1
+          }
+          if (Object.keys(binding).length > 0) nextBindings[avatarId] = binding
+        }
+        const next = { ...ext }
+        if (Object.keys(nextBindings).length > 0) next.avatar_bindings = nextBindings
+        else delete next.avatar_bindings
+        if (isRecord(ext.greeting_backgrounds)) {
+          const backgrounds: Record<number, unknown> = {}
+          for (const [rawIndex, imageId] of Object.entries(ext.greeting_backgrounds)) {
+            const greetingIndex = Number(rawIndex)
+            if (!Number.isInteger(greetingIndex) || greetingIndex === removedGreetingIndex) continue
+            backgrounds[greetingIndex > removedGreetingIndex ? greetingIndex - 1 : greetingIndex] = imageId
+          }
+          if (Object.keys(backgrounds).length > 0) next.greeting_backgrounds = backgrounds
+          else delete next.greeting_backgrounds
+        }
+        return removeAlternateGreetingMetadata(next, index)
+      }, false)
       if (editingCharacterId) {
         showSaving()
         browser.updateCharacter(editingCharacterId, { alternate_greetings: updated })
       }
     },
-    [alternateGreetings, editingCharacterId, browser.updateCharacter, showSaving]
+    [alternateGreetings, editingCharacterId, browser, mutateExtensions, showSaving]
+  )
+
+  const handleGreetingDragEnd = useCallback(
+    (event: DragEndEvent) => {
+      const { active, over } = event
+      if (!over || active.id === over.id) return
+      const oldIndex = alternateGreetingIds.indexOf(String(active.id))
+      const newIndex = alternateGreetingIds.indexOf(String(over.id))
+      if (oldIndex < 0 || newIndex < 0) return
+
+      clearTimeout(timers.current['alternate_greetings'])
+      const reorderedGreetings = arrayMove(alternateGreetings, oldIndex, newIndex)
+      setAlternateGreetings(reorderedGreetings)
+      setAlternateGreetingIds((current) => arrayMove(current, oldIndex, newIndex))
+      setGreetingBackgroundPickerIndex(null)
+
+      const oldGreetingIndex = oldIndex + 1
+      const newGreetingIndex = newIndex + 1
+      mutateExtensions((ext) => {
+        let next = moveAlternateGreetingMetadata(ext, oldIndex, newIndex)
+
+        if (isRecord(next.greeting_backgrounds)) {
+          const backgrounds: Record<string, unknown> = {}
+          for (const [rawIndex, imageId] of Object.entries(next.greeting_backgrounds)) {
+            const greetingIndex = Number(rawIndex)
+            if (!Number.isInteger(greetingIndex) || greetingIndex < 0) {
+              backgrounds[rawIndex] = imageId
+              continue
+            }
+            backgrounds[String(remapGreetingIndexForMove(greetingIndex, oldGreetingIndex, newGreetingIndex))] = imageId
+          }
+          next = { ...next, greeting_backgrounds: backgrounds }
+        }
+
+        if (isRecord(next.avatar_bindings)) {
+          const bindings: AvatarBindings = {}
+          for (const [avatarId, rawBinding] of Object.entries(next.avatar_bindings)) {
+            if (!isRecord(rawBinding)) continue
+            const binding = { ...rawBinding } as AvatarBindings[string]
+            if (typeof binding.greeting_index === 'number') {
+              binding.greeting_index = remapGreetingIndexForMove(
+                binding.greeting_index,
+                oldGreetingIndex,
+                newGreetingIndex,
+              )
+            }
+            bindings[avatarId] = binding
+          }
+          next = { ...next, avatar_bindings: bindings }
+        }
+
+        return next
+      }, false)
+
+      if (editingCharacterId) {
+        showSaving()
+        void browser.updateCharacter(editingCharacterId, { alternate_greetings: reorderedGreetings })
+      }
+    },
+    [alternateGreetingIds, alternateGreetings, browser, editingCharacterId, mutateExtensions, showSaving]
   )
 
   const handleExtensionsChange = useCallback(
@@ -906,7 +1387,7 @@ export default function CharacterEditorPage() {
         toast.error(err.body?.error || err.message || t('characterEditor.unbindRegexFailed'))
       }
     },
-    [updateRegexScript]
+    [updateRegexScript, t]
   )
 
   const clearActivatedWorldInfo = useStore((s) => s.clearActivatedWorldInfo)
@@ -1001,7 +1482,7 @@ export default function CharacterEditorPage() {
         setAltAvatarUploadProgress(null)
       }
     },
-    [mutateExtensions]
+    [editingCharacterId, character, mutateExtensions, t]
   )
 
   const { cropModalProps: altAvatarCropProps, openCropFlow: openAltAvatarCropFlow } =
@@ -1025,6 +1506,33 @@ export default function CharacterEditorPage() {
     [openCropFlow]
   )
 
+  const handleReplaceCard = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0]
+      e.target.value = ''
+      if (!file || !editingCharacterId || replacingCard) return
+
+      // An older debounce firing after the replacement would otherwise restore
+      // stale editor values over the newly-uploaded card.
+      for (const timer of Object.values(timers.current)) clearTimeout(timer)
+      pendingExtensionsRef.current = null
+      if (layersSaveTimerRef.current) clearTimeout(layersSaveTimerRef.current)
+
+      setReplacingCard(true)
+      try {
+        const updated = await charactersApi.replaceCard(editingCharacterId, file)
+        lastSyncedId.current = null
+        updateCharInStore(editingCharacterId, updated)
+        toast.success(t('characterEditor.replaceCardSuccess'))
+      } catch (err: any) {
+        toast.error(err?.body?.error || err?.message || t('characterEditor.replaceCardFailed'))
+      } finally {
+        setReplacingCard(false)
+      }
+    },
+    [editingCharacterId, replacingCard, t, updateCharInStore]
+  )
+
   const perspectiveLayers = useMemo<CharacterPerspectiveLayerInput[]>(() => {
     return readPerspectiveLayers(character?.extensions?.landing_perspective_layers)
   }, [character?.extensions?.landing_perspective_layers])
@@ -1037,7 +1545,7 @@ export default function CharacterEditorPage() {
     setLocalPerspectiveLayers(nextLayers)
     pendingLayersRef.current = clonePerspectiveLayers(nextLayers)
     syncedPerspectiveLayersRef.current = clonePerspectiveLayers(nextLayers)
-  }, [character?.id])
+  }, [character?.id, character, perspectiveLayers])
 
   const flushPerspectiveLayersSave = useCallback(async () => {
     if (!editingCharacterId) return
@@ -1177,19 +1685,19 @@ export default function CharacterEditorPage() {
       skipPerspectiveLayerFlushRef.current = false
       throw err
     }
-  }, [editingCharacterId, browser.deleteCharacter, close])
+  }, [editingCharacterId, browser, close])
 
   const handleDuplicate = useCallback(async () => {
     if (!editingCharacterId) return
     const dup = await browser.duplicateCharacter(editingCharacterId)
     setEditingCharacterId(dup.id)
-  }, [editingCharacterId, browser.duplicateCharacter, setEditingCharacterId])
+  }, [editingCharacterId, browser, setEditingCharacterId])
 
   const handleOpenChat = useCallback(() => {
     if (!character) return
     close()
     browser.openChat(character)
-  }, [character, browser.openChat, close])
+  }, [character, browser, close])
 
   const handleCreatePersonaFromCharacter = useCallback(async () => {
     if (!character || creatingPersona) return
@@ -1215,7 +1723,22 @@ export default function CharacterEditorPage() {
           const avatarFile = new File([avatarBlob], `avatar.${avatarExtension(avatarBlob.type)}`, {
             type: avatarBlob.type || 'image/png',
           })
-          persona = await personasApi.uploadAvatar(persona.id, avatarFile)
+          const originalImageId = typeof character.extensions?.original_image_id === 'string'
+            ? character.extensions.original_image_id
+            : character.image_id
+          let originalFile: File | undefined
+          if (originalImageId) {
+            const originalRes = await fetch(imagesApi.url(originalImageId), { credentials: 'include' })
+            if (originalRes.ok) {
+              const originalBlob = await originalRes.blob()
+              originalFile = new File(
+                [originalBlob],
+                `avatar-original.${avatarExtension(originalBlob.type)}`,
+                { type: originalBlob.type || 'image/png' },
+              )
+            }
+          }
+          persona = await personasApi.uploadAvatar(persona.id, avatarFile, originalFile)
           updatePersona(persona.id, persona)
         } catch {
           toast.warning(t('characterEditor.personaAvatarCopyFailed'))
@@ -1234,14 +1757,79 @@ export default function CharacterEditorPage() {
 
   const [showExportMenu, setShowExportMenu] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [headerActionMenuPosition, setHeaderActionMenuPosition] = useState<ContextMenuPos | null>(null)
   const exportMenuRef = useRef<HTMLDivElement>(null)
+  const activeCharxExportRef = useRef<{
+    exportId: string
+    characterId: string
+    characterName: string
+    toastId: string
+  } | null>(null)
+
+  useEffect(() => {
+    return wsClient.on(EventType.CHARACTER_EXPORT_PROGRESS, (payload: CharxExportProgress) => {
+      const active = activeCharxExportRef.current
+      if (!active || payload.exportId !== active.exportId || payload.characterId !== active.characterId) return
+
+      if (payload.phase === 'collecting_assets') {
+        toast.update(active.toastId, {
+          message: t('characterEditor.exportAssetsProgress', {
+            completed: payload.completed ?? 0,
+            total: payload.total ?? 0,
+          }),
+        })
+        return
+      }
+      if (payload.phase === 'compressing') {
+        toast.update(active.toastId, { message: t('characterEditor.exportCompressing') })
+        return
+      }
+      if (payload.phase === 'complete') {
+        toast.dismiss(active.toastId)
+        activeCharxExportRef.current = null
+        setExporting(false)
+        toast.success(t('characterEditor.exportSuccess', { name: active.characterName, format: 'CHARX' }))
+        return
+      }
+      if (payload.phase === 'failed') {
+        toast.dismiss(active.toastId)
+        activeCharxExportRef.current = null
+        setExporting(false)
+        toast.error(t('characterEditor.exportFailed', { error: payload.error || t('characterEditor.unknownError') }))
+      }
+    })
+  }, [t])
 
   const handleExport = useCallback(async (format: 'json' | 'png' | 'charx') => {
     if (!editingCharacterId || !character) return
     setExporting(true)
     setShowExportMenu(false)
     const formatLabel = format === 'charx' ? 'CHARX' : format === 'png' ? 'PNG' : 'JSON'
-    const toastId = toast.info(t('characterEditor.preparingExport', { format: formatLabel }), { title: t('characterEditor.exporting'), duration: 60_000, dismissible: false })
+    const toastId = toast.info(t('characterEditor.preparingExport', { format: formatLabel }), {
+      title: t('characterEditor.exporting'),
+      duration: format === 'charx' ? 0 : 60_000,
+      dismissible: false,
+    })
+
+    if (format === 'charx') {
+      const exportId = uuidv7()
+      activeCharxExportRef.current = {
+        exportId,
+        characterId: editingCharacterId,
+        characterName: character.name,
+        toastId,
+      }
+      try {
+        charactersApi.downloadCharxExport(editingCharacterId, exportId, character.name)
+      } catch (err) {
+        activeCharxExportRef.current = null
+        setExporting(false)
+        toast.dismiss(toastId)
+        toast.error(t('characterEditor.exportFailed', { error: err instanceof Error ? err.message : t('characterEditor.unknownError') }))
+      }
+      return
+    }
+
     try {
       await charactersApi.exportCharacter(editingCharacterId, format, character.name)
       toast.dismiss(toastId)
@@ -1254,6 +1842,89 @@ export default function CharacterEditorPage() {
       setExporting(false)
     }
   }, [editingCharacterId, character, t])
+
+  const headerActionMenuItems: ContextMenuEntry[] = [
+    {
+      key: 'token-report',
+      label: t('characterEditor.tokenReportTitle'),
+      icon: <Hash size={14} />,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        setShowTokenReport(true)
+      },
+    },
+    {
+      key: 'create-persona',
+      label: t('characterEditor.createPersona'),
+      icon: creatingPersona ? <Spinner size={14} fast /> : <UserPlus size={14} />,
+      disabled: creatingPersona,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        void handleCreatePersonaFromCharacter()
+      },
+    },
+    {
+      key: 'replace-card',
+      label: t('characterEditor.replaceCard'),
+      icon: replacingCard ? <Spinner size={14} fast /> : <Upload size={14} />,
+      disabled: replacingCard,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        cardReplaceFileRef.current?.click()
+      },
+    },
+    { key: 'export-divider', type: 'divider' },
+    {
+      key: 'export-json',
+      label: t('characterEditor.exportJson'),
+      icon: <Download size={14} />,
+      disabled: exporting,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        void handleExport('json')
+      },
+    },
+    {
+      key: 'export-png',
+      label: t('characterEditor.exportPng'),
+      icon: <Download size={14} />,
+      disabled: exporting,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        void handleExport('png')
+      },
+    },
+    {
+      key: 'export-charx',
+      label: t('characterEditor.exportCharx'),
+      icon: <Download size={14} />,
+      disabled: exporting,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        void handleExport('charx')
+      },
+    },
+    { key: 'duplicate-divider', type: 'divider' },
+    {
+      key: 'duplicate',
+      label: t('characterEditor.duplicate'),
+      icon: <Copy size={14} />,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        void handleDuplicate()
+      },
+    },
+    {
+      key: 'delete',
+      label: tc('actions.delete'),
+      icon: <Trash2 size={14} />,
+      danger: true,
+      onClick: () => {
+        setHeaderActionMenuPosition(null)
+        setShowDeleteConfirm(true)
+      },
+    },
+  ]
 
   // Close export menu on outside click
   useEffect(() => {
@@ -1337,14 +2008,25 @@ export default function CharacterEditorPage() {
                         <Upload size={14} />
                       )}
                     </div>
-                    <input
-                      ref={fileRef}
-                      type="file"
-                      accept="image/*"
-                      className={styles.hiddenInput}
-                      onChange={handleFileSelected}
-                    />
                   </div>
+
+                  {/* Keep these inputs outside the clickable avatar zone. A
+                      programmatic click on the card input bubbles; nesting it
+                      above would also trigger the avatar's image-only picker. */}
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    accept="image/*"
+                    className={styles.hiddenInput}
+                    onChange={handleFileSelected}
+                  />
+                  <input
+                    ref={cardReplaceFileRef}
+                    type="file"
+                    accept=".json,application/json,.png,image/png"
+                    className={styles.hiddenInput}
+                    onChange={handleReplaceCard}
+                  />
 
                   <div className={styles.headerInfo}>
                     <input
@@ -1360,10 +2042,20 @@ export default function CharacterEditorPage() {
                   {saving && <span className={styles.savingIndicator}>{t('characterEditor.saving')}</span>}
 
                   <div className={styles.headerActions}>
+                    <Button
+                      className={styles.desktopHeaderAction}
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => setShowTokenReport(true)}
+                      title={t('characterEditor.tokenReportTitle')}
+                    >
+                      <Hash size={14} />
+                    </Button>
                     <Button size="icon" variant="ghost" onClick={handleOpenChat} title={t('characterEditor.openChat')}>
                       <MessageSquare size={14} />
                     </Button>
                     <Button
+                      className={styles.desktopHeaderAction}
                       size="icon"
                       variant="ghost"
                       onClick={handleCreatePersonaFromCharacter}
@@ -1374,7 +2066,17 @@ export default function CharacterEditorPage() {
                         ? <Spinner size={14} fast />
                         : <UserPlus size={14} />}
                     </Button>
-                    <div className={styles.exportWrapper} ref={exportMenuRef}>
+                    <Button
+                      className={styles.desktopHeaderAction}
+                      size="icon"
+                      variant="ghost"
+                      onClick={() => cardReplaceFileRef.current?.click()}
+                      title={t('characterEditor.replaceCard')}
+                      disabled={replacingCard}
+                    >
+                      {replacingCard ? <Spinner size={14} fast /> : <Upload size={14} />}
+                    </Button>
+                    <div className={clsx(styles.exportWrapper, styles.desktopHeaderAction)} ref={exportMenuRef}>
                       <Button
                         size="icon"
                         variant="ghost"
@@ -1394,16 +2096,31 @@ export default function CharacterEditorPage() {
                         </div>
                       )}
                     </div>
-                    <Button size="icon" variant="ghost" onClick={handleDuplicate} title={t('characterEditor.duplicate')}>
+                    <Button className={styles.desktopHeaderAction} size="icon" variant="ghost" onClick={handleDuplicate} title={t('characterEditor.duplicate')}>
                       <Copy size={14} />
                     </Button>
                     <Button
+                      className={styles.desktopHeaderAction}
                       size="icon"
                       variant="danger-ghost"
                       onClick={() => setShowDeleteConfirm(true)}
                       title={tc('actions.delete')}
                     >
                       <Trash2 size={14} />
+                    </Button>
+                    <Button
+                      className={styles.mobileActionMenu}
+                      size="icon"
+                      variant="ghost"
+                      onClick={(e) => {
+                        const rect = e.currentTarget.getBoundingClientRect()
+                        setHeaderActionMenuPosition((position) => position ? null : { x: rect.right, y: rect.bottom + 4 })
+                      }}
+                      title={t('characterEditor.moreActions')}
+                      aria-label={t('characterEditor.moreActions')}
+                      aria-expanded={headerActionMenuPosition !== null}
+                    >
+                      <MoreHorizontal size={16} />
                     </Button>
                   </div>
 
@@ -1413,16 +2130,20 @@ export default function CharacterEditorPage() {
                 {/* Tab bar */}
                 <div className={styles.tabBar}>
                   {tabs.map((tab) => (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      className={clsx(styles.tab, activeTab === tab.id && styles.tabActive)}
-                      onClick={() => setActiveTab(tab.id)}
-                    >
-                      {tab.label}
-                    </button>
-                  ))}
-                </div>
+                  <button
+                    key={tab.id}
+                    type="button"
+                    className={clsx(
+                    styles.tab,
+                      activeTab === tab.id && styles.tabActive,
+                  )}
+                    onClick={() => setActiveTab(tab.id)}
+                >
+                 {tab.label}
+                </button>
+               ))}
+                <span data-spindle-mount="character_editor_tab" data-spindle-scope={`character-editor:${editingCharacterId ?? 'none'}:tab`} style={{ display: 'contents' }} />
+              </div>
 
                 {/* Tab content */}
                 <div className={styles.tabContent}>
@@ -1481,6 +2202,30 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'greetings' && (
                     <>
+                      <div className={styles.greetingMetaRow}>
+                        <label className={styles.greetingNameField}>
+                          <span>{t('characterEditor.greetingName')}</span>
+                          <GreetingNameInput
+                            value={getGreetingTitle(workingExtensions, 0) || ''}
+                            resetKey={`${character.id}:default`}
+                            onChange={(value) => handleGreetingTitleChange(0, value)}
+                            placeholder={t('characterEditor.greetingNamePlaceholder')}
+                          />
+                        </label>
+                        <GreetingBackgroundControl
+                          greetingIndex={0}
+                          imageId={readGreetingBackground(workingExtensions, 0)}
+                          galleryItems={galleryItems}
+                          open={greetingBackgroundPickerIndex === 0}
+                          onToggle={() => setGreetingBackgroundPickerIndex((current) => current === 0 ? null : 0)}
+                          onSelect={handleGreetingBackgroundChange}
+                          labels={{
+                            set: t('characterEditor.setGreetingBackground'),
+                            clear: t('characterEditor.clearGreetingBackground'),
+                            empty: t('characterEditor.noGalleryImages'),
+                          }}
+                        />
+                      </div>
                       <Field
                         label={t('characterEditor.firstMessage')}
                         helper={t('characterEditor.firstMessageHelper')}
@@ -1502,12 +2247,41 @@ export default function CharacterEditorPage() {
                         <span className={styles.fieldHelper}>
                           {t('characterEditor.alternateGreetingsHelper')}
                         </span>
-                        {alternateGreetings.map((greeting, i) => (
-                          <div key={i} className={styles.greetingItem}>
+                        <DndContext
+                          sensors={perspectiveLayerSensors}
+                          collisionDetection={closestCenter}
+                          onDragEnd={handleGreetingDragEnd}
+                        >
+                          <SortableContext
+                            items={alternateGreetings.map((_, index) => alternateGreetingIds[index] ?? `greeting-${index}`)}
+                            strategy={verticalListSortingStrategy}
+                          >
+                            <div className={styles.greetingList}>
+                              {alternateGreetings.map((greeting, i) => {
+                                const greetingId = alternateGreetingIds[i] ?? `greeting-${i}`
+                                return (
+                                  <SortableGreetingItem
+                                    key={greetingId}
+                                    id={greetingId}
+                                    disabled={alternateGreetings.length < 2}
+                                  >
                             <div className={styles.greetingHeader}>
                               <span className={styles.greetingLabel}>{t('characterEditor.greetingNumber', { n: i + 1 })}</span>
                               <div className={styles.greetingActions}>
                                 <TokenCountButton text={greeting} />
+                                <GreetingBackgroundControl
+                                  greetingIndex={i + 1}
+                                  imageId={readGreetingBackground(workingExtensions, i + 1)}
+                                  galleryItems={galleryItems}
+                                  open={greetingBackgroundPickerIndex === i + 1}
+                                  onToggle={() => setGreetingBackgroundPickerIndex((current) => current === i + 1 ? null : i + 1)}
+                                  onSelect={handleGreetingBackgroundChange}
+                                  labels={{
+                                    set: t('characterEditor.setGreetingBackground'),
+                                    clear: t('characterEditor.clearGreetingBackground'),
+                                    empty: t('characterEditor.noGalleryImages'),
+                                  }}
+                                />
                                 <button
                                   type="button"
                                   className={styles.removeBtn}
@@ -1518,6 +2292,13 @@ export default function CharacterEditorPage() {
                                 </button>
                               </div>
                             </div>
+                            <GreetingNameInput
+                              value={getGreetingTitle(workingExtensions, i + 1) || ''}
+                              resetKey={`${character.id}:${greetingId}`}
+                              onChange={(value) => handleGreetingTitleChange(i + 1, value)}
+                              placeholder={t('characterEditor.greetingNamePlaceholder')}
+                              ariaLabel={t('characterEditor.greetingNameFor', { number: i + 1 })}
+                            />
                             <ExpandableTextarea
                               className={styles.fieldTextarea}
                               value={greeting}
@@ -1526,8 +2307,12 @@ export default function CharacterEditorPage() {
                               title={t('characterEditor.greetingNumber', { n: i + 1 })}
                               placeholder={t('characterEditor.alternateGreetingPlaceholder')}
                             />
-                          </div>
-                        ))}
+                                  </SortableGreetingItem>
+                                )
+                              })}
+                            </div>
+                          </SortableContext>
+                        </DndContext>
                         <button type="button" className={styles.addBtn} onClick={handleAddGreeting}>
                           <Plus size={12} /> {t('characterEditor.addGreeting')}
                         </button>
@@ -1537,6 +2322,16 @@ export default function CharacterEditorPage() {
 
                   {activeTab === 'identity' && (
                     <>
+                      <div className={styles.fieldGroup}>
+                        <span className={styles.fieldLabel}>{t('characterEditor.folder')}</span>
+                        <span className={styles.fieldHelper}>{t('characterEditor.folderHelper')}</span>
+                        <FolderDropdown
+                          folders={characterFolders}
+                          selectedFolder={folder}
+                          onSelect={(value) => void handleFolderChange(value)}
+                          onCreateFolder={createCharacterFolder}
+                        />
+                      </div>
                       <Field
                         label={t('characterEditor.alternateName')}
                         helper={t('characterEditor.alternateNameHelper')}
@@ -1551,6 +2346,48 @@ export default function CharacterEditorPage() {
                         onChange={(v) => handleFieldChange('creator', v)}
                         multiline={false}
                       />
+                      <div className={styles.fieldGroup}>
+                        <span className={styles.fieldLabel}>{t('characterEditor.originalSource')}</span>
+                        <span className={styles.fieldHelper}>{t('characterEditor.originalSourceHelper')}</span>
+                        <div className={styles.creatorSourceRow}>
+                          <input
+                            type="text"
+                            inputMode="url"
+                            className={styles.fieldInput}
+                            value={sourceLinkDraft}
+                            onChange={(event) => {
+                              setSourceLinkDraft(event.target.value)
+                              setSourceLinkError(null)
+                            }}
+                            onBlur={commitSourceLink}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                event.currentTarget.blur()
+                              } else if (event.key === 'Escape') {
+                                event.preventDefault()
+                                setSourceLinkDraft(attributionUrl || '')
+                                setSourceLinkError(null)
+                              }
+                            }}
+                            placeholder={t('characterEditor.originalSourcePlaceholder')}
+                            aria-invalid={sourceLinkError ? true : undefined}
+                          />
+                          {attributionUrl && (
+                          <a
+                            href={attributionUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={styles.creatorSourceLink}
+                            title={t('characterEditor.openOriginalSource')}
+                            aria-label={t('characterEditor.openOriginalSource')}
+                          >
+                            <ExternalLink size={14} />
+                          </a>
+                          )}
+                        </div>
+                        {sourceLinkError && <span className={styles.creatorSourceError}>{sourceLinkError}</span>}
+                      </div>
                       <Field
                         label={t('characterEditor.creatorNotes')}
                         helper={t('characterEditor.creatorNotesHelper')}
@@ -1651,8 +2488,12 @@ export default function CharacterEditorPage() {
                       </div>
                       <AlternateAvatarManager
                         primaryImageId={character?.image_id || null}
-                        alternates={(character?.extensions?.alternate_avatars || []) as AlternateAvatarEntry[]}
+                        alternates={(workingExtensions.alternate_avatars || []) as AlternateAvatarEntry[]}
                         onChange={handleAlternateAvatarsChange}
+                        bindings={(workingExtensions.avatar_bindings || {}) as AvatarBindings}
+                        alternateFields={(workingExtensions.alternate_fields || {}) as Record<string, Array<{ id: string; label: string; content: string }>>}
+                        greetingCount={1 + alternateGreetings.length}
+                        onBindingsChange={handleAvatarBindingsChange}
                         openCropFlow={openAltAvatarCropFlow}
                         activeChatAvatarId={activeChatId ? activeChatAvatarId : undefined}
                         onAvatarSelect={activeChatId ? handleAvatarSelect : undefined}
@@ -1724,6 +2565,7 @@ export default function CharacterEditorPage() {
                                       item={cell.item}
                                       onRemove={handleGalleryRemove}
                                       onOpenMenu={(menuItem, pos) => setGalleryContextMenu({ item: menuItem, pos })}
+                                      onPreview={(previewItem) => setGalleryLightboxSrc(characterGalleryApi.imageUrl(previewItem.image_id))}
                                     />
                                   )
                                 })}
@@ -1765,7 +2607,7 @@ export default function CharacterEditorPage() {
                   )}
 
                   {activeTab === 'expressions' && character && (
-                    <ExpressionEditorTab characterId={character.id} />
+                    <ExpressionEditorTab characterId={character.id} chubSourcePath={chubSourcePath} />
                   )}
 
                   {activeTab === 'voice' && (
@@ -1974,8 +2816,26 @@ export default function CharacterEditorPage() {
                   )}
 
                   {activeExtensionTab && (
-                    <SpindleCharacterEditorTabContent tab={activeExtensionTab} />
+                    <div className={styles.extensionTabShell}>
+                  {activeExtensionTab.guide && (
+                    <div className={styles.extensionGuideRow}>
+                      <button
+                        type="button"
+                        className={styles.extensionGuideButton}
+                        onClick={() => setGuideOpen(true)}
+                        aria-label={`Open guide for ${activeExtensionTab.title}`}
+                        title="Open guide"
+                      >
+                        <CircleHelp size={15} strokeWidth={1.7} />
+                      </button>
+                    </div>
                   )}
+
+                    <SpindleCharacterEditorTabContent
+                      tab={activeExtensionTab}
+                    />
+                  </div>
+                )}
                 </div>
               </>
             )}
@@ -1991,6 +2851,45 @@ export default function CharacterEditorPage() {
       items={galleryContextMenuItems}
       onClose={() => setGalleryContextMenu(null)}
     />
+    <ImageLightbox src={galleryLightboxSrc} onClose={() => setGalleryLightboxSrc(null)} />
+    {galleryRenameItem && (
+      <ConfirmationModal
+        isOpen={true}
+        title={t('characterEditor.renameImageReference')}
+        message={t('characterEditor.renameImageReferenceHelper')}
+        variant="safe"
+        inputLabel={t('characterEditor.galleryReferenceName')}
+        inputPlaceholder={t('characterEditor.galleryReferenceNamePlaceholder')}
+        defaultInputValue={galleryRenameItem.reference.replace(/^gallery:\/\//, '')}
+        confirmText={tc('actions.save')}
+        loading={galleryRenaming}
+        loadingText={t('characterEditor.renamingImageReference')}
+        onConfirm={(value) => void handleGalleryReferenceRename(value)}
+        onCancel={() => {
+          if (!galleryRenaming) setGalleryRenameItem(null)
+        }}
+      />
+    )}
+    {activeExtensionTab?.guide && (
+  <GuideViewer
+    isOpen={guideOpen}
+    onClose={() => setGuideOpen(false)}
+    guide={{
+      kind: 'markdown',
+      ...activeExtensionTab.guide,
+    }}
+    title={activeExtensionTab.title}
+  />
+)}
+
+    {character && (
+      <CharacterTokenReportModal
+        isOpen={showTokenReport}
+        onClose={() => setShowTokenReport(false)}
+        characterName={name || character.name}
+        items={tokenReportItems}
+      />
+    )}
 
     {showDeleteConfirm && (
       <ConfirmationModal
@@ -2003,6 +2902,11 @@ export default function CharacterEditorPage() {
         onCancel={() => setShowDeleteConfirm(false)}
       />
     )}
+    <ContextMenu
+      position={headerActionMenuPosition}
+      items={headerActionMenuItems}
+      onClose={() => setHeaderActionMenuPosition(null)}
+    />
     </>,
     document.body
   )
@@ -2051,6 +2955,84 @@ function Field({
           onChange={(e) => onChange(e.target.value)}
           placeholder={`${label}...`}
         />
+      )}
+    </div>
+  )
+}
+
+function readGreetingBackground(extensions: Record<string, any>, greetingIndex: number): string | null {
+  const backgrounds = extensions.greeting_backgrounds
+  if (!isRecord(backgrounds)) return null
+  const imageId = backgrounds[greetingIndex]
+  return typeof imageId === 'string' && imageId ? imageId : null
+}
+
+function GreetingBackgroundControl({
+  greetingIndex,
+  imageId,
+  galleryItems,
+  open,
+  onToggle,
+  onSelect,
+  labels,
+}: {
+  greetingIndex: number
+  imageId: string | null
+  galleryItems: CharacterGalleryItem[]
+  open: boolean
+  onToggle: () => void
+  onSelect: (greetingIndex: number, imageId: string | null) => void
+  labels: { set: string; clear: string; empty: string }
+}) {
+  return (
+    <div className={styles.greetingBackgroundControl}>
+      <button
+        type="button"
+        className={styles.greetingBackgroundButton}
+        onClick={onToggle}
+        title={labels.set}
+        aria-label={labels.set}
+        aria-expanded={open}
+      >
+        {imageId ? (
+          <img src={imagesApi.smallUrl(imageId)} alt="" />
+        ) : (
+          <ImagePlus size={14} />
+        )}
+      </button>
+      {open && (
+        <div className={styles.greetingBackgroundPopover}>
+          {galleryItems.length > 0 ? (
+            <div className={styles.greetingBackgroundGrid}>
+              {galleryItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={clsx(
+                    styles.greetingBackgroundItem,
+                    imageId === item.image_id && styles.greetingBackgroundItemActive,
+                  )}
+                  onClick={() => onSelect(greetingIndex, item.image_id)}
+                  title={item.caption || labels.set}
+                >
+                  <img src={characterGalleryApi.smallUrl(item.image_id)} alt={item.caption || ''} />
+                </button>
+              ))}
+            </div>
+          ) : (
+            <span className={styles.greetingBackgroundEmpty}>{labels.empty}</span>
+          )}
+          {imageId && (
+            <button
+              type="button"
+              className={styles.greetingBackgroundClear}
+              onClick={() => onSelect(greetingIndex, null)}
+            >
+              <X size={11} />
+              {labels.clear}
+            </button>
+          )}
+        </div>
       )}
     </div>
   )

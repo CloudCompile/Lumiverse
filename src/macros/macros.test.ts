@@ -2,7 +2,7 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import { evaluate } from "./MacroEvaluator";
 import { parse } from "./MacroParser";
 import { registry } from "./MacroRegistry";
-import { initMacros } from "./index";
+import { initMacros, withPromptBlockContext } from "./index";
 import type { MacroEnv } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,10 @@ function makeEnv(opts: {
   chatCreatedAt?: number;
   lastMessageTime?: number;
   worldInfoOutlets?: Record<string, string>;
+  personaAddonOutlets?: Record<string, string>;
   rejectedSwipe?: string;
+  userInput?: string;
+  promptBlock?: MacroEnv["promptBlock"];
   multiplayer?: {
     playerCount: number;
     playerNames: string[];
@@ -52,6 +55,8 @@ function makeEnv(opts: {
       personaSubjectivePronoun: "she",
       personaObjectivePronoun: "her",
       personaPossessivePronoun: "her",
+      personaReflexivePronoun: "herself",
+      personaPossessivePronounStandalone: "hers",
       mesExamples: "<START>\n{{user}}: Hi\n{{char}}: Hello!",
       mesExamplesRaw: "<START>\n{{user}}: Hi\n{{char}}: Hello!",
       systemPrompt: "You are Bob.",
@@ -89,6 +94,7 @@ function makeEnv(opts: {
       chat: new Map(Object.entries(opts.chatVars ?? {})),
     },
     dynamicMacros: {},
+    promptBlock: opts.promptBlock,
     extra: {
       messages: opts.messages ?? [
         { content: "Hello, how are you?", name: "Alice", is_user: true },
@@ -101,6 +107,8 @@ function makeEnv(opts: {
       lastMessageTime: opts.lastMessageTime,
       characterTags: opts.characterTags ?? ["fantasy", "warrior", "male"],
       worldInfoOutlets: opts.worldInfoOutlets ?? {},
+      personaAddonOutlets: opts.personaAddonOutlets ?? {},
+      userInput: opts.userInput ?? "",
       ...(opts.multiplayer ? { multiplayer: opts.multiplayer } : {}),
     },
   };
@@ -144,11 +152,37 @@ describe("Chat transcript examples", () => {
   });
 });
 
+describe("Prompt block placement macros", () => {
+  test("reflect the current block configuration only while that block renders", async () => {
+    const env = makeEnv();
+
+    expect(
+      await ev("{{promptBlockRole}}/{{promptBlockPosition}}/{{promptBlockDepth}}", env),
+    ).toBe("//");
+
+    const resolved = await withPromptBlockContext(
+      env,
+      { role: "assistant_append", position: "in_history", depth: 3 },
+      () => ev("{{promptBlockRole}}/{{blockPosition}}/{{prompt_block_depth}}", env),
+    );
+
+    expect(resolved).toBe("assistant_append/in_history/3");
+    expect(env.promptBlock).toBeUndefined();
+  });
+});
+
 // ===========================================================================
 // EXISTING MACROS — Regression tests
 // ===========================================================================
 
 describe("Core primitives", () => {
+  test("userInput returns the input-bar draft snapshot", async () => {
+    expect(
+      await ev("{{userInput}}", makeEnv({ userInput: "Draft text\nwith spacing" })),
+    ).toBe("Draft text\nwith spacing");
+    expect(await ev("{{user_input}}", makeEnv())).toBe("");
+  });
+
   test("space", async () => {
     expect(await ev("a{{space}}b")).toBe("a b");
   });
@@ -229,15 +263,89 @@ describe("Core primitives", () => {
     const env = makeEnv({ worldInfoOutlets: { dossier: "Hello {{user}}" } });
     expect(await ev("{{outlet::DOSSIER}}", env)).toBe("Hello Alice");
   });
+
+  test("persona outlets use their own namespace", async () => {
+    const env = makeEnv({
+      worldInfoOutlets: { dossier: "World info" },
+      personaAddonOutlets: { dossier: "Persona note for {{char}}" },
+    });
+
+    expect(await ev("{{outlet::dossier}}", env)).toBe("World info");
+    expect(await ev("{{persona_outlet::DOSSIER}}", env)).toBe("Persona note for Bob");
+    expect(await ev("{{personaOutlet::dossier}}", env)).toBe("Persona note for Bob");
+  });
 });
 
 describe("Persona pronoun macros", () => {
   test("JanitorAI persona pronouns resolve", async () => {
-    expect(await ev("{{sub}}/{{obj}}/{{poss}}")).toBe("she/her/her");
+    expect(await ev("{{sub}}/{{obj}}/{{poss}}/{{ref}}/{{poss_p}}")).toBe("she/her/her/herself/hers");
   });
 
   test("explicit persona pronoun aliases resolve", async () => {
     expect(await ev("{{subjectivePronoun}} {{objectivePronoun}} {{possessivePronoun}}")).toBe("she her her");
+    expect(await ev("{{reflexivePronoun}} {{possessivePronounStandalone}}")).toBe("herself hers");
+  });
+});
+
+describe("Character Tags macros", () => {
+  test("charTags and tags alias return a clean list", async () => {
+    expect(await ev("{{charTags}}")).toBe("fantasy, warrior, male");
+    expect(await ev("{{tags}}")).toBe("fantasy, warrior, male");
+  });
+
+  test("tag indexes support positive, negative, and out-of-range access", async () => {
+    expect(await ev("{{tag::0}}")).toBe("fantasy");
+    expect(await ev("{{tag::2}}")).toBe("male");
+    expect(await ev("{{tag::-1}}")).toBe("male");
+    expect(await ev("{{tag::-3}}")).toBe("fantasy");
+    expect(await ev("{{tag::5}}")).toBe("");
+  });
+
+  test("tag aliases resolve indexed tags", async () => {
+    expect(await ev("{{tagAt::1}}")).toBe("warrior");
+    expect(await ev("{{charTagAt::2}}")).toBe("male");
+    expect(await ev("{{nthTag::-1}}")).toBe("male");
+  });
+
+  test("tagCount and numTags alias count character tags", async () => {
+    expect(await ev("{{tagCount}}")).toBe("3");
+    expect(await ev("{{numTags}}")).toBe("3");
+  });
+
+  test("randomTag returns one of the character tags", async () => {
+    expect(["fantasy", "warrior", "male"]).toContain(await ev("{{randomTag}}"));
+  });
+
+  test("hasTag is case-insensitive and condition-compatible", async () => {
+    expect(await ev("{{hasTag::fantasy}}")).toBe("true");
+    expect(await ev("{{hasTag::WARRIOR}}")).toBe("true");
+    expect(await ev("{{hasTag::scifi}}")).toBe("");
+    expect(await ev("{{tagged::male}}")).toBe("true");
+    expect(await ev("{{if::{{hasTag::fantasy}}}}has{{/if}}")).toBe("has");
+  });
+
+  test("charTags composes with list macros", async () => {
+    expect(await ev("{{count::{{charTags}}}}")).toBe("3");
+    expect(await ev("{{first::{{charTags}}}}")).toBe("fantasy");
+    expect(await ev("{{includes::{{charTags}}::warrior}}")).toBe("true");
+  });
+
+  test("empty character tags produce empty-friendly results", async () => {
+    const env = makeEnv({ characterTags: [] });
+    expect(await ev("{{charTags}}", env)).toBe("");
+    expect(await ev("{{tagCount}}", env)).toBe("0");
+    expect(await ev("{{tag::0}}", env)).toBe("");
+    expect(await ev("{{randomTag}}", env)).toBe("");
+    expect(await ev("{{hasTag::anything}}", env)).toBe("");
+  });
+  test("non-string tag entries are ignored without throwing", async () => {
+    const env = makeEnv({
+      characterTags: ["fantasy", 3, null, "warrior", "  "] as unknown as string[],
+    });
+    expect(await ev("{{charTags}}", env)).toBe("fantasy, warrior");
+    expect(await ev("{{tagCount}}", env)).toBe("2");
+    expect(await ev("{{tag::1}}", env)).toBe("warrior");
+    expect(await ev("{{hasTag::warrior}}", env)).toBe("true");
   });
 });
 
@@ -358,6 +466,21 @@ describe("if / else", () => {
     const env = makeEnv({ globalVars: { mode: "dark" } });
     expect(await ev("{{if $mode}}has mode{{/if}}", env)).toBe("has mode");
   });
+
+  test("if supports elseif / elif chains", async () => {
+    expect(
+      await ev("{{if::false}}A{{elseif::0}}B{{elseif::yes}}C{{else}}D{{/if}}"),
+    ).toBe("C");
+    expect(
+      await ev("{{if::false}}A{{elif::true}}B{{else}}C{{/if}}"),
+    ).toBe("B");
+  });
+
+  test("unless inverts a condition and supports else", async () => {
+    expect(await ev("{{unless::{{isGroupChat}}}}solo{{else}}group{{/unless}}")).toBe("group");
+    expect(await ev("{{unless::0}}hidden{{else}}shown{{/unless}}")).toBe("hidden");
+    expect(await ev("{{unless::true}}hidden{{else}}shown{{/unless}}")).toBe("shown");
+  });
 });
 
 describe("Variables", () => {
@@ -416,6 +539,15 @@ describe("Variables", () => {
     const env = makeEnv();
     await ev("{{setgvar::theme::dark}}", env);
     expect(await ev("{{getgvar::theme}}", env)).toBe("dark");
+  });
+
+  test("let binds scoped local variables and restores previous values", async () => {
+    const env = makeEnv({ localVars: { name: "outer" } });
+    expect(
+      await ev("{{let::name::inner::role::mage}}{{.name}}/{{.role}}{{/let}}|{{.name}}/{{.role}}", env),
+    ).toBe("inner/mage|outer/");
+    expect(env.variables.local.get("name")).toBe("outer");
+    expect(env.variables.local.has("role")).toBe(false);
   });
 });
 
@@ -975,6 +1107,22 @@ describe("Logic macros", () => {
     expect(env.variables.chat.has("also_bad")).toBe(false);
   });
 
+  test("scoped switch resolves matching case block only", async () => {
+    const env = makeEnv({ localVars: { mode: "dark" } });
+    const result = await ev(
+      "{{switch::{{.mode}}}}{{case::light}}{{setchatvar::bad::1}}Sun{{/case}}{{case::dark}}Moon{{/case}}{{default}}Star{{/default}}{{/switch}}",
+      env,
+    );
+    expect(result).toBe("Moon");
+    expect(env.variables.chat.has("bad")).toBe(false);
+  });
+
+  test("scoped switch resolves scoped default block", async () => {
+    expect(
+      await ev("{{switch::missing}}{{case::hit}}Hit{{/case}}{{default}}Fallback {{char}}{{/default}}{{/switch}}"),
+    ).toBe("Fallback Bob");
+  });
+
   test("default truthy", async () => {
     expect(await ev("{{default::hello::fallback}}")).toBe("hello");
   });
@@ -1037,6 +1185,15 @@ describe("Logic macros", () => {
     const result = await ev("{{or::yes::{{setchatvar::or_ran::1}}later}}", env);
     expect(result).toBe("true");
     expect(env.variables.chat.has("or_ran")).toBe(false);
+  });
+
+  test("predicate helpers cover blank, numeric, regex, and affixes", async () => {
+    expect(await ev("{{empty::}}/{{empty:: }}")).toBe("true/");
+    expect(await ev("{{blank::   }}")).toBe("true");
+    expect(await ev("{{number::-3.5}}/{{number::nan}}")).toBe("true/");
+    expect(await ev("{{integer::42}}/{{integer::4.2}}")).toBe("true/");
+    expect(await ev("{{matches::The Raven::raven::i}}")).toBe("true");
+    expect(await ev("{{startsWith::foobar::foo}}/{{endsWith::foobar::bar}}")).toBe("true/true");
   });
 
   test("not truthy", async () => {
@@ -1220,21 +1377,6 @@ describe("Chat Utils macros", () => {
     expect(await ev(template, env)).toBe("1. A\n2. C");
   });
 
-  test("charTags", async () => {
-    expect(await ev("{{charTags}}")).toBe("fantasy, warrior, male");
-  });
-
-  test("charTag exists", async () => {
-    expect(await ev("{{charTag::fantasy}}")).toBe("true");
-  });
-
-  test("charTag case insensitive", async () => {
-    expect(await ev("{{charTag::WARRIOR}}")).toBe("true");
-  });
-
-  test("charTag missing", async () => {
-    expect(await ev("{{charTag::scifi}}")).toBe("false");
-  });
 });
 
 // ===========================================================================
@@ -1282,6 +1424,23 @@ describe("Integration: nested and combined macros", () => {
   test("len of description", async () => {
     const result = parseInt(await ev("{{len::{{description}}}}"), 10);
     expect(result).toBe("A brave warrior with a heart of gold".length);
+  });
+
+  test("focused group character card macros read the focused member snapshot", async () => {
+    const env = makeEnv();
+    env.names.charGroupFocused = "Charlie";
+    env.names.groupCardMode = "merge";
+    env.character.description = "Merged description";
+    env.character.personality = "Merged personality";
+    env.extra.groupFocusedCharacter = {
+      id: "char-2",
+      name: "Charlie",
+      description: "Focused description",
+      personality: "Focused personality",
+    };
+
+    expect(await ev("{{charGroupFocusedDescription}}", env)).toBe("Focused description");
+    expect(await ev("{{charGroupFocusedPersonality}}", env)).toBe("Focused personality");
   });
 
   test("counter in if condition", async () => {
@@ -1363,7 +1522,7 @@ describe("Regex Reference macros", () => {
 });
 
 describe("Lumia and council macros", () => {
-  test("lumiaCouncilInst matches the extension council prompt verbatim", async () => {
+  test("lumiaCouncilInst keeps council profiles as feedback perspectives", async () => {
     const env = makeEnv();
     env.extra.council = {
       councilMode: true,
@@ -1394,13 +1553,13 @@ describe("Lumia and council macros", () => {
     };
 
     const result = await ev("{{lumiaCouncilInst}}", env);
-    expect(result).toContain("COUNCIL MODE ACTIVATED! We Lumias gather in the Loom's planning room to weave the next story beat TOGETHER.");
-    expect(result).toContain("- Address each other BY NAME—no speaking into the void");
-    expect(result).toContain("This is a conversation, not a list of separate opinions. Every voice responds to what came before.");
-    expect(result).toContain("The current sitting members of the council are: **Mira**, **Kael**");
+    expect(result).toContain("## Council Feedback Mode");
+    expect(result).toContain("They are not characters to portray in the response.");
+    expect(result).toContain("Do not simulate a council meeting");
+    expect(result).toContain("Available feedback perspectives: **Mira**, **Kael**");
   });
 
-  test("lumiaStateSynthesis matches the extension council sound-off prompt", async () => {
+  test("lumiaStateSynthesis keeps council output out of the roleplay", async () => {
     const env = makeEnv();
     env.extra.council = {
       councilMode: true,
@@ -1431,9 +1590,9 @@ describe("Lumia and council macros", () => {
     };
 
     const result = await ev("{{lumiaStateSynthesis}}", env);
-    expect(result).toContain("**Council Sound-Off**");
-    expect(result).toContain("- Each member maintains their UNIQUE personality—do not blend or homogenize voices");
-    expect(result).not.toContain("Members kick off in first person as named individuals");
+    expect(result).toContain("## Council Perspective Handling");
+    expect(result).toContain("Do not turn those perspectives into speakers, dialogue, or a group roleplay.");
+    expect(result).not.toContain("Council Sound-Off");
   });
 
   test("lumiaOOC matches the extension council social prompt", async () => {
@@ -1591,8 +1750,8 @@ describe("Lumia and council macros", () => {
     expect(result).toContain("## Council Deliberation");
     expect(result).toContain("Mira");
     expect(result).toContain("Moonlight, rain, and a tense confrontation in the alley.");
-    expect(result).toContain("2. Debate which suggestions have the most merit");
-    expect(result).not.toContain("2. Debate which suggestions have the most merit in first person as named council members responding to each other");
+    expect(result).toContain("## Council Feedback Usage");
+    expect(result).toContain("Do not roleplay, quote, or respond as a council member.");
   });
 
   test("lumiaCouncilToolsActive reflects actual tool output", async () => {
@@ -1963,6 +2122,23 @@ describe("foreach macro", () => {
     expect(await ev("{{foreach::x,y}}{{.item}}{{/foreach}}|{{.item}}", env)).toBe("xy|");
     expect(env.variables.local.has("item")).toBe(false);
     expect(env.variables.local.has("item_index")).toBe(false);
+  });
+});
+
+describe("map macro", () => {
+  test("transforms list items into a canonical list", async () => {
+    expect(await ev("{{map::a,b,c::x}}{{upper::{{.x}}}}{{/map}}")).toBe("A, B, C");
+  });
+
+  test("supports custom input and output delimiters", async () => {
+    expect(await ev("{{map::a|b|c::x::|:: / }}{{.x_number}}={{.x}}{{/map}}")).toBe(
+      "1=a / 2=b / 3=c",
+    );
+  });
+
+  test("restores map loop variables", async () => {
+    const env = makeEnv({ localVars: { x: "outer" } });
+    expect(await ev("{{map::a,b::x}}{{.x}}{{/map}}|{{.x}}", env)).toBe("a, b|outer");
   });
 });
 
@@ -2357,9 +2533,14 @@ describe("Temporal macros", () => {
     expect(await ev("{{idleDuration}}", env)).toBe("unknown");
   });
 
-  test("{{idleDuration}} formats time since the last message", async () => {
+  test("{{idleDuration}} formats time since the last assistant message", async () => {
     const env = makeEnv({ lastMessageTime: Date.now() - 90_000 });
     expect(await ev("{{idleDuration}}", env)).toBe("1 minute");
+  });
+
+  test("{{idleDuration}} formats multi-day durations", async () => {
+    const env = makeEnv({ lastMessageTime: Date.now() - 3 * 24 * 60 * 60 * 1000 });
+    expect(await ev("{{idleDuration}}", env)).toBe("3 days");
   });
 
   test("{{idle_duration}} alias works", async () => {

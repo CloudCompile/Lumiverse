@@ -78,6 +78,18 @@ export type PromptVariableType = PromptVariableDef['type']
 export type PromptVariableValue = string | number | string[]
 export type PromptVariableValues = Record<string /* blockId */, Record<string /* varName */, PromptVariableValue>>
 
+export interface PromptBlockPlacement {
+  role: 'system' | 'user' | 'assistant' | LoomInjectTag
+  position: 'pre_history' | 'post_history' | 'in_history'
+  depth: number
+}
+
+/** A select variable on this block can choose one of these insertion profiles. */
+export interface PromptBlockPlacementBinding {
+  variableId: string
+  options: Record<string /* select option id */, PromptBlockPlacement>
+}
+
 export interface PromptBlock {
   id: string
   name: string
@@ -90,14 +102,24 @@ export interface PromptBlock {
   isLocked: boolean
   color: string | null
   injectionTrigger: string[]
+  characterTagTrigger?: string[]
   group?: string | null
   categoryMode?: 'radio' | 'checkbox' | null
+  /**
+   * Child enablement snapshot captured when the category was blanket-
+   * disabled via the category-row "and contents" control, restored on the
+   * blanket re-enable. Category blocks only.
+   */
+  savedChildEnabled?: Record<string, boolean>
   variables?: PromptVariableDef[]
+  placementBinding?: PromptBlockPlacementBinding
+  /** Stable identity of a user-owned stash entry shared across presets. */
+  stashId?: string
   /** When uploaded to LumiHub, content is extracted into a private sidecar block. */
   sealed?: boolean
   sealedKey?: string
-  /** LumiHub-installed sealed blocks are editable locally but never export raw content. */
-  sealedSource?: 'lumihub' | string
+  /** Remotely installed sealed blocks are editable locally but never export raw content. */
+  sealedSource?: string
   sealedOriginPresetId?: string
   sealedOriginVersion?: string | null
   sealedSha256?: string
@@ -134,6 +156,7 @@ export interface PromptBehavior {
 
 export interface CompletionSettings {
   assistantPrefill: string
+  reasoningPrefill?: string
   assistantImpersonation: string
   continuePrefill: boolean
   continuePostfix: string
@@ -150,6 +173,7 @@ export interface AdvancedSettings {
   seed: number
   customStopStrings: string[]
   collapseMessages: boolean
+  trimIncompleteWords: boolean
 }
 
 export interface PresetSource {
@@ -169,9 +193,13 @@ export interface LoomPreset {
   presetVersion: string | null
   /** LumiHub provenance metadata (install source, hub id, slug, creator) preserved verbatim across edits. Null when not LumiHub-sourced. */
   lumihubMeta: Record<string, unknown> | null
+  /** Metadata not owned by Loom itself, preserved verbatim for extensions and forward compatibility. */
+  passthroughMetadata: Record<string, unknown>
   schemaVersion: number
   createdAt: number
   updatedAt: number
+  /** Monotonic persisted revision for conditional coordinator updates. Omitted for raw imports. */
+  cacheRevision?: number
   blocks: PromptBlock[]
   source: PresetSource | null
   isDefault: boolean
@@ -188,6 +216,7 @@ export interface LoomPreset {
 export interface LoomRegistryEntry {
   name: string
   blockCount: number
+  coverUrl: string | null
   updatedAt: number
   isDefault: boolean
 }

@@ -26,6 +26,7 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
   const [apiUrl, setApiUrl] = useState(profile?.api_url || '')
   const [model, setModel] = useState(profile?.model || '')
   const [isDefault, setIsDefault] = useState(profile?.is_default || false)
+  const [novelAINonStreaming, setNovelAINonStreaming] = useState(profile?.metadata?.novelai?.nonStreaming === true)
 
   const [models, setModels] = useState<Array<{ id: string; label: string }>>([])
   const [modelsLoading, setModelsLoading] = useState(false)
@@ -162,11 +163,17 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
       name: name.trim(),
       provider,
       api_key: apiKey.trim() || undefined,
-      api_url: apiUrl.trim() || undefined,
+      api_url: apiUrl.trim(),
       model: model.trim() || undefined,
       is_default: isDefault,
+      ...(provider === 'novelai' ? {
+        metadata: {
+          ...profile?.metadata,
+          novelai: { ...profile?.metadata?.novelai, nonStreaming: novelAINonStreaming },
+        },
+      } : {}),
     })
-  }, [name, provider, apiKey, apiUrl, model, isDefault, onSave])
+  }, [name, provider, apiKey, apiUrl, model, isDefault, novelAINonStreaming, profile?.metadata, onSave])
 
   return (
     <div className={styles.form}>
@@ -210,6 +217,17 @@ export default function ImageGenConnectionForm({ providers, profile, onSave, onC
           placeholder={capabilities?.defaultUrl || 'https://...'}
         />
       </FormField>
+
+      {provider === 'novelai' && (
+        <FormField label="">
+          <Toggle.Checkbox
+            checked={novelAINonStreaming}
+            onChange={setNovelAINonStreaming}
+            label={t('imageGenConnectionForm.novelaiNonStreaming')}
+            hint={t('imageGenConnectionForm.novelaiNonStreamingHint')}
+          />
+        </FormField>
+      )}
 
       <FormField label={t('connectionForm.model')} hint={isDynamicModelList ? t('connectionForm.modelHint') : undefined}>
         <ModelCombobox

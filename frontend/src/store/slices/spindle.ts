@@ -1,24 +1,48 @@
 import type { StateCreator } from 'zustand'
 import type { SpindleSlice, PendingPermissionRequest, PendingTextEditorRequest, PendingContextMenuRequest, ExtensionThemeOverride, BulkUpdateStatus } from '@/types/store'
+import type { ExtensionInfo } from 'lumiverse-spindle-types'
 import { wsClient } from '@/ws/client'
 import { spindleApi } from '@/api/spindle'
 import { loadFrontendExtension, unloadFrontendExtension } from '@/lib/spindle/loader'
 import { scheduleLowPriorityTask } from '@/lib/low-priority-task'
 import { yieldToBrowser } from '@/lib/spindle/browser-scheduler'
+import { compareFrontendHydrationPriority } from '@/lib/spindle/frontend-startup-priority'
+import { shareExtensionLoad } from '@/lib/spindle/extension-load-flight'
+import { reconcileMessageTagRuntimeCapabilities } from '@/lib/spindle/message-tag-runtime-readiness'
 
 const MUTED_THEMES_KEY = 'lumiverse:mutedExtensionThemes'
 const FRONTEND_HYDRATION_CONCURRENCY = 4
+const SPINDLE_LIST_RETRY_ATTEMPTS = 5
+const SPINDLE_LIST_RETRY_BASE_DELAY_MS = 1_000
+const SPINDLE_LIST_RETRY_BACKOFF = 1.7
+const SPINDLE_LIST_RETRY_MAX_DELAY_MS = 8_000
 
-function isHighPriorityFrontend(ext: {
-  enabled: boolean
-  has_frontend: boolean
-  granted_permissions: string[]
-}): boolean {
-  if (!ext.enabled || !ext.has_frontend) return false
-  return (
-    ext.granted_permissions.includes('ui_panels') ||
-    ext.granted_permissions.includes('app_manipulation')
-  )
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Boot hydration is one-shot (WS CONNECTED -> loadExtensions). A transient
+ * failure of the single `GET /api/v1/spindle` request at cold start left the
+ * store empty so Canvas never loaded until the user happened to open the
+ * Extensions panel (which only re-runs when empty). Retry the list fetch with
+ * a bounded backoff so a cold-start hiccup self-heals.
+ */
+async function retrySpindleList(): Promise<{ extensions: ExtensionInfo[]; isPrivileged: boolean }> {
+  let delay = SPINDLE_LIST_RETRY_BASE_DELAY_MS
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await spindleApi.list()
+    } catch (err) {
+      if (attempt >= SPINDLE_LIST_RETRY_ATTEMPTS) throw err
+      console.warn(
+        `[Spindle] Extension list fetch failed (attempt ${attempt}/${SPINDLE_LIST_RETRY_ATTEMPTS}), retrying:`,
+        err,
+      )
+      await sleep(delay)
+      delay = Math.min(delay * SPINDLE_LIST_RETRY_BACKOFF, SPINDLE_LIST_RETRY_MAX_DELAY_MS)
+    }
+  }
 }
 
 function loadMutedThemes(): Record<string, boolean> {
@@ -41,6 +65,7 @@ function saveMutedThemes(muted: Record<string, boolean>) {
 
 export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   extensions: [],
+  extensionUpdates: [],
   extensionThemeOverrides: {},
   mutedExtensionThemes: loadMutedThemes(),
   chatStyleModes: {},
@@ -54,76 +79,83 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   pendingInputPrompt: null,
   pendingContextMenu: null,
 
-  loadExtensions: async () => {
+  loadExtensions: () => shareExtensionLoad(async () => {
     try {
-      const { extensions, isPrivileged } = await spindleApi.list()
+      // Retry the one-shot list fetch so a transient cold-start failure does
+      // not leave the store empty (and the extension unloaded until the user
+      // happens to open the Extensions panel, which only re-runs when empty).
+      const { extensions, isPrivileged } = await retrySpindleList()
+      reconcileMessageTagRuntimeCapabilities(extensions)
       set({ extensions, spindlePrivileged: isPrivileged })
 
-      scheduleLowPriorityTask(() => {
-        const hydrateExtension = async (ext: typeof extensions[number]) => {
-          const status = get().extensionOperationStatus
-          const updateReloadPending =
-            status?.extensionId === ext.id &&
-            (status.operation === 'updating' || status.operation === 'updated')
+      await new Promise<void>((resolveHydration) => {
+        scheduleLowPriorityTask(async () => {
+          const hydrateExtension = async (ext: typeof extensions[number]) => {
+            const status = get().extensionOperationStatus
+            const updateReloadPending =
+              status?.extensionId === ext.id &&
+              (status.operation === 'updating' || status.operation === 'updated')
 
-          if (updateReloadPending) return
+            if (updateReloadPending) return
 
-          if (ext.enabled && ext.has_frontend) {
-            const manifest = await spindleApi.getManifest(ext.id)
-            await loadFrontendExtension(ext.id, manifest)
-          } else {
-            await unloadFrontendExtension(ext.id)
-          }
-        }
-
-        void (async () => {
-          const hydrationQueue = extensions
-            .filter((ext) => ext.enabled && ext.has_frontend)
-            .sort((a, b) => {
-              const aPriority = isHighPriorityFrontend(a) ? 1 : 0
-              const bPriority = isHighPriorityFrontend(b) ? 1 : 0
-              if (aPriority !== bPriority) return bPriority - aPriority
-              return b.installed_at - a.installed_at
-            })
-
-          const cleanupQueue = extensions.filter((ext) => !(ext.enabled && ext.has_frontend))
-
-          let nextIndex = 0
-          const workerCount = Math.min(FRONTEND_HYDRATION_CONCURRENCY, Math.max(1, hydrationQueue.length))
-
-          if (hydrationQueue.length > 0) {
-            await Promise.allSettled(
-              Array.from({ length: workerCount }, async () => {
-                while (true) {
-                  const ext = hydrationQueue[nextIndex++]
-                  if (!ext) return
-
-                  try {
-                    await hydrateExtension(ext)
-                  } catch (err) {
-                    console.error(`[Spindle] Failed to hydrate frontend for ${ext.id}:`, err)
-                  }
-
-                  await yieldToBrowser({ when: 'paint' })
-                }
-              })
-            )
-          }
-
-          for (const ext of cleanupQueue) {
-            try {
-              await hydrateExtension(ext)
-            } catch (err) {
-              console.error(`[Spindle] Failed to reconcile frontend for ${ext.id}:`, err)
+            if (ext.enabled && ext.has_frontend) {
+              const manifest = await spindleApi.getManifest(ext.id)
+              await loadFrontendExtension(ext.id, manifest)
+            } else {
+              await unloadFrontendExtension(ext.id)
             }
           }
-        })().catch((err) => {
-          console.error('[Spindle] Frontend hydration loop failed:', err)
-        })
-      }, { label: 'spindle frontend hydration' })
+
+          try {
+            const hydrationQueue = extensions
+              .filter((ext) => ext.enabled && ext.has_frontend)
+              .sort(compareFrontendHydrationPriority)
+
+            const cleanupQueue = extensions.filter((ext) => !(ext.enabled && ext.has_frontend))
+
+            let nextIndex = 0
+            const workerCount = Math.min(FRONTEND_HYDRATION_CONCURRENCY, Math.max(1, hydrationQueue.length))
+
+            if (hydrationQueue.length > 0) {
+              await Promise.allSettled(
+                Array.from({ length: workerCount }, async () => {
+                  while (true) {
+                    const ext = hydrationQueue[nextIndex++]
+                    if (!ext) return
+
+                    try {
+                      await hydrateExtension(ext)
+                    } catch (err) {
+                      console.error(`[Spindle] Failed to hydrate frontend for ${ext.id}:`, err)
+                    }
+
+                    await yieldToBrowser({ when: 'paint' })
+                  }
+                })
+              )
+            }
+
+            for (const ext of cleanupQueue) {
+              try {
+                await hydrateExtension(ext)
+              } catch (err) {
+                console.error(`[Spindle] Failed to reconcile frontend for ${ext.id}:`, err)
+              }
+            }
+          } catch (err) {
+            console.error('[Spindle] Frontend hydration loop failed:', err)
+          } finally {
+            resolveHydration()
+          }
+        }, { label: 'spindle frontend hydration' })
+      })
     } catch (err) {
       console.error('[Spindle] Failed to load extensions:', err)
     }
+  }),
+
+  setExtensionUpdates: (extensionUpdates) => {
+    set({ extensionUpdates })
   },
 
   installExtension: async (githubUrl: string, branch?: string | null) => {
@@ -136,6 +168,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     spindleApi.clearManifestCache(id)
     set((state) => ({
       extensions: state.extensions.map((e) => (e.id === id ? updated : e)),
+      extensionUpdates: state.extensionUpdates.filter((update) => update.extensionId !== id),
     }))
     if (updated.enabled && updated.has_frontend) {
       const manifest = await spindleApi.getManifest(id, { force: true })
@@ -148,6 +181,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     spindleApi.clearManifestCache(id)
     set((state) => ({
       extensions: state.extensions.map((e) => (e.id === id ? updated : e)),
+      extensionUpdates: state.extensionUpdates.filter((update) => update.extensionId !== id),
     }))
     if (updated.enabled && updated.has_frontend) {
       const manifest = await spindleApi.getManifest(id, { force: true })
@@ -166,6 +200,7 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
       if (id in state.mutedExtensionThemes) saveMutedThemes(mutedRest)
       return {
         extensions: state.extensions.filter((e) => e.id !== id),
+        extensionUpdates: state.extensionUpdates.filter((update) => update.extensionId !== id),
         extensionThemeOverrides: overridesRest,
         mutedExtensionThemes: mutedRest,
       }
@@ -192,16 +227,17 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
 
   disableExtension: async (id: string) => {
     await spindleApi.disable(id)
-    await unloadFrontendExtension(id)
-    get().clearExtensionChatStyleModes(id)
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, enabled: false, status: 'stopped' as const } : e
       ),
+      extensionUpdates: state.extensionUpdates.filter((update) => update.extensionId !== id),
       extensionThemeOverrides: Object.fromEntries(
         Object.entries(state.extensionThemeOverrides).filter(([extensionId]) => extensionId !== id)
       ),
     }))
+    await unloadFrontendExtension(id)
+    get().clearExtensionChatStyleModes(id)
   },
 
   restartExtension: async (id: string) => {
@@ -285,6 +321,13 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     })
   },
 
+  dismissTextEditor: (requestId: string) => {
+    set((state) => {
+      if (state.pendingTextEditor?.requestId !== requestId) return state
+      return { ...state, pendingTextEditor: null }
+    })
+  },
+
   openSpindleModal: (request) => {
     set({ pendingModal: request })
   },
@@ -309,10 +352,25 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
   },
 
   openSpindleConfirm: (request) => {
+    const previous = get().pendingConfirm
+    if (previous && previous.requestId !== request.requestId) {
+      wsClient.send({
+        type: 'SPINDLE_CONFIRM_RESULT',
+        requestId: previous.requestId,
+        confirmed: false,
+      })
+      window.dispatchEvent(
+        new CustomEvent('spindle:confirm-resolved', {
+          detail: { requestId: previous.requestId, confirmed: false },
+        })
+      )
+    }
     set({ pendingConfirm: request })
   },
 
   closeSpindleConfirm: (requestId: string, confirmed: boolean) => {
+    const current = get().pendingConfirm
+    if (!current || current.requestId !== requestId) return
     set({ pendingConfirm: null })
     wsClient.send({
       type: 'SPINDLE_CONFIRM_RESULT',

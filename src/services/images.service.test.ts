@@ -1,5 +1,7 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync } from "fs";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, existsSync, unlinkSync, statSync } from "fs";
+import * as fs from "fs";
+import * as fsPromises from "fs/promises";
 import { tmpdir } from "os";
 import { join } from "path";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
@@ -11,15 +13,39 @@ import {
   WALLPAPER_LIBRARY_OWNER,
   deleteImage,
   deleteImageIfUnreferenced,
+  deleteImagesBulk,
   deleteWallpaperLibraryImage,
+  discardImageProcessingQueue,
+  getDeferredImageProcessingStatus,
   getImage,
   getImageFilePath,
+  getImageProcessingRecovery,
   listImages,
+  rebuildAllThumbnails,
+  recoverImageProcessingQueue,
+  resetDeferredImageProcessingForTests,
+  saveImageFromDataUrl,
   uploadImage,
+  uploadImageDeferred,
+  uploadImages,
+  uploadOptimizedWebpImage,
+  waitForDeferredImageProcessing,
 } from "./images.service";
+import { recordImageProcessingJob } from "./image-processing-queue";
+import { deriveWorkerBudget, setWorkerBudgetOverride } from "../utils/cpu-budget";
+import { applySharpSettings } from "./sharp-settings.service";
+import { readImageMetadata } from "../utils/image-pipeline";
 
 const originalDataDir = env.dataDir;
 let testDataDir = "";
+
+function unlinkError(code: string, path: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`${code}: simulated unlink failure, unlink '${path}'`), {
+    code,
+    path,
+    syscall: "unlink",
+  });
+}
 
 function initImagesTestDb(): void {
   closeDatabase();
@@ -35,6 +61,7 @@ function initImagesTestDb(): void {
     width INTEGER,
     height INTEGER,
     has_thumbnail INTEGER NOT NULL DEFAULT 0,
+    skip_thumbnail_processing INTEGER NOT NULL DEFAULT 0,
     owner_extension_identifier TEXT,
     owner_character_id TEXT,
     owner_chat_id TEXT,
@@ -130,12 +157,18 @@ function seedChat(id: string, metadata: Record<string, unknown>, updatedAt = 100
 }
 
 beforeEach(() => {
+  resetDeferredImageProcessingForTests();
+  setWorkerBudgetOverride(null);
+  applySharpSettings({});
   initImagesTestDb();
   testDataDir = mkdtempSync(join(tmpdir(), "lumiverse-images-test-"));
   env.dataDir = testDataDir;
 });
 
 afterEach(() => {
+  resetDeferredImageProcessingForTests();
+  setWorkerBudgetOverride(null);
+  applySharpSettings({});
   closeDatabase();
   env.dataDir = originalDataDir;
   if (testDataDir) {
@@ -145,6 +178,19 @@ afterEach(() => {
 });
 
 describe("images.service ownership filters", () => {
+  test("does not create an image row when a write reports success without creating the file", async () => {
+    const writeSpy = spyOn(Bun, "write").mockImplementation(async () => 1);
+    try {
+      const file = new File([new Uint8Array([0])], "missing.png", { type: "image/png" });
+
+      await expect(uploadImage("u1", file)).rejects.toThrow("Image file was not created");
+      const count = getDb().query("SELECT COUNT(*) AS count FROM images").get() as { count: number };
+      expect(count.count).toBe(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
   test("lists only extension-owned images and returns specificity-aware URLs", () => {
     seedImage("img-1", 300, { owner_extension_identifier: "ext.gallery", owner_chat_id: "chat-1" });
     seedImage("img-2", 200, { owner_extension_identifier: "ext.gallery", owner_character_id: "char-1" });
@@ -189,6 +235,23 @@ describe("images.service ownership filters", () => {
     const deleted = deleteImageIfUnreferenced("u1", "img-1");
 
     expect(deleted).toBe(false);
+    expect(getImage("u1", "img-1")).not.toBeNull();
+  });
+
+  test("treats locally stored preset covers as image references", () => {
+    seedImage("img-1", 100);
+    getDb().run(`CREATE TABLE presets (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      metadata TEXT NOT NULL DEFAULT '{}'
+    )`);
+    getDb().query("INSERT INTO presets (id, user_id, metadata) VALUES (?, ?, ?)").run(
+      "preset-1",
+      "u1",
+      JSON.stringify({ coverUrl: "/api/v1/images/img-1" }),
+    );
+
+    expect(deleteImageIfUnreferenced("u1", "img-1")).toBe(false);
     expect(getImage("u1", "img-1")).not.toBeNull();
   });
 
@@ -307,12 +370,98 @@ describe("images.service ownership filters", () => {
     mkdirSync(imagesDir, { recursive: true });
     const primaryPath = join(imagesDir, "clip-2.mp4");
     const hevcPath = join(imagesDir, "clip-2_hevc.mp4");
+    const avifThumbPath = join(imagesDir, "clip-2_thumb_sm_v2.avif");
     writeFileSync(primaryPath, "primary");
     writeFileSync(hevcPath, "hevc");
+    writeFileSync(avifThumbPath, "avif-thumb");
 
     expect(deleteImage("u1", "clip-2")).toBe(true);
     expect(existsSync(primaryPath)).toBe(false);
     expect(existsSync(hevcPath)).toBe(false);
+    expect(existsSync(avifThumbPath)).toBe(false);
+  });
+
+  test("keeps the image row when deleting its files fails", () => {
+    seedImage("undeletable", 100);
+    const imagesDir = join(env.dataDir, "images");
+    mkdirSync(join(imagesDir, "undeletable.png"), { recursive: true });
+
+    expect(() => deleteImage("u1", "undeletable")).toThrow("Could not delete 1 image file");
+    expect(getImage("u1", "undeletable")).not.toBeNull();
+  });
+
+  test("keeps bulk-deletion rows when deleting their files fails", async () => {
+    seedImage("bulk-undeletable", 100);
+    const imagesDir = join(env.dataDir, "images");
+    mkdirSync(join(imagesDir, "bulk-undeletable.png"), { recursive: true });
+
+    await expect(deleteImagesBulk("u1", ["bulk-undeletable"])).rejects.toThrow("Could not delete 1 image file");
+    expect(getImage("u1", "bulk-undeletable")).not.toBeNull();
+  });
+
+  test("ignores a reported EPERM when the image path is already gone", async () => {
+    seedImage("gone-after-unlink", 100);
+    const primaryPath = join(env.dataDir, "images", "gone-after-unlink.png");
+    mkdirSync(join(env.dataDir, "images"), { recursive: true });
+    writeFileSync(primaryPath, "image");
+
+    const unlinkSpy = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
+      rmSync(path);
+      throw unlinkError("EPERM", String(path));
+    });
+    try {
+      await expect(deleteImagesBulk("u1", ["gone-after-unlink"])).resolves.toBe(1);
+      expect(unlinkSpy).toHaveBeenCalledTimes(1);
+      expect(getImage("u1", "gone-after-unlink")).toBeNull();
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  test("retries transient EPERM when deleting an image synchronously", () => {
+    seedImage("retry-sync", 100);
+    const primaryPath = join(env.dataDir, "images", "retry-sync.png");
+    mkdirSync(join(env.dataDir, "images"), { recursive: true });
+    writeFileSync(primaryPath, "image");
+
+    let attempts = 0;
+    const unlinkSpy = spyOn(fs, "unlinkSync").mockImplementation((path) => {
+      attempts++;
+      if (attempts === 1) throw unlinkError("EPERM", String(path));
+      rmSync(path);
+    });
+    const sleepSpy = spyOn(Bun, "sleepSync").mockImplementation(() => {});
+    try {
+      expect(deleteImage("u1", "retry-sync")).toBe(true);
+      expect(attempts).toBe(2);
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+      expect(getImage("u1", "retry-sync")).toBeNull();
+    } finally {
+      sleepSpy.mockRestore();
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  test("keeps the image row after transient unlink retries are exhausted", async () => {
+    seedImage("retry-exhausted", 100);
+    const primaryPath = join(env.dataDir, "images", "retry-exhausted.png");
+    mkdirSync(join(env.dataDir, "images"), { recursive: true });
+    writeFileSync(primaryPath, "image");
+
+    const unlinkSpy = spyOn(fsPromises, "unlink").mockImplementation(async (path) => {
+      throw unlinkError("EPERM", String(path));
+    });
+    const sleepSpy = spyOn(Bun, "sleep").mockImplementation(async () => {});
+    try {
+      await expect(deleteImagesBulk("u1", ["retry-exhausted"])).rejects.toThrow("Could not delete 1 image file");
+      expect(unlinkSpy).toHaveBeenCalledTimes(6);
+      expect(sleepSpy).toHaveBeenCalledTimes(5);
+      expect(existsSync(primaryPath)).toBe(true);
+      expect(getImage("u1", "retry-exhausted")).not.toBeNull();
+    } finally {
+      sleepSpy.mockRestore();
+      unlinkSpy.mockRestore();
+    }
   });
 
   test("emits wallpaper video upload progress through transcoding and finalize stages", async () => {
@@ -376,5 +525,299 @@ describe("images.service ownership filters", () => {
     } finally {
       rmSync(workdir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("deferred image processing", () => {
+  const ONE_BY_ONE_PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4////fwAJ+wP9KobjigAAAABJRU5ErkJggg==",
+    "base64",
+  );
+
+  test("single deferred uploads infer MIME, preserve ownership, and finish queued processing", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const file = new File([ONE_BY_ONE_PNG], "embedded.png");
+
+    const image = await uploadImageDeferred("u1", file, { owner_character_id: "char-1" });
+
+    expect(image.mime_type).toBe("image/png");
+    expect(image.owner_character_id).toBe("char-1");
+    await waitForDeferredImageProcessing();
+    expect(getImage("u1", image.id)).toMatchObject({
+      width: 1,
+      height: 1,
+      has_thumbnail: true,
+      owner_character_id: "char-1",
+    });
+  });
+
+  test("single deferred uploads recognize supported image extensions when MIME is absent", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const image = await uploadImageDeferred("u1", new File([ONE_BY_ONE_PNG], "embedded.apng"));
+
+    expect(image.mime_type).toBe("image/apng");
+    await waitForDeferredImageProcessing();
+    expect(getImage("u1", image.id)).toMatchObject({ width: 1, height: 1, has_thumbnail: true });
+  });
+
+  test("uses Sharp AVIF thumbnails when the operator codec is enabled", async () => {
+    applySharpSettings({ thumbnailCodec: "avif", avifQuality: 54 });
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const image = await uploadImageDeferred("u1", new File([ONE_BY_ONE_PNG], "embedded.png"));
+
+    await waitForDeferredImageProcessing();
+    const avifSmPath = join(testDataDir, "images", `${image.id}_thumb_sm_v2.avif`);
+    const avifLgPath = join(testDataDir, "images", `${image.id}_thumb_lg_v2.avif`);
+    expect(existsSync(avifSmPath)).toBe(true);
+    expect(existsSync(avifLgPath)).toBe(true);
+    expect(existsSync(join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`))).toBe(false);
+    expect(await readImageMetadata(avifSmPath)).toMatchObject({ format: "avif" });
+    expect(await getImageFilePath("u1", image.id, "sm")).toBe(avifSmPath);
+
+    applySharpSettings({ thumbnailCodec: "webp", webpQuality: 80 });
+    const webpSmPath = join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`);
+    expect(await getImageFilePath("u1", image.id, "sm")).toBe(webpSmPath);
+    expect(existsSync(webpSmPath)).toBe(true);
+
+    applySharpSettings({ thumbnailCodec: "avif", avifQuality: 54 });
+    await rebuildAllThumbnails("u1");
+    expect(existsSync(webpSmPath)).toBe(false);
+    expect(existsSync(avifSmPath)).toBe(true);
+  });
+
+  test("thumbnail processing opt-outs survive lazy reads and rebuilds", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const image = await uploadImageDeferred(
+      "u1",
+      new File([ONE_BY_ONE_PNG], "baked.avif", { type: "image/avif" }),
+      { skip_thumbnail_processing: true },
+    );
+    const originalPath = join(testDataDir, "images", image.filename);
+    const smPath = join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`);
+    const lgPath = join(testDataDir, "images", `${image.id}_thumb_lg_v2.webp`);
+
+    await waitForDeferredImageProcessing();
+    expect(getDeferredImageProcessingStatus().total).toBe(0);
+    expect(getImage("u1", image.id)).toMatchObject({
+      width: null,
+      height: null,
+      has_thumbnail: false,
+      skip_thumbnail_processing: true,
+    });
+    expect(await getImageFilePath("u1", image.id, "sm")).toBe(originalPath);
+    expect(existsSync(smPath)).toBe(false);
+
+    expect(await rebuildAllThumbnails("u1")).toEqual({
+      total: 1,
+      current: 1,
+      generated: 0,
+      skipped: 1,
+      failed: 0,
+    });
+    expect(existsSync(smPath)).toBe(false);
+    expect(existsSync(lgPath)).toBe(false);
+  });
+
+  test("ordinary uploadImage calls use deferred processing", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const image = await uploadImage(
+      "u1",
+      new File([ONE_BY_ONE_PNG], "avatar.png", { type: "image/png" }),
+      { owner_character_id: "char-1" },
+    );
+
+    await waitForDeferredImageProcessing();
+    expect(getImage("u1", image.id)).toMatchObject({
+      width: 1,
+      height: 1,
+      has_thumbnail: true,
+      owner_character_id: "char-1",
+    });
+  });
+
+  test("data URL and optimized WebP uploads finish through the deferred queue", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const dataUrlImage = await saveImageFromDataUrl(
+      "u1",
+      `data:image/png;base64,${ONE_BY_ONE_PNG.toString("base64")}`,
+      "generated.png",
+    );
+    const webpImage = await uploadOptimizedWebpImage(
+      "u1",
+      new File([ONE_BY_ONE_PNG], "layer.png", { type: "image/png" }),
+      { owner_character_id: "char-1" },
+    );
+
+    await waitForDeferredImageProcessing();
+    expect(getImage("u1", dataUrlImage.id)).toMatchObject({ width: 1, height: 1, has_thumbnail: true });
+    expect(getImage("u1", webpImage.id)).toMatchObject({
+      width: 1,
+      height: 1,
+      has_thumbnail: true,
+      mime_type: "image/webp",
+      owner_character_id: "char-1",
+    });
+  });
+
+  test("waitForDeferredImageProcessing drains queued thumbnail work", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const results = await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+      { data: ONE_BY_ONE_PNG, filename: "b.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    expect(results.every((row) => row.image)).toBe(true);
+    await waitForDeferredImageProcessing();
+    const thumbs = getDb().query("SELECT COUNT(*) AS count FROM images WHERE has_thumbnail = 1").get() as { count: number };
+    expect(thumbs.count).toBe(2);
+  });
+
+  test("reports processed and remaining counts until drain completes", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+      { data: ONE_BY_ONE_PNG, filename: "b.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    const mid = getDeferredImageProcessingStatus();
+    expect(mid.total).toBe(2);
+    expect(mid.processed + mid.remaining).toBe(2);
+    await waitForDeferredImageProcessing();
+    expect(getDeferredImageProcessingStatus()).toEqual({
+      processed: 2,
+      remaining: 0,
+      total: 2,
+      active: 0,
+      queued: 0,
+    });
+  });
+
+  test("repeated uploads append to one processing queue", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+
+    await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+      { data: ONE_BY_ONE_PNG, filename: "b.png", mime_type: "image/png" },
+      { data: ONE_BY_ONE_PNG, filename: "c.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+
+    const status = getDeferredImageProcessingStatus();
+    expect(status.total).toBe(3);
+    expect(status.processed + status.remaining).toBe(3);
+    expect(status.active).toBeLessThanOrEqual(1);
+    await waitForDeferredImageProcessing();
+    expect(getDeferredImageProcessingStatus().processed).toBe(3);
+  });
+
+  test("rebuildAllThumbnails drains through the deferred Sharp queue", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const uploaded = await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+      { data: ONE_BY_ONE_PNG, filename: "b.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    await waitForDeferredImageProcessing();
+    const first = uploaded[0]?.image;
+    if (!first) throw new Error("expected uploaded image");
+    unlinkSync(join(testDataDir, "images", `${first.id}_thumb_sm_v2.webp`));
+
+    const ticks: number[] = [];
+    const result = await rebuildAllThumbnails("u1", {
+      onProgress: (progress) => ticks.push(progress.current),
+    });
+    expect(result).toEqual({
+      total: 2,
+      current: 2,
+      generated: 2,
+      skipped: 0,
+      failed: 0,
+    });
+    expect(ticks.at(-1)).toBe(2);
+    expect(getDeferredImageProcessingStatus()).toMatchObject({
+      processed: 2,
+      remaining: 0,
+      total: 2,
+    });
+    expect(existsSync(join(testDataDir, "images", `${first.id}_thumb_sm_v2.webp`))).toBe(true);
+  });
+
+  test("rebuildAllThumbnails wipes existing thumbs then reattributes them", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const uploaded = await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    await waitForDeferredImageProcessing();
+    const image = uploaded[0]?.image;
+    if (!image) throw new Error("expected uploaded image");
+    const smPath = join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`);
+    const stalePath = join(testDataDir, "images", `${image.id}_thumb_sm.webp`);
+    writeFileSync(stalePath, "stale-legacy-thumb");
+    const before = existsSync(smPath) ? statSync(smPath).mtimeMs : 0;
+    getDb().query("UPDATE images SET has_thumbnail = 1 WHERE id = ?").run(image.id);
+
+    const result = await rebuildAllThumbnails("u1");
+    expect(result).toMatchObject({ total: 1, generated: 1, skipped: 0, failed: 0 });
+    expect(existsSync(stalePath)).toBe(false);
+    expect(existsSync(smPath)).toBe(true);
+    expect(statSync(smPath).mtimeMs).toBeGreaterThanOrEqual(before);
+    expect(getDb().query("SELECT has_thumbnail AS flag FROM images WHERE id = ?").get(image.id)).toEqual({ flag: 1 });
+  });
+
+  test("does not auto-run leftover rows and recover starts them", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const uploaded = await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    await waitForDeferredImageProcessing();
+    const image = uploaded[0]?.image;
+    if (!image) throw new Error("expected uploaded image");
+    unlinkSync(join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`));
+    recordImageProcessingJob("u1", image.id, "process");
+
+    expect(getImageProcessingRecovery()).toEqual({
+      pending: 1,
+      process: 1,
+      rebuild: 0,
+    });
+    expect(existsSync(join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`))).toBe(false);
+
+    recoverImageProcessingQueue();
+    await waitForDeferredImageProcessing();
+    expect(existsSync(join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`))).toBe(true);
+    expect(getImageProcessingRecovery().pending).toBe(0);
+  });
+
+  test("discard leftover rows without starting them", async () => {
+    setWorkerBudgetOverride(deriveWorkerBudget(2));
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const uploaded = await uploadImages("u1", [
+      { data: ONE_BY_ONE_PNG, filename: "a.png", mime_type: "image/png" },
+    ], { deferProcessing: true });
+    await waitForDeferredImageProcessing();
+    const image = uploaded[0]?.image;
+    if (!image) throw new Error("expected uploaded image");
+    recordImageProcessingJob("u1", image.id, "rebuild");
+    expect(getImageProcessingRecovery().pending).toBe(1);
+    expect(discardImageProcessingQueue()).toEqual({ pending: 0, process: 0, rebuild: 0 });
+    expect(getImageProcessingRecovery().pending).toBe(0);
+  });
+
+  test("recovery discards stale processing jobs for opted-out assets", async () => {
+    mkdirSync(join(testDataDir, "images"), { recursive: true });
+    const image = await uploadImageDeferred(
+      "u1",
+      new File([ONE_BY_ONE_PNG], "baked.avif", { type: "image/avif" }),
+      { skip_thumbnail_processing: true },
+    );
+    recordImageProcessingJob("u1", image.id, "process");
+
+    expect(getImageProcessingRecovery().pending).toBe(1);
+    expect(recoverImageProcessingQueue()).toEqual({ pending: 0, process: 0, rebuild: 0 });
+    await waitForDeferredImageProcessing();
+    expect(existsSync(join(testDataDir, "images", `${image.id}_thumb_sm_v2.webp`))).toBe(false);
+    expect(existsSync(join(testDataDir, "images", `${image.id}_thumb_lg_v2.webp`))).toBe(false);
   });
 });

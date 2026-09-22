@@ -7,7 +7,7 @@ const PREFIX_RE =
 
 const IMAGE_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\.[a-zA-Z0-9]{1,8})?$/;
 
-const THUMB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_thumb_(?:sm|lg)_v2\.webp$/;
+const THUMB_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_thumb_(?:sm|lg)_v2\.(?:webp|avif)$/;
 
 const AVATAR_RE = /^[A-Za-z0-9._-]+$/;
 

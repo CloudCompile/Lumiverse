@@ -413,6 +413,25 @@ export function startImport(file: File, action: string): Promise<WeaverImportSta
   return upload<WeaverImportStartResult>('/weaver/import/start', form, LLM_CALL)
 }
 
+export function inspectGalleryCharacter(characterId: string): Promise<WeaverImportInspection> {
+  return post<WeaverImportInspection>(
+    `/weaver/import/characters/${encodeURIComponent(characterId)}/inspect`,
+    {},
+    LLM_CALL,
+  )
+}
+
+export function startGalleryCharacterImport(
+  characterId: string,
+  action: string,
+): Promise<WeaverImportStartResult> {
+  return post<WeaverImportStartResult>(
+    `/weaver/import/characters/${encodeURIComponent(characterId)}/start`,
+    { action },
+    LLM_CALL,
+  )
+}
+
 export function enrichImportEntry(bookId: string, entryId: string): Promise<WeaverEnrichEntryResult> {
   return post<WeaverEnrichEntryResult>(`/weaver/import/enrich/${bookId}/entries/${entryId}`, {}, LLM_CALL)
 }

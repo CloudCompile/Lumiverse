@@ -4,7 +4,9 @@ Self-contained styled HTML in chat messages is auto-extracted into a Shadow DOM 
 
 ## Detection
 
-A block-level element (`<div>`, `<section>`, `<article>`, `<aside>`, `<nav>`, `<main>`, `<header>`, `<footer>`, `<form>`, `<fieldset>`, `<figure>`, `<details>`) or a full HTML wrapper (`<html>`, `<body>`) becomes an island when its content contains either a `<style>` tag or three or more `style="..."` attributes.
+A block-level element (`<div>`, `<section>`, `<article>`, `<aside>`, `<nav>`, `<main>`, `<header>`, `<footer>`, `<form>`, `<fieldset>`, `<figure>`, `<details>`) becomes an island when its content contains a `<style>` tag. Full HTML wrappers (`<html>`, `<body>`) containing authored styles are also isolated.
+
+Blocks that use three or more inline `style="..."` attributes stay in the normal document tree so document-level CSS, controls, event delegation, and observers can reach them. Lumiverse places a light-DOM spacing shell around those blocks to reserve the same visual-effects bleed room as an island without creating a Shadow DOM boundary.
 
 Standalone `<style>` blocks not inside a wrapper element are extracted together with any subsequent sibling HTML, including complete document-shaped markup.
 

@@ -1,5 +1,14 @@
-import { describe, expect, test } from "bun:test";
-import { extractMentionSlugs, stripMentions } from "./mention-resolver.service";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { closeDatabase, getDb, initDatabase } from "../../db/connection";
+import type { DatabankDocument } from "./types";
+import {
+  __mentionResolveCacheTest,
+  clearAllResolveCache,
+  extractMentionSlugs,
+  formatMentionsAsAppendix,
+  resolveSlugContent,
+  stripMentions,
+} from "./mention-resolver.service";
 
 describe("extractMentionSlugs", () => {
   test("extracts a basic slug", () => {
@@ -72,5 +81,105 @@ describe("stripMentions", () => {
   test("strips longer slug exactly when present in validSlugs", () => {
     const out = stripMentions("read #foo-bar please", new Set(["foo-bar"]));
     expect(out).toBe("read please");
+  });
+});
+
+describe("mention resolution cache", () => {
+  test("caps retained results and clears them under memory pressure", () => {
+    clearAllResolveCache();
+    for (let index = 0; index <= 256; index++) {
+      __mentionResolveCacheTest.set(`key-${index}`, [{
+        slug: `doc-${index}`,
+        documentName: `Document ${index}`,
+        content: "content",
+        truncated: false,
+      }]);
+    }
+
+    expect(__mentionResolveCacheTest.size()).toBe(256);
+    expect(__mentionResolveCacheTest.keys()).not.toContain("key-0");
+
+    clearAllResolveCache();
+    expect(__mentionResolveCacheTest.size()).toBe(0);
+  });
+
+  test("does not retain a second copy of oversized full documents", () => {
+    clearAllResolveCache();
+    __mentionResolveCacheTest.set("oversized", [{
+      slug: "large-doc",
+      documentName: "Large Document",
+      content: "x".repeat(256 * 1024 + 1),
+      truncated: false,
+    }]);
+
+    expect(__mentionResolveCacheTest.size()).toBe(0);
+  });
+});
+
+describe("resolveSlugContent", () => {
+  beforeEach(() => {
+    closeDatabase();
+    initDatabase(":memory:");
+    getDb().run(`CREATE TABLE databank_chunks (
+      document_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      content TEXT NOT NULL
+    )`);
+    clearAllResolveCache();
+  });
+
+  afterEach(() => {
+    clearAllResolveCache();
+    closeDatabase();
+  });
+
+  test("injects every stored chunk for documents above the former token cutoff", async () => {
+    const firstHalf = Array.from({ length: 1_600 }, (_, index) => `first-${index}`).join(" ");
+    const secondHalf = Array.from({ length: 700 }, (_, index) => `second-${index}`).join(" ");
+    const fullText = `${firstHalf}\n${secondHalf}`;
+    const db = getDb();
+    db.run(
+      "INSERT INTO databank_chunks (document_id, user_id, chunk_index, content) VALUES (?, ?, ?, ?)",
+      ["doc-large", "user-1", 0, firstHalf],
+    );
+    db.run(
+      "INSERT INTO databank_chunks (document_id, user_id, chunk_index, content) VALUES (?, ?, ?, ?)",
+      ["doc-large", "user-1", 1, secondHalf],
+    );
+
+    const doc: DatabankDocument = {
+      id: "doc-large",
+      databankId: "bank-1",
+      userId: "user-1",
+      name: "Large Document",
+      slug: "large-document",
+      filePath: "large.md",
+      mimeType: "text/markdown",
+      fileSize: fullText.length,
+      contentHash: "large-document-v1",
+      totalChunks: 2,
+      status: "ready",
+      errorMessage: null,
+      metadata: {},
+      createdAt: 1,
+      updatedAt: 1,
+    };
+
+    const resolved = await resolveSlugContent(
+      "user-1",
+      "chat-1",
+      [doc.slug],
+      new Map([[doc.slug, doc]]),
+    );
+
+    expect(resolved).toEqual([{
+      slug: doc.slug,
+      documentName: doc.name,
+      content: fullText,
+      truncated: false,
+    }]);
+    expect(resolved[0].content.length).toBeGreaterThan(3_000);
+    expect(formatMentionsAsAppendix(resolved)).not.toContain("most relevant excerpts");
   });
 });

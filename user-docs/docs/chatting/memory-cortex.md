@@ -127,22 +127,35 @@ For maximum accuracy, you can assign a secondary LLM connection to assist the co
 
 1. In **Memory Cortex settings**, select a **Connection Profile** under the Sidecar section
 2. Choose a **Model** (smaller, faster models work well here — the sidecar doesn't need to be creative)
-3. Adjust **Temperature** (0.1 recommended for factual extraction)
-4. Set **Parallel Requests** to control how many concurrent LLM calls run during a rebuild
-5. Set **Requests Per Minute** to throttle the sidecar against your provider's rate limits (0 = unlimited)
+3. Optionally add separate fallback connections for extraction and memory summaries
+4. Adjust **Temperature** (0.1 recommended for factual extraction)
+5. Set **Parallel Requests** to control how many concurrent LLM calls run during a rebuild
+6. Set **Requests Per Minute** to throttle the sidecar against your provider's rate limits (0 = unlimited)
+
+The connection picker includes both built-in connections and sidecar providers contributed by enabled [Spindle extensions](../extensions/index.md#extension-provided-ai-providers).
 
 !!! note "Sidecar Costs"
     The sidecar makes one LLM call per chunk during live chat, and one per chunk during rebuilds. A chat with 200 chunks would make 200 API calls on rebuild. Choose an inexpensive model for the sidecar to keep costs reasonable.
 
-### Reliability & Retries
+### Failure Handling
 
-The sidecar is wrapped in a small reliability layer you can tune:
+Choose how to handle a failed sidecar call:
 
 | Setting | Description |
 |---------|-------------|
 | **Fallback** | `heuristic` writes the heuristic result if the sidecar fails; `skip` holds the chunk for reprocessing on the next pass. |
-| **Max Retries** | Additional attempts after the first failed call (exponential backoff). |
 | **Sidecar Timeout** | Per-call timeout in milliseconds before the call is abandoned. |
+
+### Connection Failover
+
+Memory Cortex keeps two independent ordered chains because extraction and summarization have different workloads:
+
+- **Extraction secondary / fallbacks** handle query generation, entity extraction, relationships, and related analysis.
+- **Summary secondary / fallbacks** handle scene and story-arc consolidation.
+
+The primary connection is attempted once. Lumiverse does not automatically retry requests against the same connection. If it remains unavailable or times out, Lumiverse tries the corresponding secondary connection and then each additional fallback in order, once per connection. Only after that chain is exhausted does the **Fallback** reliability setting decide whether to use heuristics or leave the work for a later pass.
+
+Fallback connections keep their own models and credentials. Removing a fallback from one chain does not remove it from the other.
 
 ### Arbitration
 
@@ -151,7 +164,7 @@ When the sidecar is enabled, two optional behaviors give it authority over heuri
 - **Arbitrates Heuristics** — the sidecar reviews each heuristic entity before it is persisted and can reject or rename misidentifications (e.g. discarding common words mistakenly extracted as characters).
 - **Grades Existing Records** — periodically re-evaluates already-saved entities and removes ones that have become noise. Useful after a long chat has accumulated mistakes.
 
-If the sidecar call fails and **Fallback** is set to `heuristic`, the heuristic result is used as a safe default.
+If every configured sidecar connection fails and **Fallback** is set to `heuristic`, the heuristic result is used as a safe default.
 
 ---
 

@@ -1,4 +1,4 @@
-import { buildEnv, initMacros, mergeDynamicMacros, resolveGroupCharacterNames, resolvePersonaPronouns } from "../macros";
+import { buildEnv, initMacros, mergeDynamicMacros, resolveGroupCharacterNames } from "../macros";
 import type { MacroEnv } from "../macros";
 import { messageContentProcessorChain } from "../spindle/message-content-processor";
 import { getEffectiveCharacterName, makeAssistantCharacter } from "../types/character";
@@ -11,9 +11,10 @@ import * as connectionsSvc from "./connections.service";
 import * as personasSvc from "./personas.service";
 import { resolvePersonaForChatMacros } from "./persona-addon-states";
 import { populateLumiaLoomContext } from "./prompt-assembly.service";
-import { applyRegexScripts } from "./regex-scripts.service";
+import { applyRegexScripts, hasRegexMatchAction } from "./regex-scripts.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
+import { readPromptActivation } from "../utils/regex-prompt-activation";
 
 initMacros();
 
@@ -44,9 +45,24 @@ function buildEnvFromContext(userId: string, ctx: DisplayRegexContext): MacroEnv
     const chat = chatsSvc.getChat(userId, ctx.chat_id);
     if (chat) {
       const messages = chatsSvc.getMessages(userId, ctx.chat_id);
-      const character = chat.character_id
+      const isGroup = !!chat.metadata?.group;
+      const groupCharacterIds =
+        isGroup && Array.isArray(chat.metadata?.character_ids)
+          ? (chat.metadata.character_ids as string[])
+          : [];
+      const targetCharacterId =
+        isGroup &&
+        typeof ctx.character_id === "string" &&
+        groupCharacterIds.includes(ctx.character_id)
+          ? ctx.character_id
+          : undefined;
+      const defaultCharacter = chat.character_id
         ? charactersSvc.getCharacter(userId, chat.character_id)
         : makeAssistantCharacter();
+      const focusedCharacter = targetCharacterId
+        ? charactersSvc.getCharacter(userId, targetCharacterId) ?? defaultCharacter
+        : defaultCharacter;
+      const character = focusedCharacter;
       if (character) {
         const persona = isTemporaryChatMetadata(chat.metadata)
           ? null
@@ -60,15 +76,16 @@ function buildEnvFromContext(userId: string, ctx: DisplayRegexContext): MacroEnv
           const c = charactersSvc.getCharacter(userId, cid);
           return c ? getEffectiveCharacterName(c) : undefined;
         });
-        const isGroup = !!chat.metadata?.group;
         const env = buildEnv({
           character,
+          focusedCharacter,
           persona,
           chat,
           messages,
           generationType: "normal",
           connection,
           groupCharacterNames,
+          targetCharacterId,
           targetCharacterName: isGroup ? getEffectiveCharacterName(character) : undefined,
         });
         populateLumiaLoomContext(env, userId, chat);
@@ -113,74 +130,57 @@ function buildEnvFromContext(userId: string, ctx: DisplayRegexContext): MacroEnv
     personasSvc.resolvePersonaOrDefault(userId, ctx.persona_id),
     null,
   );
-  const personaPronouns = resolvePersonaPronouns(persona);
   const connection = connectionsSvc.resolveConnection(userId);
-  return {
-    commit: true,
-    names: {
-      user: persona?.name || "User",
-      char: "",
-      group: "",
-      groupNotMuted: "",
-      notChar: persona?.name || "User",
-      charGroupFocused: "",
-      groupOthers: "",
-      groupMemberCount: "0",
-      isGroupChat: "no",
-      isNarrator: persona?.is_narrator ? "yes" : "no",
-      groupLastSpeaker: "",
-      groupCardMode: "solo",
-    },
-    character: {
-      name: "",
-      description: "",
-      personality: "",
-      scenario: "",
-      persona: persona?.description || "",
-      personaSubjectivePronoun: personaPronouns.subjective,
-      personaObjectivePronoun: personaPronouns.objective,
-      personaPossessivePronoun: personaPronouns.possessive,
-      mesExamples: "",
-      mesExamplesRaw: "",
-      systemPrompt: "",
-      postHistoryInstructions: "",
-      depthPrompt: "",
-      creatorNotes: "",
-      version: "",
-      creator: "",
-      firstMessage: "",
-    },
-    chat: {
-      id: "",
-      messageCount: 0,
-      lastMessage: "",
-      lastMessageName: "",
-      lastUserMessage: "",
-      lastCharMessage: "",
-      lastMessageId: -1,
-      firstIncludedMessageId: -1,
-      lastSwipeId: 0,
-      currentSwipeId: 0,
-      rejectedSwipe: "",
-    },
-    system: {
-      model: connection?.model || "",
-      maxPrompt: 0,
-      maxContext: 0,
-      maxResponse: 0,
-      lastGenerationType: "normal",
-      isMobile: false,
-    },
-    variables: { local: new Map(), global: new Map(), chat: new Map() },
-    dynamicMacros: {},
-    extra: {},
+  const chat: Chat = {
+    id: "",
+    character_id: null,
+    name: "",
+    metadata: {},
+    created_at: 0,
+    updated_at: 0,
   };
+  return buildEnv({
+    character: makeAssistantCharacter(),
+    persona,
+    chat,
+    messages: [],
+    generationType: "normal",
+    connection,
+  });
 }
 
 export interface ApplyDisplayRegexResult {
   result: string;
   touchedVars: ReadonlySet<string>;
   cacheable: boolean;
+  /** Scripts independently stopped by the backend sandbox watchdog. */
+  timedOutScriptIds: ReadonlySet<string>;
+}
+
+function getDisplayBehaviorContext(
+  userId: string,
+  context: DisplayRegexContext,
+): { previousContent?: string } {
+  if (!context.chat_id) return {};
+  const message = context.message_id
+    ? chatsSvc.getMessage(userId, context.message_id)
+    : undefined;
+  const messageIndex = message?.index_in_chat ?? context.message_index;
+  if (typeof messageIndex !== "number" || messageIndex <= 0) {
+    return {};
+  }
+  const isUser = context.role
+    ? context.role === "user"
+    : message?.is_user ?? context.is_user;
+  const previousContent = chatsSvc.getPreviousSameRoleContent(
+    userId,
+    context.chat_id,
+    isUser,
+    context.message_id,
+  );
+  return {
+    ...(previousContent !== undefined ? { previousContent } : {}),
+  };
 }
 
 type DisplayVarEnv = { variables: { local: Map<string, unknown>; chat: Map<string, unknown>; global: Map<string, unknown> } } | null | undefined;
@@ -266,6 +266,7 @@ export async function applyDisplayRegex(input: ApplyDisplayRegexInput): Promise<
         {
           chatId: input.context.chat_id,
           content,
+          isUser: input.context.is_user,
           origin: "render",
           userId: input.userId,
           ...(input.context.message_id ? { messageId: input.context.message_id } : {}),
@@ -290,6 +291,9 @@ export async function applyDisplayRegex(input: ApplyDisplayRegexInput): Promise<
   const env = buildEnvFromContext(input.userId, input.context);
   const dyn: Record<string, string> = { ...(input.dynamicMacros ?? {}) };
   if (env) {
+    env.extra.activationPreviewContext = {
+      chat_id: input.context.chat_id, character_id: input.context.character_id, persona_id: input.context.persona_id,
+    };
     if (input.context.role && dyn.role === undefined) {
       dyn.role = input.context.role;
     }
@@ -301,16 +305,27 @@ export async function applyDisplayRegex(input: ApplyDisplayRegexInput): Promise<
       mergeDynamicMacros(env, dyn);
     }
   }
-  const noCache = (globalThis as { Bun?: { env?: Record<string, string | undefined> } }).Bun?.env?.LUMIVERSE_DISPLAY_REGEX_NO_CACHE === "1";
+  const noCache = input.scripts.some((script) => script.preset_id && readPromptActivation(script.metadata) && script.find_regex.includes("{{"))
+    || (globalThis as { Bun?: { env?: Record<string, string | undefined> } }).Bun?.env?.LUMIVERSE_DISPLAY_REGEX_NO_CACHE === "1";
   const cacheKey = displayRegexCacheKey(input.context.chat_id, content, placement, input.context.depth, input.scripts, dyn, input.resolvedFindPatterns, input.resolvedReplacements);
   if (!noCache) {
     const cached = DISPLAY_REGEX_CACHE.get(cacheKey);
     if (cached && (env ? cached.touched.every(([n, val]) => varStateForKey(env, n) === val) : cached.touched.length === 0)) {
-      return { result: cached.result, touchedVars: new Set(cached.touched.map(([n]) => n)), cacheable: true };
+      return {
+        result: cached.result,
+        touchedVars: new Set(cached.touched.map(([n]) => n)),
+        cacheable: true,
+        timedOutScriptIds: new Set(),
+      };
     }
   }
 
   const fingerprint = { touchedVars: new Set<string>(), cacheable: true };
+  const timedOutScriptIds = new Set<string>();
+  const hasRepeatBack = hasRegexMatchAction(input.scripts, "repeat_back");
+  const behaviorContext = hasRepeatBack
+    ? getDisplayBehaviorContext(input.userId, input.context)
+    : undefined;
   const result = await applyRegexScripts(
     content,
     input.scripts,
@@ -321,7 +336,14 @@ export async function applyDisplayRegex(input: ApplyDisplayRegexInput): Promise<
       resolvedFindPatterns: input.resolvedFindPatterns,
       resolvedReplacements: input.resolvedReplacements,
     },
-    { source: "display_backend", outFingerprint: fingerprint },
+    {
+      source: "display_backend",
+      outFingerprint: fingerprint,
+      onPerformanceIssue: (issue) => {
+        if (issue.timedOut) timedOutScriptIds.add(issue.scriptId);
+      },
+      ...(behaviorContext ?? {}),
+    },
   );
   if (!noCache && fingerprint.cacheable) {
     DISPLAY_REGEX_CACHE.set(cacheKey, {
@@ -337,5 +359,6 @@ export async function applyDisplayRegex(input: ApplyDisplayRegexInput): Promise<
     result,
     touchedVars: fingerprint.touchedVars,
     cacheable: fingerprint.cacheable,
+    timedOutScriptIds,
   };
 }

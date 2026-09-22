@@ -96,6 +96,14 @@
   background: var(--lumiverse-fill-subtle);
 }
 
+.attachPickerItem:disabled {
+  cursor: default;
+}
+
+.attachPickerItem:disabled:hover {
+  background: transparent;
+}
+
 .attachPickerItemActive {
   color: var(--lumiverse-primary);
 }
@@ -161,6 +169,20 @@
 
 .attachPillRemove:hover {
   opacity: 1;
+}
+
+.attachPillDisabled {
+  color: var(--lumiverse-text-dim);
+  background: var(--lumiverse-fill-subtle);
+  border-color: var(--lumiverse-border);
+}
+
+.attachPillState {
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  opacity: 0.7;
 }
 
 .attachHint {

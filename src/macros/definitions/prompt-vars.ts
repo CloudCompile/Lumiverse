@@ -9,10 +9,9 @@
  * {{getvar::name}}, and the {{.name}} shorthand all resolve to the same value.
  *
  * Resolution precedence for {{var::name}}:
- *   1. env.variables.local  — runtime map; reflects schema-seeded values AND any
- *                             in-prompt {{setvar::name::…}} mutations so an
- *                             upstream variable-setter block's writes survive
- *                             downstream reads via either syntax.
+ *   1. env.variables.local  — runtime map; overlaid with the current block's
+ *                             schema-resolved values while that block renders,
+ *                             then updated by any in-block {{setvar::name::…}}.
  *   2. env.extra.promptVariables       — schema-resolved snapshot (belt & braces).
  *   3. env.extra.promptVariableDefaults — creator-declared defaults.
  *   4. "" — undeclared.
@@ -23,10 +22,12 @@
  *   blocks. Unknown keys cause the check to fail. Empty key list returns 'true'.
  *
  * env.extra shape:
- *   promptVariables          — Record<varName, string | number>   flat; last enabled block wins
+ *   promptVariables          — Record<varName, string | number>   flat compatibility view
  *   promptVariablesByBlock   — Record<blockId, Record<varName, string | number>>
- *   promptVariableDefaults   — Record<varName, string | number>   creator-declared defaults
- *   promptVariableSelections — Record<varName, string[]>          multiselect option ids
+ *   promptVariableDefaults   — Record<varName, string | number>   flat compatibility view
+ *   promptVariableDefaultsByBlock — block-scoped creator defaults
+ *   promptVariableSelections — Record<varName, string[]>          flat compatibility view
+ *   promptVariableSelectionsByBlock — block-scoped multiselect option ids
  */
 
 import { registry } from "../MacroRegistry";
@@ -38,14 +39,29 @@ function resolveKey(ctx: MacroExecContext): string | null {
 }
 
 function getValues(ctx: MacroExecContext): Record<string, string | number> {
+  const blockId = ctx.env.promptBlock?.id;
+  const byBlock = ctx.env.extra.promptVariablesByBlock as
+    | Record<string, Record<string, string | number>>
+    | undefined;
+  if (blockId && byBlock?.[blockId]) return byBlock[blockId];
   return (ctx.env.extra.promptVariables ?? {}) as Record<string, string | number>;
 }
 
 function getDefaults(ctx: MacroExecContext): Record<string, string | number> {
+  const blockId = ctx.env.promptBlock?.id;
+  const byBlock = ctx.env.extra.promptVariableDefaultsByBlock as
+    | Record<string, Record<string, string | number>>
+    | undefined;
+  if (blockId && byBlock?.[blockId]) return byBlock[blockId];
   return (ctx.env.extra.promptVariableDefaults ?? {}) as Record<string, string | number>;
 }
 
 function getSelections(ctx: MacroExecContext): Record<string, string[]> {
+  const blockId = ctx.env.promptBlock?.id;
+  const byBlock = ctx.env.extra.promptVariableSelectionsByBlock as
+    | Record<string, Record<string, string[]>>
+    | undefined;
+  if (blockId && byBlock?.[blockId]) return byBlock[blockId];
   return (ctx.env.extra.promptVariableSelections ?? {}) as Record<string, string[]>;
 }
 
@@ -74,7 +90,8 @@ function resolveIsOnQuery(ctx: MacroExecContext, key: string): string {
 export function registerPromptVarMacros(): void {
   // {{var::name}} — configured value, falling back to creator default, then empty string.
   // Reads env.variables.local first so {{var::}} stays in lockstep with {{getvar::}}
-  // and the {{.name}} shorthand — all three resolve against the same backing store.
+  // and the {{.name}} shorthand. Prompt assembly temporarily overlays the
+  // current block's own resolved bucket on this shared backing store.
   //
   // {{var::name::ison::key1,key2,…}} — multiselect-only AND-query. Returns
   // 'true' iff every listed option key is currently selected.

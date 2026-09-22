@@ -6,7 +6,7 @@ import { Toggle } from '@/components/shared/Toggle'
 import { toast } from '@/lib/toast'
 import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
 import { useStore } from '@/store'
-import { stMigrationApi, type ValidateResult, type ScanResult, type MigrationScope, type FileConnectionConfig } from '@/api/st-migration'
+import { stMigrationApi, type ValidateResult, type ScanResult, type MigrationScope, type FileConnectionConfig, type StBackupUploadResult } from '@/api/st-migration'
 import type { TagLibraryImportResult } from '@/types/api'
 import type { MigrationProgressPayload } from '@/types/ws-events'
 import type { AuthUser } from '@/types/store'
@@ -15,6 +15,7 @@ import ConnectionPicker from './ConnectionPicker'
 import styles from './MigrationSettings.module.css'
 
 type Step = 'browse' | 'stUser' | 'scan' | 'target' | 'confirm' | 'progress'
+type SourceMode = 'directory' | 'zip'
 
 export default function MigrationSettings() {
   const { t } = useTranslation('settings')
@@ -32,6 +33,7 @@ export default function MigrationSettings() {
 
   // Wizard state
   const [step, setStep] = useState<Step>(migrationId && !migrationResult && !migrationError ? 'progress' : 'browse')
+  const [sourceMode, setSourceMode] = useState<SourceMode>('directory')
   const [currentPath, setCurrentPath] = useState('')
   const [connection, setConnection] = useState<FileConnectionConfig>({ type: 'local' })
   const [remoteConnected, setRemoteConnected] = useState(true) // local starts "connected"
@@ -41,6 +43,10 @@ export default function MigrationSettings() {
   const [selectedStUser, setSelectedStUser] = useState('')
   const [scanResult, setScanResult] = useState<ScanResult | null>(null)
   const [scanning, setScanning] = useState(false)
+  const [backupFile, setBackupFile] = useState<File | null>(null)
+  const [backupUpload, setBackupUpload] = useState<StBackupUploadResult | null>(null)
+  const [backupUploading, setBackupUploading] = useState(false)
+  const [backupError, setBackupError] = useState<string | null>(null)
   const [scope, setScope] = useState<MigrationScope>({
     characters: true,
     worldBooks: true,
@@ -199,6 +205,24 @@ export default function MigrationSettings() {
     }
   }, [])
 
+  const discardBackupUpload = useCallback((upload: StBackupUploadResult | null) => {
+    if (upload) void stMigrationApi.discardBackup(upload.uploadId).catch(() => {})
+  }, [])
+
+  const handleSourceModeChange = useCallback((mode: SourceMode) => {
+    if (mode === sourceMode) return
+    if (mode === 'directory') {
+      discardBackupUpload(backupUpload)
+      setBackupFile(null)
+      setBackupUpload(null)
+      setBackupError(null)
+    }
+    setSourceMode(mode)
+    setValidation(null)
+    setScanResult(null)
+    setSelectedStUser('')
+  }, [backupUpload, discardBackupUpload, sourceMode])
+
   const handlePathNavigate = useCallback((path: string) => {
     setCurrentPath(path)
     setValidation(null)
@@ -220,7 +244,33 @@ export default function MigrationSettings() {
     }
   }
 
+  const handleBackupFileChange = (file: File | null) => {
+    discardBackupUpload(backupUpload)
+    setBackupFile(file)
+    setBackupUpload(null)
+    setBackupError(null)
+    setScanResult(null)
+  }
+
+  const handleBackupUpload = async () => {
+    if (!backupFile || backupUploading) return
+    setBackupUploading(true)
+    setBackupError(null)
+    try {
+      const result = await stMigrationApi.uploadBackup(backupFile)
+      setBackupUpload(result)
+      setScanResult(result.counts)
+    } catch (err: any) {
+      setBackupUpload(null)
+      setScanResult(null)
+      setBackupError(err?.body?.error || err?.message || t('migration.zipUploadFailed'))
+    } finally {
+      setBackupUploading(false)
+    }
+  }
+
   const getDataDir = (): string => {
+    if (sourceMode === 'zip') return ''
     if (!validation?.basePath) return ''
     const sep = connection.type === 'local' ? '/' : '/'
     if (validation.layout === 'legacy') {
@@ -254,14 +304,16 @@ export default function MigrationSettings() {
 
   const handleExecute = async () => {
     const dataDir = getDataDir()
-    if (!dataDir || !targetUserId) return
+    if ((!dataDir && !backupUpload?.uploadId) || !targetUserId) return
     setExecuting(true)
     try {
       const result = await stMigrationApi.execute({
-        dataDir,
+        ...(sourceMode === 'zip' && backupUpload
+          ? { uploadId: backupUpload.uploadId }
+          : { dataDir }),
         targetUserId,
         scope,
-        connection: connection.type !== 'local' ? connection : undefined,
+        connection: sourceMode === 'directory' && connection.type !== 'local' ? connection : undefined,
       })
       setMigrationStarted(result.migrationId)
       setStep('progress')
@@ -273,10 +325,15 @@ export default function MigrationSettings() {
   }
 
   const handleReset = () => {
+    discardBackupUpload(backupUpload)
     resetMigration()
     setStep('browse')
     setValidation(null)
     setScanResult(null)
+    setBackupFile(null)
+    setBackupUpload(null)
+    setBackupUploading(false)
+    setBackupError(null)
     setTagLibraryFile(null)
     setTagLibraryImporting(false)
     setTagLibraryResult(null)
@@ -312,9 +369,9 @@ export default function MigrationSettings() {
       })
   }, [migrationError, migrationId, migrationResult, tagLibraryError, tagLibraryFile, tagLibraryImporting, tagLibraryResult, targetUserId, t])
 
-  const canProceedFromBrowse = validation?.valid === true
+  const canProceedFromBrowse = sourceMode === 'zip' ? backupUpload !== null : validation?.valid === true
   const canProceedFromStUser = validation?.layout === 'legacy' || !!selectedStUser
-  const needsStUserStep = validation?.layout === 'multi-user' && (validation.stUsers?.length ?? 0) > 1
+  const needsStUserStep = sourceMode === 'directory' && validation?.layout === 'multi-user' && (validation.stUsers?.length ?? 0) > 1
 
   const filteredUsers = users.filter((u) => {
     if (u.id === user?.id) return true
@@ -323,7 +380,9 @@ export default function MigrationSettings() {
     return u.role === 'user'
   })
 
-  const connectionLabel = connection.type === 'local'
+  const connectionLabel = sourceMode === 'zip'
+    ? t('migration.sourceZip')
+    : connection.type === 'local'
     ? t('migration.sourceLocal')
     : connection.type === 'sftp'
       ? t('migration.sourceSftp', { host: (connection as any).host || '...' })
@@ -335,6 +394,10 @@ export default function MigrationSettings() {
         : connection.type === 'google-drive'
           ? t('migration.sourceGoogleDrive')
           : t('migration.sourceDropbox')
+
+  const sourceLabel = sourceMode === 'zip'
+    ? (backupUpload?.fileName || backupFile?.name || t('migration.notSelected'))
+    : getDataDir()
 
   const scopeLabels: Record<keyof MigrationScope, string> = {
     characters: t('migration.scopeCharacters'),
@@ -382,52 +445,114 @@ export default function MigrationSettings() {
         {t('migration.browseSubtitle')}
       </p>
 
-      <ConnectionPicker value={connection} onChange={handleConnectionChange} onConnected={handleRemoteConnected} />
-
-      {remoteConnected && (
-        <DirectoryBrowser
-          key={connection.type === 'local' ? 'local' : `${connection.type}-connected`}
-          onNavigate={handlePathNavigate}
-          onShapeChange={setLooksLikeST}
-          connection={connection}
-        />
-      )}
-
-      <div className={styles.actions}>
-        <button type="button" className={styles.btn} onClick={handleValidate} disabled={!currentPath || validating}>
-          {validating ? <Spinner size={12} /> : null}
-          {t('migration.validate')}
+      <div className={styles.sourceModePicker}>
+        <button
+          type="button"
+          className={`${styles.sourceModeButton} ${sourceMode === 'directory' ? styles.sourceModeButtonActive : ''}`}
+          aria-pressed={sourceMode === 'directory'}
+          disabled={backupUploading}
+          onClick={() => handleSourceModeChange('directory')}
+        >
+          {t('migration.sourceDirectoryOption')}
+        </button>
+        <button
+          type="button"
+          className={`${styles.sourceModeButton} ${sourceMode === 'zip' ? styles.sourceModeButtonActive : ''}`}
+          aria-pressed={sourceMode === 'zip'}
+          disabled={backupUploading}
+          onClick={() => handleSourceModeChange('zip')}
+        >
+          {t('migration.sourceZipOption')}
         </button>
       </div>
 
-      {looksLikeST && !validation && !validating && (
-        <div className={styles.validHint}>
-          <CheckCircle size={14} />
-          {t('migration.looksLikeFolder')}
-        </div>
-      )}
+      {sourceMode === 'directory' ? (
+        <>
+          <ConnectionPicker value={connection} onChange={handleConnectionChange} onConnected={handleRemoteConnected} />
 
-      {validating && (
-        <div className={styles.validChecking}>
-          <Spinner size={14} />
-          {t('migration.validatingMessage')}
-        </div>
-      )}
-      {validation && !validating && validation.valid && (
-        <div className={styles.validGood}>
-          <CheckCircle size={14} />
-          {t('migration.validFound', {
-            layout: validation.layout,
-            users: validation.stUsers && validation.stUsers.length > 0
-              ? t('migration.validFoundUsers', { count: validation.stUsers.length })
-              : '',
-          })}
-        </div>
-      )}
-      {validation && !validating && !validation.valid && (
-        <div className={styles.validBad}>
-          <XCircle size={14} />
-          {validation.error || t('migration.invalidDirectory')}
+          {remoteConnected && (
+            <DirectoryBrowser
+              key={connection.type === 'local' ? 'local' : `${connection.type}-connected`}
+              onNavigate={handlePathNavigate}
+              onShapeChange={setLooksLikeST}
+              connection={connection}
+            />
+          )}
+
+          <div className={styles.actions}>
+            <button type="button" className={styles.btn} onClick={handleValidate} disabled={!currentPath || validating}>
+              {validating ? <Spinner size={12} /> : null}
+              {t('migration.validate')}
+            </button>
+          </div>
+
+          {looksLikeST && !validation && !validating && (
+            <div className={styles.validHint}>
+              <CheckCircle size={14} />
+              {t('migration.looksLikeFolder')}
+            </div>
+          )}
+
+          {validating && (
+            <div className={styles.validChecking}>
+              <Spinner size={14} />
+              {t('migration.validatingMessage')}
+            </div>
+          )}
+          {validation && !validating && validation.valid && (
+            <div className={styles.validGood}>
+              <CheckCircle size={14} />
+              {t('migration.validFound', {
+                layout: validation.layout,
+                users: validation.stUsers && validation.stUsers.length > 0
+                  ? t('migration.validFoundUsers', { count: validation.stUsers.length })
+                  : '',
+              })}
+            </div>
+          )}
+          {validation && !validating && !validation.valid && (
+            <div className={styles.validBad}>
+              <XCircle size={14} />
+              {validation.error || t('migration.invalidDirectory')}
+            </div>
+          )}
+        </>
+      ) : (
+        <div className={styles.zipUploadCard}>
+          <div className={styles.uploadHeader}>
+            <span className={styles.selectLabel}>{t('migration.zipUploadLabel')}</span>
+            <span className={styles.uploadHint}>{t('migration.zipUploadHint')}</span>
+          </div>
+          <input
+            type="file"
+            accept="application/zip,.zip"
+            className={styles.fileInput}
+            disabled={backupUploading}
+            onChange={(event) => handleBackupFileChange(event.target.files?.[0] ?? null)}
+          />
+          <div className={styles.actions}>
+            <button
+              type="button"
+              className={styles.btn}
+              disabled={!backupFile || backupUploading || backupUpload !== null}
+              onClick={handleBackupUpload}
+            >
+              {backupUploading ? <Spinner size={12} /> : null}
+              {backupUploading ? t('migration.zipProcessing') : t('migration.zipUploadAction')}
+            </button>
+          </div>
+          {backupUpload && (
+            <div className={styles.validGood}>
+              <CheckCircle size={14} />
+              {t('migration.zipReady', { name: backupUpload.fileName })}
+            </div>
+          )}
+          {backupError && (
+            <div className={styles.validBad}>
+              <XCircle size={14} />
+              {backupError}
+            </div>
+          )}
         </div>
       )}
 
@@ -440,7 +565,7 @@ export default function MigrationSettings() {
             if (needsStUserStep) {
               setStep('stUser')
             } else {
-              handleScan()
+              if (sourceMode === 'directory') handleScan()
               setStep('scan')
             }
           }}
@@ -624,7 +749,7 @@ export default function MigrationSettings() {
           </div>
           <div className={styles.summaryRow}>
             <span className={styles.summaryLabel}>{t('migration.source')}</span>
-            <span className={styles.summaryValue}>{getDataDir()}</span>
+            <span className={styles.summaryValue}>{sourceLabel}</span>
           </div>
           <div className={styles.summaryRow}>
             <span className={styles.summaryLabel}>{t('migration.importing')}</span>

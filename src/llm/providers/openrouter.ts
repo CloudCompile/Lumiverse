@@ -60,6 +60,12 @@ const _modelCache = new Map<string, { data: OpenRouterModelInfo[]; fetchedAt: nu
 let _providerListCache: { data: OpenRouterProviderEntry[]; fetchedAt: number } | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+/** Drop provider metadata that can be fetched again on demand. */
+export function clearOpenRouterMetadataCache(): void {
+  _modelCache.clear();
+  _providerListCache = null;
+}
+
 export class OpenRouterProvider extends OpenAICompatibleProvider {
   readonly name = "openrouter";
   readonly displayName = "OpenRouter";

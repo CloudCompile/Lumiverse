@@ -1,6 +1,11 @@
 {
   "appName": "Lumiverso",
   "home": "Home",
+  "safeTheme": {
+    "url": "La modalità tema sicuro è attiva per questa sessione del browser. Il CSS personalizzato e gli override dei componenti sono temporaneamente disattivati; ricarica senza ?safe-theme=1 per ripristinarli.",
+    "server": "La modalità tema sicuro è attiva per questo server. Il CSS personalizzato e gli override dei componenti sono temporaneamente disattivati; rimuovi LUMIVERSE_SAFE_THEME e riavvia per ripristinarli.",
+    "both": "La modalità tema sicuro è attiva sia dall’URL sia dal server. Il CSS personalizzato e gli override dei componenti sono temporaneamente disattivati."
+  },
   "actions": {
     "save": "Salva",
     "cancel": "Annulla",
@@ -52,9 +57,17 @@
     "px": "{{count}}px"
   },
   "toast": {
+    "desktopDownloadTitle": "Salvataggio download",
+    "desktopDownloadStarted": "Salvataggio di {{fileName}}…",
+    "desktopDownloadComplete": "{{fileName}} salvato",
+    "desktopDownloadFailed": "Impossibile salvare {{fileName}}",
     "operatorUpdateTitle": "Aggiornamento disponibile",
     "operatorUpdatesAvailable": "{{count}} aggiornamento disponibile{{suffix}}",
     "operatorUpdatesAvailable_plural": "{{count}} aggiornamenti disponibili{{suffix}}",
+    "extensionUpdateTitle": "Aggiornamento estensione disponibile",
+    "extensionUpdatesAvailable": "{{count}} aggiornamento estensione disponibile{{suffix}}",
+    "extensionUpdatesAvailable_plural": "{{count}} aggiornamenti estensioni disponibili{{suffix}}",
+    "viewExtensions": "Visualizza estensioni",
     "extensionErrorTitle": "Errore estensione",
     "extensionsNoneToUpdate": "Nessuna estensione da aggiornare",
     "extensionsUpdated": "Estensione {{count}} aggiornata",

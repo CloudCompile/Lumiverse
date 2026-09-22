@@ -5,7 +5,14 @@ import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
 import { useLongPress } from '@/hooks/useLongPress'
+import { getLiveRootRecordExact } from '@/lib/spindle/live-root-registry'
 import { scheduleSpindleDomTask } from '@/lib/spindle/browser-scheduler'
+import { getUiScale, layoutViewportSize, toLayoutDelta } from '@/lib/uiScale'
+import {
+  FLOAT_WIDGET_VIEWPORT_PADDING,
+  resolveFloatWidgetSize,
+  resolveFloatWidgetStyle,
+} from './spindle-float-widget-layout'
 import styles from './SpindleFloatWidget.module.css'
 
 interface Props {
@@ -18,50 +25,72 @@ export default function SpindleFloatWidget({ widget }: Props) {
   const setPlacementHidden = useStore((s) => s.setPlacementHidden)
   const isMobile = useIsMobile()
 
-  const dragging = useRef(false)
-  const offset = useRef({ x: 0, y: 0 })
+  const dragCleanup = useRef<(() => void) | null>(null)
+  const suppressDragClick = useRef(false)
   const contentHostRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
+  const [viewport, setViewport] = useState(() => layoutViewportSize())
 
-  const size = isMobile
-    ? { width: Math.min(widget.width, 40), height: Math.min(widget.height, 40) }
-    : { width: widget.width, height: widget.height }
+  const size = useMemo(() => resolveFloatWidgetSize(
+    isMobile,
+    { width: widget.width, height: widget.height },
+    viewport,
+  ), [isMobile, viewport, widget.height, widget.width])
 
   useEffect(() => {
-    setPos({ x: widget.x, y: widget.y })
-  }, [widget.x, widget.y])
+    const updateViewport = () => {
+      const next = layoutViewportSize()
+      setViewport((prev) => prev.width === next.width && prev.height === next.height ? prev : next)
+    }
+    const observer = new MutationObserver(updateViewport)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
+    window.addEventListener('resize', updateViewport)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateViewport)
+    }
+  }, [])
+
+  useEffect(() => {
+    const pad = FLOAT_WIDGET_VIEWPORT_PADDING
+    setPos({
+      x: Math.max(pad, Math.min(widget.x, viewport.width - size.width - pad)),
+      y: Math.max(pad, Math.min(widget.y, viewport.height - size.height - pad)),
+    })
+  }, [size.height, size.width, viewport.height, viewport.width, widget.x, widget.y])
 
   useEffect(() => {
     const host = contentHostRef.current
     if (!host) return
 
     return scheduleSpindleDomTask(() => {
+      if (!getLiveRootRecordExact(widget.extensionId, widget.root)) return
       if (!host.isConnected) return
       if (!host.contains(widget.root)) {
         host.replaceChildren(widget.root)
       }
     }, { phase: 'paint' })
-  }, [widget.root])
+  }, [widget.extensionId, widget.root])
 
   const clampPos = useCallback(
     (x: number, y: number) => {
-      const pad = 12
+      const pad = FLOAT_WIDGET_VIEWPORT_PADDING
       return {
-        x: Math.max(pad, Math.min(x, window.innerWidth - size.width - pad)),
-        y: Math.max(pad, Math.min(y, window.innerHeight - size.height - pad)),
+        x: Math.max(pad, Math.min(x, viewport.width - size.width - pad)),
+        y: Math.max(pad, Math.min(y, viewport.height - size.height - pad)),
       }
     },
-    [size.width, size.height]
+    [size.width, size.height, viewport.height, viewport.width]
   )
 
   const snapToEdge = useCallback(
     (x: number, y: number) => {
       if (!widget.snapToEdge) return { x, y }
       const snapDist = 24
-      const pad = 12
-      const vw = window.innerWidth
-      const vh = window.innerHeight
+      const pad = FLOAT_WIDGET_VIEWPORT_PADDING
+      const vw = viewport.width
+      const vh = viewport.height
       let sx = x, sy = y
       if (x < snapDist) sx = pad
       else if (x + size.width > vw - snapDist) sx = vw - size.width - pad
@@ -69,44 +98,88 @@ export default function SpindleFloatWidget({ widget }: Props) {
       else if (y + size.height > vh - snapDist) sy = vh - size.height - pad
       return { x: sx, y: sy }
     },
-    [widget.snapToEdge, size.width, size.height]
+    [widget.snapToEdge, size.width, size.height, viewport.height, viewport.width]
   )
 
   const isFullscreen = widget.fullscreen ?? false
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (isFullscreen || e.button !== 0) return
-    dragging.current = true
-    offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y }
-    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
-    e.preventDefault()
-  }, [pos, isFullscreen])
+  useEffect(() => () => { dragCleanup.current?.() }, [widget.visible, isFullscreen, widget.root])
 
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current || isFullscreen) return
-    const raw = { x: e.clientX - offset.current.x, y: e.clientY - offset.current.y }
-    setPos(clampPos(raw.x, raw.y))
-  }, [clampPos, isFullscreen])
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    suppressDragClick.current = false
+    if (isFullscreen || e.defaultPrevented || e.button !== 0 || dragCleanup.current) return
+    // Editing/navigation gestures belong to the extension. Buttons and custom
+    // click targets can still be dragged, but an ordinary press stays untouched.
+    const surface = e.currentTarget
+    for (const target of e.nativeEvent.composedPath()) {
+      if (target === surface) break
+      if (target instanceof Element && target.matches(
+        'input, textarea, select, option, a[href], [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="textbox"], [data-spindle-float-resize-handle]',
+      )) return
+    }
+    const pointerId = e.pointerId
+    const startX = e.clientX, startY = e.clientY
+    const scale = getUiScale()
+    let moved = false
+    let position = pos
 
-  const handlePointerUp = useCallback(() => {
-    if (!dragging.current || isFullscreen) return
-    dragging.current = false
-    let snapped = { x: 0, y: 0 }
-    setPos((prev) => {
-      snapped = snapToEdge(prev.x, prev.y)
-      return snapped
-    })
-    // Defer store update out of React's state-computation phase to avoid
-    // triggering a SpindleUIManager re-render while this component is mid-render.
-    requestAnimationFrame(() => {
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', onBlur)
+      surface.removeEventListener('lostpointercapture', onLostCapture)
+      dragCleanup.current = null
+      if (surface.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId)
+    }
+    const onMove = (event: PointerEvent) => {
+      if (event.pointerId !== pointerId) return
+      const dx = event.clientX - startX, dy = event.clientY - startY
+      // Slop is measured in rendered pixels, independently of UI zoom.
+      if (!moved) {
+        if (Math.hypot(dx, dy) < 4) return
+        moved = true
+        suppressDragClick.current = true
+        surface.setPointerCapture(pointerId)
+      }
+      const delta = toLayoutDelta(dx, dy, scale)
+      position = clampPos(pos.x + delta.x, pos.y + delta.y)
+      setPos(position)
+    }
+    const finish = (event?: PointerEvent) => {
+      if (event && event.pointerId !== pointerId) return
+      cleanup()
+      if (!moved) return
+      if (event?.type === 'pointerup') {
+        const delta = toLayoutDelta(event.clientX - startX, event.clientY - startY, scale)
+        position = clampPos(pos.x + delta.x, pos.y + delta.y)
+      }
+      const snapped = snapToEdge(position.x, position.y)
+      setPos(snapped)
       updateFloatWidget(widget.id, snapped)
-      window.dispatchEvent(
-        new CustomEvent('spindle:float-drag-end', {
-          detail: { widgetId: widget.id, ...snapped },
-        })
-      )
-    })
-  }, [snapToEdge, updateFloatWidget, widget.id, isFullscreen])
+      window.dispatchEvent(new CustomEvent('spindle:float-drag-end', {
+        detail: { widgetId: widget.id, ...snapped },
+      }))
+    }
+    const onBlur = () => finish()
+    const onLostCapture = (event: PointerEvent) => {
+      // Touch may transfer implicit capture from a child to the drag surface.
+      if (event.target === surface) finish(event)
+    }
+    dragCleanup.current = cleanup
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+    window.addEventListener('blur', onBlur)
+    surface.addEventListener('lostpointercapture', onLostCapture)
+  }, [pos, isFullscreen, clampPos, snapToEdge, updateFloatWidget, widget.id])
+
+  const handleClickCapture = useCallback((e: React.MouseEvent) => {
+    if (!suppressDragClick.current || e.detail === 0) return
+    suppressDragClick.current = false
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
 
   const longPress = useLongPress({
     onLongPress: (pos) => setContextMenu(pos),
@@ -133,12 +206,13 @@ export default function SpindleFloatWidget({ widget }: Props) {
       key: 'reset',
       label: t('resetPosition'),
       onClick: () => {
-        const pad = 12
+        const pad = FLOAT_WIDGET_VIEWPORT_PADDING
         const resetWidth = widget.defaultWidth
         const resetHeight = widget.defaultHeight
+        const bounds = layoutViewportSize()
         const reset = {
-          x: Math.max(pad, Math.min(widget.defaultX, window.innerWidth - resetWidth - pad)),
-          y: Math.max(pad, Math.min(widget.defaultY, window.innerHeight - resetHeight - pad)),
+          x: Math.max(pad, Math.min(widget.defaultX, bounds.width - resetWidth - pad)),
+          y: Math.max(pad, Math.min(widget.defaultY, bounds.height - resetHeight - pad)),
           width: resetWidth,
           height: resetHeight,
         }
@@ -160,9 +234,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
 
   if (!widget.visible) return null
 
-  const widgetStyle = isFullscreen
-    ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
-    : { left: pos.x, top: pos.y, width: size.width, height: size.height }
+  const widgetStyle = resolveFloatWidgetStyle(isFullscreen, pos, size)
 
   return (
     <>
@@ -171,8 +243,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
         style={widgetStyle}
         title={widget.tooltip}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
+        onClickCapture={handleClickCapture}
         {...longPress}
         onTouchStart={(e) => { if (!widget.root.contains(e.target as Node)) longPress.onTouchStart(e) }}
         onContextMenu={handleContextMenu}

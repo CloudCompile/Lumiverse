@@ -2,8 +2,7 @@ import type { Context, Next } from "hono";
 import { auth } from "./index";
 import { getDb } from "../db/connection";
 import { getFirstUserId } from "./seed";
-import { authLockoutService } from "../services/auth-lockout.service";
-import { getClientIp } from "../utils/client-ip";
+import { forwardSessionCookies } from "./session-cookies";
 
 // Augment Hono's context variables
 declare module "hono" {
@@ -30,29 +29,21 @@ declare module "hono" {
 }
 
 export async function requireAuth(c: Context, next: Next) {
-  const clientId = getClientIp(c);
-  const session = await auth.api.getSession({
+  const result = await auth.api.getSession({
     headers: c.req.raw.headers,
+    returnHeaders: true,
   });
+  const session = result.response;
+  forwardSessionCookies(c, result.headers);
 
   if (!session) {
-    const result = authLockoutService.recordFailure(clientId, "unauthorized", {
-      method: c.req.method,
-      path: c.req.path,
-      origin: c.req.header("origin") || undefined,
-      host: c.req.header("host") || undefined,
-    });
-    if (result.lockout) {
-      c.header("Retry-After", String(result.lockout.retryAfterMs / 1000));
-      return c.json(
-        authLockoutService.buildPayload(result.lockout, "Too many unauthorized requests. Try again later."),
-        429,
-      );
-    }
-    return c.json({ error: "Unauthorized" }, 401);
+    // Missing and expired browser sessions are normal lifecycle events. They
+    // must not feed the IP lockout counter: a desktop client can otherwise
+    // make several background requests at once and lock out its own address
+    // before it has a chance to sign in again. Credential attempts are still
+    // throttled and counted by the sign-in middleware in app.ts.
+    return c.json({ error: "Unauthorized", code: "SESSION_EXPIRED" }, 401);
   }
-
-  authLockoutService.recordSuccess(clientId, "unauthorized");
 
   // BetterAuth's admin plugin adds the `role` field to the user schema, but
   // getSession() sometimes omits it (adapter/transform quirks with plugin-

@@ -1,18 +1,17 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 
-import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldAlert, Globe, RotateCcw, Package, Trash2, PanelRightOpen, PanelRightClose, Image as ImageIcon } from 'lucide-react'
+import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldAlert, Globe, RotateCcw, Package, Trash2, PanelRightOpen, PanelRightClose, Columns2, Maximize2, ArrowLeftRight, Image as ImageIcon } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
-import { themeAssetsApi } from '@/api/theme-assets'
+import useIsMobile from '@/hooks/useIsMobile'
+import { CUSTOM_CSS_DOCK_BREAKPOINT } from '@/lib/custom-css-dock'
 import { useStore } from '@/store'
+import { useThemePackActions } from '@/hooks/useThemePackActions'
 import { validateCSS, sanitizeCSS } from '@/lib/cssValidator'
 import { validateTSX } from '@/lib/componentTranspiler'
 import { CSS_MODULE_REGISTRY, generateSelector, type CSSModuleEntry } from '@/lib/cssModuleRegistry'
 import { getComponentTemplate, type PropDoc } from '@/lib/componentTemplates'
-import { createThemePack, exportThemePack, importThemePack, packSummary, type ThemePackAsset } from '@/lib/themePack'
-import { disableImportedThemePackTsx } from '@/lib/componentOverrideSecurity'
 import { toast } from '@/lib/toast'
-import { generateUUID } from '@/lib/uuid'
 import { css, cssLanguage } from '@codemirror/lang-css'
 import { javascript, javascriptLanguage } from '@codemirror/lang-javascript'
 import { type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
@@ -23,6 +22,7 @@ import CssVariablesReference from './CssVariablesReference'
 import ComponentCssReference from './ComponentCssReference'
 import styles from './CustomCSSModal.module.css'
 import clsx from 'clsx'
+import { clearSearchOnEscape } from '@/lib/clearableSearch'
 
 type EditorTab = 'css' | 'tsx'
 
@@ -137,25 +137,29 @@ function createCssThemeVarsCompletionSource() {
   }
 }
 
-async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer()
-  let binary = ''
-  const bytes = new Uint8Array(buffer)
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i])
-  return btoa(binary)
+type CustomCSSEditorPresentation = 'modal' | 'dock'
+
+interface CustomCSSEditorProps {
+  onClose: () => void
+  presentation?: CustomCSSEditorPresentation
+  dockSide?: 'left' | 'right'
+  onDock?: () => void
+  onUndock?: () => void
+  onSwapDockSide?: () => void
 }
 
-function base64ToFile(dataBase64: string, filename: string, mimeType: string): File {
-  const binary = atob(dataBase64)
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-  return new File([bytes], filename, { type: mimeType })
-}
-
-export default function CustomCSSModal() {
+export function CustomCSSEditor({
+  onClose,
+  presentation = 'modal',
+  dockSide,
+  onDock,
+  onUndock,
+  onSwapDockSide,
+}: CustomCSSEditorProps) {
   const { t } = useTranslation('modals', { keyPrefix: 'customCss' })
   const { t: tc } = useTranslation('common')
+  const dockUnavailable = useIsMobile(CUSTOM_CSS_DOCK_BREAKPOINT)
 
-  const closeModal = useStore((s) => s.closeModal)
   const customCSS = useStore((s) => s.customCSS)
   const setCustomCSS = useStore((s) => s.setCustomCSS)
   const ensureThemeBundleId = useStore((s) => s.ensureThemeBundleId)
@@ -165,17 +169,17 @@ export default function CustomCSSModal() {
   const setComponentTSX = useStore((s) => s.setComponentTSX)
   const toggleComponentOverride = useStore((s) => s.toggleComponentOverride)
   const resetAllOverrides = useStore((s) => s.resetAllOverrides)
-  const applyThemePack = useStore((s) => s.applyThemePack)
-  const addSavedTheme = useStore((s) => s.addSavedTheme)
-  const theme = useStore((s) => s.theme)
   const openModal = useStore((s) => s.openModal)
 
-  const [search, setSearch] = useState('')
-  const [selected, setSelected] = useState<string>(GLOBAL_KEY)
-  const [activeTab, setActiveTab] = useState<EditorTab>('css')
-  const [sidebarOpen, setSidebarOpen] = useState(true)
-  const [showReference, setShowReference] = useState(false)
-  const [showAssets, setShowAssets] = useState(false)
+  const {
+    search,
+    selected,
+    activeTab,
+    sidebarOpen,
+    showReference,
+    showAssets,
+  } = useStore((s) => s.customCSSEditorSession)
+  const setCustomCSSEditorSession = useStore((s) => s.setCustomCSSEditorSession)
   const cssEditorRef = useRef<CodeEditorHandle | null>(null)
 
   const isGlobal = selected === GLOBAL_KEY
@@ -230,23 +234,30 @@ export default function CustomCSSModal() {
   }, [isGlobal, selected, setComponentTSX])
 
   const handleSelect = useCallback((key: string) => {
-    setSelected(key)
-    // Auto-switch to CSS tab when selecting Global (no TSX for global)
-    if (key === GLOBAL_KEY && activeTab === 'tsx') setActiveTab('css')
-  }, [activeTab])
+    setCustomCSSEditorSession({
+      selected: key,
+      ...(key === GLOBAL_KEY && activeTab === 'tsx' ? { activeTab: 'css' } : {}),
+    })
+  }, [activeTab, setCustomCSSEditorSession])
 
   // ── Validation ──
-  const validation = useMemo(() => {
-    if (activeTab === 'css') {
-      const src = currentCSS.trim()
-      if (!src) return { status: 'empty' as const }
-      const result = validateCSS(sanitizeCSS(src))
-      return result.valid ? { status: 'valid' as const } : { status: 'error' as const, error: result.error }
+  const [validation, setValidation] = useState<{ status: 'empty' | 'valid' | 'error'; error?: string }>({ status: 'empty' })
+
+  useEffect(() => {
+    async function runValidation() {
+      if (activeTab === 'css') {
+        const src = currentCSS.trim()
+        if (!src) { setValidation({ status: 'empty' }); return }
+        const result = validateCSS(sanitizeCSS(src))
+        setValidation(result.valid ? { status: 'valid' } : { status: 'error', error: result.error })
+        return
+      }
+      const src = currentTSX.trim()
+      if (!src) { setValidation({ status: 'empty' }); return }
+      const result = await validateTSX(src)
+      setValidation(result.valid ? { status: 'valid' } : { status: 'error', error: result.error })
     }
-    const src = currentTSX.trim()
-    if (!src) return { status: 'empty' as const }
-    const result = validateTSX(src)
-    return result.valid ? { status: 'valid' as const } : { status: 'error' as const, error: result.error }
+    runValidation()
   }, [activeTab, currentCSS, currentTSX])
 
   const byteCount = useMemo(
@@ -255,23 +266,6 @@ export default function CustomCSSModal() {
   )
 
   const assetBundleId = customCSS.bundleId
-
-  const buildPackAssets = useCallback(async (): Promise<ThemePackAsset[]> => {
-    const bundleId = customCSS.bundleId
-    if (!bundleId) return []
-    const assets = await themeAssetsApi.list(bundleId)
-    return Promise.all(assets.map(async (asset) => {
-      const blob = await themeAssetsApi.getBlob(asset.id)
-      return {
-        slug: asset.slug,
-        originalFilename: asset.original_filename,
-        mimeType: asset.mime_type,
-        tags: asset.tags,
-        metadata: asset.metadata || {},
-        dataBase64: await blobToBase64(blob),
-      }
-    }))
-  }, [customCSS.bundleId])
 
   // ── Export / Import ──
   const handleExport = useCallback(() => {
@@ -303,54 +297,7 @@ export default function CustomCSSModal() {
   }, [activeTab, handleCSSChange, handleTSXChange])
 
   // ── Pack-level export / import / reset ──
-  const handleExportPack = useCallback(async () => {
-    try {
-      const assets = await buildPackAssets()
-      const pack = createThemePack(theme, customCSS, componentOverrides, assets, {
-        name: theme?.name || t('customThemeName'),
-      })
-      exportThemePack(pack)
-      toast.success(t('exportSuccess'))
-    } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || t('exportFailed'))
-    }
-  }, [buildPackAssets, theme, customCSS, componentOverrides])
-
-  const handleImportPack = useCallback(async () => {
-    const result = await importThemePack()
-    if (!result) {
-      toast.info(t('importCancelled'))
-      return
-    }
-    if (result.error) {
-      toast.error(result.error.message)
-      return
-    }
-    const imported = disableImportedThemePackTsx(result.pack)
-    const pack = imported.pack
-    const localBundleId = generateUUID()
-    const localizedPack = { ...pack, bundleId: localBundleId }
-    try {
-      for (const asset of localizedPack.assets) {
-        const file = base64ToFile(asset.dataBase64, asset.originalFilename, asset.mimeType)
-        await themeAssetsApi.upload(file, {
-          bundleId: localBundleId,
-          slug: asset.slug,
-          tags: asset.tags,
-          metadata: asset.metadata,
-        })
-      }
-      const summary = packSummary(localizedPack)
-      applyThemePack(localizedPack)
-      addSavedTheme({ kind: 'pack', name: pack.name || t('importedThemeName'), pack: localizedPack })
-      const disabledNote = imported.disabledCount > 0
-        ? t('tsxDisabledNote', { count: imported.disabledCount })
-        : ''
-      toast.success(t('appliedFromBundle', { name: pack.name, summary: summary.join(', ') }) + disabledNote)
-    } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || t('importFailed'))
-    }
-  }, [applyThemePack, addSavedTheme])
+  const { handleExportPack, handleImportPack } = useThemePackActions()
 
   const handleResetAll = useCallback(() => {
     openModal('confirm', {
@@ -360,12 +307,14 @@ export default function CustomCSSModal() {
       confirmText: t('resetConfirm'),
       onConfirm: () => {
         resetAllOverrides()
-        setSelected(GLOBAL_KEY)
-        setActiveTab('css')
+        setCustomCSSEditorSession({
+          selected: GLOBAL_KEY,
+          activeTab: 'css',
+        })
         toast.info(t('overridesCleared'))
       },
     })
-  }, [openModal, resetAllOverrides, t])
+  }, [openModal, resetAllOverrides, setCustomCSSEditorSession, t])
 
   // ── Template for selected component ──
   const componentTemplate = useMemo(
@@ -414,14 +363,7 @@ export default function CustomCSSModal() {
   }, [activeTab, isGlobal, componentTemplate])
 
   return (
-    <ModalShell
-      isOpen
-      onClose={closeModal}
-      maxWidth="92vw"
-      maxHeight="88vh"
-      style={{ width: '1100px', height: '720px', padding: 0, overflow: 'hidden' }}
-    >
-      <div className={styles.shell}>
+    <div className={clsx(styles.shell, presentation === 'dock' && styles.dockShell)}>
         {/* ── Unified header ──────────────────────────────────── */}
         <div className={styles.header}>
           <div className={styles.headerLeft}>
@@ -461,7 +403,40 @@ export default function CustomCSSModal() {
             <button type="button" className={clsx(styles.actionBtn, styles.dangerBtn)} onClick={handleResetAll} title={t('resetAll')}>
               <Trash2 size={12} />
             </button>
-            <button type="button" className={styles.closeBtn} onClick={closeModal} aria-label={tc('actions.close')}>
+            {!dockUnavailable && presentation === 'modal' && onDock && (
+              <button
+                type="button"
+                className={styles.closeBtn}
+                onClick={onDock}
+                title={t('dock')}
+                aria-label={t('dock')}
+              >
+                <Columns2 size={16} />
+              </button>
+            )}
+            {!dockUnavailable && presentation === 'dock' && dockSide && onSwapDockSide && (
+              <button
+                type="button"
+                className={styles.closeBtn}
+                onClick={onSwapDockSide}
+                title={dockSide === 'left' ? t('moveDockRight') : t('moveDockLeft')}
+                aria-label={dockSide === 'left' ? t('moveDockRight') : t('moveDockLeft')}
+              >
+                <ArrowLeftRight size={16} />
+              </button>
+            )}
+            {!dockUnavailable && presentation === 'dock' && onUndock && (
+              <button
+                type="button"
+                className={styles.closeBtn}
+                onClick={onUndock}
+                title={t('undock')}
+                aria-label={t('undock')}
+              >
+                <Maximize2 size={16} />
+              </button>
+            )}
+            <button type="button" className={styles.closeBtn} onClick={onClose} aria-label={tc('actions.close')}>
               <X size={16} />
             </button>
           </div>
@@ -471,7 +446,7 @@ export default function CustomCSSModal() {
         <button
           type="button"
           className={styles.mobileToggle}
-          onClick={() => setSidebarOpen(!sidebarOpen)}
+          onClick={() => setCustomCSSEditorSession({ sidebarOpen: !sidebarOpen })}
         >
           {sidebarOpen ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
           {sidebarOpen ? t('hideComponents') : t('showComponents', { count: CSS_MODULE_REGISTRY.length })}
@@ -481,12 +456,20 @@ export default function CustomCSSModal() {
         <div className={styles.body}>
           {/* ── Sidebar ────────────────────────────────────────── */}
           <div className={clsx(styles.sidebar, !sidebarOpen && styles.sidebarCollapsed)}>
-            <input
-              className={styles.searchInput}
-              placeholder={t('searchPlaceholder')}
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
+            <div className={styles.sidebarSearch}>
+              <input
+                className={styles.searchInput}
+                placeholder={t('searchPlaceholder')}
+                value={search}
+                onChange={(e) => setCustomCSSEditorSession({ search: e.target.value })}
+                onKeyDown={(e) => clearSearchOnEscape(e, search, () => setCustomCSSEditorSession({ search: '' }))}
+              />
+              {search && (
+                <button type="button" className={styles.searchClear} onClick={() => setCustomCSSEditorSession({ search: '' })} aria-label={tc('actions.clear')}>
+                  <X size={13} />
+                </button>
+              )}
+            </div>
             <div className={styles.componentList}>
               {/* Global entry */}
               {(!search.trim() || 'global'.includes(search.toLowerCase())) && (
@@ -549,7 +532,7 @@ export default function CustomCSSModal() {
                 <button
                   type="button"
                   className={clsx(styles.tab, activeTab === 'css' && styles.tabActive)}
-                  onClick={() => setActiveTab('css')}
+                  onClick={() => setCustomCSSEditorSession({ activeTab: 'css' })}
                 >
                   <Paintbrush size={13} className={styles.tabIcon} />
                   {t('cssTab')}
@@ -558,7 +541,7 @@ export default function CustomCSSModal() {
                   <button
                     type="button"
                     className={clsx(styles.tab, activeTab === 'tsx' && styles.tabActive)}
-                    onClick={() => setActiveTab('tsx')}
+                    onClick={() => setCustomCSSEditorSession({ activeTab: 'tsx' })}
                   >
                     <Code2 size={13} className={styles.tabIcon} />
                     {t('componentTab')}
@@ -570,7 +553,7 @@ export default function CustomCSSModal() {
                   <button 
                     type="button" 
                     className={clsx(styles.panelToggleBtn, showAssets && styles.panelToggleBtnActive)}
-                    onClick={() => setShowAssets(!showAssets)}
+                    onClick={() => setCustomCSSEditorSession({ showAssets: !showAssets })}
                   >
                     <ImageIcon size={13} /> {t('assets')}
                   </button>
@@ -578,7 +561,7 @@ export default function CustomCSSModal() {
                 <button 
                   type="button" 
                   className={clsx(styles.panelToggleBtn, showReference && styles.panelToggleBtnActive)}
-                  onClick={() => setShowReference(!showReference)}
+                  onClick={() => setCustomCSSEditorSession({ showReference: !showReference })}
                 >
                   {showReference ? <PanelRightClose size={13} /> : <PanelRightOpen size={13} />}
                   {t('reference')}
@@ -586,7 +569,7 @@ export default function CustomCSSModal() {
               </div>
             </div>
 
-            {/* TSX sandbox notice */}
+            {/* TSX sandbox/additive-edit notice */}
             {activeTab === 'tsx' && !isGlobal && (
               <div className={styles.tsxNotice}>
                 <ShieldAlert size={14} className={styles.tsxNoticeIcon} />
@@ -644,7 +627,26 @@ export default function CustomCSSModal() {
             </div>
           </div>
         </div>
-      </div>
+    </div>
+  )
+}
+
+export default function CustomCSSModal() {
+  const closeModal = useStore((s) => s.closeModal)
+  const openCustomCSSDock = useStore((s) => s.openCustomCSSDock)
+
+  return (
+    <ModalShell
+      isOpen
+      onClose={closeModal}
+      maxWidth="92vw"
+      maxHeight="88vh"
+      style={{ width: '1100px', height: '720px', padding: 0, overflow: 'hidden' }}
+    >
+      <CustomCSSEditor
+        onClose={closeModal}
+        onDock={openCustomCSSDock}
+      />
     </ModalShell>
   )
 }

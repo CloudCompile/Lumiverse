@@ -10,7 +10,7 @@ import type { VisualProviderAdapter } from "../provider-adapter";
 
 type SimpleVisualProvider = Extract<
   WeaverVisualProvider,
-  "novelai" | "nanogpt" | "google_gemini" | "pollinations" | "sdapi" | "swarmui"
+  "novelai" | "nanogpt" | "google_gemini" | "pollinations" | "openrouter" | "sdapi" | "swarmui"
 >;
 
 const IMAGE_INPUT: Record<SimpleVisualProvider, WeaverVisualImageInputMechanism | null> = {
@@ -18,6 +18,7 @@ const IMAGE_INPUT: Record<SimpleVisualProvider, WeaverVisualImageInputMechanism 
   nanogpt: "edit",
   novelai: "reference",
   pollinations: "edit",
+  openrouter: "edit",
   sdapi: "init",
   swarmui: "init",
 };
@@ -46,6 +47,7 @@ function applySourceImage(
 ): void {
   switch (provider) {
     case "google_gemini":
+    case "openrouter":
       parameters.resolvedSourceImages = [{ data: source.data, mimeType: source.mimeType }];
       return;
     case "nanogpt":
@@ -102,6 +104,7 @@ function buildProviderSpecificParameters(
         ...(asset.seed != null ? { seed: asset.seed } : {}),
       };
     case "google_gemini":
+    case "openrouter":
       return {
         aspectRatio: asset.aspect_ratio,
       };
@@ -133,6 +136,16 @@ export function createSimpleProviderAdapter(
     supportsWorkflowImport: false,
     supportsAdvancedMode: false,
     imageInput: IMAGE_INPUT[provider],
+    checkImageInput(connection) {
+      if (provider === "novelai" && connection.model.startsWith("nai-diffusion-5")) {
+        return {
+          supported: false,
+          mechanism: null,
+          reason: "NovelAI V5 does not currently support Vibe Transfer or Precise Reference.",
+        };
+      }
+      return { supported: true, mechanism: IMAGE_INPUT[provider] };
+    },
     async validate(asset, connection) {
       const errors: string[] = [];
       if (connection.provider !== provider) {
@@ -143,6 +156,9 @@ export function createSimpleProviderAdapter(
       }
       if (!connection.model?.trim()) {
         errors.push("Connection model is required.");
+      }
+      if (provider === "novelai" && connection.model.startsWith("nai-diffusion-5") && asset.source_image) {
+        errors.push("NovelAI V5 does not currently support Vibe Transfer or Precise Reference.");
       }
       return errors;
     },

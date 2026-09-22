@@ -1,5 +1,6 @@
 import { get, post, del, put } from './client'
 import type { ExtensionInfo, SpindleManifest, ToolRegistration } from 'lumiverse-spindle-types'
+import type { ExtensionUpdateSnapshot } from '@/types/spindle-updates'
 
 const manifestCache = new Map<string, SpindleManifest>()
 const manifestInFlight = new Map<string, Promise<SpindleManifest>>()
@@ -56,6 +57,10 @@ export interface EphemeralOverviewMe {
 export const spindleApi = {
   list() {
     return get<{ extensions: ExtensionInfo[]; isPrivileged: boolean }>('/spindle')
+  },
+
+  getUpdates() {
+    return get<ExtensionUpdateSnapshot>('/spindle/updates')
   },
 
   install(githubUrl: string, branch?: string | null) {

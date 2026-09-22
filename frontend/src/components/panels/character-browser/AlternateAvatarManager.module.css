@@ -31,7 +31,10 @@
   display: flex;
   gap: 8px;
   overflow-x: auto;
-  padding: 4px 0;
+  /* Keep selected outlines and hover actions inside the scrollport. Without
+     this gutter, the first avatar's glow is clipped by the editor body's
+     horizontal overflow boundary. */
+  padding: 8px 6px;
   scrollbar-width: thin;
 }
 
@@ -93,6 +96,44 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.avatarLabelButton {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 72px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.avatarLabelButton .avatarLabel {
+  min-width: 0;
+}
+
+.labelEditIcon {
+  flex: 0 0 auto;
+  opacity: 0.65;
+}
+
+.avatarLabelButton:hover,
+.avatarLabelButton:focus-visible {
+  color: var(--lumiverse-text);
+}
+
+.avatarLabelButton:hover .avatarLabel,
+.avatarLabelButton:focus-visible .avatarLabel {
+  color: currentColor;
+}
+
+.avatarLabelButton:focus-visible {
+  outline: 1px solid var(--lumiverse-primary);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .cardActions {
@@ -199,4 +240,59 @@
   font-weight: 700;
   color: var(--lumiverse-text-muted);
   font-variant-numeric: tabular-nums;
+}
+
+.bindingBtn {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 18px;
+  padding: 1px 5px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 999px;
+  background: var(--lumiverse-fill);
+  color: var(--lumiverse-text-dim);
+  font-size: calc(9px * var(--lumiverse-font-scale, 1));
+  cursor: pointer;
+}
+
+.bindingBtn:hover {
+  color: var(--lumiverse-primary);
+  border-color: var(--lumiverse-primary-040, rgba(140, 130, 255, 0.4));
+}
+
+.bindingEditor {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-fill);
+}
+
+.bindingTitle {
+  color: var(--lumiverse-text);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+}
+
+.bindingRow {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  text-transform: capitalize;
+}
+
+.bindingRow select {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 5px;
+  background: var(--lumiverse-bg);
+  color: var(--lumiverse-text);
+  font-size: inherit;
+  outline: none;
 }

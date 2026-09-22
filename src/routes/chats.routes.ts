@@ -15,6 +15,17 @@ import {
 import { resolveRenderedMessageContent } from "../services/chat-macro-render.service";
 import { contentHasMacroHints } from "../services/vectorization-content.service";
 import { computeMessageTokenCount } from "../services/message-token-count";
+import {
+  getActivatedWorldInfoEntriesForChat,
+  resolveWorldInfoOutlets,
+} from "../services/prompt-assembly.service";
+import { resolveRegexActionEffects } from "../services/associative-regex-effects.service";
+import {
+  personaHasAddon,
+  withChatPersonaAddonState,
+} from "../services/persona-addon-states";
+import type { RegexActionEffect } from "../types/regex-script";
+import { dispatchEditAndSendRequest } from "../services/edit-and-send-dispatcher.service";
 
 async function runMessageContentProcessors(
   ctx: MessageContentProcessorCtx,
@@ -23,6 +34,30 @@ async function runMessageContentProcessors(
 ): Promise<MessageContentProcessorCtx> {
   if (messageContentProcessorChain.count === 0) return ctx;
   return messageContentProcessorChain.run(ctx, userId, signal);
+}
+
+function editRegexOptions(
+  scripts: readonly { metadata?: Record<string, any> }[],
+  userId: string,
+  chatId: string,
+  message: { id: string; index_in_chat: number; is_user: boolean } | null,
+) {
+  const hasRepeatBack = regexScriptsSvc.hasRegexMatchAction(
+    scripts,
+    "repeat_back",
+  );
+  if (!hasRepeatBack || (message?.index_in_chat ?? -1) <= 0) return undefined;
+  const previousContent = message
+    ? svc.getPreviousSameRoleContent(
+        userId,
+        chatId,
+        message.is_user,
+        message.id,
+      )
+    : undefined;
+  return {
+    ...(previousContent !== undefined ? { previousContent } : {}),
+  };
 }
 
 // Auto-greetings are inserted by service-layer createMessage calls that
@@ -37,6 +72,7 @@ async function processChatGreeting(userId: string, chat: { id: string }) {
     chatId: chat.id,
     messageId: greeting.id,
     content: greeting.content,
+    isUser: false,
     extra: greeting.extra,
     origin: "create",
     userId,
@@ -52,6 +88,9 @@ async function processChatGreeting(userId: string, chat: { id: string }) {
 
 const app = new Hono();
 
+/** Matches an outlet macro so display resolution can populate Lorebook
+ * outlets when a directly or indirectly referenced persona outlet needs one. */
+const OUTLET_MACRO_RE = /\{\{(?:outlet|persona_outlet|personaoutlet)::/i;
 const DISPLAY_PREPROCESS_BATCH_MAX = 100;
 
 interface DisplayPreprocessItem {
@@ -85,10 +124,12 @@ async function runDisplayPreprocessItem(
   item: DisplayPreprocessItem,
   signal?: AbortSignal,
 ) {
-  const processed = messageContentProcessorChain.count > 0
+  const hasContentProcessor = messageContentProcessorChain.hasForUser(userId);
+  const processed = hasContentProcessor
     ? await messageContentProcessorChain.run({
         chatId,
         content: item.rawContent,
+        isUser: item.role === "user",
         origin: "render",
         userId,
         ...(item.messageId ? { messageId: item.messageId } : {}),
@@ -102,10 +143,29 @@ async function runDisplayPreprocessItem(
   let content = processed.content ?? item.rawContent;
   if (contentHasMacroHints(content)) {
     const env = svc.buildMacroEnvForChat(userId, chatId);
-    if (env) content = await resolveRenderedMessageContent(content, env);
+    if (env) {
+      // {{outlet::name}} is only populated during prompt assembly; mirror it
+      // here so displayed messages match what the model actually receives.
+      if (OUTLET_MACRO_RE.test(content)) {
+        try {
+          const entries = await getActivatedWorldInfoEntriesForChat(userId, chatId);
+          await resolveWorldInfoOutlets(entries, env, signal);
+        } catch {
+          // Leave outlets unresolved — base macro resolution still runs.
+        }
+      }
+      content = await resolveRenderedMessageContent(content, env);
+    }
   }
 
-  return { messageId: item.messageId, content };
+  return {
+    messageId: item.messageId,
+    content,
+    // Lets the client paint an append-only plain-text suffix while its next
+    // coalesced preprocess request is pending. Macro-looking suffixes remain
+    // gated client-side, and any applicable processor disables the fast path.
+    incrementalRawAppendSafe: !hasContentProcessor,
+  };
 }
 
 // --- Chat endpoints ---
@@ -120,7 +180,18 @@ app.get("/", (c) => {
 app.get("/recent", (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"), RECENT_CHATS_DEFAULT_LIMIT);
-  return c.json(svc.listRecentChats(userId, pagination));
+  const search = c.req.query("search");
+  const sortParam = c.req.query("sort");
+  const directionParam = c.req.query("direction");
+  const sort: svc.RecentChatSort | undefined =
+    sortParam === "name" || sortParam === "recent" || sortParam === "created" ? sortParam : undefined;
+  const direction: "asc" | "desc" | undefined =
+    directionParam === "asc" || directionParam === "desc" ? directionParam : undefined;
+  return c.json(svc.listRecentChats(userId, pagination, {
+    ...(search ? { search } : {}),
+    ...(sort ? { sort } : {}),
+    ...(direction ? { direction } : {}),
+  }));
 });
 
 app.get("/recent-grouped", (c) => {
@@ -129,6 +200,14 @@ app.get("/recent-grouped", (c) => {
   const search = c.req.query("search");
   const sortParam = c.req.query("sort");
   const directionParam = c.req.query("direction");
+  const favoriteCharacterIds = c.req.query("favorite_ids")
+    ?.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  const hiddenCharacterIds = c.req.query("hidden_character_ids")
+    ?.split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
   const sort: svc.GroupedRecentChatSort | undefined =
     sortParam === "name" || sortParam === "recent" || sortParam === "created" ? sortParam : undefined;
   const direction: "asc" | "desc" | undefined =
@@ -137,7 +216,14 @@ app.get("/recent-grouped", (c) => {
     ...(search ? { search } : {}),
     ...(sort ? { sort } : {}),
     ...(direction ? { direction } : {}),
+    ...(favoriteCharacterIds?.length ? { favoriteCharacterIds } : {}),
+    ...(hiddenCharacterIds?.length ? { hiddenCharacterIds } : {}),
   }));
+});
+
+app.get("/hidden-from-recent", (c) => {
+  const userId = c.get("userId");
+  return c.json(svc.listHiddenRecentChats(userId));
 });
 
 app.get("/character-chats/:characterId", (c) => {
@@ -150,6 +236,15 @@ app.delete("/character-chats/:characterId", (c) => {
   const userId = c.get("userId");
   const deleted = svc.deleteAllChatsForCharacter(userId, c.req.param("characterId"));
   return c.json({ success: true, deleted });
+});
+
+app.post("/bulk-delete", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  if (!Array.isArray(body?.ids)) return c.json({ error: "ids must be an array" }, 400);
+  const ids = body.ids.filter((value: unknown): value is string => typeof value === "string" && value.length > 0);
+  const deleted = svc.deleteChats(userId, ids);
+  return c.json({ deleted, count: deleted.length });
 });
 
 app.get("/group-chats", (c) => {
@@ -267,6 +362,67 @@ app.patch("/:id/members/:characterId/alternate-fields", async (c) => {
   if (!updated) {
     return c.json({ error: "Not found, not a group chat/member, or invalid alternate field selection" }, 400);
   }
+  return c.json(updated);
+});
+
+app.patch("/:id/appearance", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return c.json({ error: "Appearance action must be an object" }, 400);
+  }
+
+  const characterId = typeof body.character_id === "string" && body.character_id
+    ? body.character_id
+    : undefined;
+  let action: import("../types/chat").ChatAppearanceAction | null = null;
+  if (body.type === "avatar" && typeof body.avatar_entry_id === "string" && body.avatar_entry_id) {
+    action = { type: "avatar", avatar_entry_id: body.avatar_entry_id, ...(characterId ? { character_id: characterId } : {}) };
+  } else if (
+    body.type === "field"
+    && (body.field === "description" || body.field === "personality" || body.field === "scenario")
+    && (body.variant_id === null || typeof body.variant_id === "string")
+  ) {
+    action = { type: "field", field: body.field, variant_id: body.variant_id, ...(characterId ? { character_id: characterId } : {}) };
+  } else if (body.type === "greeting" && Number.isInteger(body.greeting_index)) {
+    action = { type: "greeting", greeting_index: body.greeting_index, ...(characterId ? { character_id: characterId } : {}) };
+  }
+  if (!action) return c.json({ error: "Invalid appearance action" }, 400);
+
+  const result = svc.applyChatAppearance(userId, c.req.param("id"), action);
+  if (!result) return c.json({ error: "Invalid character, avatar, or binding" }, 400);
+  return c.json(result);
+});
+
+/**
+ * Atomically toggle one persona add-on in this chat. Besides the existing
+ * boolean override, this records toggle recency so that the newest enabled
+ * add-on with alternative art owns the active persona avatar.
+ */
+app.put("/:id/persona-addons/:personaId/:addonId", async (c) => {
+  const userId = c.get("userId");
+  const chat = svc.getChat(userId, c.req.param("id"));
+  if (!chat) return c.json({ error: "Not found" }, 404);
+
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.enabled !== "boolean") {
+    return c.json({ error: "enabled must be a boolean" }, 400);
+  }
+
+  const persona = personasSvc.getPersona(userId, c.req.param("personaId"));
+  if (!persona) return c.json({ error: "Persona not found" }, 404);
+  if (!personaHasAddon(persona, c.req.param("addonId"))) {
+    return c.json({ error: "Add-on is not attached to this persona" }, 404);
+  }
+
+  const metadata = withChatPersonaAddonState(
+    chat.metadata,
+    persona.id,
+    c.req.param("addonId"),
+    body.enabled,
+  );
+  const updated = svc.updateChat(userId, chat.id, { metadata });
+  if (!updated) return c.json({ error: "Not found" }, 404);
   return c.json(updated);
 });
 
@@ -533,9 +689,58 @@ app.post("/:id/branch", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.message_id) return c.json({ error: "message_id is required" }, 400);
-  const branch = svc.branchChat(userId, c.req.param("id"), body.message_id);
+  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : undefined;
+  const branch = svc.branchChat(userId, c.req.param("id"), body.message_id, name);
   if (!branch) return c.json({ error: "Not found or invalid message" }, 404);
   return c.json(branch, 201);
+});
+
+app.post("/:chatId/edit-and-send", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object") return c.json({ error: "JSON body is required" }, 400);
+
+  const messageId = (body as { messageId?: unknown }).messageId;
+  const content = (body as { content?: unknown }).content;
+  const expectedVersion = (body as { expectedVersion?: unknown }).expectedVersion;
+  const requestId = (body as { requestId?: unknown }).requestId;
+  const branchChatOnEditAndSend = (body as { branchChatOnEditAndSend?: unknown }).branchChatOnEditAndSend;
+
+  if (typeof messageId !== "string" || !messageId.trim()) {
+    return c.json({ error: "messageId is required" }, 400);
+  }
+  if (typeof content !== "string") {
+    return c.json({ error: "content is required" }, 400);
+  }
+  if (typeof requestId !== "string" || !requestId.trim()) {
+    return c.json({ error: "requestId is required" }, 400);
+  }
+  if (typeof expectedVersion !== "number" || !Number.isInteger(expectedVersion) || expectedVersion < 1) {
+    return c.json({ error: "expectedVersion must be a positive integer" }, 400);
+  }
+  if (branchChatOnEditAndSend !== undefined && typeof branchChatOnEditAndSend !== "boolean") {
+    return c.json({ error: "branchChatOnEditAndSend must be a boolean" }, 400);
+  }
+
+  const result = svc.editAndSend(userId, chatId, {
+    messageId,
+    content,
+    expectedVersion,
+    requestId,
+    branchChatOnEditAndSend: branchChatOnEditAndSend ?? true,
+  });
+  if (result.status === "not_found") return c.json({ error: result.error }, 404);
+  if (result.status === "conflict") return c.json({ error: result.error }, 409);
+  if (result.status === "bad_request") return c.json({ error: result.error }, 400);
+
+  try {
+    await dispatchEditAndSendRequest(userId, chatId, requestId);
+  } catch (err) {
+    console.warn("[chats] edit-and-send dispatch failed; outbox will retry", err);
+  }
+
+  return c.json(result.payload);
 });
 
 app.post("/reattribute-all", async (c) => {
@@ -594,6 +799,19 @@ app.get("/:chatId/messages", (c) => {
   return c.json(svc.listMessages(userId, chatId, pagination, { light }));
 });
 
+app.get("/:chatId/messages/search", (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const chat = svc.getChat(userId, chatId);
+  if (!chat) return c.json({ error: "Chat not found" }, 404);
+
+  const query = c.req.query("q")?.trim() ?? "";
+  if (query.length === 0) return c.json({ data: [], total: 0, message_total: 0, truncated: false });
+  if (query.length > 500) return c.json({ error: "Search query is too long" }, 400);
+
+  return c.json(svc.searchMessages(userId, chatId, query));
+});
+
 app.post("/:chatId/messages/bulk-hide", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
@@ -647,7 +865,14 @@ app.post("/:chatId/messages", async (c) => {
   }
 
   const processed = await runMessageContentProcessors(
-    { chatId, content: body.content, extra: body.extra, origin: "create", userId },
+    {
+      chatId,
+      content: body.content,
+      isUser: body.is_user === true,
+      extra: body.extra,
+      origin: "create",
+      userId,
+    },
     userId,
     c.req.raw.signal,
   );
@@ -666,6 +891,132 @@ app.post("/:chatId/messages", async (c) => {
   return c.json(msg, 201);
 });
 
+// POST /:chatId/messages/:id/regex-action — atomically consume a rendered
+// associative-regex choice block before the client sends or queues its effect.
+app.post("/:chatId/messages/regex-actions/claim", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const body = await c.req.json().catch(() => null);
+  const rawSelections = Array.isArray(body?.selections) ? body.selections : [];
+  if (rawSelections.length === 0 || rawSelections.length > 64) {
+    return c.json({ error: "selections must contain between 1 and 64 actions" }, 400);
+  }
+
+  const selections: svc.AssociativeRegexActionBatchInput[] = [];
+  for (const raw of rawSelections) {
+    const messageId = typeof raw?.message_id === "string" ? raw.message_id : "";
+    const scriptId = typeof raw?.script_id === "string" ? raw.script_id : "";
+    const actionId = typeof raw?.action_id === "string" ? raw.action_id : "";
+    const instanceId = typeof raw?.instance_id === "string" ? raw.instance_id : "";
+    if (!messageId || !scriptId || !actionId || !instanceId ||
+      !instanceId.startsWith(`${scriptId}:`) ||
+      !/^\d+:\d+$/.test(instanceId.slice(scriptId.length + 1))) {
+      return c.json({ error: "invalid regex action selection" }, 400);
+    }
+    const script = regexScriptsSvc.getRegexScript(userId, scriptId);
+    const action = script?.actions.find((candidate) => candidate.id === actionId);
+    if (!script || script.disabled || !script.target.includes("display") || !action) {
+      return c.json({ error: "regex action is no longer available" }, 404);
+    }
+    if (!action.multi_select && action.type !== "send") {
+      return c.json({ error: "only Send actions can trigger a mixed batch claim" }, 400);
+    }
+    let stateEffects: Array<{ key: string; value: string }> | undefined;
+    if (action.effects?.length) {
+      const resolved = await resolveRegexActionEffects(userId, chatId, messageId, scriptId, actionId, instanceId);
+      if (resolved.status === "user_source") {
+        return c.json({ error: "composable effects require an assistant source message" }, 403);
+      }
+      if (resolved.status !== "resolved") {
+        return c.json({ error: "regex action could not be verified from its source message" }, 404);
+      }
+      stateEffects = resolved.effects
+        .filter((effect) => effect.type === "set_state")
+        .map(({ key, value }) => ({ key, value }));
+    }
+    selections.push({
+      messageId,
+      scriptId,
+      actionId,
+      instanceId,
+      multiSelect: action.multi_select,
+      ...(stateEffects ? { stateEffects } : {}),
+    });
+  }
+
+  const result = svc.claimAssociativeRegexActions(userId, chatId, selections);
+  if (result.status === "not_found") return c.json({ error: "Source message not found", messages: result.messages }, 404);
+  if (result.status === "forbidden") return c.json({ error: "composable effects require an assistant source message", messages: result.messages }, 403);
+  if (result.status === "used") {
+    return c.json({ error: "One or more choices have already been used", messages: result.messages, usage: result.usage }, 409);
+  }
+  return c.json({ messages: result.messages, usages: result.usages });
+});
+
+app.post("/:chatId/messages/:id/regex-action", async (c) => {
+  const userId = c.get("userId");
+  const chatId = c.req.param("chatId");
+  const messageId = c.req.param("id");
+  const body = await c.req.json().catch(() => null);
+  const scriptId = typeof body?.script_id === "string" ? body.script_id : "";
+  const actionId = typeof body?.action_id === "string" ? body.action_id : "";
+  const instanceId = typeof body?.instance_id === "string" ? body.instance_id : "";
+  if (!scriptId || !actionId || !instanceId) {
+    return c.json({ error: "script_id, action_id, and instance_id are required" }, 400);
+  }
+  if (!instanceId.startsWith(`${scriptId}:`) || !/^\d+:\d+$/.test(instanceId.slice(scriptId.length + 1))) {
+    return c.json({ error: "invalid regex action instance" }, 400);
+  }
+
+  const script = regexScriptsSvc.getRegexScript(userId, scriptId);
+  const action = script?.actions.find((candidate) => candidate.id === actionId);
+  if (!script || script.disabled || !script.target.includes("display") || !action) {
+    return c.json({ error: "regex action is no longer available" }, 404);
+  }
+  if (action.multi_select) {
+    return c.json({ error: "multi-select actions must be finalized with the batch claim endpoint" }, 400);
+  }
+
+  let resolvedEffects: RegexActionEffect[] = [];
+  let stateEffects: Array<{ key: string; value: string }> | undefined;
+  if (action.effects?.length) {
+    const resolved = await resolveRegexActionEffects(userId, chatId, messageId, scriptId, actionId, instanceId);
+    if (resolved.status === "user_source") {
+      return c.json({ error: "composable effects require an assistant source message" }, 403);
+    }
+    if (resolved.status !== "resolved") {
+      return c.json({ error: "regex action could not be verified from its source message" }, 404);
+    }
+    resolvedEffects = resolved.effects;
+    stateEffects = resolvedEffects
+      .filter((effect) => effect.type === "set_state")
+      .map(({ key, value }) => ({ key, value }));
+  }
+
+  const result = svc.claimAssociativeRegexAction(userId, chatId, messageId, {
+    instanceId,
+    scriptId,
+    actionId,
+    multiSelect: false,
+    ...(stateEffects ? { stateEffects } : {}),
+    ...(resolvedEffects.length > 0 ? {
+      requiresAssistantSource: true,
+      fork: resolvedEffects.some((effect) => effect.type === "fork"),
+    } : {}),
+  });
+  if (result.status === "not_found") return c.json({ error: "Message not found" }, 404);
+  if (result.status === "forbidden") return c.json({ error: "composable effects require an assistant source message" }, 403);
+  if (result.status === "used") {
+    return c.json({ error: "This choice has already been used", message: result.message, usage: result.usage }, 409);
+  }
+  return c.json({
+    message: result.message,
+    usage: result.usage,
+    ...(resolvedEffects.length > 0 ? { effects: resolvedEffects } : {}),
+    ...(result.forkedChat ? { forked_chat: result.forkedChat } : {}),
+  });
+});
+
 app.put("/:chatId/messages/:id", async (c) => {
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
@@ -673,11 +1024,13 @@ app.put("/:chatId/messages/:id", async (c) => {
   const body = await c.req.json();
 
   if (body.content !== undefined) {
+    const existing = svc.getMessage(userId, messageId);
     const processed = await runMessageContentProcessors(
       {
         chatId,
         messageId,
         content: body.content,
+        isUser: existing?.is_user === true,
         extra: body.extra,
         origin: "update",
         userId,
@@ -695,13 +1048,20 @@ app.put("/:chatId/messages/:id", async (c) => {
         chatId,
       });
       if (editScripts.length > 0) {
-        const existing = svc.getMessage(userId, messageId);
         const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
         body.content = await regexScriptsSvc.applyRegexScripts(
           body.content,
           editScripts,
           placement,
           0,
+          undefined,
+          undefined,
+          editRegexOptions(
+            editScripts,
+            userId,
+            chatId,
+            existing,
+          ),
         );
       }
     }
@@ -749,11 +1109,13 @@ app.post("/:chatId/messages/:id/swipe", async (c) => {
   if (body.direction === "left" || body.direction === "right") {
     msg = svc.cycleSwipe(userId, messageId, body.direction);
   } else if (body.content !== undefined) {
+    const existing = svc.getMessage(userId, messageId);
     const processed = await runMessageContentProcessors(
       {
         chatId,
         messageId,
         content: body.content,
+        isUser: existing?.is_user === true,
         origin: "swipe_add",
         userId,
       },
@@ -776,12 +1138,14 @@ app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
   const body = await c.req.json();
   if (body.content === undefined) return c.json({ error: "content is required" }, 400);
   const idx = parseInt(c.req.param("idx"), 10);
+  const existing = svc.getMessage(userId, messageId);
 
   const processed = await runMessageContentProcessors(
     {
       chatId,
       messageId,
       content: body.content,
+      isUser: existing?.is_user === true,
       origin: "swipe_update",
       swipeIndex: idx,
       userId,
@@ -798,13 +1162,20 @@ app.put("/:chatId/messages/:id/swipe/:idx", async (c) => {
       chatId,
     });
     if (editScripts.length > 0) {
-      const existing = svc.getMessage(userId, messageId);
       const placement = existing?.is_user ? "user_input" as const : "ai_output" as const;
       finalContent = await regexScriptsSvc.applyRegexScripts(
         finalContent,
         editScripts,
         placement,
         0,
+        undefined,
+        undefined,
+        editRegexOptions(
+          editScripts,
+          userId,
+          chatId,
+          existing,
+        ),
       );
     }
   }
@@ -838,10 +1209,11 @@ app.post("/:chatId/display-preprocess", async (c) => {
       return c.json({ error: "each item requires rawContent (string)" }, 400);
     }
 
-    const processed = [];
-    for (const item of items as DisplayPreprocessItem[]) {
-      processed.push(await runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal));
-    }
+    const processed = await Promise.all(
+      (items as DisplayPreprocessItem[]).map((item) =>
+        runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal)
+      )
+    );
 
     return c.json({ items: processed });
   }

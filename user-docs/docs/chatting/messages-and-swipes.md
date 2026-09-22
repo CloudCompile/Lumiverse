@@ -19,7 +19,16 @@ Type your message in the input area and press **Enter** to send (or click the se
 
 ## Editing Messages
 
-Click on any message to edit its text. Both your messages and the character's messages can be edited. Edits are saved immediately.
+Click on any message to edit its text. Both your messages and the character's messages can be edited.
+
+The editor gives user-authored messages two ways to finish:
+
+| Action | Result |
+|--------|--------|
+| **Save** | Saves the revised text without asking the AI for another response. |
+| **Edit and Send** | Creates and opens a new branch, preserving the original conversation. Lumiverse applies the edit there and immediately asks the AI to respond again. If an assistant reply already follows that turn, the branch receives a new swipe on its copy of that reply; at the end of a chat, it receives the next assistant message. |
+
+**Edit and Send** is unavailable while another response is streaming. You can hide this optional action under **Settings → Productivity → Optional surfaces & navigation**.
 
 Editing a character's message also updates the current swipe — so the content stays consistent.
 
@@ -62,6 +71,19 @@ Swipes are one of the most powerful features in AI chat. Instead of accepting th
 ## Continue
 
 If a response feels cut short, click **Continue** to ask the AI to keep writing from where it left off. The continuation is appended to the current message rather than creating a new one.
+
+---
+
+## Impersonate
+
+Impersonation generates a draft from your persona's point of view and places it in the input box for review. Choose the account-wide default under **Settings → Chat → Default impersonation mode**. A chat or group chat can inherit that choice or override it under **Chat Settings → Impersonation Mode**:
+
+- **Preset Prompts** uses the chat's active preset and its impersonate-triggered blocks.
+- **Impersonation Preset** fully assembles the dedicated preset selected in Chat Settings, including chat history and its impersonation prompt. It falls back to the active preset when none is selected.
+- **One-liner** uses only chat history and the dedicated preset's impersonation prompt. It adds the preset's assistant prefill only when **Continue Prefill** is enabled.
+
+The input-bar **Impersonate** button uses the chat override when one is set and otherwise follows the global default. The initial global default is One-liner, and the dedicated impersonation preset does not replace the chat's main preset.
+For both full-preset options and One-liner, impersonation prefills are ignored unless **Continue Prefill** is enabled in the selected preset. When it is disabled, the impersonation instruction is sent as the final user message instead; when enabled, it is followed by the preset's partial assistant prefill.
 
 ---
 

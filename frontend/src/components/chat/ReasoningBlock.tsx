@@ -6,6 +6,7 @@ import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { sanitizeRichHtml } from '@/lib/richHtmlSanitizer'
 import { ChevronRight, Brain } from 'lucide-react'
+import { dispatchCollapsibleToggleLayoutEvent } from './collapsibleLayout'
 import styles from './ReasoningBlock.module.css'
 import clsx from 'clsx'
 
@@ -52,6 +53,7 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   const [renderMode, setRenderMode] = useState<ReasoningRenderMode>(() => (
     reasoning.length >= LARGE_REASONING_RENDER_THRESHOLD ? 'text' : 'markdown'
   ))
+  const containerRef = useRef<HTMLDivElement>(null)
   const timerRef = useRef<number | null>(null)
   const startTimeRef = useRef<number | null>(null)
   const shouldPreferPlainText = reasoning.length >= LARGE_REASONING_RENDER_THRESHOLD
@@ -59,6 +61,7 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   const deferredReasoning = useDeferredValue(reasoning)
 
   const toggle = useCallback(() => {
+    dispatchCollapsibleToggleLayoutEvent(containerRef.current)
     setIsOpen((o) => !o)
   }, [])
 
@@ -130,12 +133,16 @@ export default function ReasoningBlock({ reasoning, reasoningDuration, reasoning
   )
 
   return (
-    <div className={clsx(styles.container, variant === 'bubble' && styles.bubble, align === 'right' && styles.alignRight)}>
+    <div
+      ref={containerRef}
+      className={clsx(styles.container, variant === 'bubble' && styles.bubble, align === 'right' && styles.alignRight)}
+    >
       <button
         type="button"
         className={styles.toggle}
         onClick={toggle}
         aria-expanded={isOpen}
+        data-reasoning-toggle="true"
       >
         <ChevronRight className={clsx(styles.chevron, isOpen && styles.chevronOpen)} />
         <Brain className={styles.brain} />

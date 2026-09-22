@@ -52,6 +52,7 @@ export {
   searchDirect,
   getCachedDatabankResult,
   clearCache,
+  invalidateDatabankCache,
 } from "./retrieval.service";
 
 // Scope resolution

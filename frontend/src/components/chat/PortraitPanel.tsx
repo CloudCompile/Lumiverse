@@ -17,6 +17,12 @@ import type { Character, CharacterGalleryItem } from '@/types/api'
 import type { WallpaperRef } from '@/types/store'
 import styles from './PortraitPanel.module.css'
 import clsx from 'clsx'
+import { requestHostIntent } from '@/lib/hostIntents'
+import { copyTextToClipboard } from '@/lib/clipboard'
+import { galleryImageMarkdown } from '@/lib/galleryImageReference'
+import { toast } from '@/lib/toast'
+import { Copy } from 'lucide-react'
+import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 
 interface PortraitPanelProps {
   side?: 'left' | 'right'
@@ -52,7 +58,7 @@ function GalleryMosaicCell({ item, className, onOpen, onPreview }: GalleryMosaic
   )
 }
 
-export default function PortraitPanel({ side = 'right', mobileDrawer = false, open = false }: PortraitPanelProps) {
+function PortraitPanelNative({ side = 'right', mobileDrawer = false, open = false }: PortraitPanelProps) {
   const { t } = useTranslation('chat')
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -100,7 +106,21 @@ export default function PortraitPanel({ side = 'right', mobileDrawer = false, op
     setContextMenu(null)
   }, [activeChatId, setActiveChatWallpaper, setSceneBackground])
 
+  const copyGalleryImageReference = useCallback((item: CharacterGalleryItem) => {
+    const markdown = galleryImageMarkdown(item, t('portrait.galleryImage'))
+    setContextMenu(null)
+    void copyTextToClipboard(markdown)
+      .then(() => toast.success(t('portrait.imageReferenceCopied')))
+      .catch(() => toast.error(t('portrait.imageReferenceCopyFailed')))
+  }, [t])
+
   const contextMenuItems: ContextMenuEntry[] = contextMenu ? [
+    {
+      key: 'copy-image-reference',
+      label: t('portrait.copyImageReference'),
+      icon: <Copy size={14} />,
+      onClick: () => copyGalleryImageReference(contextMenu.item),
+    },
     {
       key: 'set-chat-background',
       label: t('portrait.setChatBackground'),
@@ -178,7 +198,11 @@ export default function PortraitPanel({ side = 'right', mobileDrawer = false, op
           <div
             className={styles.frame}
             style={frameHeight ? { height: frameHeight } : undefined}
-            onClick={() => setLightboxSrc(getLightboxUrl())}
+            onClick={() => {
+              const imageUrl = getLightboxUrl()
+              if (!imageUrl || requestHostIntent('image-preview', { imageUrl, caption: charName, source: 'portrait-frame' })) return
+              setLightboxSrc(imageUrl)
+            }}
           >
             {/* Previous image — fades out */}
             {prevSrc && (
@@ -234,7 +258,10 @@ export default function PortraitPanel({ side = 'right', mobileDrawer = false, op
                   item={item}
                   className={span}
                   onOpen={(menuItem, pos) => setContextMenu({ item: menuItem, pos })}
-                  onPreview={setLightboxSrc}
+                  onPreview={(imageUrl) => {
+                    if (requestHostIntent('image-preview', { imageUrl, caption: item.caption || charName, source: 'portrait-gallery' })) return
+                    setLightboxSrc(imageUrl)
+                  }}
                 />
               )
             })}
@@ -250,4 +277,8 @@ export default function PortraitPanel({ side = 'right', mobileDrawer = false, op
       />
     </div>
   )
+}
+
+export default function PortraitPanel(props: PortraitPanelProps) {
+  return useSpindleComponentOverride('PortraitPanel', PortraitPanelNative, props)
 }

@@ -54,6 +54,8 @@ export interface ScopedMacroNode {
   args: AstNode[][];
   flags: MacroFlags;
   body: AstNode[];
+  /** Exact source text between the opening and closing tags when available. */
+  bodySource?: string;
   raw: string;
   offset: number;
 }
@@ -113,12 +115,18 @@ export interface MacroExecContext {
   commit: boolean;
   isScoped: boolean;
   body: string;
+  /** Exact, unevaluated scoped body text when the parser retained its span. */
+  bodySource: string;
   bodyRaw: AstNode[];
   offset: number;
   globalOffset: number;
   env: MacroEnv;
   resolve: (text: string) => string | Promise<string>;
   resolveNodes: (nodes: AstNode[]) => string | Promise<string>;
+  resolvePromptSource?: (
+    input: string,
+    sourceHint: string,
+  ) => Promise<string | undefined>;
   warn: (message: string) => void;
 }
 
@@ -164,6 +172,8 @@ export interface MacroEnv {
     personaSubjectivePronoun: string;
     personaObjectivePronoun: string;
     personaPossessivePronoun: string;
+    personaReflexivePronoun: string;
+    personaPossessivePronounStandalone: string;
     mesExamples: string;
     mesExamplesRaw: string;
     systemPrompt: string;
@@ -173,6 +183,8 @@ export interface MacroEnv {
     version: string;
     creator: string;
     firstMessage: string;
+    /** Card-defined alternatives, excluding the default first message. */
+    alternateGreetings?: string[];
   };
   chat: {
     id: string;
@@ -186,6 +198,8 @@ export interface MacroEnv {
     lastSwipeId: number;
     currentSwipeId: number;
     rejectedSwipe: string;
+    /** Selected index in [default greeting, ...alternate greetings]. */
+    greetingIndex?: number;
   };
   system: {
     model: string;
@@ -204,6 +218,12 @@ export interface MacroEnv {
   };
   /** Set to true when any chat variable macro mutates state. Used to trigger persistence. */
   _chatVarsDirty?: boolean;
+  /**
+   * The preset prompt block currently being rendered. This is set only for
+   * that block's existing macro evaluation and restored immediately after, so
+   * placement macros remain read-only reflections of the block configuration.
+   */
+  promptBlock?: PromptBlockMacroContext;
   /** Internal: fingerprint accumulator stashed by evaluate(). Surfaced back
    *  via EvaluateResult.touchedVars / cacheable. */
   _fingerprint?: { touched: Set<string>; cacheable: boolean };
@@ -217,6 +237,15 @@ export interface MacroEnv {
    *  than holding the event loop until the 5-pass loop converges. */
   signal?: AbortSignal;
   extra: Record<string, any>;
+}
+
+/** Read-only placement configuration for the preset block currently rendering. */
+export interface PromptBlockMacroContext {
+  /** Stable block identity used to resolve block-scoped prompt variables. */
+  id?: string;
+  role: string;
+  position: string;
+  depth: number;
 }
 
 // ============================================================================

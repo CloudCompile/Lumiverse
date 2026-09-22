@@ -2,6 +2,9 @@ import { Hono } from "hono";
 import * as svc from "../services/regex-scripts.service";
 import { parsePagination } from "../services/pagination";
 import { applyDisplayRegex } from "../services/display-regex.service";
+import { matchPromptActivation, MAX_ACTIVATION_CONTENT_LENGTH } from "../utils/regex-prompt-activation";
+import { resolveActivationFindPattern } from "../utils/regex-activation-inputs";
+import { loadActivationInputSnapshot } from "../services/regex-activation-inputs.service";
 import type { RegexMacroMode, RegexPlacement, RegexScope, RegexScript, RegexTarget } from "../types/regex-script";
 
 const app = new Hono();
@@ -12,7 +15,7 @@ const APPLY_MAX_PATTERN_LENGTH = 10_000;
 const APPLY_MAX_RESOLVED_TEMPLATE_LENGTH = 100_000;
 const APPLY_VALID_PLACEMENTS = new Set<RegexPlacement>(["user_input", "ai_output", "world_info", "reasoning"]);
 const APPLY_VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
-const APPLY_VALID_MACRO_MODES = new Set<RegexMacroMode>(["none", "raw", "escaped", "after"]);
+const APPLY_VALID_MACRO_MODES = new Set<RegexMacroMode>(["none", "find", "raw", "escaped", "after"]);
 
 function isStringRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -69,6 +72,7 @@ function normalizeDisplayScripts(value: unknown, userId: string): RegexScript[] 
       script_id: typeof raw.script_id === "string" ? raw.script_id : id,
       find_regex: findRegex,
       replace_string: replaceString,
+      actions: svc.normalizeRegexActions(raw.actions),
       flags,
       placement,
       scope: raw.scope === "character" || raw.scope === "chat" ? raw.scope : "global",
@@ -88,6 +92,9 @@ function normalizeDisplayScripts(value: unknown, userId: string): RegexScript[] 
       pack_id: typeof raw.pack_id === "string" ? raw.pack_id : null,
       preset_id: typeof raw.preset_id === "string" ? raw.preset_id : null,
       character_id: typeof raw.character_id === "string" ? raw.character_id : null,
+      // Request-supplied display scripts are transient and never acquire
+      // persisted extension ownership.
+      owner_extension_identifier: null,
       metadata: isStringRecord(raw.metadata) ? raw.metadata : {},
       created_at: typeof raw.created_at === "number" ? raw.created_at : 0,
       updated_at: typeof raw.updated_at === "number" ? raw.updated_at : 0,
@@ -200,15 +207,77 @@ app.post("/apply", async (c) => {
     result: applied.result,
     touched_vars: Array.from(applied.touchedVars),
     cacheable: applied.cacheable,
+    timed_out_script_ids: Array.from(applied.timedOutScriptIds),
   });
+});
+
+// Prepare persisted activation inputs without matching message content.
+app.post("/activation-patterns", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.preset_id !== "string" || !body.preset_id || body.preset_id.length > 200
+    || !Array.isArray(body.patterns) || body.patterns.length === 0 || body.patterns.length > 100
+    || body.patterns.some((pattern: unknown) => typeof pattern !== "string" || pattern.length > 10_000)
+    || body.patterns.reduce((sum: number, pattern: string) => sum + pattern.length, 0) > 100_000) {
+    return c.json({ error: "A preset ID and between 1 and 100 bounded patterns are required" }, 400);
+  }
+  try {
+    const inputs = loadActivationInputSnapshot(c.get("userId"), body.preset_id, {
+      chat_id: body.chat_id, character_id: body.character_id,
+      persona_id: body.persona_id, connection_id: body.connection_id,
+    }, body.patterns);
+    return c.json({ patterns: body.patterns.map((pattern: string) => {
+      try {
+        return { source: pattern, resolved: resolveActivationFindPattern(pattern, inputs) };
+      } catch (error) {
+        return { source: pattern, error: error instanceof Error ? error.message : String(error) };
+      }
+    }) });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
+// POST /test — test regex
+app.post("/test-activation", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.content !== "string" || typeof body.find_regex !== "string"
+    || typeof body.flags !== "string" || !validateFlags(body.flags) || !body.prompt_activation
+    || body.find_regex.length > APPLY_MAX_PATTERN_LENGTH) {
+    return c.json({ error: "A pattern, flags, content and prompt activation configuration are required" }, 400);
+  }
+  if (body.content.length > MAX_ACTIVATION_CONTENT_LENGTH) return c.json({ error: "Content exceeds maximum length" }, 413);
+  const error = svc.validatePromptActivationBinding(c.get("userId"), {
+    name: "Preview", find_regex: body.find_regex, preset_id: body.preset_id,
+    metadata: { prompt_activation: body.prompt_activation },
+  });
+  if (error) return c.json({ error }, 400);
+  try {
+    const inputs = body.find_regex.includes("{{") ? loadActivationInputSnapshot(c.get("userId"), body.preset_id, {
+      chat_id: body.chat_id, character_id: body.character_id, persona_id: body.persona_id, connection_id: body.connection_id,
+    }, [body.find_regex]) : undefined;
+    const findRegex = resolveActivationFindPattern(body.find_regex, inputs);
+    return c.json({
+      matches: await matchPromptActivation({ ...body, find_regex: findRegex }, body.prompt_activation, body.content),
+      ...(inputs ? { resolved_find_regex: findRegex } : {}),
+    });
+  } catch (error) {
+    return c.json({ matches: [], error: error instanceof Error ? error.message : String(error) });
+  }
 });
 
 // POST /test — test regex
 app.post("/test", async (c) => {
-  const userId = c.get("userId");
-  const { find_regex, replace_string, flags, content } = await c.req.json();
+  const { find_regex, replace_string, flags, content, match_actions } = await c.req.json();
   if (!find_regex || content === undefined) return c.json({ error: "find_regex and content are required" }, 400);
-  return c.json(await svc.testRegex(find_regex, replace_string ?? "", flags ?? "gi", content));
+  const actions = Array.isArray(match_actions)
+    ? match_actions.filter(
+        (action): action is "move_top" | "move_bottom" | "repeat_back" =>
+          action === "move_top"
+          || action === "move_bottom"
+          || action === "repeat_back",
+      )
+    : [];
+  return c.json(await svc.testRegex(find_regex, replace_string ?? "", flags ?? "gi", content, actions));
 });
 
 // POST /export — export scripts
@@ -246,6 +315,18 @@ app.post("/bulk-delete", async (c) => {
   const stringIds = ids.filter((v: unknown): v is string => typeof v === "string" && v.length > 0);
   const deleted = svc.deleteRegexScripts(userId, stringIds);
   return c.json({ deleted, count: deleted.length });
+});
+
+// POST /bulk-toggle — enable/disable an explicit selection in one transaction
+app.post("/bulk-toggle", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  if (!Array.isArray(body?.ids)) return c.json({ error: "ids must be an array" }, 400);
+  const stringIds = body.ids.filter((v: unknown): v is string => typeof v === "string" && v.length > 0);
+  const result = svc.toggleRegexScriptsByIds(userId, stringIds, !!body?.disabled, {
+    activePresetId: body?.active_preset_id ?? null,
+  });
+  return c.json(result);
 });
 
 // GET /:id — get by ID
@@ -301,6 +382,34 @@ app.post("/:id/report-performance", async (c) => {
   return c.json(result.script);
 });
 
+// POST /:id/report-evidence — persist client-side execution evidence
+// (metadata.regex_evidence.quarantined) used by the display-regex tier rules.
+// Quarantine is the only field accepted: it is the only evidence that changes
+// which tier a script runs in. Successful-timing evidence was removed rather
+// than kept, because nothing read it and it could not promote a script.
+// `quarantined: false` is a valid body and clears the flag, which is how the
+// panel lets a user un-quarantine a script.
+export type RegexEvidenceReportBody = {
+  quarantined?: boolean;
+};
+
+function parseEvidenceBody(body: any): RegexEvidenceReportBody | null {
+  if (body?.quarantined === undefined) return null;
+  return { quarantined: !!body.quarantined };
+}
+
+app.post("/:id/report-evidence", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const patch = parseEvidenceBody(body);
+  if (!patch) return c.json({ error: "evidence patch requires a quarantined field" }, 400);
+  const script = svc.reportRegexScriptEvidence(userId, c.req.param("id"), {
+    quarantined: patch.quarantined,
+  });
+  if (!script) return c.json({ error: "Not found" }, 404);
+  return c.json(script);
+});
+
 // PUT /:id/toggle — quick enable/disable
 app.put("/:id/toggle", async (c) => {
   const userId = c.get("userId");
@@ -308,6 +417,18 @@ app.put("/:id/toggle", async (c) => {
   const script = svc.toggleRegexScript(userId, c.req.param("id"), !!disabled, { activePresetId: active_preset_id ?? null });
   if (!script) return c.json({ error: "Not found" }, 404);
   return c.json(script);
+});
+
+// POST /folders/toggle — bulk enable/disable every script in a folder
+app.post("/folders/toggle", async (c) => {
+  const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({}));
+  const folder = typeof body?.folder === "string" ? body.folder : undefined;
+  if (folder === undefined) return c.json({ error: "folder is required" }, 400);
+  const result = svc.toggleRegexScriptsByFolder(userId, folder, !!body?.disabled, {
+    activePresetId: body?.active_preset_id ?? null,
+  });
+  return c.json(result);
 });
 
 export { app as regexScriptsRoutes };

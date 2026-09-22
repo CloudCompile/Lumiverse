@@ -136,9 +136,15 @@ class AuthLockoutService {
     // Don't lock out loopback — it's almost always the server owner, and
     // polling components (Operator Panel, generation recovery watchdog) can
     // hit 401s rapidly when a session expires.  Rate-limiting still applies.
-    if (clientId === "127.0.0.1" || clientId === "::1" || clientId === "unknown") {
+    if (clientId === "127.0.0.1" || clientId === "::1") {
       return { count: 0, lockout: null };
     }
+    // Clients with no resolvable peer address ("unknown") stay lockable under
+    // that shared key. Bun resolves peers for real connections, so the bucket
+    // is normally empty; if it ever isn't, a client that defeats IP resolution
+    // must not get an unthrottled brute-force lane. The shared key means such
+    // clients lock each other out — an acceptable trade for a state that
+    // should not exist in practice.
 
     const state = getOrCreateState(clientId, now);
     state.failures[reason] += 1;

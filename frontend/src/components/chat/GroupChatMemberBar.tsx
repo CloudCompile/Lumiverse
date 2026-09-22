@@ -13,6 +13,7 @@ import { useLongPress } from '@/hooks/useLongPress'
 import useHorizontalScroll from '@/hooks/useHorizontalScroll'
 import styles from './GroupChatMemberBar.module.css'
 import clsx from 'clsx'
+import { imagesApi } from '@/api/images'
 
 interface GroupChatMemberBarProps {
   chatId: string
@@ -66,7 +67,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         setStreamingError(msg)
       }
     },
-    [chatId, isStreaming, mutedCharacterIds, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, startStreaming, setStreamingError]
+    [chatId, isStreaming, mutedCharacterIds, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, startStreaming, setStreamingError, te]
   )
 
   const openContextMenu = useCallback((characterId: string, pos: ContextMenuPos) => {
@@ -124,7 +125,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         },
       })
     },
-    [chatId, characters, groupCharacterIds, mutedCharacterIds, setGroupCharacterIds, setMutedCharacterIds, openModal]
+    [chatId, characters, groupCharacterIds, mutedCharacterIds, setGroupCharacterIds, setMutedCharacterIds, openModal, t]
   )
 
   const handleForceGenerateFromMenu = useCallback(
@@ -153,8 +154,6 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
     if (!chars || typeof chars !== 'object') return new Set<string>()
     return new Set(Object.keys(chars).filter((id) => !!chars[id]))
   }, [activeChatMetadata])
-
-  if (groupCharacterIds.length === 0) return null
 
   const contextIsMuted = contextMenu ? mutedCharacterIds.includes(contextMenu.characterId) : false
 
@@ -192,6 +191,8 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
     ]
   }, [contextMenu, contextIsMuted, isStreaming, overrideIds, handleForceGenerateFromMenu, handleToggleMute, handleOpenVoiceModal, handleRemoveMember, t])
 
+  if (groupCharacterIds.length === 0) return null
+
   return (
     <div className={styles.barWrapper}>
       {canScrollLeft && <div className={clsx(styles.scrollFade, styles.scrollFadeLeft)} aria-hidden="true" />}
@@ -207,6 +208,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
             isMuted={mutedCharacterIds.includes(id)}
             isStreaming={isStreaming}
             hasVoiceOverride={overrideIds.has(id)}
+            avatarOverrideId={typeof activeChatMetadata?.group_active_avatar_ids?.[id] === 'string' ? activeChatMetadata.group_active_avatar_ids[id] : null}
             onForceGenerate={handleForceGenerate}
             onOpenContextMenu={openContextMenu}
           />
@@ -239,15 +241,16 @@ interface MemberButtonProps {
   isMuted: boolean
   isStreaming: boolean
   hasVoiceOverride: boolean
+  avatarOverrideId: string | null
   onForceGenerate: (id: string) => void
   onOpenContextMenu: (id: string, pos: ContextMenuPos) => void
 }
 
-function MemberButton({ id, characters, isActive, isMuted, isStreaming, hasVoiceOverride, onForceGenerate, onOpenContextMenu }: MemberButtonProps) {
+function MemberButton({ id, characters, isActive, isMuted, isStreaming, hasVoiceOverride, avatarOverrideId, onForceGenerate, onOpenContextMenu }: MemberButtonProps) {
   const { t } = useTranslation('chat')
   const char = characters.find((c: any) => c.id === id)
   const talk = char?.talkativeness ?? 0.5
-  const avatarUrl = getCharacterAvatarThumbUrl(char)
+  const avatarUrl = avatarOverrideId ? imagesApi.smallUrl(avatarOverrideId) : getCharacterAvatarThumbUrl(char)
 
   const longPress = useLongPress({
     onLongPress: (pos) => onOpenContextMenu(id, pos),
@@ -268,7 +271,7 @@ function MemberButton({ id, characters, isActive, isMuted, isStreaming, hasVoice
       title={char?.name || t('characterFallback')}
       disabled={isStreaming}
     >
-      {char?.avatar_path || char?.image_id ? (
+      {avatarOverrideId || char?.avatar_path || char?.image_id ? (
         <img
           src={avatarUrl || undefined}
           alt={char?.name}

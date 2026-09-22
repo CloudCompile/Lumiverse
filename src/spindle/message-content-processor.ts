@@ -11,6 +11,7 @@ export interface MessageContentProcessorCtx {
   chatId: string;
   messageId?: string;
   content: string;
+  isUser: boolean;
   extra?: Record<string, unknown>;
   origin: MessageContentProcessorOrigin;
   swipeIndex?: number;
@@ -156,6 +157,10 @@ class MessageContentProcessorChain {
 
   get count(): number {
     return this.handlers.length;
+  }
+
+  hasForUser(userId?: string | null): boolean {
+    return this.handlers.some((handler) => !handler.userId || handler.userId === userId);
   }
 }
 

@@ -5,12 +5,22 @@ import { requireOwner } from "../auth/middleware";
 import { getDb } from "../db/connection";
 import { scanSTData } from "../migration/st-reader";
 import { importTagLibraryBackup } from "../services/tag-library-import.service";
+import { ArchiveValidationError } from "../services/user-data/import.service";
 import {
-  executeMigration,
+  startStMigration,
   isMigrationRunning,
   getActiveMigration,
   getLastMigration,
 } from "../migration/st-migration.service";
+import {
+  StBackupUploadError,
+  claimStagedStBackup,
+  cleanupClaimedStBackup,
+  discardStagedStBackup,
+  getStagedStBackup,
+  stageStBackupArchive,
+  type StagedStBackup,
+} from "../migration/st-backup-upload";
 import type { FileConnectionConfig, FileSystem } from "../file-connections/types";
 import { LocalFileSystem } from "../file-connections/providers/local";
 import { createFileSystem, withFileSystem, getAvailableConnectionTypes } from "../file-connections/factory";
@@ -69,10 +79,21 @@ function parseConnectionConfig(body: any): FileConnectionConfig {
   return body.connection as FileConnectionConfig;
 }
 
+async function parseObjectBody(c: any): Promise<{ body: Record<string, any> } | { response: Response }> {
+  let body: unknown;
+  try { body = await c.req.json(); } catch { return { response: c.json({ error: "Invalid JSON body" }, 400) }; }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { response: c.json({ error: "JSON body must be an object" }, 400) };
+  }
+  return { body: body as Record<string, any> };
+}
+
 // ─── POST /test-connection — test a remote file connection ──────────────────
 
 app.post("/test-connection", async (c) => {
-  const body = await c.req.json();
+  const parsed = await parseObjectBody(c);
+  if ("response" in parsed) return parsed.response;
+  const { body } = parsed;
   const config = body.connection as FileConnectionConfig | undefined;
 
   if (!config || config.type === "local") {
@@ -175,7 +196,9 @@ app.get("/browse", async (c) => {
 // ─── POST /validate — validate SillyTavern installation ────────────────────
 
 app.post("/validate", async (c) => {
-  const body = await c.req.json();
+  const parsed = await parseObjectBody(c);
+  if ("response" in parsed) return parsed.response;
+  const { body } = parsed;
   const rawPath = body.path;
   const config = parseConnectionConfig(body);
 
@@ -248,7 +271,9 @@ app.post("/validate", async (c) => {
 // ─── POST /scan — preview available data ────────────────────────────────────
 
 app.post("/scan", async (c) => {
-  const body = await c.req.json();
+  const parsed = await parseObjectBody(c);
+  if ("response" in parsed) return parsed.response;
+  const { body } = parsed;
   const dataDir = body.dataDir;
   const config = parseConnectionConfig(body);
 
@@ -276,6 +301,47 @@ app.post("/scan", async (c) => {
   } catch (err: any) {
     return c.json({ error: err.message }, 500);
   }
+});
+
+// ─── PUT /backup — upload and stage an ST web user-folder ZIP ──────────────
+
+app.put("/backup", async (c) => {
+  const body = c.req.raw.body;
+  if (!body) return c.json({ error: "request body is empty" }, 400);
+
+  const declaredHeader = c.req.header("content-length");
+  const declaredSize = declaredHeader ? Number(declaredHeader) : null;
+  if (declaredSize !== null && (!Number.isFinite(declaredSize) || declaredSize < 0)) {
+    return c.json({ error: "invalid Content-Length" }, 400);
+  }
+
+  try {
+    const result = await stageStBackupArchive({
+      callerUserId: c.get("userId"),
+      body,
+      declaredSize,
+      fileName: c.req.query("filename"),
+    });
+    return c.json(result, 201);
+  } catch (err: unknown) {
+    if (err instanceof ArchiveValidationError) {
+      return c.json(
+        { error: err.message, code: err.code },
+        err.code === "size" ? 413 : 400,
+      );
+    }
+    if (err instanceof StBackupUploadError) {
+      const status = err.code === "busy" ? 409 : 422;
+      return c.json({ error: err.message, code: err.code }, status);
+    }
+    const message = err instanceof Error ? err.message : "failed to process SillyTavern backup";
+    return c.json({ error: message }, 400);
+  }
+});
+
+app.delete("/backup/:uploadId", (c) => {
+  const removed = discardStagedStBackup(c.req.param("uploadId"), c.get("userId"));
+  return removed ? c.body(null, 204) : c.json({ error: "staged backup not found" }, 404);
 });
 
 app.post("/tag-library/import", async (c) => {
@@ -308,11 +374,22 @@ app.post("/execute", async (c) => {
     return c.json({ error: "A migration is already in progress" }, 409);
   }
 
-  const body = await c.req.json();
-  const { dataDir, targetUserId, scope } = body;
+  const parsed = await parseObjectBody(c);
+  if ("response" in parsed) return parsed.response;
+  const { body } = parsed;
+  const { targetUserId, scope } = body;
+  const uploadId = typeof body.uploadId === "string" ? body.uploadId : null;
+  let dataDir = body.dataDir;
   const config = parseConnectionConfig(body);
 
-  if (!dataDir || typeof dataDir !== "string") {
+  if (uploadId) {
+    if (config.type !== "local") {
+      return c.json({ error: "uploaded backups cannot use a remote file connection" }, 400);
+    }
+    const staged = getStagedStBackup(uploadId, c.get("userId"));
+    if (!staged) return c.json({ error: "staged backup not found or expired" }, 404);
+    dataDir = staged.dataDir;
+  } else if (!dataDir || typeof dataDir !== "string") {
     return c.json({ error: "dataDir is required" }, 400);
   }
   if (!targetUserId || typeof targetUserId !== "string") {
@@ -335,28 +412,45 @@ app.post("/execute", async (c) => {
   if (permissionError) return permissionError;
 
   const migrationId = crypto.randomUUID();
-
-  // For remote connections, create and connect the FileSystem before handing
-  // it off to the async migration. The migration service will disconnect it
-  // when done (in the finally block).
-  let fs: FileSystem = localFs;
-  if (config.type !== "local") {
-    try {
-      fs = await createFileSystem(config);
-      await fs.connect();
-    } catch (err: any) {
-      return c.json({ error: `Failed to connect: ${err.message}` }, 400);
-    }
-  }
-
-  // Run migration asynchronously — return immediately
-  executeMigration(migrationId, callerUserId, targetUserId, effectiveDataDir, {
+  const migrationScope = {
     characters: !!scope.characters,
     worldBooks: !!scope.worldBooks,
     personas: !!scope.personas,
     chats: !!scope.chats,
     groupChats: !!scope.groupChats,
-  }, fs);
+    connections: !!scope.connections,
+    repairExisting: !!scope.repairExisting,
+    dryRun: !!scope.dryRun,
+  };
+
+  // Remote connections are opened by the isolated child (or in-process
+  // fallback). Pre-connecting here would leave a second unused session.
+  if (config.type !== "local") {
+    try {
+      await withFileSystem(config, async () => {});
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `Failed to connect: ${message}` }, 400);
+    }
+  }
+
+  let claimedUpload: StagedStBackup | null = null;
+  if (uploadId) {
+    claimedUpload = claimStagedStBackup(uploadId, callerUserId);
+    if (!claimedUpload) return c.json({ error: "staged backup is already in use" }, 409);
+  }
+
+  void startStMigration(
+    migrationId,
+    callerUserId,
+    targetUserId,
+    effectiveDataDir,
+    migrationScope,
+    config,
+    config.type === "local" ? localFs : undefined,
+  ).finally(() => {
+    if (claimedUpload) cleanupClaimedStBackup(claimedUpload);
+  });
 
   return c.json({ migrationId }, 202);
 });

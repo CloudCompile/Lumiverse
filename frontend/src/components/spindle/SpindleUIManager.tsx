@@ -12,6 +12,7 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { InputPromptModal } from '@/components/shared/InputPromptModal'
 import ContextMenu, { type ContextMenuEntry } from '@/components/shared/ContextMenu'
 import type { SpindleModalItem } from '@/types/store'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 function SpindleTextEditor() {
   const reqId = useStore((s) => s.pendingTextEditor?.requestId ?? null)
@@ -25,7 +26,7 @@ function SpindleTextEditor() {
 
   useEffect(() => {
     if (req) setValue(req.value ?? '')
-  }, [reqId])
+  }, [reqId, req])
 
   // Stable close handler — never changes identity, reads from refs
   const handleClose = useRef(() => {
@@ -58,23 +59,30 @@ export default function SpindleUIManager() {
   const floatWidgets = useStore((s) => s.floatWidgets)
   const dockPanels = useStore((s) => s.dockPanels)
   const appMounts = useStore((s) => s.appMounts)
+  const extensions = useStore((s) => s.extensions)
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
+  const enabledFloatWidgets = filterEnabledFrontendContributions(floatWidgets, extensions)
+  const enabledDockPanels = filterEnabledFrontendContributions(dockPanels, extensions)
+  const enabledAppMounts = filterEnabledFrontendContributions(appMounts, extensions)
 
   return (
     <>
-      {floatWidgets
-        .filter((w) => w.visible && !hiddenPlacements.includes(w.id))
+      {enabledFloatWidgets
+        // A desktop pop-out owns its own extension DOM. Do not leave the
+        // page-level host mounted behind it; restoring the widget simply
+        // clears this flag and mounts the existing root back in the page.
+        .filter((w) => w.visible && !w.desktopPoppedOut && !hiddenPlacements.includes(w.id))
         .map((w) => (
           <SpindleFloatWidget key={w.id} widget={w} />
         ))}
 
-      {dockPanels
+      {enabledDockPanels
         .filter((p) => !hiddenPlacements.includes(p.id))
         .map((p) => (
           <SpindleDockPanel key={p.id} panel={p} />
         ))}
 
-      {appMounts
+      {enabledAppMounts
         .filter((m) => !hiddenPlacements.includes(m.id))
         .map((m) => (
           <SpindleAppMount key={m.id} mount={m} />

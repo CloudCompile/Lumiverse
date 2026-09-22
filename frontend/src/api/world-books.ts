@@ -1,4 +1,4 @@
-import { get, post, put, del } from './client'
+import { get, post, postBlob, put, patch, del, type RequestOptions } from './client'
 import type {
   WorldBook, CreateWorldBookInput, UpdateWorldBookInput,
   WorldBookEntry, CreateWorldBookEntryInput, UpdateWorldBookEntryInput,
@@ -6,11 +6,39 @@ import type {
   WorldBookReindexResult, WorldBookVectorSummary,
   DuplicateWorldBookEntryInput, ReorderWorldBookEntriesInput,
   WorldBookEntryBulkActionInput, WorldBookEntryBulkActionResult,
+  RenameWorldBookFolderResponse, DeleteWorldBookFolderResponse,
 } from '@/types/api'
+import { triggerBlobDownload } from '@/lib/downloads'
+
+export type WorldBookExportFormat = 'lumiverse' | 'character_book' | 'sillytavern'
+
+function sanitizeDownloadName(name: string): string {
+  return name
+    .trim()
+    .replace(/[\\/:*?"<>|\x00-\x1f]+/g, '_')
+    .replace(/\s+/g, ' ')
+    .replace(/^\.+$/, '')
+    || 'world-book'
+}
 
 export const worldBooksApi = {
   list(params?: { limit?: number; offset?: number }) {
     return get<PaginatedResult<WorldBook>>('/world-books', params)
+  },
+
+  async listAll() {
+    const pageSize = 200
+    const data: WorldBook[] = []
+    let offset = 0
+    let total = Number.POSITIVE_INFINITY
+    while (offset < total) {
+      const page = await get<PaginatedResult<WorldBook>>('/world-books', { limit: pageSize, offset })
+      data.push(...page.data)
+      total = page.total
+      if (page.data.length === 0) break
+      offset += page.data.length
+    }
+    return data
   },
 
   get(id: string) {
@@ -23,6 +51,17 @@ export const worldBooksApi = {
 
   update(id: string, input: UpdateWorldBookInput) {
     return put<WorldBook>(`/world-books/${id}`, input)
+  },
+
+  renameFolder(oldName: string, newName: string) {
+    return post<RenameWorldBookFolderResponse>('/world-books/folders/rename', {
+      old_name: oldName,
+      new_name: newName,
+    })
+  },
+
+  deleteFolder(name: string) {
+    return post<DeleteWorldBookFolderResponse>('/world-books/folders/delete', { name })
   },
 
   delete(id: string) {
@@ -38,9 +77,33 @@ export const worldBooksApi = {
       sort_by?: 'order' | 'priority' | 'created' | 'updated' | 'name'
       sort_dir?: 'asc' | 'desc'
       search?: string
-    }
+    },
+    options?: RequestOptions,
   ) {
-    return get<PaginatedResult<WorldBookEntry>>(`/world-books/${bookId}/entries`, params)
+    return get<PaginatedResult<WorldBookEntry>>(`/world-books/${bookId}/entries`, params, options)
+  },
+
+  /** Load every entry so book-wide tools are not limited by the editor's current page. */
+  async listAllEntries(bookId: string, options?: RequestOptions) {
+    const pageSize = 1000
+    const data: WorldBookEntry[] = []
+    let offset = 0
+    let total = Number.POSITIVE_INFINITY
+
+    while (offset < total) {
+      const page = await get<PaginatedResult<WorldBookEntry>>(`/world-books/${bookId}/entries`, {
+        limit: pageSize,
+        offset,
+        sort_by: 'order',
+        sort_dir: 'asc',
+      }, options)
+      data.push(...page.data)
+      total = page.total
+      if (page.data.length === 0) break
+      offset += page.data.length
+    }
+
+    return data
   },
 
   getEntry(bookId: string, entryId: string) {
@@ -67,12 +130,41 @@ export const worldBooksApi = {
     return put<WorldBookEntry>(`/world-books/${bookId}/entries/${entryId}`, input)
   },
 
-  deleteEntry(bookId: string, entryId: string) {
-    return del<void>(`/world-books/${bookId}/entries/${entryId}`)
+  setEntryExtensionNamespace(bookId: string, entryId: string, namespace: string, value: unknown) {
+    return patch<{
+      entity: 'world_book_entry'
+      id: string
+      namespace: string
+      value: unknown
+      extensions: Record<string, any>
+    }>(`/world-books/${bookId}/entries/${entryId}/extensions/${encodeURIComponent(namespace)}`, { value })
   },
 
-  export(bookId: string, format: 'lumiverse' | 'character_book' | 'sillytavern' = 'lumiverse') {
+  deleteEntry(bookId: string, entryId: string, expectedRevision?: number) {
+    const suffix = expectedRevision === undefined ? '' : `?expected_revision=${encodeURIComponent(String(expectedRevision))}`
+    return del<void>(`/world-books/${bookId}/entries/${entryId}${suffix}`)
+  },
+
+  export(bookId: string, format: WorldBookExportFormat = 'lumiverse') {
     return get<Record<string, any>>(`/world-books/${bookId}/export`, { format })
+  },
+
+  bulkDelete(ids: string[]) {
+    return post<{ deleted: string[] }>('/world-books/bulk-delete', { ids })
+  },
+
+  bulkMoveFolder(ids: string[], folder: string) {
+    return post<{ updated: number }>('/world-books/bulk-move-folder', { ids, folder })
+  },
+
+  bulkExport(ids: string[], format: WorldBookExportFormat = 'lumiverse') {
+    return postBlob('/world-books/bulk-export', { ids, format })
+  },
+
+  async downloadWorldBook(bookId: string, bookName: string, format: WorldBookExportFormat = 'lumiverse') {
+    const data = await worldBooksApi.export(bookId, format)
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+    triggerBlobDownload(blob, `${sanitizeDownloadName(bookName)}.json`)
   },
 
   importJson(payload: Record<string, any>) {
@@ -87,8 +179,8 @@ export const worldBooksApi = {
     return post<{ world_book: WorldBook; entry_count: number }>('/world-books/import-character-book', { characterId })
   },
 
-  getVectorSummary(bookId: string) {
-    return get<WorldBookVectorSummary>(`/world-books/${bookId}/vector-summary`)
+  getVectorSummary(bookId: string, options?: RequestOptions) {
+    return get<WorldBookVectorSummary>(`/world-books/${bookId}/vector-summary`, undefined, options)
   },
 
   setSemanticActivation(bookId: string, enabled: boolean) {

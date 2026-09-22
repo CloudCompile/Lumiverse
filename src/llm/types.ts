@@ -6,6 +6,8 @@ export interface LlmTextPart {
   type: "text";
   text: string;
   cache_control?: Record<string, unknown>;
+  /** Opaque Gemini thought signature for this non-tool part. */
+  thought_signature?: string;
 }
 
 export interface LlmImagePart {
@@ -19,6 +21,13 @@ export interface LlmAudioPart {
   type: "audio";
   data: string;      // base64-encoded
   mime_type: string;  // e.g. "audio/wav", "audio/mp3"
+  cache_control?: Record<string, unknown>;
+}
+
+export interface LlmVideoPart {
+  type: "video";
+  data: string;      // base64-encoded
+  mime_type: string;  // e.g. "video/mp4", "video/webm"
   cache_control?: Record<string, unknown>;
 }
 
@@ -43,6 +52,7 @@ export type LlmMessagePart =
   | LlmTextPart
   | LlmImagePart
   | LlmAudioPart
+  | LlmVideoPart
   | LlmToolUsePart
   | LlmToolResultPart;
 
@@ -74,6 +84,12 @@ export interface LlmMessage {
   role: "system" | "user" | "assistant";
   content: string | LlmMessagePart[];
   name?: string;
+  /**
+   * Marks a trailing assistant message as a generation prefix. Providers that
+   * support native partial/prefill mode can use this to continue after
+   * `content` instead of treating it as a completed history message.
+   */
+  partial?: boolean;
   cache_control?: Record<string, unknown>;
   /** Provider-returned reasoning payload required by some OpenAI-compatible tool-call continuations. */
   reasoning_content?: string;
@@ -85,6 +101,8 @@ export interface LlmMessage {
    *  Replayed verbatim (entire sequence, unmodified) on the assistant message
    *  to preserve chain-of-thought across tool calls. Opaque to Lumiverse. */
   reasoning_details?: Record<string, unknown>[];
+  /** Opaque Gemini signature on a non-tool response part, replayed when enabled. */
+  thought_signature?: string;
 }
 
 /** Helper: extract the text content from an LlmMessage regardless of format. */
@@ -119,6 +137,9 @@ export function describeContentForDisplay(
         case "audio":
           countPart("audio");
           return `[audio: ${part.mime_type}]`;
+        case "video":
+          countPart("video");
+          return `[video: ${part.mime_type}]`;
         case "tool_use":
           countPart("tool_use");
           return `[tool_call: ${part.name}(${JSON.stringify(part.input)})]`;
@@ -160,6 +181,8 @@ export function flattenContentForDisplay(
 }
 
 export interface GenerationRequest {
+  /** Internal observer of the finalized outbound body; never serialized to a provider. */
+  onProviderRequest?: import("./request-observer").ProviderRequestObserver;
   messages: LlmMessage[];
   model: string;
   parameters?: GenerationParameters;
@@ -209,6 +232,8 @@ export interface GenerationResponse {
   content: string;
   reasoning?: string;
   finish_reason: string;
+  stop_details?: GenerationStopDetails | null;
+  stop_sequence?: string | null;
   /** Present when the LLM requested function calls instead of (or in addition to) generating text. */
   tool_calls?: ToolCallResult[];
   /** Provider-native reasoning blocks captured this turn (Anthropic), to replay
@@ -217,13 +242,24 @@ export interface GenerationResponse {
   /** OpenRouter `reasoning_details` captured this turn, to replay on tool-use
    *  continuations. */
   reasoning_details?: Record<string, unknown>[];
+  /** Optional Gemini signature from a non-tool response part. */
+  thought_signature?: string;
   usage?: GenerationUsage;
+}
+
+/** Provider explanation for a terminal outcome, such as an Anthropic refusal. */
+export interface GenerationStopDetails {
+  type: string;
+  category?: string | null;
+  explanation?: string | null;
 }
 
 export interface StreamChunk {
   token: string;
   reasoning?: string;
   finish_reason?: string;
+  stop_details?: GenerationStopDetails | null;
+  stop_sequence?: string | null;
   /** Accumulated function calls (set on the final chunk when finish_reason indicates tool use). */
   tool_calls?: ToolCallResult[];
   /** Provider-native reasoning blocks (set on the final chunk alongside
@@ -233,6 +269,8 @@ export interface StreamChunk {
   /** OpenRouter `reasoning_details`, accumulated across stream chunks and set on
    *  the final chunk alongside tool_calls. */
   reasoning_details?: Record<string, unknown>[];
+  /** Optional Gemini signature from a non-tool response part. */
+  thought_signature?: string;
   usage?: GenerationUsage;
 }
 
@@ -240,27 +278,39 @@ export interface StreamChunk {
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet';
 
-export type ImpersonateMode = 'prompts' | 'oneliner' | 'sovereign_hand';
+export type ImpersonateMode = 'prompts' | 'preset' | 'oneliner' | 'sovereign_hand';
 
 export interface AssemblyContext {
   userId: string;
   chatId: string;
   connectionId?: string;
   presetId?: string;
+  /** Internal transient preset used by assembly-only callers. Never persisted. */
+  presetOverride?: import("../types/preset").Preset;
+  /** Skip per-chat/character/connection preset-profile block overrides. */
+  skipPresetProfileBinding?: boolean;
+  /** Whether macro handlers may commit side effects. Defaults to true. */
+  macroCommit?: boolean;
   /** When true, bypass preset-profile preset selection and use presetId directly. */
   forcePresetId?: boolean;
   generationType: GenerationType;
   personaId?: string;
   /** Effective persona add-on states for this generation. Applied to a cloned persona only. */
   personaAddonStates?: Record<string, boolean>;
-  /** For impersonate: controls how much of the preset is included. */
+  /** For impersonate: selects the active-preset, dedicated-preset, or one-liner assembly path. */
   impersonateMode?: ImpersonateMode;
   /** For impersonate: free-form user text from the input box, appended to the impersonation prompt. */
   impersonateInput?: string;
+  /** Exact input-bar draft snapshot captured when this generation started. */
+  userInput?: string;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
   /** For regenerate/swipe: content of the active target swipe before it was replaced. */
   rejectedSwipe?: string;
+  /** For continue: source message id of the assistant turn being extended. */
+  continueMessageId?: string;
+  /** For continue: separator to append to the target in the model prompt and saved reply. */
+  continuePostfix?: string;
   /** For group chats: generate a response as this specific character. */
   targetCharacterId?: string;
   /** Council tool results (passed from generate.service when council executes before assembly). */
@@ -276,6 +326,8 @@ export interface AssemblyContext {
   regenFeedback?: string;
   /** Where to inject regen feedback: 'system' (last system msg) or 'user' (last user msg). */
   regenFeedbackPosition?: "system" | "user";
+  /** Freeform prompt template containing the guarded {{$regenInput}} placeholder. */
+  regenFeedbackFormat?: string;
   /** When true, an extension owns this chat's `target:prompt` regex and the
    *  host skips its own per-message prompt-regex pass. */
   skipPromptRegex?: boolean;
@@ -308,6 +360,7 @@ export interface PrefetchedData {
     entries: import("../types/world-book").WorldBookEntry[];
     worldBookIds: string[];
     bookSourceMap: Map<string, import("../services/world-info-sources.service").BookSource>;
+    bookNameMap: Map<string, string>;
   };
   /** Group chat members, batch-loaded. */
   groupCharacters?: Map<string, import("../types/character").Character>;
@@ -334,6 +387,16 @@ export interface ActivatedWorldInfoEntry {
   score?: number;
   bookSource?: 'character' | 'persona' | 'chat' | 'global' | 'peer';
   bookId?: string;
+  bookName?: string;
+  activationType?: "constant" | "sticky" | "keyword" | "vector";
+  estimatedTokens?: number;
+  activationOrder?: number;
+  priority?: number;
+  position?: number;
+  depth?: number;
+  preventRecursion?: boolean;
+  activationProvenance?: ActivationProvenance;
+  firstTriggeredForBook?: boolean;
 }
 
 export interface MemoryStats {
@@ -370,7 +433,7 @@ export interface DatabankStats {
     | "skipped_no_active_banks"
     | "skipped_embeddings_disabled";
   retrievedChunks: Array<{
-    score: number;
+    score: number | null;
     tokenEstimate: number;
     documentName: string;
     databankId: string;
@@ -417,19 +480,35 @@ export interface ContextClipStats {
   budgetInvalid?: boolean;
   /** True when fixed prompt overhead alone is larger than the available input budget. */
   fixedOverBudget?: boolean;
+  /** True when a context anchor set the first chat-history message the model may read. */
+  anchorActive?: boolean;
+  /** Exact tokens required by the anchored history tail. */
+  protectedHistoryTokens?: number;
+  /** Budget remaining after the anchored history tail. Negative means the anchor cannot fit. */
+  remainingBeforeAnchor?: number;
+  /** True when the anchored history tail cannot fit in the remaining history budget. */
+  anchorOverflow?: boolean;
 }
 
 export interface AssemblyResult {
   messages: LlmMessage[];
   breakdown: AssemblyBreakdownEntry[];
   parameters: Record<string, any>;
+  /** Preset selected by profile/request resolution for this assembly. */
+  resolvedPreset?: { id: string; name: string };
+  /** Whether a directly word-terminated streaming response should lose its final word. */
+  trimIncompleteWords?: boolean;
   /** The resolved assistant prefill text (from promptBias / assistantPrefill / assistantImpersonation).
    *  When set, the last message in `messages` is an assistant message containing this text.
    *  The generate service must prepend this to the LLM response content since the model
    *  continues *after* the prefill (it's not included in the model's output). */
   assistantPrefill?: string;
+  /** A provider-native `reasoning_content` prefix. The generation service
+   * surfaces this before the provider's streamed reasoning tail. */
+  assistantReasoningPrefill?: string;
   /** Summary of all world info entries activated during this assembly. */
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
+  spindleWorldInfoCaptures?: Record<string, ActivatedWorldInfoEntry[]>;
   /** Statistics from the World Info activation pipeline (budget enforcement, etc.). */
   worldInfoStats?: {
     totalCandidates: number;
@@ -495,6 +574,13 @@ export interface AssemblyBreakdownEntry {
   firstMessageIndex?: number;
   /** Pre-counted token value (e.g. from sidecar usage stats). Skips local tokenization. */
   preCountedTokens?: number;
+  /**
+   * Alternate content used only for prompt-breakdown tokenization. The normal
+   * `content` remains the fully resolved text shown in inspectors.
+   */
+  tokenCountContent?: string;
+  /** True when this entry's token-count content delegates marker-mode WI to its World Info rows. */
+  attributesWorldInfoMarkerTokens?: boolean;
   /** If true, tokens are displayed but NOT added to the total (e.g. sidecar tokens spent on a separate LLM). */
   excludeFromTotal?: boolean;
   /** Present for prompt blocks injected by Spindle interceptors. */
@@ -502,3 +588,5 @@ export interface AssemblyBreakdownEntry {
   /** Human-readable extension attribution for injected prompt blocks. */
   extensionName?: string;
 }
+import type { ActivationProvenance } from "../spindle/activation-provenance";
+export type { ActivationProvenance, ActivationTraceEntry } from "../spindle/activation-provenance";

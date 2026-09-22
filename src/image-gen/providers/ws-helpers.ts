@@ -14,6 +14,56 @@ export function formatWsError(e: unknown): string {
   return "connection failed (likely refused / DNS / non-WS endpoint)"
 }
 
+type BunPausableWebSocket = WebSocket & {
+  pause(): boolean
+  resume(): boolean
+}
+
+export interface WebSocketReceiveBackpressure {
+  enqueued(queueLength: number): void
+  dequeued(queueLength: number): void
+  release(): void
+}
+
+/**
+ * Bound an async consumer's decoded-message queue with Bun's WebSocket receive
+ * backpressure. Bun may deliver messages decoded just before pause(), so this
+ * is a high/low-water controller rather than a hard queue-size limit.
+ */
+export function createWebSocketReceiveBackpressure(
+  ws: WebSocket,
+  options: { highWaterMark?: number; lowWaterMark?: number } = {},
+): WebSocketReceiveBackpressure {
+  const highWaterMark = options.highWaterMark ?? 16
+  const lowWaterMark = options.lowWaterMark ?? 4
+  if (lowWaterMark < 0 || highWaterMark <= lowWaterMark) {
+    throw new RangeError("WebSocket backpressure requires 0 <= lowWaterMark < highWaterMark")
+  }
+
+  const socket = ws as BunPausableWebSocket
+  let pausedByController = false
+
+  const resume = () => {
+    if (!pausedByController) return
+    try {
+      socket.resume()
+    } finally {
+      pausedByController = false
+    }
+  }
+
+  return {
+    enqueued(queueLength) {
+      if (pausedByController || queueLength < highWaterMark) return
+      pausedByController = socket.pause()
+    },
+    dequeued(queueLength) {
+      if (queueLength <= lowWaterMark) resume()
+    },
+    release: resume,
+  }
+}
+
 // Opens a WS with a timeout; cleans up listeners on settle so we don't keep
 // the event loop alive or leak handlers after resolution. `headers` uses
 // Bun's WebSocket constructor extension (WHATWG WebSocket can't set headers).
@@ -56,4 +106,47 @@ export async function openWebSocket(
     ws.addEventListener("error", onError)
   })
   return ws
+}
+
+async function waitForWebSocketClose(ws: WebSocket, timeoutMs: number): Promise<boolean> {
+  if (ws.readyState === WebSocket.CLOSED) return true
+  return new Promise<boolean>((resolve) => {
+    let settled = false
+    const finish = (closed: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      ws.removeEventListener("close", onClose)
+      resolve(closed)
+    }
+    const onClose = () => finish(true)
+    const timer = setTimeout(() => finish(false), Math.max(0, timeoutMs))
+    ws.addEventListener("close", onClose, { once: true })
+  })
+}
+
+/**
+ * Initiate a normal WebSocket close handshake and briefly await the peer's
+ * acknowledgement. Awaiting the close event gives Bun time to flush the close
+ * frame instead of letting the request tear down the transport immediately
+ * after `ws.close()`.
+ *
+ * If the peer has already started closing, just wait for that handshake to
+ * finish rather than issuing a second close.
+ */
+export async function closeWebSocketGracefully(
+  ws: WebSocket,
+  closeTimeoutMs = 1_000,
+): Promise<void> {
+  if (ws.readyState === WebSocket.CLOSED) return
+
+  if (ws.readyState === WebSocket.OPEN) {
+    try {
+      ws.close(1000, "complete")
+    } catch {
+      return
+    }
+  }
+
+  await waitForWebSocketClose(ws, closeTimeoutMs)
 }

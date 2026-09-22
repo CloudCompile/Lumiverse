@@ -23,11 +23,16 @@ import {
   collapseVectorHitsBySourceId,
   estimateChatChunkTokens,
   hashChatChunkContent,
-  splitChatChunkContent,
   type ChatChunkEmbeddingMetadata,
 } from "./chat-chunk-embedding";
-import { isChatChunkVectorizationBatchTimeoutError } from "./chat-chunk-vectorization-timeouts";
 import { chunkDocument } from "./databank/document-chunker.service";
+import {
+  providerRegistry,
+  type HostScopeContext,
+  type ProviderDescriptor,
+  type RegisteredProvider,
+} from "../spindle/provider-registry";
+import { emitProviderRegistryChanged } from "../ws/bus";
 import { loadWorldBookVectorSettings, type WorldBookVectorSettings } from "./world-book-vector-settings.service";
 import {
   desiredWorldBookVectorIndexStatus,
@@ -38,6 +43,7 @@ import {
 } from "./world-book-vector-state";
 import { getActiveVectorStore } from "./vector-store";
 import {
+  MAX_SOURCE_FILTER_IDS,
   andFilter,
   cosineSimilarity,
   distanceFromSimilarity,
@@ -45,6 +51,7 @@ import {
   idsIn,
   inSet,
   mmrSelect,
+  notInSet,
   ownerScope,
   ownersScope,
   reciprocalRankFusion,
@@ -99,8 +106,11 @@ export {
   stopIndexHealthMonitor,
 };
 
-const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
+export const EMBEDDING_SETTINGS_KEY = "embeddingConfig";
 const EMBEDDING_SECRET_KEY = "embedding_api_key";
+const EMBEDDING_PROFILE_SECRET_PREFIX = "embedding-profile";
+const PROFILE_SECRET_FIELD_API_KEY = "apiKey";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const WORLD_BOOK_VECTOR_VERSION = 4;
 const WORLD_BOOK_VECTOR_VERSION_KEY = "worldBookVectorVersion";
 const WORLD_BOOK_ROW_SCAN_FALLBACK_LIMIT = 10_000;
@@ -109,16 +119,57 @@ const WORLD_BOOK_ROW_SCAN_FALLBACK_LIMIT = 10_000;
  *  User-configurable via EmbeddingConfig.request_timeout (seconds). */
 const DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS = 120_000; // 120 seconds
 
-function embeddingProviderSecretKey(provider: EmbeddingProvider): string {
+export const EMBEDDING_ERROR_CODES = {
+  PROVIDER_UNAVAILABLE: "embedding_provider_unavailable",
+  FALLBACK_EXHAUSTED: "embedding_fallback_exhausted",
+} as const;
+
+export type EmbeddingErrorCode = typeof EMBEDDING_ERROR_CODES[keyof typeof EMBEDDING_ERROR_CODES];
+
+export class EmbeddingError extends Error {
+  readonly code: EmbeddingErrorCode;
+  constructor(code: EmbeddingErrorCode, message: string) {
+    super(message);
+    this.name = "EmbeddingError";
+    this.code = code;
+  }
+}
+
+export function isEmbeddingAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: string }).name;
+  if (name === "AbortError") return true;
+  const message = (err as { message?: string }).message || "";
+  return name === "DOMException" && /abort/i.test(message);
+}
+
+function embeddingProviderSecretKey(provider: string): string {
   return `${EMBEDDING_SECRET_KEY}_${provider}`;
 }
 
-async function getEmbeddingSecret(userId: string, provider: EmbeddingProvider): Promise<string | null> {
+/** Host-only secret path. Never include this string in DTOs, logs, or errors. */
+export function embeddingProfileSecretKey(profileId: string, field = PROFILE_SECRET_FIELD_API_KEY): string {
+  return `${EMBEDDING_PROFILE_SECRET_PREFIX}/${profileId}/${field}`;
+}
+
+export function isUsableProfileId(id: unknown): id is string {
+  return typeof id === "string" && UUID_RE.test(id);
+}
+
+function ensureProfileId(id: unknown): string {
+  return isUsableProfileId(id) ? id : crypto.randomUUID();
+}
+
+async function readEmbeddingSecret(
+  userId: string,
+  provider: string,
+  readSecret: (userId: string, key: string) => Promise<string | null>,
+): Promise<string | null> {
   const scopedKey = embeddingProviderSecretKey(provider);
-  const scoped = await secretsSvc.getSecret(userId, scopedKey);
+  const scoped = await readSecret(userId, scopedKey);
   if (scoped && scoped.length > 0) return scoped;
 
-  const legacy = await secretsSvc.getSecret(userId, EMBEDDING_SECRET_KEY);
+  const legacy = await readSecret(userId, EMBEDDING_SECRET_KEY);
   if (!legacy || legacy.length === 0) return null;
 
   await secretsSvc.putSecret(userId, scopedKey, legacy);
@@ -126,19 +177,62 @@ async function getEmbeddingSecret(userId: string, provider: EmbeddingProvider): 
   return legacy;
 }
 
-async function hasEmbeddingSecret(userId: string, provider: EmbeddingProvider): Promise<boolean> {
-  const secret = await getEmbeddingSecret(userId, provider);
+async function getEmbeddingSecret(userId: string, provider: string): Promise<string | null> {
+  return readEmbeddingSecret(userId, provider, secretsSvc.getSecret);
+}
+
+async function hasEmbeddingSecret(userId: string, provider: string): Promise<boolean> {
+  const secret = await readEmbeddingSecret(userId, provider, secretsSvc.getSecretForStatus);
   return !!secret && secret.length > 0;
 }
 
-async function putEmbeddingSecret(userId: string, provider: EmbeddingProvider, value: string): Promise<void> {
+async function putEmbeddingSecret(userId: string, provider: string, value: string): Promise<void> {
   await secretsSvc.putSecret(userId, embeddingProviderSecretKey(provider), value);
   secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
 }
 
-function deleteEmbeddingSecret(userId: string, provider: EmbeddingProvider): void {
+function deleteEmbeddingSecret(userId: string, provider: string): void {
   secretsSvc.deleteSecret(userId, embeddingProviderSecretKey(provider));
   secretsSvc.deleteSecret(userId, EMBEDDING_SECRET_KEY);
+}
+
+async function hasProfileSecret(userId: string, profile: Pick<EmbeddingConnectionProfile, "id" | "provider">): Promise<boolean> {
+  if (isUsableProfileId(profile.id)) {
+    const scoped = await secretsSvc.getSecretForStatus(userId, embeddingProfileSecretKey(profile.id));
+    if (scoped && scoped.length > 0) return true;
+    // PR 309 briefly sourced embedding profiles from the general LLM
+    // Connections list. Keep those users working while the snapshot is moved
+    // into the dedicated embedding-connection workflow.
+    const legacyConnectionSecret = await secretsSvc.getSecretForStatus(userId, `connection_${profile.id}_api_key`);
+    if (legacyConnectionSecret && legacyConnectionSecret.length > 0) return true;
+  }
+  return hasEmbeddingSecret(userId, profile.provider);
+}
+
+async function resolveProfileSecret(
+  userId: string,
+  profile: Pick<EmbeddingConnectionProfile, "id" | "provider">,
+): Promise<string | null> {
+  if (isUsableProfileId(profile.id)) {
+    const scoped = await secretsSvc.getSecret(userId, embeddingProfileSecretKey(profile.id));
+    if (scoped && scoped.length > 0) return scoped;
+    const legacyConnectionSecret = await secretsSvc.getSecret(userId, `connection_${profile.id}_api_key`);
+    if (legacyConnectionSecret && legacyConnectionSecret.length > 0) {
+      // Copy instead of moving: the original LLM connection may still be in
+      // active use for chat generation.
+      await putProfileSecret(userId, profile.id, legacyConnectionSecret);
+      return legacyConnectionSecret;
+    }
+  }
+  return getEmbeddingSecret(userId, profile.provider);
+}
+
+async function putProfileSecret(userId: string, profileId: string, value: string): Promise<void> {
+  await secretsSvc.putSecret(userId, embeddingProfileSecretKey(profileId), value);
+}
+
+function deleteProfileSecret(userId: string, profileId: string): void {
+  secretsSvc.deleteSecret(userId, embeddingProfileSecretKey(profileId));
 }
 
 /** Combine an optional external abort signal with an internal timeout into a
@@ -172,12 +266,62 @@ function resolveAbortError(signal: AbortSignal | undefined, fallbackMessage = "A
 export type EmbeddingProvider =
   | "openai-compatible"
   | "openai"
+  | "mistral"
+  | "cohere"
   | "openrouter"
   | "electronhub"
   | "bananabread"
   | "nanogpt"
   | "pollinations"
+  | "nvidia-nim"
   | "google_vertex";
+
+/**
+ * Connection and retrieval options remembered for each embedding provider.
+ * `enabled` remains global: the active embedding model is shared by the
+ * vector store, while switching providers should not discard its setup.
+ */
+export interface EmbeddingProviderProfile {
+  api_url: string;
+  model: string;
+  dimensions: number | null;
+  send_dimensions: boolean;
+  retrieval_top_k: number;
+  hybrid_weight_mode: "keyword_first" | "balanced" | "vector_first";
+  preferred_context_size: number;
+  batch_size: number;
+  similarity_threshold: number;
+  rerank_cutoff: number;
+  vectorize_world_books: boolean;
+  vectorize_chat_messages: boolean;
+  vectorize_chat_documents: boolean;
+  chat_memory_mode: "conservative" | "balanced" | "aggressive";
+  request_timeout: number;
+  vertex_region?: string;
+}
+
+export interface EmbeddingProviderProfileWithStatus extends EmbeddingProviderProfile {
+  has_api_key: boolean;
+}
+
+export interface EmbeddingConnectionProfile {
+  id: string;
+  /** User-facing label for this dedicated embedding connection. */
+  name?: string;
+  provider: string;
+  model: string;
+  api_url: string;
+  dimensions: number | null;
+  enabled: boolean;
+  /** Google Vertex AI region. Ignored for non-Vertex providers. */
+  vertex_region?: string;
+  /** Google Vertex project id. Host-resolved; never a secret. */
+  vertex_project?: string;
+}
+
+export interface EmbeddingConnectionProfileStatus extends EmbeddingConnectionProfile {
+  hasSecret: boolean;
+}
 
 export interface EmbeddingConfig {
   enabled: boolean;
@@ -202,17 +346,29 @@ export interface EmbeddingConfig {
   /** Google Vertex AI region. Only used when `provider === "google_vertex"`.
    *  The `api_url` field is ignored for Vertex — host is derived from this. */
   vertex_region?: string;
+  /** Saved, non-secret settings for each provider. API keys live in the
+   * encrypted secret store under provider-specific keys. */
+  provider_profiles?: Partial<Record<EmbeddingProvider, EmbeddingProviderProfile>>;
+  vertex_project?: string;
+  connectionProfiles?: EmbeddingConnectionProfile[];
+  primaryProfileId?: string | null;
+  fallbackProfileIds?: string[];
 }
 
 export interface EmbeddingConfigWithStatus extends EmbeddingConfig {
   has_api_key: boolean;
+  provider_profiles?: Partial<Record<EmbeddingProvider, EmbeddingProviderProfileWithStatus>>;
   /** True when the returned config belongs to the server owner and the caller
    *  is a non-owner receiving it by inheritance. Non-owners cannot mutate an
    *  inherited config and share the owner's API key / billing. */
   inherited?: boolean;
+  connectionProfiles: EmbeddingConnectionProfileStatus[];
+  primaryProfileId: string | null;
+  fallbackProfileIds: string[];
 }
 
 export interface EmbeddingModelsPreviewInput {
+  profile_id?: string;
   provider?: EmbeddingProvider;
   api_url?: string;
   api_key?: string;
@@ -233,9 +389,43 @@ export interface WorldBookSearchCandidate {
   entry_id: string;
   distance: number;
   lexical_score: number | null;
+  /** Bounded, provider-scale-independent BM25 evidence used by reranking. */
+  lexical_strength?: number;
   content: string;
   searchTextPreview: string;
   metadata: WorldBookEmbeddingMetadata;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? (sorted[middle - 1] + sorted[middle]) / 2
+    : sorted[middle];
+}
+
+/**
+ * Convert provider-specific positive BM25 magnitudes into a bounded robust
+ * signal. Log centering makes the result exactly invariant to uniform positive
+ * scaling; median/MAD keeps isolated score outliers from setting the scale.
+ */
+export function normalizeBm25Scores(
+  scores: Array<number | null | undefined>,
+): number[] {
+  const positiveLogs = scores
+    .filter((score): score is number => typeof score === "number" && Number.isFinite(score) && score > 0)
+    .map((score) => Math.log(score));
+  if (positiveLogs.length === 0) return scores.map(() => 0);
+
+  const center = median(positiveLogs);
+  const mad = median(positiveLogs.map((value) => Math.abs(value - center)));
+  const scale = Math.max(1.4826 * mad, 0.25);
+  return scores.map((score) => {
+    if (typeof score !== "number" || !Number.isFinite(score) || score <= 0) return 0;
+    const z = Math.max(-6, Math.min(6, (Math.log(score) - center) / scale));
+    return 1 / (1 + Math.exp(-z));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +465,9 @@ export interface ChatMemorySettings {
 
   // --- Quick Mode ---
   quickMode: "conservative" | "balanced" | "aggressive" | null; // Default "balanced". null = manual
+
+  // --- Injection Strategy ---
+  injectionStrategy: "fallback" | "macro_only" | "disabled"; // Default "macro_only"
 }
 
 export interface PerChatMemoryOverrides {
@@ -317,6 +510,7 @@ export const DEFAULT_CHAT_MEMORY_SETTINGS: ChatMemorySettings = {
   splitOnTimeGapMinutes: 0,
   maxMessagesPerChunk: 0,
   quickMode: "balanced",
+  injectionStrategy: "macro_only",
 };
 
 const CHAT_MEMORY_SETTINGS_KEY = "chatMemorySettings";
@@ -351,6 +545,9 @@ export function normalizeChatMemorySettings(input: any): ChatMemorySettings {
     quickMode: input?.quickMode === null ? null
       : ["conservative", "balanced", "aggressive"].includes(input?.quickMode) ? input.quickMode
       : d.quickMode,
+    injectionStrategy: ["fallback", "macro_only", "disabled"].includes(input?.injectionStrategy)
+      ? input.injectionStrategy
+      : d.injectionStrategy,
   };
 }
 
@@ -462,28 +659,45 @@ export function saveChatMemorySettings(userId: string, input: any): ChatMemorySe
 const PROVIDER_DEFAULT_URL: Record<EmbeddingProvider, string> = {
   "openai-compatible": "https://api.openai.com/v1/embeddings",
   openai: "https://api.openai.com/v1/embeddings",
+  mistral: "https://api.mistral.ai/v1/embeddings",
+  cohere: "https://api.cohere.com/v2/embed",
   openrouter: "https://openrouter.ai/api/v1/embeddings",
   electronhub: "https://api.electronhub.top/v1/embeddings",
   bananabread: "http://localhost:8008/v1/embeddings",
   nanogpt: "https://nano-gpt.com/api/v1/embeddings",
   pollinations: "https://gen.pollinations.ai/v1/embeddings",
+  "nvidia-nim": "https://integrate.api.nvidia.com/v1/embeddings",
   // Vertex derives its host from vertex_region — this is a cosmetic default.
   google_vertex: "https://aiplatform.googleapis.com",
 };
 
-function providerDefaultModel(provider: EmbeddingProvider): string {
+function isKnownEmbeddingProvider(provider: string): provider is EmbeddingProvider {
+  return VALID_EMBEDDING_PROVIDERS.includes(provider as EmbeddingProvider);
+}
+
+function providerDefaultModel(provider: string): string {
+  if (provider === "mistral") return "mistral-embed";
+  if (provider === "cohere") return "embed-v4.0";
   if (provider === "bananabread") return "mixedbread-ai/mxbai-embed-large-v1";
   if (provider === "nanogpt") return "text-embedding-3-small";
   if (provider === "pollinations") return "text-embedding-3-small";
   if (provider === "openrouter") return "text-embedding-3-small";
   if (provider === "electronhub") return "text-embedding-3-small";
   if (provider === "openai") return "text-embedding-3-small";
+  if (provider === "nvidia-nim") return "nvidia/nemotron-3-embed-1b";
   if (provider === "google_vertex") return "gemini-embedding-001";
   return "text-embedding-3-small";
 }
 
-function providerAllowsCustomApiUrl(provider: EmbeddingProvider): boolean {
-  return provider === "openai-compatible" || provider === "bananabread";
+function providerAllowsCustomApiUrl(provider: string): boolean {
+  // NIM's hosted API is the default, but self-hosted NIM deployments expose
+  // the same OpenAI-compatible endpoint and may offer additional models.
+  return provider === "openai-compatible" || provider === "bananabread" || provider === "nvidia-nim" || !isKnownEmbeddingProvider(provider);
+}
+
+function providerDefaultUrl(provider: string): string {
+  if (isKnownEmbeddingProvider(provider)) return PROVIDER_DEFAULT_URL[provider];
+  return PROVIDER_DEFAULT_URL["openai-compatible"];
 }
 
 function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): EmbeddingConfig {
@@ -506,28 +720,230 @@ function defaultConfig(provider: EmbeddingProvider = "openai-compatible"): Embed
     chat_memory_mode: "balanced",
     request_timeout: 120,
     vertex_region: provider === "google_vertex" ? "global" : undefined,
+    connectionProfiles: [],
+    primaryProfileId: null,
+    fallbackProfileIds: [],
   };
 }
 
 const VALID_EMBEDDING_PROVIDERS: EmbeddingProvider[] = [
-  "openai-compatible", "openai", "openrouter", "electronhub", "bananabread", "nanogpt", "pollinations", "google_vertex",
+  "openai-compatible", "openai", "mistral", "cohere", "openrouter", "electronhub", "bananabread", "nanogpt", "pollinations", "nvidia-nim", "google_vertex",
 ];
 
-function normalizeConfig(input: any): EmbeddingConfig {
-  const rawProvider = input?.provider as EmbeddingProvider | undefined;
-  const provider: EmbeddingProvider = rawProvider && VALID_EMBEDDING_PROVIDERS.includes(rawProvider)
-    ? rawProvider
+function normalizeOptionalString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function normalizeProfileDimensions(value: unknown): number | null {
+  return Number.isFinite(value) && (value as number) > 0 ? Math.floor(value as number) : null;
+}
+
+export function areProfileDimensionsCompatible(
+  primary: Pick<EmbeddingConnectionProfile, "dimensions"> | null | undefined,
+  candidate: Pick<EmbeddingConnectionProfile, "dimensions">,
+): boolean {
+  if (!primary) return true;
+  if (primary.dimensions == null || candidate.dimensions == null) return true;
+  return primary.dimensions === candidate.dimensions;
+}
+
+function stripProfileSecrets<T extends Record<string, any>>(profile: T): EmbeddingConnectionProfile {
+  const rawProvider = typeof profile.provider === "string" && profile.provider.trim()
+    ? profile.provider.trim()
     : "openai-compatible";
-  const base = defaultConfig(provider);
-  const api_url = providerAllowsCustomApiUrl(provider)
-    ? (typeof input?.api_url === "string" && input.api_url.trim() ? input.api_url.trim() : base.api_url)
-    : base.api_url;
+  // General Connections calls its arbitrary OpenAI-compatible provider
+  // "custom". Embedding drivers call the same protocol
+  // "openai-compatible"; canonicalize snapshots created by the brief shared
+  // workflow so they remain runnable after becoming dedicated connections.
+  const provider = rawProvider === "custom" ? "openai-compatible" : rawProvider;
   return {
-    enabled: input?.enabled !== undefined ? !!input.enabled : base.enabled,
+    id: ensureProfileId(profile.id),
+    name: typeof profile.name === "string" && profile.name.trim()
+      ? profile.name.trim()
+      : embeddingProviderDisplayName(provider),
     provider,
-    api_url,
-    model: typeof input?.model === "string" && input.model.trim() ? input.model.trim() : base.model,
-    dimensions: Number.isFinite(input?.dimensions) && input.dimensions > 0 ? Math.floor(input.dimensions) : null,
+    model: typeof profile.model === "string" && profile.model.trim()
+      ? profile.model.trim()
+      : providerDefaultModel(typeof profile.provider === "string" ? profile.provider : "openai-compatible"),
+    api_url: typeof profile.api_url === "string" && profile.api_url.trim()
+      ? profile.api_url.trim()
+      : providerDefaultUrl(typeof profile.provider === "string" ? profile.provider : "openai-compatible"),
+    dimensions: normalizeProfileDimensions(profile.dimensions),
+    enabled: profile.enabled !== undefined ? !!profile.enabled : true,
+    vertex_region: normalizeOptionalString(profile.vertex_region),
+    vertex_project: normalizeOptionalString(profile.vertex_project),
+  };
+}
+
+function embeddingProviderDisplayName(provider: string): string {
+  const names: Record<string, string> = {
+    "openai-compatible": "OpenAI Compatible",
+    openai: "OpenAI",
+    mistral: "Mistral",
+    cohere: "Cohere",
+    openrouter: "OpenRouter",
+    electronhub: "ElectronHub",
+    bananabread: "BananaBread",
+    nanogpt: "Nano-GPT",
+    "nvidia-nim": "NVIDIA NIM",
+    google_vertex: "Google Vertex AI",
+  };
+  return names[provider] ?? provider;
+}
+
+function profileFromLegacyFields(input: {
+  provider: string;
+  api_url: string;
+  model: string;
+  dimensions: number | null;
+  vertex_region?: string;
+  vertex_project?: string;
+}, existingId?: unknown): EmbeddingConnectionProfile {
+  return stripProfileSecrets({
+    id: existingId,
+    provider: input.provider,
+    api_url: input.api_url,
+    model: input.model,
+    dimensions: input.dimensions,
+    enabled: true,
+    vertex_region: input.vertex_region,
+    vertex_project: input.vertex_project,
+  });
+}
+
+export function selectFallbackChain(cfg: {
+  connectionProfiles?: EmbeddingConnectionProfile[] | null;
+  primaryProfileId?: string | null;
+  fallbackProfileIds?: string[] | null;
+}): EmbeddingConnectionProfile[] {
+  const profiles = Array.isArray(cfg.connectionProfiles) ? cfg.connectionProfiles : [];
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  const chain: EmbeddingConnectionProfile[] = [];
+  const seen = new Set<string>();
+
+  const push = (profile: EmbeddingConnectionProfile | undefined, requireCompatWith?: EmbeddingConnectionProfile) => {
+    if (!profile || !profile.enabled || seen.has(profile.id)) return;
+    if (requireCompatWith && !areProfileDimensionsCompatible(requireCompatWith, profile)) return;
+    seen.add(profile.id);
+    chain.push(profile);
+  };
+
+  const primary = (cfg.primaryProfileId && byId.get(cfg.primaryProfileId)) || profiles[0];
+  push(primary);
+
+  const fallbackIds = Array.isArray(cfg.fallbackProfileIds) ? cfg.fallbackProfileIds : [];
+  for (const id of fallbackIds) {
+    push(byId.get(id), chain[0]);
+  }
+
+  return chain;
+}
+
+function storedBlobHasProfiles(value: unknown): boolean {
+  return !!value && typeof value === "object" && Array.isArray((value as { connectionProfiles?: unknown }).connectionProfiles)
+    && (value as { connectionProfiles: unknown[] }).connectionProfiles.length > 0;
+}
+
+function persistableConfig(cfg: EmbeddingConfig): EmbeddingConfig {
+  return {
+    ...cfg,
+    connectionProfiles: (cfg.connectionProfiles ?? []).map((profile) => stripProfileSecrets(profile)),
+    primaryProfileId: cfg.primaryProfileId ?? null,
+    fallbackProfileIds: Array.isArray(cfg.fallbackProfileIds) ? cfg.fallbackProfileIds.filter(isUsableProfileId) : [],
+  };
+}
+
+function sanitizeEmbeddingError(err: unknown, secrets: Array<string | null | undefined> = []): Error {
+  const original = err instanceof Error ? err : new Error(String(err));
+  let message = original.message || "Embedding request failed";
+  message = message.replace(/embedding-profile\/[^\s"'\\]+/gi, "[redacted]");
+  for (const secret of secrets) {
+    if (secret && secret.length > 0) message = message.split(secret).join("[redacted]");
+  }
+  message = message.replace(/Bearer\s+\S+/gi, "Bearer [redacted]");
+  if (err instanceof EmbeddingError) return new EmbeddingError(err.code, message);
+  const out = new Error(message);
+  out.name = original.name;
+  return out;
+}
+
+function resolveStoredProvider(rawProvider: unknown, fallback: EmbeddingProvider): EmbeddingProvider {
+  if (typeof rawProvider !== "string" || !rawProvider.trim()) return fallback;
+  const trimmed = rawProvider.trim();
+  return isKnownEmbeddingProvider(trimmed) ? trimmed : fallback;
+}
+
+function toProviderProfile(config: EmbeddingConfig): EmbeddingProviderProfile {
+  const {
+    enabled: _enabled,
+    provider: _provider,
+    provider_profiles: _providerProfiles,
+    ...profile
+  } = config;
+  return profile;
+}
+
+function normalizeProviderProfiles(input: any): Partial<Record<EmbeddingProvider, EmbeddingProviderProfile>> {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+  const profiles: Partial<Record<EmbeddingProvider, EmbeddingProviderProfile>> = {};
+  for (const provider of VALID_EMBEDDING_PROVIDERS) {
+    if (!input[provider] || typeof input[provider] !== "object" || Array.isArray(input[provider])) continue;
+    profiles[provider] = toProviderProfile(normalizeConfig({ ...input[provider], provider }));
+  }
+  return profiles;
+}
+
+function normalizeConfig(input: any): EmbeddingConfig {
+  const rawProvider = typeof input?.provider === "string" ? input.provider.trim() : "";
+  // Preserve unknown provider ids on the stored blob; only fill a missing provider.
+  const provider: EmbeddingProvider = rawProvider
+    ? (isKnownEmbeddingProvider(rawProvider) ? rawProvider : rawProvider as EmbeddingProvider)
+    : "openai-compatible";
+  const base = defaultConfig(resolveStoredProvider(provider, "openai-compatible"));
+  const api_url = providerAllowsCustomApiUrl(provider)
+    ? (typeof input?.api_url === "string" && input.api_url.trim() ? input.api_url.trim() : providerDefaultUrl(provider))
+    : providerDefaultUrl(provider);
+  const model = typeof input?.model === "string" && input.model.trim() ? input.model.trim() : providerDefaultModel(provider);
+  const dimensions = Number.isFinite(input?.dimensions) && input.dimensions > 0 ? Math.floor(input.dimensions) : null;
+  const vertex_region = provider === "google_vertex" || typeof input?.vertex_region === "string"
+    ? (normalizeOptionalString(input?.vertex_region) ?? (provider === "google_vertex" ? base.vertex_region : undefined))
+    : undefined;
+  const vertex_project = normalizeOptionalString(input?.vertex_project);
+
+  const rawProfiles: any[] = Array.isArray(input?.connectionProfiles) ? input.connectionProfiles : [];
+  let connectionProfiles = rawProfiles
+    .filter((profile: unknown) => profile && typeof profile === "object")
+    .map((profile: any) => stripProfileSecrets(profile));
+
+  if (connectionProfiles.length === 0) {
+    connectionProfiles = [profileFromLegacyFields({
+      provider,
+      api_url,
+      model,
+      dimensions,
+      vertex_region,
+      vertex_project,
+    })];
+  }
+
+  const usableIds = new Set(connectionProfiles.map((profile) => profile.id));
+  let primaryProfileId = isUsableProfileId(input?.primaryProfileId) && usableIds.has(input.primaryProfileId)
+    ? input.primaryProfileId
+    : connectionProfiles[0].id;
+  const fallbackProfileIds = (Array.isArray(input?.fallbackProfileIds) ? input.fallbackProfileIds : [])
+    .filter((id: unknown): id is string => isUsableProfileId(id) && usableIds.has(id) && id !== primaryProfileId);
+
+  const primary = connectionProfiles.find((profile) => profile.id === primaryProfileId) ?? connectionProfiles[0];
+  primaryProfileId = primary.id;
+
+  const normalized: EmbeddingConfig = {
+    enabled: input?.enabled !== undefined ? !!input.enabled : base.enabled,
+    provider: (isKnownEmbeddingProvider(primary.provider) ? primary.provider : provider) as EmbeddingProvider,
+    api_url: primary.api_url || api_url,
+    model: primary.model || model,
+    dimensions: primary.dimensions ?? dimensions,
     send_dimensions: input?.send_dimensions !== undefined ? !!input.send_dimensions : base.send_dimensions,
     retrieval_top_k:
       Number.isFinite(input?.retrieval_top_k) && input.retrieval_top_k > 0
@@ -571,12 +987,21 @@ function normalizeConfig(input: any): EmbeddingConfig {
       Number.isFinite(input?.request_timeout) && input.request_timeout >= 0
         ? Math.min(300, input.request_timeout)
         : base.request_timeout,
-    vertex_region: provider === "google_vertex"
-      ? (typeof input?.vertex_region === "string" && input.vertex_region.trim()
-          ? input.vertex_region.trim()
-          : base.vertex_region)
-      : undefined,
+    vertex_region: primary.provider === "google_vertex"
+      ? (primary.vertex_region || vertex_region || "global")
+      : (primary.vertex_region || vertex_region),
+    vertex_project: primary.vertex_project || vertex_project,
+    connectionProfiles,
+    primaryProfileId,
+    fallbackProfileIds,
   };
+  const profiles = normalizeProviderProfiles(input?.provider_profiles);
+  // Existing installs only have the legacy flat config. Surface it as this
+  // provider's first profile so the UI can switch away and back without a
+  // migration step or a first-save data loss.
+  if (!profiles[provider]) profiles[provider] = toProviderProfile(normalized);
+  normalized.provider_profiles = profiles;
+  return normalized;
 }
 
 /**
@@ -910,290 +1335,20 @@ function loadChatChunkMessageIds(chunkId: string): string[] {
 async function embedChatChunkContentLeaves(
   userId: string,
   content: string,
-  initialError?: Error,
   options?: { signal?: AbortSignal },
 ): Promise<Array<{ content: string; vector: number[] }>> {
   const text = content.trim();
   if (!text) return [];
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-
-  if (initialError && !isRetryableBatchError(initialError)) {
-    throw initialError;
-  }
-  if (initialError) {
-    const forcedSlices = splitChatChunkContent(text, { forceSplit: true });
-    if (forcedSlices.length < 2) throw initialError;
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const slice of forcedSlices) {
-      out.push(...await embedChatChunkContentLeaves(userId, slice, undefined, options));
-    }
-    return out;
-  }
-
-  const proactiveSlices = buildChatChunkEmbeddingSlices(text).map((slice) => slice.content);
-  if (proactiveSlices.length > 1) {
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const slice of proactiveSlices) {
-      out.push(...await embedChatChunkContentLeaves(userId, slice, undefined, options));
-    }
-    return out;
-  }
-
-  try {
-    const [vector] = await cachedEmbedTexts(userId, [text], { signal: options?.signal });
-    if (!vector || vector.length === 0) {
-      throw new Error("No embedding vector returned");
-    }
-    return [{ content: text, vector }];
-  } catch (err) {
+  const leaves: Array<{ content: string; vector: number[] }> = [];
+  // Split before dispatch using the normal chunk limits. A failed slice is
+  // never resubmitted or split again in response to a provider error.
+  for (const slice of buildChatChunkEmbeddingSlices(text)) {
     if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-    const error = err instanceof Error ? err : new Error(String(err));
-    if (!isRetryableBatchError(error)) throw error;
-
-    const parts = splitChatChunkContent(text, { forceSplit: true });
-    if (parts.length < 2) throw error;
-
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const part of parts) {
-      out.push(...await embedChatChunkContentLeaves(userId, part, undefined, options));
-    }
-    return out;
+    const [vector] = await cachedEmbedTexts(userId, [slice.content], { signal: options?.signal });
+    if (!vector || vector.length === 0) throw new Error("No embedding vector returned");
+    leaves.push({ content: slice.content, vector });
   }
-}
-
-export async function tryRecoverChatChunkEmbeddingWithAutoSplit(
-  userId: string,
-  chatId: string,
-  chunkId: string,
-  content: string,
-  error: Error,
-  metadata?: Record<string, any>,
-  sourceTokenCount?: number,
-  options?: { signal?: AbortSignal },
-): Promise<{
-  recovered: boolean;
-  skipped: boolean;
-  splitCount: number;
-  splitCharCounts: number[];
-  splitTokenCounts: number[];
-}> {
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-  const text = content.trim();
-  if (!text || !isRetryableBatchError(error)) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const previewSplits = splitChatChunkContent(text, { forceSplit: true });
-  if (previewSplits.length < 2) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const db = getDb();
-  const liveBefore = db
-    .query("SELECT 1 AS found FROM chat_chunks WHERE id = ? AND chat_id = ?")
-    .get(chunkId, chatId) as { found: number } | null;
-  if (!liveBefore) {
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const resolvedSourceTokenCount = Math.max(0, sourceTokenCount ?? estimateChatChunkTokens(text));
-  console.warn(
-    "[embeddings] Chat chunk auto-split triggered:",
-    {
-      chunkId,
-      chatId,
-      sourceChars: text.length,
-      sourceTokensApprox: resolvedSourceTokenCount,
-      previewSplits: previewSplits.length,
-      previewSplitChars: previewSplits.map((part) => part.length),
-      previewSplitTokensApprox: previewSplits.map((part) => estimateChatChunkTokens(part)),
-      error: error.message,
-    },
-  );
-
-  const leaves = await embedChatChunkContentLeaves(userId, text, error, options);
-  const liveAfter = db
-    .query("SELECT 1 AS found FROM chat_chunks WHERE id = ? AND chat_id = ?")
-    .get(chunkId, chatId) as { found: number } | null;
-  if (!liveAfter) {
-    console.info(`[embeddings] Chat chunk auto-split skipped write for deleted chunk ${chunkId}`);
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-
-  const rows = buildChatChunkEmbeddingRows(
-    userId,
-    chatId,
-    chunkId,
-    text,
-    leaves,
-    metadata,
-    Math.floor(Date.now() / 1000),
-    resolvedSourceTokenCount,
-  );
-  await replaceChatChunkEmbeddingRows(userId, [{ chatId, chunkId }], rows);
-  await scheduleStoreOptimize("chat_chunk");
-
-  const splitCharCounts = rows.map((row) => row.content.length);
-  const splitTokenCounts = rows.map((row) => estimateChatChunkTokens(row.content));
-  console.info(
-    "[embeddings] Chat chunk auto-split recovered:",
-    {
-      chunkId,
-      chatId,
-      splitCount: rows.length,
-      splitCharCounts,
-      splitTokenCountsApprox: splitTokenCounts,
-    },
-  );
-
-  return {
-    recovered: true,
-    skipped: false,
-    splitCount: rows.length,
-    splitCharCounts,
-    splitTokenCounts,
-  };
-}
-
-async function tryRecoverVaultChunkEmbeddingWithAutoSplit(
-  userId: string,
-  vaultId: string,
-  vaultChunkId: string,
-  content: string,
-  error: Error,
-  metadata?: Record<string, any>,
-  sourceTokenCount?: number,
-): Promise<{
-  recovered: boolean;
-  skipped: boolean;
-  splitCount: number;
-  splitCharCounts: number[];
-  splitTokenCounts: number[];
-}> {
-  const text = content.trim();
-  if (!text || !isRetryableBatchError(error)) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const previewSplits = splitChatChunkContent(text, { forceSplit: true });
-  if (previewSplits.length < 2) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const db = getDb();
-  const liveBefore = db
-    .query("SELECT 1 AS found FROM cortex_vault_chunks WHERE id = ? AND vault_id = ?")
-    .get(vaultChunkId, vaultId) as { found: number } | null;
-  if (!liveBefore) {
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const resolvedSourceTokenCount = Math.max(0, sourceTokenCount ?? estimateChatChunkTokens(text));
-  console.warn(
-    "[embeddings] Vault chunk auto-split triggered:",
-    {
-      vaultChunkId,
-      vaultId,
-      sourceChars: text.length,
-      sourceTokensApprox: resolvedSourceTokenCount,
-      previewSplits: previewSplits.length,
-      previewSplitChars: previewSplits.map((part) => part.length),
-      previewSplitTokensApprox: previewSplits.map((part) => estimateChatChunkTokens(part)),
-      error: error.message,
-    },
-  );
-
-  const leaves = await embedChatChunkContentLeaves(userId, text, error);
-  const liveAfter = db
-    .query("SELECT 1 AS found FROM cortex_vault_chunks WHERE id = ? AND vault_id = ?")
-    .get(vaultChunkId, vaultId) as { found: number } | null;
-  if (!liveAfter) {
-    console.info(`[embeddings] Vault chunk auto-split skipped write for deleted chunk ${vaultChunkId}`);
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const rows = buildVaultChunkEmbeddingRows(
-    userId,
-    vaultId,
-    vaultChunkId,
-    text,
-    leaves,
-    metadata,
-    Math.floor(Date.now() / 1000),
-    resolvedSourceTokenCount,
-  );
-  await replaceVaultChunkEmbeddingRows(userId, vaultId, [vaultChunkId], rows);
-  await scheduleStoreOptimize();
-
-  const splitCharCounts = rows.map((row) => row.content.length);
-  const splitTokenCounts = rows.map((row) => estimateChatChunkTokens(row.content));
-  console.info(
-    "[embeddings] Vault chunk auto-split recovered:",
-    {
-      vaultChunkId,
-      vaultId,
-      splitCount: rows.length,
-      splitCharCounts,
-      splitTokenCountsApprox: splitTokenCounts,
-    },
-  );
-
-  return {
-    recovered: true,
-    skipped: false,
-    splitCount: rows.length,
-    splitCharCounts,
-    splitTokenCounts,
-  };
+  return leaves;
 }
 
 async function deleteStoreRows(collection: CollectionName, filter: VectorFilter): Promise<void> {
@@ -1259,6 +1414,270 @@ export function getProviderDefaults(provider: EmbeddingProvider) {
   return {
     api_url: PROVIDER_DEFAULT_URL[provider],
     model: providerDefaultModel(provider),
+  };
+}
+
+const NVIDIA_NIM_EMBEDDING_MODELS = [
+  "nvidia/llama-nemotron-embed-1b-v2",
+  "nvidia/nemotron-3-embed-1b",
+  "nvidia/nv-embed-v1",
+  "nvidia/nv-embedqa-e5-v5",
+];
+
+const MISTRAL_EMBEDDING_MODELS = [
+  "codestral-embed-2505",
+  "mistral-embed",
+];
+
+type EmbeddingInputType = "query" | "passage";
+
+function nvidiaNimNeedsInputType(cfg: { provider: string; model: string }): boolean {
+  return cfg.provider === "nvidia-nim" && [
+    "nvidia/llama-nemotron-embed-1b-v2",
+    "nvidia/nv-embedqa-e5-v5",
+  ].includes(cfg.model);
+}
+
+function isLikelyEmbeddingModel(model: string): boolean {
+  return /(?:embed|retriev)/i.test(model);
+}
+
+function bearerHeaders(apiKey: string): Record<string, string> {
+  const token = apiKey.trim().replace(/^Bearer\s+/i, "");
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function fetchMistralEmbeddingModels(apiKey: string, apiUrl: string): Promise<string[]> {
+  const base = normalizeEmbeddingApiUrlForModelListing(apiUrl);
+  const url = `${base || "https://api.mistral.ai/v1"}/models`;
+  const res = await fetch(url, { headers: bearerHeaders(apiKey) });
+  if (!res.ok) throw new Error(`Mistral model listing failed with ${res.status}`);
+
+  const payload = await res.json() as {
+    data?: Array<{ id?: unknown }>;
+  } | Array<{ id?: unknown }>;
+  const entries = Array.isArray(payload) ? payload : payload.data;
+  const discovered = Array.isArray(entries)
+    ? entries
+      .map((entry) => typeof entry?.id === "string" ? entry.id.trim() : "")
+      .filter((id) => id && isLikelyEmbeddingModel(id))
+    : [];
+  return Array.from(new Set([...MISTRAL_EMBEDDING_MODELS, ...discovered])).sort();
+}
+
+function resolveCohereModelsUrl(apiUrl: string): string {
+  try {
+    const parsed = new URL(apiUrl);
+    const url = new URL("/v1/models", parsed.origin);
+    url.searchParams.set("endpoint", "embed");
+    url.searchParams.set("page_size", "1000");
+    return url.toString();
+  } catch {
+    return "https://api.cohere.com/v1/models?endpoint=embed&page_size=1000";
+  }
+}
+
+async function fetchCohereEmbeddingModels(apiKey: string, apiUrl: string): Promise<string[]> {
+  const res = await fetch(resolveCohereModelsUrl(apiUrl), { headers: bearerHeaders(apiKey) });
+  if (!res.ok) throw new Error(`Cohere model listing failed with ${res.status}`);
+
+  const payload = await res.json() as {
+    models?: Array<{ name?: unknown; is_deprecated?: unknown }>;
+  };
+  return Array.isArray(payload.models)
+    ? payload.models
+      .filter((entry) => entry?.is_deprecated !== true)
+      .map((entry) => typeof entry?.name === "string" ? entry.name.trim() : "")
+      .filter(Boolean)
+      .sort()
+    : [];
+}
+
+async function fetchNvidiaNimEmbeddingModels(apiKey: string, apiUrl: string): Promise<string[]> {
+  const fallback = NVIDIA_NIM_EMBEDDING_MODELS;
+  const providerImpl = getProvider("custom");
+  if (!providerImpl) return fallback;
+  try {
+    const models = await providerImpl.listModels(apiKey, normalizeEmbeddingApiUrlForModelListing(apiUrl));
+    // A private/self-hosted NIM may serve Qwen or a newer Nemotron embedding
+    // model before it appears in the hosted catalogue. Only include likely
+    // embedding models; the form still permits an explicit model ID.
+    return Array.from(new Set([...fallback, ...models.filter(isLikelyEmbeddingModel)])).sort();
+  } catch {
+    // Keep known hosted choices usable when /models needs a different scope
+    // or is disabled by a self-hosted NIM gateway.
+    return fallback;
+  }
+}
+
+export type EmbeddingDriverSource = "builtin" | "registry";
+export type EmbeddingDriverStatus = "ok" | "unavailable" | "timeout";
+
+export interface EmbeddingDriverInfo {
+  id: string;
+  name: string;
+  kind: "embedding";
+  source: EmbeddingDriverSource;
+  status: EmbeddingDriverStatus;
+  installationId?: string;
+}
+
+const CONSUMER_PROVIDER_SCOPE = "frontend";
+const embeddingConsumerRevisions = new Map<string, number>();
+
+function embeddingConsumerRevision(userId: string): { generation: number; revision: number } {
+  const revision = (embeddingConsumerRevisions.get(userId) ?? 0) + 1;
+  embeddingConsumerRevisions.set(userId, revision);
+  return { generation: 1, revision };
+}
+
+function embeddingDriverName(record: RegisteredProvider): string {
+  const description = record.descriptor.description;
+  if (description && typeof description === "object" && !Array.isArray(description)) {
+    const name = (description as Record<string, unknown>).name;
+    if (typeof name === "string" && name.trim()) return name.trim();
+  }
+  return record.key.id;
+}
+
+function embeddingDriverStatus(record: RegisteredProvider): EmbeddingDriverStatus | "denied" {
+  const description = record.descriptor.description;
+  if (description && typeof description === "object" && !Array.isArray(description)) {
+    const rec = description as Record<string, unknown>;
+    if (rec.denied === true || rec.visible === false || rec.status === "denied") return "denied";
+    if (rec.status === "timeout" || rec.availability === "timeout") return "timeout";
+    if (rec.status === "unavailable" || rec.availability === "unavailable") return "unavailable";
+  }
+  return "ok";
+}
+
+function visibleEmbeddingRecords(userId?: string): RegisteredProvider[] {
+  const scopes = userId
+    ? [`user:${userId}`, "system"] as const
+    : ["system"] as const;
+  return providerRegistry.listVisible([...scopes]);
+}
+
+/** Built-in embedding engines plus live spindle-registered embedding drivers. */
+export function listEmbeddingDrivers(viewer?: { userId?: string }): EmbeddingDriverInfo[] {
+  const builtins: EmbeddingDriverInfo[] = VALID_EMBEDDING_PROVIDERS.map((id) => ({
+    id,
+    name: id,
+    kind: "embedding",
+    source: "builtin",
+    status: "ok",
+  }));
+  const extra: EmbeddingDriverInfo[] = [];
+  try {
+    for (const record of visibleEmbeddingRecords(viewer?.userId)) {
+      try {
+        if (record.key.kind !== "embedding") continue;
+        const status = embeddingDriverStatus(record);
+        if (status === "denied") continue;
+        extra.push({
+          id: record.key.id,
+          name: embeddingDriverName(record),
+          kind: "embedding",
+          source: "registry",
+          status,
+          installationId: record.key.installationId,
+        });
+      } catch {
+        // One bad descriptor must not hide the rest of the menu.
+      }
+    }
+  } catch {
+    return builtins;
+  }
+  return [...builtins, ...extra];
+}
+
+export function publishEmbeddingProviderRegistryChanged(args: {
+  userId: string;
+  action: "add" | "remove" | "change";
+  payload: unknown;
+}): void {
+  const clock = embeddingConsumerRevision(args.userId);
+  emitProviderRegistryChanged({
+    userId: args.userId,
+    scope: CONSUMER_PROVIDER_SCOPE,
+    action: args.action,
+    generation: clock.generation,
+    revision: clock.revision,
+    payload: args.payload,
+  });
+}
+
+export function commitEmbeddingRegistryProvider(
+  descriptor: ProviderDescriptor,
+  host: HostScopeContext & { installationId: string },
+  userId: string,
+): RegisteredProvider {
+  const record = providerRegistry.register(descriptor, host);
+  publishEmbeddingProviderRegistryChanged({
+    userId,
+    action: "add",
+    payload: {
+      id: record.key.id,
+      kind: record.key.kind,
+      name: embeddingDriverName(record),
+      installationId: record.key.installationId,
+    },
+  });
+  return record;
+}
+
+export function revokeEmbeddingRegistryProvider(
+  ref: { kind: string; id: string },
+  host: HostScopeContext & { installationId: string },
+  userId: string,
+): boolean {
+  const removed = providerRegistry.unregister(ref, host);
+  if (removed) {
+    publishEmbeddingProviderRegistryChanged({
+      userId,
+      action: "remove",
+      payload: { id: ref.id, kind: ref.kind },
+    });
+  }
+  return removed;
+}
+
+export type HostEmbeddingDriver = Omit<ProviderDescriptor, "kind" | "id"> & Partial<HostScopeContext> & {
+  installationId?: string;
+};
+
+function hostScopeFromEmbeddingDriver(driver: HostEmbeddingDriver): HostScopeContext & { installationId: string } {
+  const installationId = typeof driver.installationId === "string" && driver.installationId.trim()
+    ? driver.installationId.trim()
+    : "host";
+  const installScope = driver.installScope === "user" || driver.installScope === "operator" || driver.installScope === "system"
+    ? driver.installScope
+    : "system";
+  return {
+    installationId,
+    installScope,
+    installedByUserId: driver.installedByUserId,
+    authenticatedSubject: driver.authenticatedSubject,
+  };
+}
+
+export function registerEmbeddingDriver(id: string, driver: HostEmbeddingDriver): () => void {
+  const host = hostScopeFromEmbeddingDriver(driver);
+  providerRegistry.register({
+    kind: "embedding",
+    id,
+    description: driver.description ?? driver,
+    broker: driver.broker,
+    generation: driver.generation,
+    revision: driver.revision,
+    owner: driver.owner,
+  }, host);
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    providerRegistry.unregister({ kind: "embedding", id }, host);
   };
 }
 
@@ -1351,15 +1770,49 @@ export async function previewEmbeddingModels(
 ): Promise<{ models: string[]; model_labels?: Record<string, string>; provider: EmbeddingProvider; error?: string }> {
   const ctx = resolveEmbeddingUserContext(userId);
   const base = readRawEmbeddingConfig(ctx.userId);
-  const provider = input.provider ?? base.provider;
-  const cfg = normalizeConfig({ ...base, ...input, provider });
+  const selectedProfile = isUsableProfileId(input.profile_id)
+    ? base.connectionProfiles?.find((profile) => profile.id === input.profile_id)
+    : undefined;
+  const provider = input.provider ?? selectedProfile?.provider ?? base.provider;
+  const cfg = normalizeConfig({
+    ...base,
+    connectionProfiles: undefined,
+    primaryProfileId: undefined,
+    fallbackProfileIds: [],
+    ...selectedProfile,
+    ...input,
+    provider,
+  });
 
   let apiKey = input.api_key?.trim() || "";
   if (!apiKey) {
-    apiKey = (await getEmbeddingSecret(ctx.userId, cfg.provider)) || "";
+    apiKey = selectedProfile
+      ? (await resolveProfileSecret(ctx.userId, selectedProfile)) || ""
+      : (await getEmbeddingSecret(ctx.userId, cfg.provider)) || "";
   }
 
   try {
+    if (cfg.provider === "mistral") {
+      return {
+        models: await fetchMistralEmbeddingModels(apiKey, cfg.api_url),
+        provider: cfg.provider,
+      };
+    }
+
+    if (cfg.provider === "cohere") {
+      return {
+        models: await fetchCohereEmbeddingModels(apiKey, cfg.api_url),
+        provider: cfg.provider,
+      };
+    }
+
+    if (cfg.provider === "nvidia-nim") {
+      return {
+        models: await fetchNvidiaNimEmbeddingModels(apiKey, cfg.api_url),
+        provider: cfg.provider,
+      };
+    }
+
     if (cfg.provider === "nanogpt") {
       const result = await fetchNanoGptEmbeddingModels(apiKey, cfg.api_url);
       return { ...result, provider: cfg.provider };
@@ -1407,7 +1860,100 @@ export async function previewEmbeddingModels(
 /** Raw per-user embedding config (no inheritance resolution). */
 function readRawEmbeddingConfig(userId: string): EmbeddingConfig {
   const setting = settingsSvc.getSetting(userId, EMBEDDING_SETTINGS_KEY);
-  return normalizeConfig(setting?.value);
+  const cfg = normalizeConfig(setting?.value);
+  const rawProfiles = Array.isArray((setting?.value as any)?.connectionProfiles)
+    ? (setting?.value as any).connectionProfiles as Array<Record<string, unknown>>
+    : [];
+  const profilesMissingNames = rawProfiles.length > 0 && rawProfiles.some((profile) => (
+    typeof profile?.name !== "string" || !profile.name.trim()
+  ));
+  const profilesNeedingProviderMigration = rawProfiles.some((profile) => profile?.provider === "custom");
+
+  if (profilesMissingNames) {
+    // Preserve names for users who selected a general OpenAI-compatible
+    // connection during the short-lived shared-profile workflow.
+    for (const profile of cfg.connectionProfiles ?? []) {
+      try {
+        const row = getDb().query(
+          "SELECT name FROM connection_profiles WHERE id = ? AND user_id = ?",
+        ).get(profile.id, userId) as { name?: string } | null;
+        if (row?.name?.trim()) profile.name = row.name.trim();
+      } catch {
+        // A missing/older connection table must not block embedding startup.
+      }
+    }
+  }
+
+  if (!setting?.value || !storedBlobHasProfiles(setting.value) || profilesMissingNames || profilesNeedingProviderMigration) {
+    settingsSvc.putSetting(userId, EMBEDDING_SETTINGS_KEY, persistableConfig(cfg), { suppressBroadcast: true });
+  }
+  return cfg;
+}
+
+async function migrateLegacyConnectionSecrets(userId: string, cfg: EmbeddingConfig): Promise<void> {
+  for (const profile of cfg.connectionProfiles ?? []) {
+    if (!isUsableProfileId(profile.id)) continue;
+    const scoped = await secretsSvc.getSecretForStatus(userId, embeddingProfileSecretKey(profile.id));
+    if (scoped) continue;
+    const legacyConnectionSecret = await secretsSvc.getSecret(userId, `connection_${profile.id}_api_key`);
+    if (legacyConnectionSecret) await putProfileSecret(userId, profile.id, legacyConnectionSecret);
+  }
+}
+
+/** Config whose connection-profile status fields are resolved;
+ *  provider_profiles key status is applied separately by
+ *  withEmbeddingSecretStatus. */
+type EmbeddingConfigPreStatus = Omit<EmbeddingConfigWithStatus, "provider_profiles"> & {
+  provider_profiles?: EmbeddingConfig["provider_profiles"];
+};
+
+async function withEmbeddingSecretStatus(
+  userId: string,
+  config: EmbeddingConfigPreStatus,
+  inherited = false,
+): Promise<EmbeddingConfigWithStatus> {
+  const profiles = config.provider_profiles ?? {};
+  const profilesWithStatus = Object.fromEntries(await Promise.all(
+    Object.entries(profiles).map(async ([provider, profile]) => [
+      provider,
+      { ...profile, has_api_key: await hasEmbeddingSecret(userId, provider as EmbeddingProvider) },
+    ] as const),
+  )) as Partial<Record<EmbeddingProvider, EmbeddingProviderProfileWithStatus>>;
+  // toConfigWithStatus already resolved has_api_key from the selected
+  // connection profile's secret; only fall back to provider-key lookups when
+  // that signal is absent (e.g. legacy configs without connection profiles).
+  const has_api_key = config.has_api_key
+    || profilesWithStatus[config.provider]?.has_api_key === true
+    || await hasEmbeddingSecret(userId, config.provider);
+  return {
+    ...config,
+    has_api_key,
+    provider_profiles: profilesWithStatus,
+    ...(inherited ? { inherited: true } : {}),
+  };
+}
+
+function mergeEmbeddingConfigUpdate(
+  current: EmbeddingConfig,
+  input: Partial<EmbeddingConfig>,
+): EmbeddingConfig {
+  const requestedProvider = input.provider && VALID_EMBEDDING_PROVIDERS.includes(input.provider)
+    ? input.provider
+    : current.provider;
+  // A partial API caller can change only `provider`; in that case restore the
+  // selected provider's saved profile before applying its patch.
+  const selectedBase = requestedProvider === current.provider
+    ? current
+    : { ...current, ...current.provider_profiles?.[requestedProvider], provider: requestedProvider };
+  const merged = normalizeConfig({ ...selectedBase, ...input });
+  return {
+    ...merged,
+    provider_profiles: {
+      ...current.provider_profiles,
+      ...merged.provider_profiles,
+      [merged.provider]: toProviderProfile(merged),
+    },
+  };
 }
 
 /**
@@ -1432,18 +1978,64 @@ function resolveEmbeddingUserContext(callerUserId: string): { userId: string; in
   return { userId: callerUserId, inherited: false };
 }
 
+async function toConfigWithStatus(
+  userId: string,
+  cfg: EmbeddingConfig,
+  inherited?: boolean,
+): Promise<EmbeddingConfigPreStatus> {
+  const profiles = await Promise.all((cfg.connectionProfiles ?? []).map(async (profile) => ({
+    ...stripProfileSecrets(profile),
+    hasSecret: await hasProfileSecret(userId, profile),
+  })));
+  const primary = profiles.find((profile) => profile.id === cfg.primaryProfileId) ?? profiles[0];
+  const has_api_key = primary
+    ? primary.hasSecret
+    : await hasEmbeddingSecret(userId, cfg.provider);
+  return {
+    ...cfg,
+    connectionProfiles: profiles,
+    primaryProfileId: cfg.primaryProfileId ?? primary?.id ?? null,
+    fallbackProfileIds: cfg.fallbackProfileIds ?? [],
+    has_api_key,
+    ...(inherited ? { inherited: true } : {}),
+  };
+}
+
 export async function getEmbeddingConfig(userId: string): Promise<EmbeddingConfigWithStatus> {
   const ctx = resolveEmbeddingUserContext(userId);
   const cfg = readRawEmbeddingConfig(ctx.userId);
-  const has_api_key = await hasEmbeddingSecret(ctx.userId, cfg.provider);
-  return ctx.inherited
-    ? { ...cfg, has_api_key, inherited: true }
-    : { ...cfg, has_api_key };
+  await migrateLegacyConnectionSecrets(ctx.userId, cfg);
+  return withEmbeddingSecretStatus(ctx.userId, await toConfigWithStatus(ctx.userId, cfg, ctx.inherited || undefined), ctx.inherited);
+}
+
+function applyLegacyConnectionPatch(current: EmbeddingConfig, input: Record<string, any>): Record<string, any> {
+  if (Array.isArray(input.connectionProfiles)) return input;
+  const profiles = current.connectionProfiles ?? [];
+  if (profiles.length === 0) return input;
+  const primaryId = isUsableProfileId(input.primaryProfileId) ? input.primaryProfileId : current.primaryProfileId;
+  return {
+    ...input,
+    connectionProfiles: profiles.map((profile) => {
+      if (profile.id !== primaryId) return profile;
+      return {
+        ...profile,
+        ...(input.provider !== undefined ? { provider: input.provider } : {}),
+        ...(input.model !== undefined ? { model: input.model } : {}),
+        ...(input.api_url !== undefined ? { api_url: input.api_url } : {}),
+        ...(input.dimensions !== undefined ? { dimensions: input.dimensions } : {}),
+        ...(input.vertex_region !== undefined ? { vertex_region: input.vertex_region } : {}),
+        ...(input.vertex_project !== undefined ? { vertex_project: input.vertex_project } : {}),
+      };
+    }),
+  };
 }
 
 export async function updateEmbeddingConfig(
   userId: string,
-  input: Partial<EmbeddingConfig> & { api_key?: string | null }
+  input: Partial<EmbeddingConfig> & {
+    api_key?: string | null;
+    connectionProfiles?: Array<EmbeddingConnectionProfile & { api_key?: string | null; hasSecret?: boolean }>;
+  },
 ): Promise<EmbeddingConfigWithStatus> {
   const ownerId = getFirstUserId();
   const callerIsOwner = ownerId !== null && ownerId === userId;
@@ -1458,15 +2050,43 @@ export async function updateEmbeddingConfig(
   }
 
   const current = readRawEmbeddingConfig(userId);
-  const merged = normalizeConfig({ ...current, ...input });
+  const incomingProfiles: Array<EmbeddingConnectionProfile & { api_key?: string | null; hasSecret?: boolean }> | undefined =
+    Array.isArray(input.connectionProfiles)
+      ? input.connectionProfiles.map((profile) => ({ ...profile, id: ensureProfileId(profile.id) }))
+      : undefined;
+  // Keep the caller's omission of connectionProfiles observable here. The
+  // legacy settings form still writes the flat provider/model/url fields; if
+  // we spread `current` into this object first, its stored profile array makes
+  // applyLegacyConnectionPatch think the caller supplied dedicated profiles
+  // and the flat changes are silently discarded.
+  const patched = applyLegacyConnectionPatch(current, {
+    ...input,
+    ...(incomingProfiles ? { connectionProfiles: incomingProfiles } : {}),
+  });
+  const merged = mergeEmbeddingConfigUpdate(current, patched);
   settingsSvc.putSetting(userId, EMBEDDING_SETTINGS_KEY, merged);
+
+  for (const profile of incomingProfiles ?? []) {
+    if (profile.api_key === undefined) continue;
+    const next = (profile.api_key || "").trim();
+    if (next) await putProfileSecret(userId, profile.id, next);
+    else deleteProfileSecret(userId, profile.id);
+  }
+
+  const keptIds = new Set((merged.connectionProfiles ?? []).map((profile) => profile.id));
+  for (const profile of current.connectionProfiles ?? []) {
+    if (!keptIds.has(profile.id)) deleteProfileSecret(userId, profile.id);
+  }
 
   if (input.api_key !== undefined) {
     const next = (input.api_key || "").trim();
+    const primaryId = merged.primaryProfileId;
     if (next) {
       await putEmbeddingSecret(userId, merged.provider, next);
+      if (primaryId) await putProfileSecret(userId, primaryId, next);
     } else {
       deleteEmbeddingSecret(userId, merged.provider);
+      if (primaryId) deleteProfileSecret(userId, primaryId);
     }
   }
 
@@ -1490,8 +2110,7 @@ export async function updateEmbeddingConfig(
     await invalidateAllVectors(userId);
   }
 
-  const has_api_key = await hasEmbeddingSecret(userId, merged.provider);
-  return { ...merged, has_api_key };
+  return withEmbeddingSecretStatus(userId, await toConfigWithStatus(userId, merged));
 }
 
 /**
@@ -1509,10 +2128,25 @@ function parseEmbeddingResponse(payload: any, expectedCount: number): number[][]
       : (err.message || err.code || JSON.stringify(err));
     throw new Error(`Embedding provider returned an error: ${msg}`);
   }
+  // NVIDIA NIM catalogue routing can use RFC 7807-style error envelopes even
+  // when the HTTP status is successful. Surface the useful provider detail
+  // instead of an opaque response-format error.
+  if (typeof payload?.detail === "string" && payload.detail.trim()) {
+    throw new Error(`Embedding provider returned an error: ${payload.detail}`);
+  }
 
   // OpenAI format: { data: [{ embedding: number[] }, ...] }
   if (Array.isArray(payload.data) && payload.data.length > 0 && payload.data[0].embedding) {
     const vectors = payload.data.map((d: any) => d.embedding || []);
+    if (vectors.length !== expectedCount) {
+      throw new Error(`Embedding provider returned ${vectors.length} vectors, expected ${expectedCount}`);
+    }
+    return vectors;
+  }
+
+  // Cohere v2 format: { embeddings: { float: number[][] } }
+  if (Array.isArray(payload?.embeddings?.float)) {
+    const vectors = payload.embeddings.float;
     if (vectors.length !== expectedCount) {
       throw new Error(`Embedding provider returned ${vectors.length} vectors, expected ${expectedCount}`);
     }
@@ -1564,8 +2198,35 @@ function isVertexEmbedContentModel(model: string): boolean {
       || model.includes("maas");
 }
 
-async function requestVertexEmbeddings(
+type EmbeddingDriverConfig = {
+  provider: string;
+  api_url: string;
+  model: string;
+  dimensions: number | null;
+  send_dimensions: boolean;
+  request_timeout: number;
+  vertex_region?: string;
+  vertex_project?: string;
+};
+
+function profileToDriverConfig(
   cfg: EmbeddingConfig,
+  profile: EmbeddingConnectionProfile,
+): EmbeddingDriverConfig {
+  return {
+    provider: profile.provider,
+    api_url: profile.api_url || cfg.api_url,
+    model: profile.model || cfg.model,
+    dimensions: profile.dimensions ?? cfg.dimensions,
+    send_dimensions: cfg.send_dimensions,
+    request_timeout: cfg.request_timeout,
+    vertex_region: profile.vertex_region || cfg.vertex_region,
+    vertex_project: profile.vertex_project || cfg.vertex_project,
+  };
+}
+
+async function requestVertexEmbeddings(
+  cfg: EmbeddingDriverConfig,
   apiKey: string,
   texts: string[],
   options?: { omitDimensions?: boolean; signal?: AbortSignal }
@@ -1574,7 +2235,7 @@ async function requestVertexEmbeddings(
   const accessToken = await getAccessToken(sa);
   const location = cfg.vertex_region || "global";
   const host = vertexHostForLocation(location);
-  const projectId = sa.project_id;
+  const projectId = cfg.vertex_project || sa.project_id;
   const model = cfg.model;
   const useEmbedContent = isVertexEmbedContentModel(model);
   const dims = !options?.omitDimensions && cfg.send_dimensions && cfg.dimensions
@@ -1677,26 +2338,42 @@ async function postVertex<T>(url: string, accessToken: string, body: Record<stri
   }
 }
 
-async function requestEmbeddings(
-  userId: string,
+async function requestEmbeddingsWithDriver(
+  driver: EmbeddingDriverConfig,
+  apiKey: string,
   texts: string[],
-  options?: { omitDimensions?: boolean; signal?: AbortSignal }
+  options?: { omitDimensions?: boolean; signal?: AbortSignal; inputType?: EmbeddingInputType }
 ): Promise<number[][]> {
-  // Resolve which user's settings + API key actually drive this call. In gate
-  // mode non-owners inherit the owner's config and use the owner's key.
-  const ctx = resolveEmbeddingUserContext(userId);
-  const cfg = readRawEmbeddingConfig(ctx.userId);
-  if (!cfg.enabled) throw new Error("Embeddings are disabled for this user");
-  const apiKey = await getEmbeddingSecret(ctx.userId, cfg.provider);
-  if (!apiKey) throw new Error("Embedding API key is not configured");
   if (!texts.length) return [];
   if (options?.signal?.aborted) throw resolveAbortError(options.signal);
 
-  if (cfg.provider === "google_vertex") {
-    return requestVertexEmbeddings(cfg, apiKey, texts, options);
+  if (driver.provider === "google_vertex") {
+    return requestVertexEmbeddings(driver, apiKey, texts, options);
   }
 
-  const url = resolveEmbeddingUrl(cfg.api_url);
+  if (!isKnownEmbeddingProvider(driver.provider)) {
+    throw new EmbeddingError(
+      EMBEDDING_ERROR_CODES.PROVIDER_UNAVAILABLE,
+      "Embedding provider is unavailable",
+    );
+  }
+
+  // Cohere accepts at most 96 texts per v2 embed request. Lumiverse allows a
+  // larger global batch size, so preserve that setting by chunking here.
+  if (driver.provider === "cohere" && texts.length > 96) {
+    const vectors: number[][] = [];
+    for (let offset = 0; offset < texts.length; offset += 96) {
+      vectors.push(...await requestEmbeddingsWithDriver(
+        driver,
+        apiKey,
+        texts.slice(offset, offset + 96),
+        options,
+      ));
+    }
+    return vectors;
+  }
+
+  const url = resolveEmbeddingUrl(driver.api_url);
 
   // Detect Ollama endpoints from the resolved URL (not the raw user input)
   // so that partial paths like /api → /api/embeddings are caught correctly.
@@ -1711,22 +2388,38 @@ async function requestEmbeddings(
   if (isOllamaLegacySingleOnly && texts.length > 1) {
     const results: number[][] = [];
     for (const text of texts) {
-      const [vec] = await requestEmbeddings(userId, [text], options);
+      const [vec] = await requestEmbeddingsWithDriver(driver, apiKey, [text], options);
       results.push(vec);
     }
     return results;
   }
 
-  const body: Record<string, any> = {
-    model: cfg.model,
-    input: isOllamaLegacySingleOnly ? texts[0] : texts,
-  };
-  if (!isOllamaNative) {
+  const body: Record<string, any> = driver.provider === "cohere"
+    ? {
+        model: driver.model,
+        texts,
+        input_type: options?.inputType === "query" ? "search_query" : "search_document",
+        embedding_types: ["float"],
+      }
+    : {
+        model: driver.model,
+        input: isOllamaLegacySingleOnly ? texts[0] : texts,
+      };
+  if (!isOllamaNative && driver.provider !== "cohere") {
     body.encoding_format = "float";
   }
-  if (!options?.omitDimensions && cfg.send_dimensions && cfg.dimensions) body.dimensions = cfg.dimensions;
-  const timeoutMs = cfg.request_timeout > 0
-    ? cfg.request_timeout * 1000
+  if (nvidiaNimNeedsInputType(driver)) {
+    body.input_type = options?.inputType ?? "passage";
+  }
+  if (!options?.omitDimensions && driver.send_dimensions && driver.dimensions) {
+    if (driver.provider === "mistral" || driver.provider === "cohere") {
+      body.output_dimension = driver.dimensions;
+    } else {
+      body.dimensions = driver.dimensions;
+    }
+  }
+  const timeoutMs = driver.request_timeout > 0
+    ? driver.request_timeout * 1000
     : DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS;
   const { signal, cleanup } = linkTimeoutSignal(options?.signal, timeoutMs);
   const mapAbortError = (err: any): Error => {
@@ -1769,22 +2462,80 @@ async function requestEmbeddings(
   }
 }
 
+async function requestEmbeddings(
+  userId: string,
+  texts: string[],
+  options?: { omitDimensions?: boolean; signal?: AbortSignal; inputType?: EmbeddingInputType },
+): Promise<number[][]> {
+  // Resolve which user's settings + API key actually drive this call. In gate
+  // mode non-owners inherit the owner's config and use the owner's key.
+  const ctx = resolveEmbeddingUserContext(userId);
+  const cfg = readRawEmbeddingConfig(ctx.userId);
+  if (!cfg.enabled) throw new Error("Embeddings are disabled for this user");
+  if (!texts.length) return [];
+  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
+
+  const chain = selectFallbackChain(cfg);
+  if (chain.length === 0) {
+    throw new EmbeddingError(
+      EMBEDDING_ERROR_CODES.PROVIDER_UNAVAILABLE,
+      "Embedding provider is unavailable",
+    );
+  }
+
+  let lastError: Error | null = null;
+  let attemptedFallback = false;
+  const primaryId = cfg.primaryProfileId ?? chain[0]?.id;
+
+  for (const profile of chain) {
+    if (options?.signal?.aborted) throw resolveAbortError(options.signal);
+    const isFallback = profile.id !== primaryId;
+    try {
+      const driver = profileToDriverConfig(cfg, profile);
+      // Host-only: resolve the opaque secret immediately before driver invocation.
+      const apiKey = await resolveProfileSecret(ctx.userId, profile);
+      if (options?.signal?.aborted) throw resolveAbortError(options.signal);
+      if (!apiKey) {
+        throw new EmbeddingError(
+          EMBEDDING_ERROR_CODES.PROVIDER_UNAVAILABLE,
+          "Embedding API key is not configured",
+        );
+      }
+      const vectors = await requestEmbeddingsWithDriver(driver, apiKey, texts, options);
+      if (options?.signal?.aborted) throw resolveAbortError(options.signal);
+      return vectors;
+    } catch (err) {
+      if (options?.signal?.aborted || isEmbeddingAbortError(err)) {
+        throw resolveAbortError(options?.signal);
+      }
+      lastError = sanitizeEmbeddingError(err);
+      if (isFallback) attemptedFallback = true;
+    }
+  }
+
+  const sanitized = lastError ? sanitizeEmbeddingError(lastError) : new Error("Embedding provider is unavailable");
+  throw new EmbeddingError(
+    attemptedFallback ? EMBEDDING_ERROR_CODES.FALLBACK_EXHAUSTED : EMBEDDING_ERROR_CODES.PROVIDER_UNAVAILABLE,
+    sanitized.message,
+  );
+}
+
 export async function embedTexts(
   userId: string,
   texts: string[],
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; inputType?: EmbeddingInputType },
 ): Promise<number[][]> {
   return requestEmbeddings(userId, texts, options);
 }
 
 function getModelFingerprint(
-  cfg: Pick<EmbeddingConfig, "provider" | "model" | "dimensions" | "api_url" | "vertex_region">,
+  cfg: Pick<EmbeddingConfig, "provider" | "model" | "dimensions" | "api_url" | "vertex_region" | "vertex_project">,
 ): ModelFingerprint {
   // For Vertex the `api_url` field is cosmetic — the effective endpoint is
   // derived from `vertex_region`. Encode it into the fingerprint so a region
   // change still invalidates cached vectors.
   const api_url = cfg.provider === "google_vertex"
-    ? `vertex:${cfg.vertex_region || "global"}`
+    ? `vertex:${cfg.vertex_region || "global"}${cfg.vertex_project ? `:${cfg.vertex_project}` : ""}`
     : cfg.api_url;
   return { provider: cfg.provider, model: cfg.model, dimensions: cfg.dimensions, api_url };
 }
@@ -1830,20 +2581,28 @@ const inflightEmbeddings = new Map<string, InflightEmbeddingEntry>();
 export async function cachedEmbedTexts(
   userId: string,
   texts: string[],
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; inputType?: EmbeddingInputType },
 ): Promise<number[][]> {
   if (!texts.length) return [];
   if (options?.signal?.aborted) throw resolveAbortError(options.signal);
   const cfg = await getEmbeddingConfig(userId);
   const fingerprint = getModelFingerprint(cfg);
+  // Asymmetric embedding models produce distinct vectors for the exact same
+  // text when used as a query versus a stored passage. Keep cache and
+  // in-flight dedup entries separate for those two roles.
+  const inputType = options?.inputType ?? "passage";
+  const cacheFingerprint: ModelFingerprint = {
+    ...fingerprint,
+    api_url: `${fingerprint.api_url}|input_type:${inputType}`,
+  };
 
   // Fast path for single-text calls (the common case for cortex + chat memory retrieval)
   if (texts.length === 1) {
-    const key = computeCacheKey(texts[0], fingerprint);
+    const key = computeCacheKey(texts[0], cacheFingerprint);
     const cached = embeddingCache.get(key);
     if (cached) return [cached];
 
-    const vec = await joinOrStartInflight(userId, texts, key, options?.signal);
+    const vec = await joinOrStartInflight(userId, texts, key, options?.signal, inputType);
     return [vec];
   }
 
@@ -1852,7 +2611,7 @@ export async function cachedEmbedTexts(
   const uncachedIndices: number[] = [];
 
   for (let i = 0; i < texts.length; i++) {
-    const key = computeCacheKey(texts[i], fingerprint);
+    const key = computeCacheKey(texts[i], cacheFingerprint);
     const cached = embeddingCache.get(key);
     if (cached) {
       results[i] = cached;
@@ -1863,97 +2622,30 @@ export async function cachedEmbedTexts(
 
   if (uncachedIndices.length > 0) {
     const uncachedTexts = uncachedIndices.map((i) => texts[i]);
-    const vectors = await requestEmbeddings(userId, uncachedTexts, options);
+    const vectors = await requestEmbeddings(userId, uncachedTexts, { ...options, inputType });
+    if (options?.signal?.aborted) throw resolveAbortError(options.signal);
     for (let j = 0; j < uncachedIndices.length; j++) {
       const idx = uncachedIndices[j];
       results[idx] = vectors[j];
-      embeddingCache.set(computeCacheKey(texts[idx], fingerprint), vectors[j]);
+      embeddingCache.set(computeCacheKey(texts[idx], cacheFingerprint), vectors[j]);
     }
   }
 
   return results as number[][];
 }
 
-/**
- * llama.cpp's /v1/embeddings endpoint rejects requests whose cumulative token
- * count exceeds the server's `n_ubatch` (physical batch size, default 512).
- * The error surfaces as HTTP 500 "input is too large to process. increase the
- * physical batch size" — not a timeout — so the caller's timeout-only retry
- * never kicks in. Detect it (plus timeouts and a few other transient shapes)
- * so callers can halve and retry down to size 1 without user intervention.
- */
-function isRetryableBatchError(err: Error): boolean {
-  if (isChatChunkVectorizationBatchTimeoutError(err)) return false;
-  const m = err.message;
-  if (/timed out|abort/i.test(m)) return true;
-  if (/too large to process|physical batch size|increase.*batch.*size/i.test(m)) return true;
-  if (/exceeds.*context|context.*exceed/i.test(m)) return true;
-  if (/\(413\)|\(500\)|\(503\)/.test(m)) return true;
-  return false;
-}
-
-function looksLikePhysicalBatchLimit(err: Error): boolean {
-  return /too large to process|physical batch size|exceeds.*context/i.test(err.message);
-}
-
-/**
- * Next (shorter) length to retry an over-budget query embed at, or null when
- * we've hit the floor and should give up. Halving mirrors
- * embedWithAdaptiveBatching's backoff; the floor stops us from spinning on a
- * backend that rejects everything.
- */
-export function nextQueryEmbedLength(currentLen: number, minChars: number): number | null {
-  if (currentLen <= minChars) return null;
-  const next = Math.max(minChars, Math.floor(currentLen / 2));
-  return next < currentLen ? next : null;
-}
-
-/**
- * Embed a single retrieval query, shrinking it on retryable "input too large"
- * errors instead of letting the caller collapse to a recency fallback.
- * Token-limited embedding backends (llama.cpp `n_ubatch`, 512-token BERT
- * models) reject oversized inputs with 413/500 — and a multi-message LTCM
- * query easily exceeds that. We keep the most-recent tail (consistent with how
- * the query is built) and halve until the backend accepts it or we hit the
- * floor, at which point the original error propagates.
- */
-export async function embedQueryAdaptive(
+/** Embed the retrieval query once per configured connection. */
+export async function embedQuery(
   userId: string,
   text: string,
-  options?: { signal?: AbortSignal; minChars?: number },
+  options?: { signal?: AbortSignal },
 ): Promise<number[]> {
-  const minChars = Math.max(64, options?.minChars ?? 512);
-  let current = text;
-  for (;;) {
-    try {
-      const [vec] = await cachedEmbedTexts(userId, [current], { signal: options?.signal });
-      return vec ?? [];
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      // Never swallow a genuine cancellation by retrying a smaller input.
-      if (options?.signal?.aborted || /abort/i.test(e.message)) throw e;
-      const nextLen = isRetryableBatchError(e) ? nextQueryEmbedLength(current.length, minChars) : null;
-      if (nextLen == null) throw e;
-      console.warn(
-        `[embeddings] Query embed of ${current.length} chars failed (${e.message}); retrying truncated to ${nextLen} chars`,
-      );
-      current = current.slice(-nextLen);
-    }
-  }
+  const [vector] = await cachedEmbedTexts(userId, [text], { signal: options?.signal, inputType: "query" });
+  return vector ?? [];
 }
 
-/**
- * Embed a list of items with automatic batch-halving on transient errors.
- *
- * For llama.cpp-style backends where the server's `n_ubatch` caps per-request
- * token volume, the user can't know the right `batch_size` in advance — a
- * batch that works for 256-token chunks will blow up on 2048-token ones. This
- * wrapper starts at `initialBatchSize`, halves on retryable failures, and
- * processes surviving sub-batches via `onBatchReady`. Items that still fail
- * at size 1 are surfaced via `onItemFailed` so callers can record error state
- * and move on rather than aborting the whole run.
- */
-export async function embedWithAdaptiveBatching<T>(
+/** Embed configured batches once and report failed items without resubmitting them. */
+export async function embedInBatches<T>(
   userId: string,
   items: T[],
   initialBatchSize: number,
@@ -1964,9 +2656,8 @@ export async function embedWithAdaptiveBatching<T>(
 ): Promise<void> {
   if (items.length === 0) return;
   const bs = Math.max(1, Math.min(initialBatchSize, 200));
-  const label = options?.label ?? "embed";
 
-  const process = async (batch: T[], currentSize: number): Promise<void> => {
+  const process = async (batch: T[]): Promise<void> => {
     if (options?.signal?.aborted) {
       await onItemFailed(batch, resolveAbortError(options.signal));
       return;
@@ -1981,33 +2672,12 @@ export async function embedWithAdaptiveBatching<T>(
         return;
       }
       const e = err instanceof Error ? err : new Error(String(err));
-      if (isRetryableBatchError(e) && currentSize > 1) {
-        const half = Math.max(1, Math.floor(currentSize / 2));
-        console.warn(
-          `[embeddings] ${label}: batch of ${batch.length} failed (${e.message}); retrying in sub-batches of ${half}`,
-        );
-        for (let j = 0; j < batch.length; j += half) {
-          await process(batch.slice(j, j + half), half);
-        }
-        return;
-      }
-      if (currentSize === 1 && looksLikePhysicalBatchLimit(e)) {
-        await onItemFailed(
-          batch,
-          new Error(
-            `${e.message} — a single input still exceeds the server's physical batch size. ` +
-            `For llama.cpp, restart llama-server with a larger --ubatch-size / -ub (and matching --batch-size / -b), ` +
-            `or reduce the source chunk size.`,
-          ),
-        );
-      } else {
-        await onItemFailed(batch, e);
-      }
+      await onItemFailed(batch, e);
     }
   };
 
   for (let i = 0; i < items.length; i += bs) {
-    await process(items.slice(i, i + bs), bs);
+    await process(items.slice(i, i + bs));
   }
 }
 
@@ -2021,6 +2691,7 @@ function joinOrStartInflight(
   texts: string[],
   key: string,
   signal: AbortSignal | undefined,
+  inputType: EmbeddingInputType,
 ): Promise<number[]> {
   const existing = inflightEmbeddings.get(key);
   if (existing) {
@@ -2035,8 +2706,12 @@ function joinOrStartInflight(
     hasUncancellableJoiner: false,
   };
 
-  entry.promise = requestEmbeddings(userId, texts, { signal: controller.signal }).then(
+  entry.promise = requestEmbeddings(userId, texts, { signal: controller.signal, inputType }).then(
     (vecs) => {
+      if (controller.signal.aborted) {
+        inflightEmbeddings.delete(key);
+        throw resolveAbortError(controller.signal);
+      }
       const vec = vecs[0];
       embeddingCache.set(key, vec);
       inflightEmbeddings.delete(key);
@@ -2187,32 +2862,94 @@ export async function testEmbeddingConfig(
   const ctx = resolveEmbeddingUserContext(userId);
   if (ctx.inherited) {
     const ownerCfg = readRawEmbeddingConfig(ctx.userId);
-    const has_api_key = await hasEmbeddingSecret(ctx.userId, ownerCfg.provider);
     return {
       dimension: first.length,
-      config: { ...ownerCfg, has_api_key, inherited: true },
+      config: await withEmbeddingSecretStatus(ctx.userId, await toConfigWithStatus(ctx.userId, ownerCfg, true), true),
     };
   }
 
   const current = readRawEmbeddingConfig(userId);
-  const updated = normalizeConfig({ ...current, dimensions: first.length });
+  const updated = mergeEmbeddingConfigUpdate(current, {
+    ...current,
+    dimensions: first.length,
+    connectionProfiles: (current.connectionProfiles ?? []).map((profile) => (
+      profile.id === current.primaryProfileId
+        ? { ...profile, dimensions: first.length }
+        : profile
+    )),
+  });
   settingsSvc.putSetting(userId, EMBEDDING_SETTINGS_KEY, updated);
-  const has_api_key = await hasEmbeddingSecret(userId, updated.provider);
-
   return {
     dimension: first.length,
-    config: {
-      ...updated,
-      has_api_key,
-    },
+    config: await withEmbeddingSecretStatus(userId, await toConfigWithStatus(userId, updated)),
   };
 }
 
-export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: string): Promise<void> {
-  await deleteWorldBookEntryRows(userId, [entryId]);
+/** Test one saved embedding connection without changing the active chain. */
+export async function testEmbeddingConnection(
+  userId: string,
+  profileId: string,
+  text: string,
+): Promise<{ dimension: number; provider: string }> {
+  const ctx = resolveEmbeddingUserContext(userId);
+  const cfg = readRawEmbeddingConfig(ctx.userId);
+  const profile = cfg.connectionProfiles?.find((entry) => entry.id === profileId);
+  if (!profile) throw new Error("Embedding connection not found");
+  const apiKey = await resolveProfileSecret(ctx.userId, profile);
+  if (!apiKey) throw new Error("No API key is configured for this embedding connection");
+  const vectors = await requestEmbeddingsWithDriver(
+    profileToDriverConfig(cfg, profile),
+    apiKey,
+    [text],
+    { omitDimensions: true },
+  );
+  const first = vectors[0] || [];
+  if (!first.length) throw new Error("No embedding vector returned");
+  return { dimension: first.length, provider: profile.provider };
 }
 
-async function deleteWorldBookEntryRows(userId: string, entryIds: string[]): Promise<void> {
+export async function deleteWorldBookEntryEmbeddings(userId: string, entryId: string): Promise<void> {
+  await deleteWorldBookEntryEmbeddingsBeforeSourceDelete(userId, [entryId], () => {});
+}
+
+const worldBookEntryVectorCommitTails = new Map<string, Promise<void>>();
+
+async function acquireWorldBookEntryVectorCommitLock(key: string): Promise<() => void> {
+  const previous = worldBookEntryVectorCommitTails.get(key) ?? Promise.resolve();
+  let releaseCurrent!: () => void;
+  const current = new Promise<void>((resolve) => {
+    releaseCurrent = resolve;
+  });
+  const tail = previous.then(() => current, () => current);
+  worldBookEntryVectorCommitTails.set(key, tail);
+  await previous.catch(() => {});
+
+  return () => {
+    releaseCurrent();
+    if (worldBookEntryVectorCommitTails.get(key) === tail) {
+      worldBookEntryVectorCommitTails.delete(key);
+    }
+  };
+}
+
+async function withWorldBookEntryVectorCommitLocks<T>(
+  userId: string,
+  entryIds: string[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const keys = Array.from(new Set(entryIds.map((entryId) => JSON.stringify([userId, entryId])))).sort();
+  const releases: Array<() => void> = [];
+  try {
+    for (const key of keys) {
+      releases.push(await acquireWorldBookEntryVectorCommitLock(key));
+    }
+    return await fn();
+  } finally {
+    for (let i = releases.length - 1; i >= 0; i--) releases[i]();
+  }
+}
+
+async function deleteWorldBookEntryRowsUnlocked(userId: string, entryIds: string[]): Promise<void> {
   if (entryIds.length === 0) return;
   await deleteStoreRows("embeddings_world_books", andFilter([
     eq("user_id", userId),
@@ -2221,9 +2958,54 @@ async function deleteWorldBookEntryRows(userId: string, entryIds: string[]): Pro
   ]));
 }
 
-async function deleteWorldBookEntryEmbeddingsBatch(userId: string, entryIds: string[]): Promise<void> {
-  if (entryIds.length === 0) return;
-  await deleteWorldBookEntryRows(userId, entryIds);
+async function deleteWorldBookRowsUnlocked(userId: string, worldBookIds: string[]): Promise<void> {
+  if (worldBookIds.length === 0) return;
+  await deleteStoreRows("embeddings_world_books", andFilter([
+    eq("user_id", userId),
+    eq("source_type", "world_book_entry"),
+    inSet("owner_id", worldBookIds),
+  ]));
+}
+
+async function coordinateWorldBookVectorAndSourceDelete<T>(
+  userId: string,
+  lockEntryIds: string[],
+  deleteVectors: () => Promise<void>,
+  deleteSource: () => T | Promise<T>,
+): Promise<T> {
+  return withWorldBookEntryVectorCommitLocks(userId, lockEntryIds, async () => {
+    await deleteVectors();
+    return await deleteSource();
+  });
+}
+
+export async function deleteWorldBookEntryEmbeddingsBeforeSourceDelete<T>(
+  userId: string,
+  entryIds: string[],
+  deleteSource: () => T | Promise<T>,
+): Promise<T> {
+  const uniqueEntryIds = Array.from(new Set(entryIds));
+  return coordinateWorldBookVectorAndSourceDelete(
+    userId,
+    uniqueEntryIds,
+    () => deleteWorldBookEntryRowsUnlocked(userId, uniqueEntryIds),
+    deleteSource,
+  );
+}
+
+export async function deleteWorldBookEmbeddingsBeforeSourceDelete<T>(
+  userId: string,
+  worldBookIds: string[],
+  lockEntryIds: string[],
+  deleteSource: () => T | Promise<T>,
+): Promise<T> {
+  const uniqueWorldBookIds = Array.from(new Set(worldBookIds));
+  return coordinateWorldBookVectorAndSourceDelete(
+    userId,
+    Array.from(new Set(lockEntryIds)),
+    () => deleteWorldBookRowsUnlocked(userId, uniqueWorldBookIds),
+    deleteSource,
+  );
 }
 
 function getDesiredWorldBookVectorStatus(entry: WorldBookEntry): WorldBookVectorIndexStatus {
@@ -2362,6 +3144,154 @@ async function filterCurrentWorldBookEntriesForWrite(
   });
 }
 
+function updateWorldBookEntriesVectorStateIfCurrent(
+  userId: string,
+  entries: WorldBookEntry[],
+  status: WorldBookVectorIndexStatus,
+  indexedAt: number | null,
+  error: string | null,
+): string[] {
+  if (entries.length === 0) return [];
+  const db = getDb();
+  const updatedIds: string[] = [];
+  const stmt = db.query(
+    `UPDATE world_book_entries
+     SET vector_index_status = ?, vector_indexed_at = ?, vector_index_error = ?
+     WHERE id = ?
+       AND world_book_id = ?
+       AND content = ?
+       AND comment = ?
+       AND key = ?
+       AND keysecondary = ?
+       AND vectorized = ?
+       AND disabled = ?
+       AND updated_at = ?
+       AND world_book_id IN (SELECT id FROM world_books WHERE user_id = ?)`
+  );
+  const apply = db.transaction(() => {
+    for (const entry of entries) {
+      const result = stmt.run(
+        status,
+        indexedAt,
+        error,
+        entry.id,
+        entry.world_book_id,
+        String(entry.content || ""),
+        String(entry.comment || ""),
+        JSON.stringify(Array.isArray(entry.key) ? entry.key : []),
+        JSON.stringify(Array.isArray(entry.keysecondary) ? entry.keysecondary : []),
+        entry.vectorized ? 1 : 0,
+        entry.disabled ? 1 : 0,
+        Number(entry.updated_at ?? 0),
+        userId,
+      );
+      if (result.changes > 0) updatedIds.push(entry.id);
+    }
+  });
+  apply();
+  return updatedIds;
+}
+
+interface WorldBookVectorCommitWrite {
+  entry: WorldBookEntry;
+  rows: EmbeddingRow[];
+}
+
+interface WorldBookVectorCommitDependencies {
+  filterCurrent: (
+    userId: string,
+    entries: WorldBookEntry[],
+    settingsFingerprint: string,
+    configFingerprint: string,
+  ) => Promise<WorldBookEntry[]>;
+  deleteRows: (userId: string, entryIds: string[]) => Promise<void>;
+  upsertRows: (rows: EmbeddingRow[]) => Promise<void>;
+  markIndexedIfCurrent: (userId: string, entries: WorldBookEntry[], indexedAt: number) => Promise<string[]> | string[];
+}
+
+interface WorldBookVectorCommitResult {
+  indexedIds: string[];
+  staleIds: string[];
+}
+
+const defaultWorldBookVectorCommitDependencies: WorldBookVectorCommitDependencies = {
+  filterCurrent: filterCurrentWorldBookEntriesForWrite,
+  deleteRows: deleteWorldBookEntryRowsUnlocked,
+  upsertRows: (rows) => upsertStoreRows("embeddings_world_books", rows),
+  markIndexedIfCurrent: (userId, entries, indexedAt) =>
+    updateWorldBookEntriesVectorStateIfCurrent(userId, entries, "indexed", indexedAt, null),
+};
+
+async function commitWorldBookVectorWritesIfCurrent(
+  userId: string,
+  writes: WorldBookVectorCommitWrite[],
+  settingsFingerprint: string,
+  configFingerprint: string,
+  indexedAt: number,
+  dependencies: WorldBookVectorCommitDependencies = defaultWorldBookVectorCommitDependencies,
+): Promise<WorldBookVectorCommitResult> {
+  const writesByEntryId = new Map(writes.map((write) => [write.entry.id, write] as const));
+  const requestedIds = Array.from(writesByEntryId.keys());
+  if (requestedIds.length === 0) return { indexedIds: [], staleIds: [] };
+
+  return withWorldBookEntryVectorCommitLocks(userId, requestedIds, async () => {
+    const requestedEntries = Array.from(writesByEntryId.values()).map((write) => write.entry);
+    const stableBeforeWrite = await dependencies.filterCurrent(
+      userId,
+      requestedEntries,
+      settingsFingerprint,
+      configFingerprint,
+    );
+    const stableBeforeIds = new Set(stableBeforeWrite.map((entry) => entry.id));
+    const staleIds = requestedIds.filter((entryId) => !stableBeforeIds.has(entryId));
+    if (stableBeforeWrite.length === 0) return { indexedIds: [], staleIds };
+
+    const rows = stableBeforeWrite.flatMap((entry) => writesByEntryId.get(entry.id)?.rows ?? []);
+    const writtenIds = stableBeforeWrite.map((entry) => entry.id);
+    await dependencies.deleteRows(userId, writtenIds);
+    await dependencies.upsertRows(rows);
+
+    const stableAfterWrite = await dependencies.filterCurrent(
+      userId,
+      stableBeforeWrite,
+      settingsFingerprint,
+      configFingerprint,
+    );
+    const indexedIds = await dependencies.markIndexedIfCurrent(userId, stableAfterWrite, indexedAt);
+    const indexedIdSet = new Set(indexedIds);
+    const staleAfterWrite = writtenIds.filter((entryId) => !indexedIdSet.has(entryId));
+    if (staleAfterWrite.length > 0) {
+      await dependencies.deleteRows(userId, staleAfterWrite);
+      staleIds.push(...staleAfterWrite);
+    }
+
+    return { indexedIds, staleIds: Array.from(new Set(staleIds)) };
+  });
+}
+
+export const __test__ = {
+  normalizeConfig,
+  mergeEmbeddingConfigUpdate,
+  putEmbeddingSecret,
+  NVIDIA_NIM_EMBEDDING_MODELS,
+  nvidiaNimNeedsInputType,
+  parseEmbeddingResponse,
+  collectWorldBookHitsByUniqueSource,
+  collapseWorldBookHitsBySource,
+  hasEmbeddingSecret,
+  hasProfileSecret,
+  resolveProfileSecret,
+  embeddingProfileSecretKey,
+  persistableConfig,
+  profileToDriverConfig,
+  stripProfileSecrets,
+  worldBookSourceExclusionFilters,
+  commitWorldBookVectorWritesIfCurrent,
+  coordinateWorldBookVectorAndSourceDelete,
+  updateWorldBookEntriesVectorStateIfCurrent,
+  withWorldBookEntryVectorCommitLocks,
+};
+
 export async function markWorldBookEntriesVectorErrorIfCurrent(
   userId: string,
   entries: WorldBookEntry[],
@@ -2369,16 +3299,23 @@ export async function markWorldBookEntriesVectorErrorIfCurrent(
   settingsFingerprint: string,
   configFingerprint: string,
 ): Promise<number> {
-  const stableEntries = await filterCurrentWorldBookEntriesForWrite(userId, entries, settingsFingerprint, configFingerprint);
-  if (stableEntries.length === 0) return 0;
-  const stableIds = stableEntries.map((entry) => entry.id);
-  try {
-    await deleteWorldBookEntryEmbeddingsBatch(userId, stableIds);
-  } catch (err) {
-    console.warn("[embeddings] Failed to delete stale world-book vectors while marking error:", err);
-  }
-  updateWorldBookEntriesVectorState(stableIds, "error", null, error);
-  return stableIds.length;
+  return withWorldBookEntryVectorCommitLocks(userId, entries.map((entry) => entry.id), async () => {
+    const stableEntries = await filterCurrentWorldBookEntriesForWrite(userId, entries, settingsFingerprint, configFingerprint);
+    if (stableEntries.length === 0) return 0;
+    const stableIds = stableEntries.map((entry) => entry.id);
+    try {
+      await deleteWorldBookEntryRowsUnlocked(userId, stableIds);
+    } catch (err) {
+      console.warn("[embeddings] Failed to delete stale world-book vectors while marking error:", err);
+    }
+    const currentAfterDelete = await filterCurrentWorldBookEntriesForWrite(
+      userId,
+      stableEntries,
+      settingsFingerprint,
+      configFingerprint,
+    );
+    return updateWorldBookEntriesVectorStateIfCurrent(userId, currentAfterDelete, "error", null, error).length;
+  });
 }
 
 export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBookEntry): Promise<void> {
@@ -2412,11 +3349,17 @@ export async function syncWorldBookEntryEmbedding(userId: string, entry: WorldBo
       return;
     }
     const rows = buildWorldBookEmbeddingRows(userId, stableEntry, chunks, vectors, now);
-
-    await deleteWorldBookEntryRows(userId, [stableEntry.id]);
-    await upsertStoreRows("embeddings_world_books", rows);
-
-    updateWorldBookEntryVectorState(stableEntry.id, "indexed", now, null);
+    const commit = await commitWorldBookVectorWritesIfCurrent(
+      userId,
+      [{ entry: stableEntry, rows }],
+      settingsFingerprint,
+      configFingerprint,
+      now,
+    );
+    if (commit.indexedIds.length === 0) {
+      console.info("[embeddings] Discarded stale world-book vector commit for entry=%s", entry.id.slice(0, 8));
+      return;
+    }
     await scheduleStoreOptimize("world_book");
   } catch (err) {
     const message = err instanceof Error ? err.message : "Vector indexing failed";
@@ -2536,7 +3479,6 @@ export async function reindexWorldBookEntries(
 
   const processGroupBatch = async (
     groups: Array<{ entry: WorldBookEntry; chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> }>,
-    currentSize: number,
   ): Promise<void> => {
     if (groups.length === 0) return;
     const payloads = groups.flatMap((group) => group.chunks.map((chunk) => ({ entry: group.entry, chunk })));
@@ -2573,36 +3515,35 @@ export async function reindexWorldBookEntries(
         );
       }
 
-      const rows: EmbeddingRow[] = [];
-      for (const group of stableGroups) {
-        rows.push(...buildWorldBookEmbeddingRows(
+      const writes = stableGroups.map((group) => ({
+        entry: group.entry,
+        rows: buildWorldBookEmbeddingRows(
           userId,
           group.entry,
           group.chunks,
           vectorSlices.get(group.entry.id) ?? [],
           now,
-        ));
+        ),
+      }));
+      const commit = await commitWorldBookVectorWritesIfCurrent(
+        userId,
+        writes,
+        settingsFingerprint,
+        configFingerprint,
+        now,
+      );
+      if (commit.staleIds.length > 0) {
+        console.info(
+          "[embeddings] Discarded %d stale world-book vector commit%s after write validation",
+          commit.staleIds.length,
+          commit.staleIds.length === 1 ? "" : "s",
+        );
       }
-
-      await deleteWorldBookEntryRows(userId, stableGroups.map((group) => group.entry.id));
-      await upsertStoreRows("embeddings_world_books", rows);
-
-      updateWorldBookEntriesVectorState(stableGroups.map((group) => group.entry.id), "indexed", now, null);
-      progress.indexed += stableGroups.length;
+      progress.indexed += commit.indexedIds.length;
       progress.current += groups.length;
       emitProgress();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      if (isRetryableBatchError(error) && currentSize > 1) {
-        const half = Math.max(1, Math.floor(currentSize / 2));
-        console.warn(
-          `[embeddings] WB reindex: batch of ${groups.length} failed (${error.message}); retrying in sub-batches of ${half}`,
-        );
-        for (let i = 0; i < groups.length; i += half) {
-          await processGroupBatch(groups.slice(i, i + half), half);
-        }
-        return;
-      }
       console.warn("[embeddings] Batch embedding failed:", error);
       const failed = await markWorldBookEntriesVectorErrorIfCurrent(
         userId,
@@ -2618,7 +3559,7 @@ export async function reindexWorldBookEntries(
   };
 
   for (let i = 0; i < entryGroups.length; i += batchSize) {
-    await processGroupBatch(entryGroups.slice(i, i + batchSize), batchSize);
+    await processGroupBatch(entryGroups.slice(i, i + batchSize));
   }
 
   // Compact all fragments into fewer files, prune old versions, and optionally
@@ -2650,13 +3591,72 @@ export async function searchWorldBookEntries(
   const text = query.trim();
   if (!text) return [];
 
-  const [vector] = await cachedEmbedTexts(userId, [text]);
+  const [vector] = await cachedEmbedTexts(userId, [text], { inputType: "query" });
   const rows = await searchWorldBookEntriesHybridWithVector(userId, worldBookId, text, vector, limit, cfg.hybrid_weight_mode);
   return rows.map((row) => ({
     entry_id: row.entry_id,
     score: row.distance,
     content: row.content,
   }));
+}
+
+function worldBookSourceExclusionFilters(sourceIds: Set<string>): VectorFilter[] {
+  const ids = Array.from(sourceIds);
+  const filters: VectorFilter[] = [];
+  for (let i = 0; i < ids.length; i += MAX_SOURCE_FILTER_IDS) {
+    filters.push(notInSet("source_id", ids.slice(i, i + MAX_SOURCE_FILTER_IDS)));
+  }
+  return filters;
+}
+
+async function collectWorldBookHitsByUniqueSource(
+  baseFilter: VectorFilter,
+  targetLimit: number,
+  search: (filter: VectorFilter) => Promise<VectorHit[]>,
+  signal?: AbortSignal,
+): Promise<VectorHit[]> {
+  const hits: VectorHit[] = [];
+  const seenSourceIds = new Set<string>();
+
+  while (seenSourceIds.size < targetLimit && !signal?.aborted) {
+    const filter = andFilter([
+      baseFilter,
+      ...worldBookSourceExclusionFilters(seenSourceIds),
+    ]);
+    const batch = await search(filter);
+    if (batch.length === 0 || signal?.aborted) break;
+
+    let addedSource = false;
+    for (const hit of batch) {
+      const sourceId = String(hit.source_id || "");
+      if (!sourceId || seenSourceIds.has(sourceId)) continue;
+      seenSourceIds.add(sourceId);
+      addedSource = true;
+    }
+    hits.push(...batch);
+
+    // A provider that ignores the exclusion filter would otherwise loop
+    // forever on the same entry's chunks.
+    if (!addedSource) break;
+  }
+
+  return hits;
+}
+
+function collapseWorldBookHitsBySource(
+  hits: VectorHit[],
+  score: "similarity" | "lexicalScore",
+): VectorHit[] {
+  const strongest = new Map<string, VectorHit>();
+  for (const hit of hits) {
+    const sourceId = String(hit.source_id || "");
+    if (!sourceId) continue;
+    const existing = strongest.get(sourceId);
+    const value = hit[score] ?? Number.NEGATIVE_INFINITY;
+    const existingValue = existing?.[score] ?? Number.NEGATIVE_INFINITY;
+    if (!existing || value > existingValue) strongest.set(sourceId, hit);
+  }
+  return Array.from(strongest.values());
 }
 
 /**
@@ -2666,7 +3666,7 @@ export async function searchWorldBookEntries(
 export async function searchWorldBookEntriesHybridWithVector(
   userId: string,
   worldBookId: string,
-  queryText: string,
+  queryText: string | string[],
   vector: number[],
   requestedLimit = 8,
   hybridWeightMode?: EmbeddingConfig["hybrid_weight_mode"],
@@ -2676,9 +3676,15 @@ export async function searchWorldBookEntriesHybridWithVector(
   await ensureWorldBookVectorVersion(userId);
   if (signal?.aborted) return [];
 
-  const trimmedQuery = queryText.trim();
+  const lexicalQueries = (Array.isArray(queryText) ? queryText : [queryText])
+    .map((value) => value.trim())
+    .filter((value, index, values) => value.length > 0 && values.indexOf(value) === index);
+  const fallbackQuery = lexicalQueries[0] ?? "";
   const filter = ownerScope(userId, "world_book_entry", worldBookId);
-  const finalLimit = Math.max(1, Math.min(requestedLimit, 100));
+  const finalLimit = Math.max(
+    1,
+    Number.isFinite(requestedLimit) ? Math.floor(requestedLimit) : 8,
+  );
   // Some callers (notably prompt assembly) already expand topK to a wider
   // candidate pool before calling this helper. Allow them to opt out of a
   // second 3x expansion so providers like Milvus do not multiply candidates at
@@ -2688,79 +3694,20 @@ export async function searchWorldBookEntriesHybridWithVector(
     : Math.min(200, Math.max(finalLimit * 3, finalLimit));
 
   const store = await getActiveVectorStore();
-  const nativeHybridSearch = store.hybridSearch?.bind(store);
-  const canUseNativeHybrid = !!nativeHybridSearch && !!trimmedQuery && hybridWeightMode !== "vector_first" && store.capabilities.nativeLexical;
-  let vectorRows = canUseNativeHybrid
-    ? await nativeHybridSearch({
-      collection: "embeddings_world_books",
-      vector,
-      queryText: trimmedQuery,
-      filter,
-      limit: candidateLimit,
-      withVector: false,
-      refine: true,
-      signal,
-    })
-    : await store.vectorSearch({
-      collection: "embeddings_world_books",
-      vector,
-      filter,
-      limit: candidateLimit,
-      withVector: false,
-      refine: true,
-      signal,
-    });
-
-  if (vectorRows.length === 0 && canUseNativeHybrid && !signal?.aborted) {
-    try {
-      const denseFallbackRows = await store.vectorSearch({
+  let vectorRows = await collectWorldBookHitsByUniqueSource(
+    filter,
+    candidateLimit,
+    (searchFilter) => store.vectorSearch({
         collection: "embeddings_world_books",
         vector,
-        filter,
+        filter: searchFilter,
         limit: candidateLimit,
         withVector: false,
         refine: true,
         signal,
-      });
-      if (denseFallbackRows.length > 0) {
-        let recoveredRows = denseFallbackRows;
-        if (trimmedQuery && store.capabilities.nativeLexical) {
-          const lexicalRows = await store.lexicalSearch({
-            collection: "embeddings_world_books",
-            queryText: trimmedQuery,
-            filter,
-            limit: candidateLimit,
-            withVector: false,
-            signal,
-          }).catch((err) => {
-            console.warn(
-              "[embeddings] WI lexical fallback failed after native hybrid miss for book=%s in provider=%s: %s",
-              worldBookId.slice(0, 8),
-              store.id,
-              err instanceof Error ? err.message : String(err),
-            );
-            return [] as VectorHit[];
-          });
-          recoveredRows = reciprocalRankFusion(denseFallbackRows, lexicalRows).slice(0, candidateLimit);
-        }
-        vectorRows = recoveredRows;
-        console.warn(
-          "[embeddings] WI vector search: native hybrid returned 0 rows for book=%s (provider=%s, limit=%d); dense fallback recovered %d row(s)",
-          worldBookId.slice(0, 8),
-          store.id,
-          finalLimit,
-          vectorRows.length,
-        );
-      }
-    } catch (err) {
-      console.warn(
-        "[embeddings] WI dense fallback failed after native hybrid miss for book=%s in provider=%s: %s",
-        worldBookId.slice(0, 8),
-        store.id,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
-  }
+      }),
+    signal,
+  );
 
   if (vectorRows.length === 0 && !signal?.aborted) {
     const fallback = await recoverWorldBookScopedRowsFromStore(
@@ -2768,7 +3715,7 @@ export async function searchWorldBookEntriesHybridWithVector(
       filter,
       vector,
       candidateLimit,
-      trimmedQuery,
+      fallbackQuery,
       signal,
     );
 
@@ -2805,6 +3752,7 @@ export async function searchWorldBookEntriesHybridWithVector(
         entry_id: entryId,
         distance,
         lexical_score: existing?.lexical_score ?? null,
+        lexical_strength: existing?.lexical_strength ?? 0,
         content: String(row.content || ""),
         searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : existing?.searchTextPreview || "",
         metadata: { ...(existing?.metadata ?? {}), ...metadata },
@@ -2812,18 +3760,30 @@ export async function searchWorldBookEntriesHybridWithVector(
     }
   }
 
-  if (!canUseNativeHybrid && trimmedQuery && hybridWeightMode !== "vector_first" && store.capabilities.nativeLexical && !signal?.aborted) {
-    try {
-      const lexicalRows = await store.lexicalSearch({
-        collection: "embeddings_world_books",
-        queryText: trimmedQuery,
-        filter,
-        limit: candidateLimit,
-        withVector: false,
-        signal,
-      });
+  if (lexicalQueries.length > 0 && hybridWeightMode !== "vector_first" && store.capabilities.nativeLexical && !signal?.aborted) {
+    for (const lexicalQuery of lexicalQueries) {
+      try {
+        const lexicalRows = collapseWorldBookHitsBySource(
+          await collectWorldBookHitsByUniqueSource(
+            filter,
+            candidateLimit,
+            (searchFilter) => store.lexicalSearch({
+              collection: "embeddings_world_books",
+              queryText: lexicalQuery,
+              filter: searchFilter,
+              limit: candidateLimit,
+              withVector: false,
+              signal,
+            }),
+            signal,
+          ),
+          "lexicalScore",
+        );
+        const strengths = normalizeBm25Scores(lexicalRows.map((row) => row.lexicalScore));
 
-      for (const row of lexicalRows) {
+        for (let index = 0; index < lexicalRows.length; index += 1) {
+          const row = lexicalRows[index];
+          const lexicalStrength = strengths[index] ?? 0;
         const entryId = String(row.source_id);
         const metadata = parseWorldBookEmbeddingMetadata(row.metadata_json);
         const lexicalScore = row.lexicalScore;
@@ -2833,6 +3793,7 @@ export async function searchWorldBookEntriesHybridWithVector(
           if (lexicalScore !== null && (existing.lexical_score === null || lexicalScore > existing.lexical_score)) {
             existing.lexical_score = lexicalScore;
           }
+          existing.lexical_strength = Math.max(existing.lexical_strength ?? 0, lexicalStrength);
           if (!existing.searchTextPreview && typeof metadata.search_text === "string") {
             existing.searchTextPreview = metadata.search_text;
           }
@@ -2847,25 +3808,32 @@ export async function searchWorldBookEntriesHybridWithVector(
             entry_id: entryId,
             distance: Number.POSITIVE_INFINITY,
             lexical_score: lexicalScore,
+            lexical_strength: lexicalStrength,
             content: String(row.content || ""),
             searchTextPreview: typeof metadata.search_text === "string" ? metadata.search_text : "",
             metadata,
           });
         }
-      }
-    } catch (err) {
-      if (!signal?.aborted && (err as any)?.name !== "AbortError") {
-        console.warn("[embeddings] World-book FTS candidate fetch failed:", err);
+        }
+      } catch (err) {
+        if (!signal?.aborted && (err as any)?.name !== "AbortError") {
+          console.warn("[embeddings] World-book FTS candidate fetch failed:", err);
+        }
       }
     }
   }
 
-  return Array.from(merged.values())
+  const rankedCandidates = Array.from(merged.values())
     .sort((a, b) => {
       if (a.distance !== b.distance) return a.distance - b.distance;
-      return (b.lexical_score ?? Number.NEGATIVE_INFINITY) - (a.lexical_score ?? Number.NEGATIVE_INFINITY);
-    })
-    .slice(0, finalLimit);
+      if ((b.lexical_strength ?? 0) !== (a.lexical_strength ?? 0)) {
+        return (b.lexical_strength ?? 0) - (a.lexical_strength ?? 0);
+      }
+      return a.entry_id.localeCompare(b.entry_id);
+    });
+  return options?.expandLimit === false
+    ? rankedCandidates
+    : rankedCandidates.slice(0, finalLimit);
 }
 
 async function recoverWorldBookScopedRowsFromStore(
@@ -2891,7 +3859,7 @@ async function recoverWorldBookScopedRowsFromStore(
     scanLimit,
   ).catch(() => [] as VectorRow[]);
 
-  const denseHits = storedRows
+  const denseHits = collapseWorldBookHitsBySource(storedRows
     .filter((row) => row.vector.length === queryVector.length && row.vector.length > 0)
     .map((row) => ({
       id: row.id,
@@ -2901,7 +3869,7 @@ async function recoverWorldBookScopedRowsFromStore(
       similarity: cosineSimilarity(queryVector, row.vector),
       lexicalScore: null,
       vector: null,
-    } satisfies VectorHit))
+    } satisfies VectorHit)), "similarity")
     .sort((a, b) => (b.similarity ?? Number.NEGATIVE_INFINITY) - (a.similarity ?? Number.NEGATIVE_INFINITY))
     .slice(0, limit);
 
@@ -2913,17 +3881,25 @@ async function recoverWorldBookScopedRowsFromStore(
     };
   }
 
-  const lexicalHits = await store.lexicalSearch({
-    collection: "embeddings_world_books",
-    queryText,
+  const lexicalHits = await collectWorldBookHitsByUniqueSource(
     filter,
     limit,
-    withVector: false,
+    (searchFilter) => store.lexicalSearch({
+      collection: "embeddings_world_books",
+      queryText,
+      filter: searchFilter,
+      limit,
+      withVector: false,
+      signal,
+    }),
     signal,
-  }).catch(() => [] as VectorHit[]);
+  ).catch(() => [] as VectorHit[]);
 
   return {
-    hits: reciprocalRankFusion(denseHits, lexicalHits).slice(0, limit),
+    hits: reciprocalRankFusion(
+      denseHits,
+      collapseWorldBookHitsBySource(lexicalHits, "lexicalScore"),
+    ).slice(0, limit),
     scopedRowCount,
     truncated: scopedRowCount > scanLimit,
   };
@@ -3248,7 +4224,7 @@ export async function reindexChatMessages(
   }
 
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
-  await embedWithAdaptiveBatching(
+  await embedInBatches(
     userId,
     chunksToUpsert,
     batchSize,
@@ -3271,19 +4247,7 @@ export async function reindexChatMessages(
         rows,
       );
     },
-    async (failedBatch, err) => {
-      if (failedBatch.length === 1) {
-        const [failed] = failedBatch;
-        const recovered = await tryRecoverChatChunkEmbeddingWithAutoSplit(
-          userId,
-          chatId,
-          failed.chunkId,
-          failed.content,
-          err,
-          { chunkId: failed.chunkId, ...(failed.metadata || {}) },
-        );
-        if (recovered.recovered) return;
-      }
+    async (_failedBatch, err) => {
       console.warn("[embeddings] Batch chat embedding failed:", err);
     },
     { label: "chat memory" },
@@ -3656,7 +4620,7 @@ export async function rebuildVaultEmbeddings(
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
   const embeddedChunkIds = new Set<string>();
 
-  await embedWithAdaptiveBatching(
+  await embedInBatches(
     userId,
     valid,
     batchSize,
@@ -3681,38 +4645,7 @@ export async function rebuildVaultEmbeddings(
       );
       for (const chunk of batch) embeddedChunkIds.add(chunk.vaultChunkId);
     },
-    async (failedBatch, err) => {
-      if (failedBatch.length === 1) {
-        const [chunk] = failedBatch;
-        const sourceTokenCount = estimateChatChunkTokens(chunk.content.trim());
-        console.warn("[embeddings] Terminal vault chunk rebuild failure:", {
-          vaultChunkId: chunk.vaultChunkId,
-          vaultId,
-          sourceChars: chunk.content.length,
-          sourceTokensApprox: sourceTokenCount,
-          model: cfg.model,
-          timeoutSeconds: cfg.request_timeout,
-          error: err.message,
-        });
-
-        const recovered = await tryRecoverVaultChunkEmbeddingWithAutoSplit(
-          userId,
-          vaultId,
-          chunk.vaultChunkId,
-          chunk.content,
-          err,
-          {
-            vaultId,
-            rebuiltAt: Math.floor(Date.now() / 1000),
-            vaultChunkId: chunk.vaultChunkId,
-          },
-          sourceTokenCount,
-        );
-        if (recovered.recovered) {
-          if (!recovered.skipped) embeddedChunkIds.add(chunk.vaultChunkId);
-          return;
-        }
-      }
+    async (_failedBatch, err) => {
       console.warn("[embeddings] Batch vault rebuild failed:", err);
     },
     { label: "vault rebuild" },
@@ -3901,7 +4834,7 @@ export async function searchDatabankChunks(
   requestedLimit = 4,
   queryText?: string,
   signal?: AbortSignal,
-): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+): Promise<Array<{ chunk_id: string; score: number | null; content: string; metadata: any }>> {
   if (databankIds.length === 0) return [];
   if (signal?.aborted) return [];
 
@@ -3960,16 +4893,59 @@ export async function searchDatabankChunks(
 
   if (signal?.aborted) return [];
 
-  const results: Array<{ chunk_id: string; score: number; content: string; metadata: any }> = [];
+  return mapDatabankSearchHits(hits, requestedLimit);
+}
+
+export function mapDatabankSearchHits(
+  hits: VectorHit[],
+  requestedLimit: number,
+): Array<{ chunk_id: string; score: number | null; content: string; metadata: any }> {
+  // Databanks are presented to users as documents, but the vector store ranks
+  // chunks. A broad query can therefore put several chunks from one document
+  // ahead of the first chunk from every other relevant document. Keep the
+  // provider's ranked order for each document's best hit, while using the
+  // available slots to cover as many documents as possible before admitting
+  // second and subsequent chunks from one document.
+  //
+  // Metadata written by vectorization always contains documentId. Treat a
+  // legacy/malformed row without it as unique to its source instead of
+  // collapsing every such row into a single synthetic document.
+  const selected: VectorHit[] = [];
+  const overflow: VectorHit[] = [];
+  const selectedDocumentIds = new Set<string>();
 
   for (const hit of hits) {
+    let documentId: string | null = null;
+    try {
+      const metadata = JSON.parse(hit.metadata_json || "{}");
+      if (typeof metadata?.documentId === "string" && metadata.documentId) {
+        documentId = metadata.documentId;
+      }
+    } catch {
+      // A malformed legacy metadata value still gets a deterministic slot.
+    }
+
+    const documentKey = documentId ?? `source:${String(hit.source_id)}`;
+    if (!selectedDocumentIds.has(documentKey)) {
+      selectedDocumentIds.add(documentKey);
+      selected.push(hit);
+    } else {
+      overflow.push(hit);
+    }
+  }
+
+  const diversifiedHits = [...selected, ...overflow].slice(0, requestedLimit);
+  const results: Array<{ chunk_id: string; score: number | null; content: string; metadata: any }> = [];
+
+  for (const hit of diversifiedHits) {
     let meta: any = {};
     try { meta = JSON.parse(hit.metadata_json || "{}"); } catch { /* empty */ }
 
-    // Historical contract: score = max(0, 1 - distance). A lexical-only hit had
-    // no `_distance` (distance treated as 0 → score 1).
-    const distance = hit.similarity == null ? 0 : distanceFromSimilarity(hit.similarity);
-    const score = Math.max(0, 1 - distance);
+    // Preserve the provider/fusion order. Re-sorting by vector similarity here
+    // discards RRF/native-hybrid ranking and makes lexical-only hits dominate.
+    // A lexical-only hit has no meaningful cosine score, so expose null rather
+    // than presenting it as a perfect 1.000 match.
+    const score = hit.similarity == null ? null : Math.max(0, hit.similarity);
 
     results.push({
       chunk_id: String(hit.source_id),
@@ -3979,7 +4955,5 @@ export async function searchDatabankChunks(
     });
   }
 
-  // Sort by score descending and take top N
-  results.sort((a, b) => b.score - a.score);
-  return results.slice(0, requestedLimit);
+  return results;
 }

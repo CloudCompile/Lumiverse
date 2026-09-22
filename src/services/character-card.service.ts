@@ -423,8 +423,12 @@ export function normalizeJannyCharacterInput(input: CreateCharacterInput): Creat
  * Extracts character card JSON from a PNG file's tEXt/zTXt/iTXt chunk.
  * Checks for "chara" (V1/V2 standard) and "ccv3" (V3 standard) keywords.
  */
-export async function extractCardFromPng(file: File): Promise<CreateCharacterInput> {
-  const buffer = Buffer.from(await file.arrayBuffer());
+export async function extractCardFromPng(file: File | Buffer | Uint8Array): Promise<CreateCharacterInput> {
+  const buffer = Buffer.isBuffer(file)
+    ? file
+    : file instanceof Uint8Array
+      ? Buffer.from(file.buffer, file.byteOffset, file.byteLength)
+      : Buffer.from(await file.arrayBuffer());
   const charaText = extractPngTextChunk(buffer, "chara") ?? extractPngTextChunk(buffer, "ccv3");
 
   if (!charaText) {
@@ -663,9 +667,19 @@ export interface LumiverseModules {
   };
   alternate_fields?: Record<string, Array<{ id: string; label: string; content: string }>>;
   alternate_avatars?: Array<{ id: string; label: string; path: string }>;
+  avatar_bindings?: Record<string, { description?: string | null; personality?: string | null; scenario?: string | null; greeting_index?: number | null }>;
   landing_perspective_layers?: Array<{ id: string; label?: string; path: string; intensity: number }>;
   world_books?: Record<string, any>[];
   regex_scripts?: BundledRegexScript[];
+}
+
+/**
+ * Keep alternate-avatar identity deterministic across CHARX imports, including
+ * older or malformed manifests that omitted the id. The source position is
+ * stable within the manifest and avoids generating a new UUID on every import.
+ */
+export function stableCharxAlternateAvatarId(id: unknown, position: number): string {
+  return typeof id === "string" && id.trim() ? id : `alternate-avatar-${position + 1}`;
 }
 
 export interface CharxResult {
@@ -766,17 +780,43 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
 
   const card = parseCardJson(json);
 
+  // Decode Lumiverse modules before choosing the primary avatar so bundled
+  // alternates can be excluded from the primary-image candidates. Concurrent
+  // export writes do not guarantee ZIP entry order, so "first icon" is not a
+  // stable way to distinguish main.png from an alternate avatar.
+  let lumiverseModules: LumiverseModules | null = null;
+  const lumiverseBytes = unzipped["lumiverse_modules.json"];
+  if (lumiverseBytes) {
+    try {
+      const parsed = JSON.parse(new TextDecoder().decode(lumiverseBytes));
+      if (parsed && typeof parsed === "object" && typeof parsed.version === "number") {
+        lumiverseModules = parsed as LumiverseModules;
+      }
+    } catch { /* malformed modules JSON — skip */ }
+  }
+
   // Find the best avatar image:
-  // 1. assets/icon/images/* (spec-recommended location)
-  // 2. Any image at the root
-  // 3. Any image anywhere in assets/
+  // 1. Lumiverse's stable primary key (assets/icon/image/main.*)
+  // 2. An icon not declared as an alternate avatar
+  // 3. Any image at the root
+  // 4. Any image anywhere in assets/
   const imagePaths = Object.keys(unzipped).filter(
     (p) => p !== "card.json" && IMAGE_EXTENSIONS.test(p)
   );
 
+  const alternateAvatarPaths = new Set(
+    Array.isArray(lumiverseModules?.alternate_avatars)
+      ? lumiverseModules.alternate_avatars
+        .map((avatar) => avatar?.path)
+        .filter((path): path is string => typeof path === "string" && path.length > 0)
+      : [],
+  );
+
   const avatarPath =
-    imagePaths.find((p) => p.startsWith("assets/icon/image/")) ??
+    imagePaths.find((p) => /^assets\/icon\/image\/main\.(?:png|jpe?g|gif|webp|avif|bmp|svg)$/i.test(p)) ??
+    imagePaths.find((p) => p.startsWith("assets/icon/image/") && !alternateAvatarPaths.has(p)) ??
     imagePaths.find((p) => !p.includes("/")) ??
+    imagePaths.find((p) => p.startsWith("assets/") && !alternateAvatarPaths.has(p)) ??
     imagePaths.find((p) => p.startsWith("assets/"));
 
   let avatarFile = avatarPath
@@ -821,18 +861,6 @@ export async function extractCardFromCharx(file: File): Promise<CharxResult> {
       const label = asset.name as string;
       expressionAssets.push({ label, file: imageFileFromBytes(bytes, zipPath) });
     }
-  }
-
-  // Decode Lumiverse modules if present
-  let lumiverseModules: LumiverseModules | null = null;
-  const lumiverseBytes = unzipped["lumiverse_modules.json"];
-  if (lumiverseBytes) {
-    try {
-      const parsed = JSON.parse(new TextDecoder().decode(lumiverseBytes));
-      if (parsed && typeof parsed === "object" && typeof parsed.version === "number") {
-        lumiverseModules = parsed as LumiverseModules;
-      }
-    } catch { /* malformed modules JSON — skip */ }
   }
 
   // Build assetFiles map (archive-path → File) for Lumiverse module asset lookup
@@ -907,6 +935,9 @@ export function resolveInlineAssetReferences(
   }
 
   function resolve(src: string): string | undefined {
+    // Portable gallery references must stay in card text. Each CharX install
+    // maps the stable URI to its own local image ID at display time.
+    if (src.startsWith("gallery://")) return undefined;
     return exactLookup.get(src)
       ?? baseLookup.get(src)
       ?? stemLookup.get(fileStem(src));

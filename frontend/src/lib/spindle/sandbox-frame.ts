@@ -1,5 +1,7 @@
 import type { SpindleSandboxFrameHandle, SpindleSandboxFrameOptions } from 'lumiverse-spindle-types'
 import { uuidv7 } from '@/lib/uuid'
+import { dispatchMessageContentLayout } from '@/lib/message-content-layout'
+import { stampExtensionRoot } from './extension-root-stamp'
 
 interface SandboxFrameRecord {
   iframe: HTMLIFrameElement
@@ -49,7 +51,13 @@ function handleSandboxMessage(event: MessageEvent): void {
       record.minHeight,
       Math.min(record.maxHeight, Math.round(wire.height))
     )
-    record.iframe.style.height = `${nextHeight}px`
+    if (record.iframe.style.height !== `${nextHeight}px`) {
+      // Auto-sized message widgets can continue expanding after their initial
+      // insertion (fonts, images, extension rendering). Dispatch before the
+      // height write so a containing virtual chat row can preserve its anchor.
+      dispatchMessageContentLayout(record.iframe, { preserveScrollAnchor: true })
+      record.iframe.style.height = `${nextHeight}px`
+    }
     return
   }
 
@@ -110,7 +118,7 @@ export function createSandboxFrame(
   const initialHeight = clampDimension(options.initialHeight ?? minHeight, minHeight, maxHeight)
 
   const iframe = document.createElement('iframe')
-  iframe.setAttribute('data-spindle-ext', extensionId)
+  stampExtensionRoot(iframe, extensionId, 'data-spindle-ext')
   iframe.setAttribute('data-spindle-sandbox-frame', token)
   iframe.setAttribute('sandbox', 'allow-scripts')
   iframe.setAttribute(

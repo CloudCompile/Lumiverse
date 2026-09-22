@@ -15,6 +15,9 @@ interface ModalShellProps {
   children: ReactNode
   className?: string
   style?: CSSProperties
+  /** Allow a modal body with form controls to scroll when the viewport is short. */
+  scrollable?: boolean
+  modalId?: string
 }
 
 export function ModalShell({
@@ -28,6 +31,8 @@ export function ModalShell({
   children,
   className,
   style,
+  scrollable = false,
+  modalId = 'shell',
 }: ModalShellProps) {
   const backdropPointerDownRef = useRef<EventTarget | null>(null)
 
@@ -75,14 +80,16 @@ export function ModalShell({
           style={{ zIndex }}
         >
           <motion.div
-            className={clsx(styles.modal, className)}
+            className={clsx(styles.modal, scrollable && styles.scrollable, className)}
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
             style={{ maxWidth, maxHeight, ...style }}
           >
+            <span data-spindle-mount="modal_header_actions" data-spindle-scope={`modal:${modalId}:header-actions`} style={{ display: 'contents' }} />
             {children}
+            <span data-spindle-mount="modal_footer_actions" data-spindle-scope={`modal:${modalId}:footer-actions`} style={{ display: 'contents' }} />
           </motion.div>
         </motion.div>
       )}

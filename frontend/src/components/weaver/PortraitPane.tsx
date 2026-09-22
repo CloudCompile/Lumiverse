@@ -71,8 +71,11 @@ export function PortraitPane({ sessionId, character, onCharacterUpdate, onCount 
     return provider?.capabilities.parameters ?? {}
   }, [providers, activeConnection])
   const advancedParams = useMemo(
-    () => Object.entries(schema).filter(([key]) => !SKIP_PARAMS.has(key)),
-    [schema],
+    () => Object.entries(schema).filter(([key, parameter]) =>
+      !SKIP_PARAMS.has(key)
+      && (!parameter.modelPrefixes?.length || parameter.modelPrefixes.some((prefix) => activeConnection?.model.startsWith(prefix))),
+    ),
+    [activeConnection?.model, schema],
   )
 
   const isComfy = isComfyProvider(activeConnection?.provider)

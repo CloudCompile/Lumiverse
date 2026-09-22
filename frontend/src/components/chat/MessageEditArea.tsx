@@ -1,7 +1,11 @@
-import { Brain, Maximize2 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
+import { Brain, ChevronRight, Maximize2 } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
+import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
+import { readProductivityFeature } from '@/lib/spindle/productivity-feature-toggles'
+import { useStore } from '@/store'
+import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import styles from './MessageEditArea.module.css'
 
 interface MessageEditAreaProps {
@@ -9,6 +13,9 @@ interface MessageEditAreaProps {
   onChangeContent: (value: string) => void
   onSave: () => void
   onCancel: () => void
+  onEditAndSend?: () => void
+  messageId?: string
+  editAndSendDisabled?: boolean
   editReasoning?: string
   onChangeReasoning?: (value: string) => void
 }
@@ -30,14 +37,16 @@ function autoResize(el: HTMLTextAreaElement | null) {
       ? Math.min(maxHeight, availableHeight)
       : availableHeight
   }
+  // Measure the content at its natural height. Scrolling is deliberately
+  // owned by CSS so this helper cannot strand a resized or viewport-clamped
+  // editor with an inline `overflow-y: hidden` declaration.
+  el.style.height = 'auto'
   const nextHeight = el.scrollHeight
   if (Number.isFinite(maxHeight) && maxHeight > 0) {
     el.style.height = `${Math.min(nextHeight, maxHeight)}px`
-    el.style.overflowY = nextHeight > maxHeight ? 'auto' : 'hidden'
     return
   }
   el.style.height = `${nextHeight}px`
-  el.style.overflowY = 'hidden'
 }
 
 function getEditorOcclusion(target: HTMLTextAreaElement | null) {
@@ -73,21 +82,32 @@ function syncEditorVisibility(target: HTMLTextAreaElement | null, correctedRef: 
   }
 }
 
-export default function MessageEditArea({
+function MessageEditAreaNative({
   editContent, onChangeContent, onSave, onCancel,
+  onEditAndSend, messageId, editAndSendDisabled,
   editReasoning, onChangeReasoning,
 }: MessageEditAreaProps) {
   const { t } = useTranslation('chat')
   const { t: tc } = useTranslation('common')
   const { t: ts } = useTranslation('shared', { keyPrefix: 'expandedTextEditor' })
+  const showEditAndSend = useStore((state) => readProductivityFeature(state, 'showEditAndSend'))
+  const hasLumiverseSuite = useStore((state) => hasEnabledFrontendExtension(state.extensions, 'lumiverse_suite'))
+  const configuredEditAndSendSide = useStore((state) => state.quickToolbarSettings?.editAndSendSide)
+  // Only an explicit left preference opts into the alternate order. Missing,
+  // reset, invalid, and suite-unavailable values retain native right placement.
+  const editAndSendSide = hasLumiverseSuite && configuredEditAndSendSide === 'left' ? 'left' : 'right'
   const hasReasoning = editReasoning != null && onChangeReasoning != null
   const contentRef = useRef<HTMLTextAreaElement>(null)
   const reasoningRef = useRef<HTMLTextAreaElement>(null)
+  const focusRequested = useStore((s) => s.messageEditDraft?.focusRequested === true)
+  const consumeFocusRequest = useStore((s) => s.consumeMessageEditFocusRequest)
   const contentRevealFrameRef = useRef(0)
   const reasoningRevealFrameRef = useRef(0)
   const focusCorrectionTimersRef = useRef<number[]>([])
   const contentCorrectedForFocusRef = useRef(false)
   const reasoningCorrectedForFocusRef = useRef(false)
+  const reasoningSectionId = useId()
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
   // Which field (if any) is currently open in the full-screen editor.
   const [expandedField, setExpandedField] = useState<'content' | 'reasoning' | null>(null)
   // Cursor position captured at expand time so the modal opens where the caret was.
@@ -119,7 +139,17 @@ export default function MessageEditArea({
   }, [editContent])
   useLayoutEffect(() => {
     autoResize(reasoningRef.current)
-  }, [editReasoning])
+  }, [editReasoning, reasoningExpanded])
+
+  useEffect(() => {
+    setReasoningExpanded(false)
+  }, [messageId])
+
+  useLayoutEffect(() => {
+    if (!focusRequested) return
+    contentRef.current?.focus({ preventScroll: true })
+    consumeFocusRequest()
+  }, [consumeFocusRequest, focusRequested])
 
   useEffect(() => {
     if (navigator.maxTouchPoints <= 0) return
@@ -189,31 +219,47 @@ export default function MessageEditArea({
     <div className={styles.editArea}>
       {hasReasoning && (
         <div className={styles.reasoningSection}>
-          <div className={styles.sectionLabel}>
+          <button
+            type="button"
+            className={`${styles.sectionLabel} ${styles.reasoningToggle}`}
+            onClick={() => setReasoningExpanded((open) => !open)}
+            aria-expanded={reasoningExpanded}
+            aria-controls={reasoningSectionId}
+            data-reasoning-toggle="true"
+            title={t(reasoningExpanded ? 'messageEdit.collapseReasoning' : 'messageEdit.expandReasoning')}
+          >
+            <ChevronRight
+              size={13}
+              className={`${styles.reasoningChevron} ${reasoningExpanded ? styles.reasoningChevronOpen : ''}`}
+            />
             <Brain size={13} />
             <span>{t('messageEdit.reasoning')}</span>
-          </div>
-          <div className={styles.textareaWrapper}>
-            <textarea
-              ref={reasoningRef}
-              name="message-edit-reasoning"
-              aria-label={t('messageEdit.reasoningAria')}
-              className={`${styles.editTextarea} ${styles.reasoningTextarea}`}
-              value={editReasoning}
-              onChange={handleReasoningChange}
-              onFocus={handleReasoningFocus}
-              placeholder={t('messageEdit.reasoningPlaceholder')}
-            />
-            <button
-              type="button"
-              className={styles.expandBtn}
-              onClick={expandReasoning}
-              title={ts('expandEditor')}
-              aria-label={ts('expandEditor')}
-            >
-              <Maximize2 size={13} />
-            </button>
-          </div>
+          </button>
+          {reasoningExpanded && (
+            <div id={reasoningSectionId} className={styles.reasoningEditor}>
+              <div className={styles.textareaWrapper}>
+                <textarea
+                  ref={reasoningRef}
+                  name="message-edit-reasoning"
+                  aria-label={t('messageEdit.reasoningAria')}
+                  className={`${styles.editTextarea} ${styles.reasoningTextarea}`}
+                  value={editReasoning}
+                  onChange={handleReasoningChange}
+                  onFocus={handleReasoningFocus}
+                  placeholder={t('messageEdit.reasoningPlaceholder')}
+                />
+                <button
+                  type="button"
+                  className={styles.expandBtn}
+                  onClick={expandReasoning}
+                  title={ts('expandEditor')}
+                  aria-label={ts('expandEditor')}
+                >
+                  <Maximize2 size={13} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <div className={hasReasoning ? styles.contentSection : undefined}>
@@ -231,7 +277,6 @@ export default function MessageEditArea({
             value={editContent}
             onChange={handleContentChange}
             onFocus={handleContentFocus}
-            autoFocus
           />
           <button
             type="button"
@@ -244,13 +289,42 @@ export default function MessageEditArea({
           </button>
         </div>
       </div>
-      <div className={styles.editActions}>
-        <button type="button" onClick={onCancel} className={styles.editCancelBtn}>
+      <div
+        className={styles.editActions}
+        data-edit-and-send-side={editAndSendSide}
+        data-spindle-mount="message_edit_actions"
+        data-spindle-scope-key={messageId ? `message:${messageId}:edit-actions` : undefined}
+      >
+        {editAndSendSide === 'left' && hasLumiverseSuite && showEditAndSend && Boolean(onEditAndSend) && (
+          <button
+            type="button"
+            onClick={onEditAndSend}
+            className={styles.editSaveBtn}
+            data-edit-and-send-action="true"
+            aria-label={t('messageEdit.editAndSend', { defaultValue: 'Edit and Send' })}
+            disabled={editAndSendDisabled || !editContent.trim()}
+          >
+            {t('messageEdit.editAndSend', { defaultValue: 'Edit and Send' })}
+          </button>
+        )}
+        <button type="button" onClick={onCancel} className={styles.editCancelBtn} disabled={editAndSendDisabled}>
           {tc('actions.cancel')}
         </button>
-        <button type="button" onClick={onSave} className={styles.editSaveBtn}>
+        <button type="button" onClick={onSave} className={styles.editSaveBtn} disabled={editAndSendDisabled}>
           {tc('actions.save')}
         </button>
+        {editAndSendSide === 'right' && hasLumiverseSuite && showEditAndSend && Boolean(onEditAndSend) && (
+          <button
+            type="button"
+            onClick={onEditAndSend}
+            className={styles.editSaveBtn}
+            data-edit-and-send-action="true"
+            aria-label={t('messageEdit.editAndSend', { defaultValue: 'Edit and Send' })}
+            disabled={editAndSendDisabled || !editContent.trim()}
+          >
+            {t('messageEdit.editAndSend', { defaultValue: 'Edit and Send' })}
+          </button>
+        )}
       </div>
       {expandedField === 'content' && (
         <ExpandedTextEditor
@@ -260,6 +334,7 @@ export default function MessageEditArea({
           title={t('messageEdit.contentAria')}
           initialCursorPos={expandCursorRef.current}
           markdownOnly
+          sourceRef={contentRef}
         />
       )}
       {expandedField === 'reasoning' && hasReasoning && (
@@ -271,8 +346,13 @@ export default function MessageEditArea({
           placeholder={t('messageEdit.reasoningPlaceholder')}
           initialCursorPos={expandCursorRef.current}
           markdownOnly
+          sourceRef={reasoningRef}
         />
       )}
     </div>
   )
+}
+
+export default function MessageEditArea(props: MessageEditAreaProps) {
+  return useSpindleComponentOverride('MessageEditArea', MessageEditAreaNative, props)
 }

@@ -23,15 +23,15 @@ function parseSchemaSafe(raw: unknown): Record<string, unknown> {
 }
 
 /**
- * Query the loom_tools table for tools flagged for deliberation,
- * converting them to CouncilToolDefinition format.
+ * List all of the user's pack tools for council assignment.
+ * store_in_deliberation controls result routing, not tool availability.
  */
 export function getDLCTools(userId: string): RuntimeCouncilToolDefinition[] {
   const rows = getDb()
     .query(
       `SELECT lt.* FROM loom_tools lt
        JOIN packs p ON lt.pack_id = p.id
-       WHERE p.user_id = ? AND lt.store_in_deliberation = 1
+       WHERE p.user_id = ?
        ORDER BY lt.sort_order ASC`
     )
     .all(userId) as any[];
@@ -45,6 +45,6 @@ export function getDLCTools(userId: string): RuntimeCouncilToolDefinition[] {
     prompt: row.prompt || "",
     inputSchema: parseSchemaSafe(row.input_schema),
     resultVariable: row.result_variable || undefined,
-    storeInDeliberation: true,
+    storeInDeliberation: !!row.store_in_deliberation,
   }));
 }

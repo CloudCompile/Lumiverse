@@ -1,5 +1,7 @@
 import { getDb } from "../db/connection";
 import * as settingsSvc from "../services/settings.service";
+import { DEFAULT_PROMPT_BEHAVIOR } from "../services/prompt-behavior";
+import { SYSTEM_SECRET_PRINCIPAL_EMAIL } from "../services/secrets.service";
 
 export const DEFAULT_PRESET_BLOCKS = [
   {
@@ -305,17 +307,10 @@ export const DEFAULT_PRESET_PARAMETERS = {
 };
 
 export const DEFAULT_PRESET_PROMPTS = {
-  promptBehavior: {
-    continueNudge: "[Continue your last message without repeating its original content.]",
-    emptySendNudge: "[Write the next reply only as {{char}}.]",
-    impersonationPrompt: "[Write your next reply from the point of view of {{user}}, using the chat history so far as a guideline for the writing style of {{user}}. Don't write as {{char}} or system. Don't describe actions of {{char}}.]",
-    groupNudge: "[Write the next reply only as {{char}}.]",
-    newChatPrompt: "[Start a new Chat]",
-    newGroupChatPrompt: "[Start a new group chat. Group members: {{group}}]",
-    sendIfEmpty: "",
-  },
+  promptBehavior: { ...DEFAULT_PROMPT_BEHAVIOR },
   completionSettings: {
     assistantPrefill: "",
+    reasoningPrefill: "",
     assistantImpersonation: "",
     continuePrefill: false,
     continuePostfix: " ",
@@ -331,6 +326,7 @@ export const DEFAULT_PRESET_PROMPTS = {
     seed: -1,
     customStopStrings: [],
     collapseMessages: false,
+    trimIncompleteWords: false,
   },
 };
 
@@ -431,7 +427,7 @@ function upgradeLegacyPresetMetadata(userId: string, row: PresetRow): void {
   metadata._lumiverse_preset_slug = BUILTIN_DEFAULT_PRESET_SLUG;
   metadata.isDefault = true;
   getDb()
-    .query("UPDATE presets SET metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?")
+    .query("UPDATE presets SET metadata = ?, updated_at = ?, cache_revision = cache_revision + 1 WHERE id = ? AND user_id = ?")
     .run(
       JSON.stringify(metadata),
       Math.floor(Date.now() / 1000),
@@ -527,9 +523,11 @@ export function seedDefaultPreset(
 }
 
 export function backfillDefaultPresets(): DefaultPresetBackfillResult {
+  // The reserved system principal is not a login account — never seed a
+  // default preset for it.
   const users = getDb()
-    .query('SELECT id FROM "user" ORDER BY createdAt ASC')
-    .all() as Array<{ id: string }>;
+    .query('SELECT id FROM "user" WHERE email IS NULL OR email != ? ORDER BY createdAt ASC')
+    .all(SYSTEM_SECRET_PRINCIPAL_EMAIL) as Array<{ id: string }>;
 
   const result: DefaultPresetBackfillResult = {
     usersScanned: users.length,

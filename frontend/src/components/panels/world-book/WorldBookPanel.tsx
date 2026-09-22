@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
-import { Plus, Trash2, BookOpen, Maximize2, ChevronDown, ChevronRight, Upload, Download, Globe, X, User, FileUp, Settings, Search, MessageSquare, ArrowDownAZ, ArrowDownZA, MoreVertical } from 'lucide-react'
+import { Plus, Trash2, Maximize2, ChevronDown, ChevronRight, Upload, Download, Globe, X, User, FileUp, Settings, Search, MessageSquare, ArrowDownAZ, ArrowDownZA, MoreVertical } from 'lucide-react'
 import { useStore } from '@/store'
 import useIsMobile from '@/hooks/useIsMobile'
 import { worldBooksApi } from '@/api/world-books'
@@ -15,11 +15,14 @@ import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookD
 import { formatWorldBookReindexStatus } from '@/lib/worldBookVectorization'
 import { filterWorldBooksForChatContextAttachment } from '@/lib/worldBookIndexPrompt'
 import { Button } from '@/components/shared/FormComponents'
+import { Toggle } from '@/components/shared/Toggle'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import FolderDropdown from '@/components/shared/FolderDropdown'
 import { useFolders } from '@/hooks/useFolders'
 import { useWorldBookListLiveSync } from '@/hooks/useWorldBookListLiveSync'
+import { upsertById } from '@/lib/worldBookList'
+import { toast } from '@/lib/toast'
 import type { WorldBook, WorldBookVectorSummary, WorldInfoSettings } from '@/types/api'
 
 import styles from './WorldBookPanel.module.css'
@@ -119,11 +122,15 @@ export default function WorldBookPanel() {
   }, [setSetting, worldBookListSortDir])
 
   // Book editing state
-  const [bookFieldsOpen, setBookFieldsOpen] = useState(false)
   const [bookName, setBookName] = useState('')
   const [bookDescription, setBookDescription] = useState('')
   const [bookFolder, setBookFolder] = useState('')
-  const { folders, createFolder } = useFolders('worldBookFolders', books)
+  const {
+    folders,
+    createFolder,
+    renameFolder: renameStoredFolder,
+    deleteFolder: deleteStoredFolder,
+  } = useFolders('worldBookFolders', books)
   const [vectorStatus, setVectorStatus] = useState<string | null>(null)
   const [vectorSummary, setVectorSummary] = useState<WorldBookVectorSummary | null>(null)
   const [showDiagnosticsModal, setShowDiagnosticsModal] = useState(false)
@@ -134,6 +141,8 @@ export default function WorldBookPanel() {
 
   // Confirmation modals
   const [deleteBookConfirm, setDeleteBookConfirm] = useState<string | null>(null)
+  const [deleteFolderConfirm, setDeleteFolderConfirm] = useState<string | null>(null)
+  const [folderActionPending, setFolderActionPending] = useState(false)
   const [showImport, setShowImport] = useState(false)
   const [convertPreview, setConvertPreview] = useState<{
     total: number; eligible: number; keys_to_clear: number; keys_retained: number; constant_skipped: number
@@ -143,6 +152,8 @@ export default function WorldBookPanel() {
   // Debounce refs
   const bookNameTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
   const bookDescTimer = useRef<ReturnType<typeof setTimeout>>(undefined)
+  const vectorSummaryAbortRef = useRef<AbortController | null>(null)
+  const vectorSummaryBookIdRef = useRef<string | null>(null)
   const panelRootRef = useRef<HTMLDivElement>(null)
   const panelScrollRef = useRef<HTMLDivElement>(null)
   const [paginationContainer, setPaginationContainer] = useState<HTMLDivElement | null>(null)
@@ -206,13 +217,21 @@ export default function WorldBookPanel() {
   }, [activeModal, isVisible, loadBooks])
 
   const loadVectorSummary = useCallback(async (bookId: string) => {
+    vectorSummaryAbortRef.current?.abort()
+    const controller = new AbortController()
+    vectorSummaryAbortRef.current = controller
+    vectorSummaryBookIdRef.current = bookId
     try {
-      const summary = await worldBooksApi.getVectorSummary(bookId)
-      setVectorSummary(summary)
+      const summary = await worldBooksApi.getVectorSummary(bookId, { signal: controller.signal })
+      if (!controller.signal.aborted && vectorSummaryBookIdRef.current === bookId) setVectorSummary(summary)
     } catch {
-      setVectorSummary(null)
+      if (!controller.signal.aborted && vectorSummaryBookIdRef.current === bookId) setVectorSummary(null)
+    } finally {
+      if (vectorSummaryAbortRef.current === controller) vectorSummaryAbortRef.current = null
     }
   }, [])
+
+  useEffect(() => () => vectorSummaryAbortRef.current?.abort(), [])
 
   // Side effects on book selection change (book fields, vector summary, reset UI state)
   useEffect(() => {
@@ -226,6 +245,8 @@ export default function WorldBookPanel() {
       }
       setShowDiagnosticsModal(false)
     } else {
+      vectorSummaryAbortRef.current?.abort()
+      vectorSummaryBookIdRef.current = null
       setVectorSummary(null)
       setShowDiagnosticsModal(false)
     }
@@ -235,10 +256,10 @@ export default function WorldBookPanel() {
   const handleCreateBook = useCallback(async () => {
     try {
       const book = await worldBooksApi.create({ name: t('worldBookPanel.defaultBookName') })
-      setBooks((prev) => [book, ...prev])
+      setBooks((prev) => upsertById(prev, book))
       setSelectedBookId(book.id)
     } catch {}
-  }, [])
+  }, [t])
 
   const handleDeleteBook = useCallback(
     async (id: string) => {
@@ -299,6 +320,46 @@ export default function WorldBookPanel() {
     [selectedBookId, markLocalBookEdit]
   )
 
+  const handleRenameFolder = useCallback(async (oldName: string, newName: string) => {
+    const source = oldName.trim()
+    const target = newName.trim()
+    if (!source || !target || source === target) return
+
+    if (bookFolder === source) markLocalBookEdit()
+    try {
+      const result = await worldBooksApi.renameFolder(source, target)
+      const updatedById = new Map(result.updated.map((book) => [book.id, book]))
+      setBooks((previous) => previous.map((book) => updatedById.get(book.id) ?? book))
+      setBookFolder((current) => (current === source ? target : current))
+      renameStoredFolder(source, target)
+      toast.success(t('worldBookPanel.renamedFolderSuccess', { name: target, count: result.count }))
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('worldBookPanel.renameFolderFailed'))
+      throw err
+    }
+  }, [bookFolder, markLocalBookEdit, renameStoredFolder, t])
+
+  const handleDeleteFolder = useCallback(async (name: string) => {
+    const folder = name.trim()
+    if (!folder || folderActionPending) return
+
+    setFolderActionPending(true)
+    if (bookFolder === folder) markLocalBookEdit()
+    try {
+      const result = await worldBooksApi.deleteFolder(folder)
+      const updatedById = new Map(result.updated.map((book) => [book.id, book]))
+      setBooks((previous) => previous.map((book) => updatedById.get(book.id) ?? book))
+      setBookFolder((current) => (current === folder ? '' : current))
+      deleteStoredFolder(folder)
+      setDeleteFolderConfirm(null)
+      toast.success(t('worldBookPanel.deletedFolderSuccess', { name: folder, count: result.count }))
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('worldBookPanel.deleteFolderFailed'))
+    } finally {
+      setFolderActionPending(false)
+    }
+  }, [bookFolder, deleteStoredFolder, folderActionPending, markLocalBookEdit, t])
+
   const [reindexing, setReindexing] = useState(false)
 
   const handleReindexVectors = useCallback(async () => {
@@ -329,7 +390,7 @@ export default function WorldBookPanel() {
     } catch {
       setVectorStatus(t('worldBookPanel.vectorPreviewFailed'))
     }
-  }, [selectedBookId])
+  }, [selectedBookId, t])
 
   const handleConvertToVectorized = useCallback(async () => {
     if (!selectedBookId) return
@@ -360,7 +421,7 @@ export default function WorldBookPanel() {
   }, [selectedBookId, activeChatId])
 
   const handleImport = useCallback((result: WorldBookImportResult) => {
-    setBooks((prev) => [result.world_book, ...prev])
+    setBooks((prev) => upsertById(prev, result.world_book))
     setSelectedBookId(result.world_book.id)
     setShowImport(false)
     setPostImportBook(result.world_book)
@@ -645,6 +706,8 @@ export default function WorldBookPanel() {
           selectedFolder={bookFolder}
           onSelect={handleBookFolderChange}
           onCreateFolder={createFolder}
+          onRenameFolder={handleRenameFolder}
+          onDeleteFolder={setDeleteFolderConfirm}
         />
       </div>
       <Button variant="danger-ghost" size="sm" icon={<Trash2 size={11} />} onClick={() => setDeleteBookConfirm(selectedBookId)}>
@@ -939,15 +1002,13 @@ export default function WorldBookPanel() {
           />
           {isMobile ? (
             <div className={styles.mobileTopActions}>
-              {selectedBookId && (
-                <Button
-                  size="icon-sm"
-                  variant={bookFieldsOpen ? 'secondary' : 'ghost'}
-                  onClick={() => setBookFieldsOpen((open) => !open)}
-                  title={t('worldBookPanel.bookDetails')}
-                  icon={<BookOpen size={14} />}
-                />
-              )}
+              <Button
+                size="icon-sm"
+                variant="ghost"
+                onClick={handlePopOut}
+                title={t('worldBookPanel.popOut')}
+                icon={<Maximize2 size={14} />}
+              />
               <Button size="icon-sm" variant="ghost" onClick={handleCreateBook} title={t('worldBookPanel.newBook')} icon={<Plus size={14} />} />
               <Button size="icon-sm" variant="ghost" onClick={handleOpenBookActionMenu} title={t('moreActions')} icon={<MoreVertical size={14} />} />
             </div>
@@ -998,23 +1059,7 @@ export default function WorldBookPanel() {
         <div className={styles.panelBody}>
           {selectedBookId ? (
             <>
-              {/* Book fields (collapsible) */}
-              {!isMobile && (
-                <button
-                  type="button"
-                  className={styles.bookFieldsToggle}
-                  onClick={() => setBookFieldsOpen((o) => !o)}
-                >
-                  <BookOpen size={12} />
-                  <span className={styles.bookFieldsLabel}>{bookName || t('worldBookPanel.bookDetails')}</span>
-                  <ChevronDown
-                    size={12}
-                    className={clsx(styles.chevron, bookFieldsOpen && styles.chevronOpen)}
-                  />
-                </button>
-              )}
-
-              {bookFieldsOpen && bookFieldsContent}
+              {bookFieldsContent}
 
               <WorldBookEntriesSection
                 books={books}
@@ -1047,6 +1092,22 @@ export default function WorldBookPanel() {
             setDeleteBookConfirm(null)
           }}
           onCancel={() => setDeleteBookConfirm(null)}
+        />
+      )}
+
+      {deleteFolderConfirm && (
+        <ConfirmationModal
+          isOpen={true}
+          title={t('worldBookPanel.deleteFolderTitle')}
+          message={t('worldBookPanel.deleteFolderMessage', { name: deleteFolderConfirm })}
+          variant="danger"
+          confirmText={t('worldBookPanel.delete')}
+          loading={folderActionPending}
+          loadingText={t('worldBookPanel.working')}
+          onConfirm={() => void handleDeleteFolder(deleteFolderConfirm)}
+          onCancel={() => {
+            if (!folderActionPending) setDeleteFolderConfirm(null)
+          }}
         />
       )}
 
@@ -1126,6 +1187,24 @@ function WorldInfoSettingsForm({
 
   return (
     <div className={styles.wiSettingsBody}>
+      <div className={styles.wiField}>
+        <Toggle.Checkbox
+          checked={settings.forceCaseSensitive === true}
+          onChange={(checked) => onChange({ forceCaseSensitive: checked })}
+          label={t('worldBookPanel.forceCaseSensitive')}
+          hint={t('worldBookPanel.forceCaseSensitiveHint')}
+        />
+      </div>
+
+      <div className={styles.wiField}>
+        <Toggle.Checkbox
+          checked={settings.forceMatchWholeWords === true}
+          onChange={(checked) => onChange({ forceMatchWholeWords: checked })}
+          label={t('worldBookPanel.forceMatchWholeWords')}
+          hint={t('worldBookPanel.forceMatchWholeWordsHint')}
+        />
+      </div>
+
       <div className={styles.wiField}>
         <label className={styles.wiFieldLabel}>{t('worldBookPanel.globalScanDepth')}</label>
         <p className={styles.wiFieldHint}>

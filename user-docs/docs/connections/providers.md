@@ -15,7 +15,7 @@ Lumiverse supports 21 AI providers out of the box. Each provider has its own mod
 | **OpenAI** | Yes | GPT-5.x, o-series, and more |
 | **Anthropic** | Yes | Claude Opus, Sonnet, Haiku — includes Lumiverse-side prompt caching support |
 | **Google** | Yes | Gemini Pro, Gemini Flash, and more |
-| **Google Vertex AI** | Service account JSON | Enterprise Gemini access through Vertex. Paste the service account JSON into the API Key field; pick a region in the metadata. |
+| **Google Vertex AI** | Service account JSON | Gemini, Claude, and managed Model Garden MaaS models through Vertex. Upload a service account JSON and pick a supported region. |
 | **OpenRouter** | Yes (or OAuth) | Aggregator — access hundreds of models through one key. Supports OAuth sign-in and provider plugins. |
 | **DeepSeek** | Yes | DeepSeek models with reasoning |
 | **xAI** | Yes | Grok models |
@@ -133,7 +133,7 @@ Z.AI ships two API URLs that share the same authentication but route to differen
 
 On a Z.AI connection, toggle **Use Coding Plan Endpoint** to route through `/api/coding/paas/v4`. Leave it off for normal API keys. Lumiverse rewrites the base URL accordingly — you don't have to edit the API URL field by hand.
 
-Z.AI does not expose an OpenAI-compatible `/models` endpoint, so Lumiverse ships a built-in model list (`glm-5.2`, `glm-5.1`, `glm-5-turbo`, `glm-5`, `glm-4.7` family, `glm-4.6`, `glm-4.5` family, `glm-4-32b-0414-128k`) and validates your key by sending a minimal `chat/completions` request rather than a model list call. This is what keeps Coding Plan keys working — they 404 the model list endpoint but accept chat requests fine.
+Z.AI does not expose an OpenAI-compatible `/models` endpoint, so Lumiverse ships a built-in model list (`glm-5.3-flash`, `glm-5.3`, `glm-5.2`, `glm-5.1`, `glm-5-turbo`, `glm-5`, `glm-4.7` family, `glm-4.6`, `glm-4.5` family, `glm-4-32b-0414-128k`) and validates your key by sending a minimal `chat/completions` request rather than a model list call. This is what keeps Coding Plan keys working — they 404 the model list endpoint but accept chat requests fine.
 
 !!! tip "Coding Plan keys reject /models"
     If you see "model list failed" errors on a freshly-saved Z.AI connection, you probably forgot to enable **Use Coding Plan Endpoint** — Lumiverse's chat-completion validation already handles this, but third-party tools that hit `/models` directly will fail.
@@ -142,15 +142,20 @@ Z.AI does not expose an OpenAI-compatible `/models` endpoint, so Lumiverse ships
 
 ## Google Vertex AI
 
-Vertex AI is Google's enterprise Gemini endpoint. Lumiverse authenticates with a **service account JSON** rather than an API key.
+Vertex AI provides Gemini plus managed partner and open models from Model Garden. Lumiverse authenticates with a **service account JSON** rather than an API key and automatically selects each model family's required API protocol.
 
 1. Create a service account in your GCP project with the **Vertex AI User** role and download the JSON key.
 2. Create a connection with provider set to **Google Vertex AI**.
-3. Paste the **entire service account JSON** into the API Key field.
+3. Upload the **service account JSON** file.
 4. Pick a **Region** (e.g. `us-central1`, `europe-west4`) in the Vertex metadata section, or leave it on `global` for the global endpoint.
-5. Use the **Models** button to populate the model list from your project.
+5. Enable each partner/open model on its Model Garden model card and accept any required terms.
+6. Refresh the model field to populate managed models from the Model Garden publisher catalogs.
 
 Because Vertex routes by project + region, the API URL is derived automatically from your service account and region selection — there's nothing to fill in there yourself.
+
+Gemini IDs can remain bare (for example, `gemini-2.5-flash`). Claude accepts either the model-card ID or an explicit `anthropic/claude-...` ID. Open MaaS models use the documented `publisher/model` form, such as `meta/llama-3.3-70b-instruct-maas` or `deepseek-ai/deepseek-v3.1-maas`. Lumiverse sends Claude through Vertex `rawPredict` using Anthropic's Messages format and sends open MaaS models through Vertex's OpenAI-compatible Chat Completions endpoint.
+
+Only managed API (MaaS) models can be called directly by this connection. A self-deployed Model Garden model has its own Vertex endpoint ID and is not the same as a managed publisher model.
 
 ---
 

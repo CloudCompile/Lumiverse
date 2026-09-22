@@ -3,6 +3,32 @@ import * as svc from "../services/audio.service";
 import { parseRangeHeader } from "./http-range";
 
 const app = new Hono();
+const MAX_AUDIO_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+app.post("/", async (c) => {
+  const userId = c.get("userId");
+  const formData = await c.req.formData();
+  const file = formData.get("audio") as File | null;
+  if (!file) return c.json({ error: "audio file is required" }, 400);
+  if (file.size <= 0) return c.json({ error: "audio file is empty" }, 400);
+  if (file.size > MAX_AUDIO_UPLOAD_BYTES) {
+    return c.json({ error: "Audio file too large", maxBytes: MAX_AUDIO_UPLOAD_BYTES }, 413);
+  }
+
+  const mimeType = svc.normalizeSupportedAudioMimeType(file.type, file.name);
+  if (!mimeType) {
+    return c.json({
+      error: "Unsupported audio format. Use WAV, MP3, AIFF, AAC, OGG, or FLAC.",
+    }, 415);
+  }
+
+  const audio = await svc.saveAudio(userId, {
+    data: new Uint8Array(await file.arrayBuffer()),
+    mime_type: mimeType,
+    original_filename: file.name,
+  });
+  return c.json(audio, 201);
+});
 
 app.get("/:id", async (c) => {
   const userId = c.get("userId");

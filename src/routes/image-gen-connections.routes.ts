@@ -5,16 +5,42 @@ import { normalizeComfyUIWorkflow, detectComfyUIWorkflowFormat, findUnsupportedA
 import { discoverCapabilities, getComfyUIObjectInfo, resolveComfyTarget } from "../image-gen/comfyui-discovery";
 import {
   readComfyUIConfig,
+  readComfyUIWorkflowLibrary,
+  syncActiveComfyUIWorkflowToLibrary,
   writeComfyUIConfig,
+  writeComfyUIWorkflowLibrary,
 } from "../image-gen/comfyui-workflow-storage";
+import type { ComfyUIWorkflowLibrary } from "../image-gen/comfyui-workflow-storage";
 import { buildComfyUIWorkflowFieldOptions } from "../image-gen/comfyui-workflow-field-options";
 import type { ComfyUIFieldMapping } from "../image-gen/comfyui-workflow-patch";
 import { parsePagination } from "../services/pagination";
 import * as secretsSvc from "../services/secrets.service";
 import { imageGenConnectionSecretKey } from "../services/image-gen-connections.service";
+import { withReadableApiKeyStatus, withReadableApiKeyStatuses } from "../services/connection-secret-status";
 
 function isComfyCapableConnection(provider: string): boolean {
   return provider === "comfyui" || provider === "swarmui";
+}
+
+function summarizeComfyWorkflowLibrary(library: ComfyUIWorkflowLibrary) {
+  return {
+    workflows: library.entries.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      updated_at: entry.updated_at,
+      node_count: Object.keys(entry.config.workflow_api_json ?? {}).length,
+    })),
+    active_id: library.activeId,
+  };
+}
+
+function getComfyCapableConnection(userId: string, connectionId: string) {
+  const connection = svc.getConnection(userId, connectionId);
+  if (!connection) return { connection: null, error: "Connection not found", status: 404 as const };
+  if (!isComfyCapableConnection(connection.provider)) {
+    return { connection: null, error: "Connection does not support ComfyUI workflows", status: 400 as const };
+  }
+  return { connection, error: null, status: null };
 }
 
 async function resolveComfyConnectionTarget(
@@ -43,10 +69,15 @@ app.get("/providers", (c) => {
 });
 
 /** List image gen connections (paginated) */
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listConnections(userId, pagination));
+  const result = await withReadableApiKeyStatuses(
+    userId,
+    svc.listConnections(userId, pagination),
+    imageGenConnectionSecretKey,
+  );
+  return c.json(result);
 });
 
 /** Create image gen connection */
@@ -69,11 +100,11 @@ app.post("/models/preview", async (c) => {
 });
 
 /** Get image gen connection by ID */
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const userId = c.get("userId");
   const conn = svc.getConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, imageGenConnectionSecretKey));
 });
 
 /** Update image gen connection */
@@ -82,7 +113,7 @@ app.put("/:id", async (c) => {
   const body = await c.req.json();
   const conn = await svc.updateConnection(userId, c.req.param("id"), body);
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn);
+  return c.json(await withReadableApiKeyStatus(userId, conn, imageGenConnectionSecretKey));
 });
 
 /** Delete image gen connection */
@@ -151,7 +182,7 @@ app.post("/:id/comfyui/workflow/import", async (c) => {
   };
 
   await svc.updateConnection(userId, connectionId, {
-    metadata: writeComfyUIConfig(connection.metadata, config),
+    metadata: syncActiveComfyUIWorkflowToLibrary(connection.metadata, config, Date.now()),
   });
 
   return c.json({ config: { ...config, unknown_nodes: normalized.unknownNodes } });
@@ -194,10 +225,120 @@ app.put("/:id/comfyui/workflow/mappings", async (c) => {
 
   const config = { ...existing, field_mappings: body.mappings as ComfyUIFieldMapping[] };
   await svc.updateConnection(userId, connectionId, {
-    metadata: writeComfyUIConfig(connection.metadata, config),
+    metadata: syncActiveComfyUIWorkflowToLibrary(connection.metadata, config, Date.now()),
   });
 
   return c.json({ config });
+});
+
+app.get("/:id/comfyui/workflows", (c) => {
+  const userId = c.get("userId");
+  const { connection, error, status } = getComfyCapableConnection(userId, c.req.param("id"));
+  if (!connection) return c.json({ error }, status);
+  return c.json(summarizeComfyWorkflowLibrary(readComfyUIWorkflowLibrary(connection.metadata)));
+});
+
+app.post("/:id/comfyui/workflows", async (c) => {
+  const userId = c.get("userId");
+  const connectionId = c.req.param("id");
+  const body = await c.req.json();
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const { connection, error, status } = getComfyCapableConnection(userId, connectionId);
+  if (!connection) return c.json({ error }, status);
+
+  const config = readComfyUIConfig(connection.metadata);
+  if (!config) return c.json({ error: "No workflow imported for this connection" }, 400);
+
+  const library = readComfyUIWorkflowLibrary(connection.metadata);
+  const entry = { id: crypto.randomUUID(), name, updated_at: Date.now(), config };
+  const next = { entries: [...library.entries, entry], activeId: entry.id };
+  await svc.updateConnection(userId, connectionId, {
+    metadata: writeComfyUIWorkflowLibrary(connection.metadata, next),
+  });
+
+  return c.json(summarizeComfyWorkflowLibrary(next), 201);
+});
+
+app.put("/:id/comfyui/workflows/:workflowId", async (c) => {
+  const userId = c.get("userId");
+  const connectionId = c.req.param("id");
+  const workflowId = c.req.param("workflowId");
+  const body = await c.req.json();
+  const name = typeof body?.name === "string" ? body.name.trim() : "";
+  if (!name) return c.json({ error: "name is required" }, 400);
+
+  const { connection, error, status } = getComfyCapableConnection(userId, connectionId);
+  if (!connection) return c.json({ error }, status);
+
+  const library = readComfyUIWorkflowLibrary(connection.metadata);
+  if (!library.entries.some((e) => e.id === workflowId)) {
+    return c.json({ error: "Workflow not found" }, 404);
+  }
+
+  const next = {
+    entries: library.entries.map((e) => (e.id === workflowId ? { ...e, name } : e)),
+    activeId: library.activeId,
+  };
+  await svc.updateConnection(userId, connectionId, {
+    metadata: writeComfyUIWorkflowLibrary(connection.metadata, next),
+  });
+
+  return c.json(summarizeComfyWorkflowLibrary(next));
+});
+
+app.post("/:id/comfyui/workflows/:workflowId/activate", async (c) => {
+  const userId = c.get("userId");
+  const connectionId = c.req.param("id");
+  const workflowId = c.req.param("workflowId");
+
+  const { connection, error, status } = getComfyCapableConnection(userId, connectionId);
+  if (!connection) return c.json({ error }, status);
+
+  const library = readComfyUIWorkflowLibrary(connection.metadata);
+  const entry = library.entries.find((e) => e.id === workflowId);
+  if (!entry) return c.json({ error: "Workflow not found" }, 404);
+
+  const next = { entries: library.entries, activeId: entry.id };
+  const metadata = writeComfyUIWorkflowLibrary(
+    writeComfyUIConfig(connection.metadata, entry.config),
+    next,
+  );
+  await svc.updateConnection(userId, connectionId, { metadata });
+
+  const target = await resolveComfyConnectionTarget(userId, connection);
+  const objectInfo = await getComfyUIObjectInfo(target.baseUrl, false, { cookie: target.cookie });
+  const unknownNodes = findUnsupportedApiNodeTypes(entry.config.workflow_api_json, objectInfo);
+
+  return c.json({
+    config: { ...entry.config, unknown_nodes: unknownNodes },
+    ...summarizeComfyWorkflowLibrary(next),
+  });
+});
+
+app.delete("/:id/comfyui/workflows/:workflowId", async (c) => {
+  const userId = c.get("userId");
+  const connectionId = c.req.param("id");
+  const workflowId = c.req.param("workflowId");
+
+  const { connection, error, status } = getComfyCapableConnection(userId, connectionId);
+  if (!connection) return c.json({ error }, status);
+
+  const library = readComfyUIWorkflowLibrary(connection.metadata);
+  if (!library.entries.some((e) => e.id === workflowId)) {
+    return c.json({ error: "Workflow not found" }, 404);
+  }
+
+  const next = {
+    entries: library.entries.filter((e) => e.id !== workflowId),
+    activeId: library.activeId === workflowId ? null : library.activeId,
+  };
+  await svc.updateConnection(userId, connectionId, {
+    metadata: writeComfyUIWorkflowLibrary(connection.metadata, next),
+  });
+
+  return c.json(summarizeComfyWorkflowLibrary(next));
 });
 
 app.get("/:id/comfyui/capabilities", async (c) => {
@@ -260,7 +401,7 @@ app.post("/:id/duplicate", async (c) => {
   const userId = c.get("userId");
   const conn = await svc.duplicateConnection(userId, c.req.param("id"));
   if (!conn) return c.json({ error: "Not found" }, 404);
-  return c.json(conn, 201);
+  return c.json(await withReadableApiKeyStatus(userId, conn, imageGenConnectionSecretKey), 201);
 });
 
 export { app as imageGenConnectionsRoutes };

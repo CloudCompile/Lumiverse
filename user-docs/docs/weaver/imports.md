@@ -4,15 +4,22 @@ title: Imports
 
 # Imports
 
-The Import door brings existing material into the studio: a character card you downloaded, or a worldbook you've built up elsewhere. An import isn't a separate pipeline — it pre-fills the Bible from your file and then runs the **same** stages as any build, so everything in [Studio Workflow](studio-workflow.md) applies. The difference is where the material comes from: instead of a dream, the Weaver reads your file.
+The Import door brings existing material into the studio: a character already in your Lumiverse gallery, a character card you downloaded, or a worldbook you've built up elsewhere. An import isn't a separate pipeline — it pre-fills the Bible from that source and then runs the **same** stages as any build, so everything in [Studio Workflow](studio-workflow.md) applies. The difference is where the material comes from: instead of a dream, the Weaver reads the existing character or file.
 
 The headline use case: **rebuild a card to studio quality.** Most downloaded cards are thin in exactly the ways the Weaver exists to fix — vague descriptions, no real tension, a voice that could belong to anyone. Importing one reverses it into a structured Bible, shows you what's actually there and what's missing, interviews you about _only the gaps_, and re-renders studio-grade fields — while the original stays untouched in your library as a fallback.
 
 ---
 
-## Bringing a File In
+## Choosing the Source
 
-**New → Import** opens the import pane. Drop a file on the zone or **Browse files**. Supported:
+**New → Import** opens with two choices:
+
+- **Your characters** lists the characters already in your gallery. Search, select one, and the Weaver reads it directly — no export and re-import required.
+- **Upload a file** accepts a dropped file or **Browse files** selection.
+
+The selected gallery character always remains untouched. The Weaver uses it as source material and creates a separate rebuilt card.
+
+Supported upload formats:
 
 | File | Reads as |
 |------|----------|
@@ -34,7 +41,7 @@ For cards, it also _reads_ the card and **suggests a treatment** with a one-line
 | **Rebuild as a Character** | The card is reversed into the loom, its gaps are interviewed, and it's rewoven to studio quality. |
 | **Build as a World** | Its places and people become a narrator card with a lore book behind it — the [world treatment](worlds.md). |
 
-Either way, **the original card lands in your library first, untouched** — portrait intact, and if it carried an embedded lorebook, that book is stored standalone and bound to it. You can chat with the original immediately and compare it against the rebuild later.
+Either way, the original stays untouched. A gallery source is already there and is used directly. An uploaded card **lands in your library first** — portrait intact, and if it carried an embedded lorebook, that book is stored standalone and bound to it. You can chat with the original immediately and compare it against the rebuild later.
 
 Then the import session starts, and it behaves like any build:
 
@@ -74,6 +81,6 @@ Every enriched entry is checked before it's written: it must stay grounded in wh
 ## Things Worth Knowing
 
 - **Import sessions resume like any other.** They live on the loom, autosave, and pick up where you left off.
-- **The original is the fallback, always.** No treatment modifies the file you imported or the original-card copy in your library.
+- **The original is the fallback, always.** No treatment modifies the gallery character you selected, the file you uploaded, or the original-card copy created from that file.
 - **CHARX extras:** the fallback copy takes the card, avatar, and embedded book. Expression packs and galleries inside a CHARX are skipped here — use the library's import button when you want full-fidelity CHARX import instead of a rebuild.
 - **A PNG with only a lorebook in it** reads as a card, because that's what it is — export the book to worldbook JSON if you want the book treatments.

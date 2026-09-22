@@ -1,3 +1,5 @@
+import { userMediaServingHeaders } from "./user-media-headers";
+
 const AVATAR_RESOLVER_CACHE_CONTROL = "private, no-cache";
 
 function buildAvatarResolverEtag(identity: string | null | undefined): string {
@@ -34,5 +36,10 @@ export function createAvatarResolverResponse(
   const response = new Response(Bun.file(filepath));
   response.headers.set("Cache-Control", AVATAR_RESOLVER_CACHE_CONTROL);
   response.headers.set("ETag", etag);
+  // Avatars are user-controlled bytes: apply the stored-XSS boundary even
+  // though this resolver previously served with no security headers at all.
+  for (const [key, value] of Object.entries(userMediaServingHeaders(response.headers.get("Content-Type")))) {
+    response.headers.set(key, value);
+  }
   return response;
 }

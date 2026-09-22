@@ -46,6 +46,11 @@ export interface UpdateChatInput {
   metadata?: Record<string, any>;
 }
 
+export type ChatAppearanceAction =
+  | { type: "avatar"; avatar_entry_id: string; character_id?: string }
+  | { type: "field"; field: "description" | "personality" | "scenario"; variant_id: string | null; character_id?: string }
+  | { type: "greeting"; greeting_index: number; character_id?: string };
+
 export interface RecentChat {
   id: string;
   character_id: string;
@@ -56,6 +61,10 @@ export interface RecentChat {
   character_name: string;
   character_avatar_path: string | null;
   character_image_id: string | null;
+  /** Total messages in the chat; rides along so list UIs avoid per-row fetches. */
+  message_count: number;
+  /** First 280 chars of the newest message, for list previews. */
+  last_message_preview: string;
 }
 
 export interface GroupedRecentChat {

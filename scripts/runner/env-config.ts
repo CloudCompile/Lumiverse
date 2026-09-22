@@ -4,17 +4,54 @@ import { ENV_FILE } from "./lib/constants.js";
 export interface EnvConfig {
   port: number;
   trustAnyOrigin: boolean;
+  directTls: boolean;
+  /** Null when direct TLS is enabled but its SAN hostname cannot be inferred. */
+  browserUrl: string | null;
+}
+
+export function resolveServerBrowserUrl(
+  port: number,
+  directTls: boolean,
+  authBaseUrl?: string,
+): string | null {
+  if (!directTls) return `http://localhost:${port}`;
+  if (!authBaseUrl?.trim()) return null;
+  try {
+    const url = new URL(authBaseUrl.trim().replace(/^(?:"|')|(?:"|')$/g, ""));
+    if (
+      url.protocol !== "https:"
+      || url.username
+      || url.password
+      || url.pathname !== "/"
+      || url.search
+      || url.hash
+    ) return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 export function readEnvConfig(): EnvConfig {
-  const config: EnvConfig = { port: 7860, trustAnyOrigin: false };
-  if (!existsSync(ENV_FILE)) return config;
-
-  const text = readFileSync(ENV_FILE, "utf-8");
+  const config: EnvConfig = {
+    port: 7860,
+    trustAnyOrigin: false,
+    directTls: false,
+    browserUrl: "http://localhost:7860",
+  };
+  const text = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, "utf-8") : "";
 
   const portMatch = text.match(/^PORT=(\d+)/m);
   if (portMatch) config.port = parseInt(portMatch[1], 10);
   config.trustAnyOrigin = /^TRUST_ANY_ORIGIN=true$/m.test(text);
+  config.directTls = Boolean(
+    process.env.LUMIVERSE_TLS_CERT_FILE?.trim()
+      || process.env.LUMIVERSE_TLS_CONFIG_FILE?.trim()
+      || /^LUMIVERSE_TLS_(?:CERT|CONFIG)_FILE=\s*\S+/m.test(text),
+  );
+  const authBaseUrl = process.env.AUTH_BASE_URL
+    || text.match(/^AUTH_BASE_URL=(.+)$/m)?.[1]?.trim();
+  config.browserUrl = resolveServerBrowserUrl(config.port, config.directTls, authBaseUrl);
 
   return config;
 }

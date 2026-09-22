@@ -4,6 +4,7 @@ import {
   extractCardFromCharx,
   parseCardJson,
 } from "../character-card.service";
+import { buildCCSv3Json } from "../character-export.service";
 import { weaverGenerateJson, weaverGenerateTextWithUsage, type WeaverConnectionPrefs } from "./llm";
 import { buildDynamicQuestionVerdict } from "./dynamic-question-gate";
 import {
@@ -170,14 +171,19 @@ export function cardImportProvenance(input: {
   originalFormat: string;
   originalCharacterId: string;
   embeddedBookId?: string;
+  boundWorldBookIds?: string[];
   avatarImageId?: string;
 }): Record<string, unknown> {
+  const boundWorldBookIds = [
+    ...(input.boundWorldBookIds ?? []),
+    ...(input.embeddedBookId ? [input.embeddedBookId] : []),
+  ].filter((id, index, ids) => Boolean(id) && ids.indexOf(id) === index);
   return {
     import_kind: "card",
     original_name: input.originalName,
     original_format: input.originalFormat,
     original_character_id: input.originalCharacterId,
-    ...(input.embeddedBookId ? { bind_world_book_ids: [input.embeddedBookId] } : {}),
+    ...(boundWorldBookIds.length > 0 ? { bind_world_book_ids: boundWorldBookIds } : {}),
     ...(input.avatarImageId ? { avatar_image_id: input.avatarImageId } : {}),
   };
 }
@@ -214,6 +220,10 @@ export interface ParsedImportArtifact {
   source: string;
   card?: CreateCharacterInput;
   avatarFile?: File;
+  hasPortrait?: boolean;
+  sourceCharacterId?: string;
+  avatarImageId?: string;
+  boundWorldBookIds?: string[];
   book?: { name: string; description: string; entries: ImportedEntryLine[]; raw: unknown };
 }
 
@@ -285,6 +295,26 @@ export async function parseImportFile(file: File): Promise<ParsedImportArtifact>
   throw new Error("This file does not read as a character card or a worldbook");
 }
 
+export function parseGalleryCharacter(userId: string, characterId: string): ParsedImportArtifact | null {
+  const character = charactersSvc.getCharacter(userId, characterId);
+  if (!character) return null;
+
+  // Go through the portable card builder so bound lorebooks are represented
+  // exactly as they are in a normal export, without creating a temporary file.
+  const card = parseCardJson(buildCCSv3Json(userId, character));
+  return {
+    artifact: "card",
+    format: "gallery",
+    name: asTrimmed(card.name) || character.name || "Gallery character",
+    source: composeCardSource(card),
+    card,
+    hasPortrait: Boolean(character.image_id),
+    sourceCharacterId: character.id,
+    ...(character.image_id ? { avatarImageId: character.image_id } : {}),
+    boundWorldBookIds: getCharacterWorldBookIds(character.extensions),
+  };
+}
+
 export interface WeaverImportReading {
   action: string;
   reason: string;
@@ -313,13 +343,12 @@ export interface WeaverImportInspection {
   reading: WeaverImportReading | null;
 }
 
-export async function inspectImport(
+async function inspectParsedImport(
   userId: string,
-  file: File,
+  parsed: ParsedImportArtifact,
   prefs: WeaverConnectionPrefs = {},
   signal?: AbortSignal,
 ): Promise<WeaverImportInspection> {
-  const parsed = await parseImportFile(file);
   const readable = readingActionsFor(parsed.artifact);
 
   let reading: WeaverImportReading | null = null;
@@ -348,11 +377,31 @@ export async function inspectImport(
     field_stats: parsed.card ? cardFieldStats(parsed.card) : [],
     entry_count: parsed.book ? parsed.book.entries.length : embedded.length,
     has_embedded_book: embedded.length > 0,
-    has_portrait: Boolean(parsed.avatarFile),
+    has_portrait: parsed.hasPortrait ?? Boolean(parsed.avatarFile),
     source_chars: parsed.source.length,
     actions: importActionsFor(parsed.artifact).map((a) => a.id),
     reading,
   };
+}
+
+export async function inspectImport(
+  userId: string,
+  file: File,
+  prefs: WeaverConnectionPrefs = {},
+  signal?: AbortSignal,
+): Promise<WeaverImportInspection> {
+  return inspectParsedImport(userId, await parseImportFile(file), prefs, signal);
+}
+
+export async function inspectGalleryCharacter(
+  userId: string,
+  characterId: string,
+  prefs: WeaverConnectionPrefs = {},
+  signal?: AbortSignal,
+): Promise<WeaverImportInspection> {
+  const parsed = parseGalleryCharacter(userId, characterId);
+  if (!parsed) throw new Error("Gallery character not found");
+  return inspectParsedImport(userId, parsed, prefs, signal);
 }
 
 export interface WeaverImportStartInput {
@@ -403,15 +452,14 @@ async function importOriginalCard(
   return { characterId: character.id, ...(embeddedBookId ? { embeddedBookId } : {}), ...(avatarImageId ? { avatarImageId } : {}) };
 }
 
-export async function startImport(
+async function startParsedImport(
   userId: string,
-  file: File,
+  parsed: ParsedImportArtifact,
   input: WeaverImportStartInput,
 ): Promise<WeaverImportStartResult> {
-  const parsed = await parseImportFile(file);
   const action = getImportAction(input.action?.trim?.() ?? "");
   if (!action || action.artifact !== parsed.artifact) {
-    throw new Error("That action does not apply to this file");
+    throw new Error("That action does not apply to this import source");
   }
 
   const sessionPrefs = {
@@ -421,7 +469,35 @@ export async function startImport(
   };
 
   if (parsed.artifact === "card") {
-    const fallback = await importOriginalCard(userId, parsed);
+    let galleryBookIds = parsed.boundWorldBookIds;
+    if (
+      parsed.sourceCharacterId
+      && (galleryBookIds?.length ?? 0) === 0
+      && parsed.card
+      && embeddedBookEntries(parsed.card).length > 0
+    ) {
+      const inlineBook = parsed.card.extensions?.character_book;
+      const imported = importCharacterBook(
+        userId,
+        parsed.sourceCharacterId,
+        parsed.name,
+        inlineBook,
+        { autoManagedByCharacter: false },
+      );
+      galleryBookIds = [imported.worldBook.id];
+    }
+    const source: {
+      characterId: string;
+      embeddedBookId?: string;
+      avatarImageId?: string;
+      boundWorldBookIds?: string[];
+    } = parsed.sourceCharacterId
+      ? {
+          characterId: parsed.sourceCharacterId,
+          avatarImageId: parsed.avatarImageId,
+          boundWorldBookIds: galleryBookIds,
+        }
+      : await importOriginalCard(userId, parsed);
     const session = createSession(userId, {
       build_type: action.targetBuildType!,
       seed_type: action.seedType!,
@@ -429,9 +505,10 @@ export async function startImport(
       seed_provenance: cardImportProvenance({
         originalName: parsed.name,
         originalFormat: parsed.format,
-        originalCharacterId: fallback.characterId,
-        embeddedBookId: fallback.embeddedBookId,
-        avatarImageId: fallback.avatarImageId,
+        originalCharacterId: source.characterId,
+        ...(source.boundWorldBookIds ? { boundWorldBookIds: source.boundWorldBookIds } : {}),
+        ...(source.embeddedBookId ? { embeddedBookId: source.embeddedBookId } : {}),
+        ...(source.avatarImageId ? { avatarImageId: source.avatarImageId } : {}),
       }),
       ...sessionPrefs,
     });
@@ -455,6 +532,24 @@ export async function startImport(
     ...sessionPrefs,
   });
   return { session, world_book: stored };
+}
+
+export async function startImport(
+  userId: string,
+  file: File,
+  input: WeaverImportStartInput,
+): Promise<WeaverImportStartResult> {
+  return startParsedImport(userId, await parseImportFile(file), input);
+}
+
+export async function startGalleryCharacterImport(
+  userId: string,
+  characterId: string,
+  input: WeaverImportStartInput,
+): Promise<WeaverImportStartResult> {
+  const parsed = parseGalleryCharacter(userId, characterId);
+  if (!parsed) throw new Error("Gallery character not found");
+  return startParsedImport(userId, parsed, input);
 }
 
 function enrichWork() {

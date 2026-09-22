@@ -1,3 +1,7 @@
+import type { ProviderRequestCapture, ProviderResponseObserver } from "./request-observer";
+import { observeProviderFailure, observeProviderResponse } from "./response-observer";
+import { transportCredentials } from "../utils/redact-request";
+
 // Workaround for Bun v1.3.x on Windows: passing the user AbortSignal directly
 // to a streaming fetch and letting Bun cancel the resulting ReadableStream
 // mid-read can trigger an internal assertion failure on the main thread,
@@ -36,6 +40,7 @@ export async function fetchWithPreflightAbort(
   input: RequestInfo | URL,
   init: RequestInit,
   signal: AbortSignal | undefined,
+  capture?: ProviderRequestCapture,
 ): Promise<Response> {
   if (signal?.aborted) {
     throw signal.reason ?? new DOMException("Aborted", "AbortError");
@@ -47,10 +52,22 @@ export async function fetchWithPreflightAbort(
   };
 
   signal?.addEventListener("abort", onAbort, { once: true });
+  let responseObserver: ProviderResponseObserver | void = undefined;
   try {
-    const res = await fetch(input, { ...init, signal: controller.signal });
+    if (capture?.observer) {
+      try {
+        responseObserver = capture.observer({
+          body: init.body, provider: capture.provider, model: capture.model,
+          credentials: [...(capture.credentials ?? []), ...transportCredentials(input, init)],
+        });
+      } catch { /* Diagnostics must never fail generation or expose a raw fallback. */ }
+    }
+    const res = observeProviderResponse(await fetch(input, { ...init, signal: controller.signal }), responseObserver, signal);
     responseConnections.set(res, controller);
     return res;
+  } catch (error) {
+    observeProviderFailure(responseObserver, error, signal);
+    throw error;
   } finally {
     signal?.removeEventListener("abort", onAbort);
   }

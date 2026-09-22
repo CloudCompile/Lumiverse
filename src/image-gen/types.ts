@@ -23,6 +23,10 @@ export interface ImageGenRequest {
   negativePrompt?: string;
   model: string;
   parameters: Record<string, any>;
+  /** Transport options from the saved connection metadata, independent of generation parameters. */
+  connectionOptions?: {
+    novelai?: { nonStreaming?: boolean };
+  };
   signal?: AbortSignal;
 }
 
@@ -87,6 +91,14 @@ export function applyRawOverride<T extends Record<string, any>>(
   return deepMerge(target, override);
 }
 
+function isUnsafeMergeKey(key: string): boolean {
+  // `__proto__` assignment on the plain-object result would rewrite its
+  // prototype (instance-level pollution that also hides protected raw
+  // override keys from subsequent lookups). constructor/prototype are kept
+  // out for the same reason.
+  return key === "__proto__" || key === "constructor" || key === "prototype";
+}
+
 function deepMerge(target: any, source: any): any {
   if (source === null || source === undefined) return target;
   if (typeof source !== "object" || Array.isArray(source)) return source;
@@ -94,6 +106,7 @@ function deepMerge(target: any, source: any): any {
 
   const result = { ...target };
   for (const key of Object.keys(source)) {
+    if (isUnsafeMergeKey(key)) continue;
     if (
       typeof result[key] === "object" &&
       result[key] !== null &&

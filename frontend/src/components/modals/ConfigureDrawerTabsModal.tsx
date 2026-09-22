@@ -35,6 +35,7 @@ import {
   type DrawerTabEntry,
 } from '@/lib/drawer-tab-registry'
 import styles from './ConfigureDrawerTabsModal.module.css'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 interface SortableTabRowProps {
   tab: DrawerTabEntry
@@ -165,6 +166,8 @@ export default function ConfigureDrawerTabsModal() {
   const setSetting = useStore((s) => s.setSetting)
   const drawerSettings = useStore((s) => s.drawerSettings)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const extensions = useStore((s) => s.extensions)
+  const enabledDrawerTabs = filterEnabledFrontendContributions(drawerTabs, extensions)
 
   const hiddenTabIds = useMemo(
     () => new Set(sanitizeHiddenDrawerTabIds(drawerSettings.hiddenTabIds)),
@@ -182,8 +185,8 @@ export default function ConfigureDrawerTabsModal() {
   )
 
   const orderedExtensionTabs = useMemo(
-    () => applyDrawerTabOrder(adaptExtensionTabs(drawerTabs), tabOrder),
-    [drawerTabs, tabOrder],
+    () => applyDrawerTabOrder(adaptExtensionTabs(enabledDrawerTabs), tabOrder),
+    [enabledDrawerTabs, tabOrder],
   )
 
   const handleToggle = (tabId: string, enabled: boolean) => {

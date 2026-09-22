@@ -26,3 +26,30 @@ export function deleteBreakdownsForChat(userId: string, chatId: string): void {
   const db = getDb();
   db.run("DELETE FROM message_breakdowns WHERE chat_id = ? AND user_id = ?", [chatId, userId]);
 }
+
+export function deleteBreakdownForMessage(userId: string, messageId: string): void {
+  const db = getDb();
+  db.run("DELETE FROM message_breakdowns WHERE message_id = ? AND user_id = ?", [messageId, userId]);
+}
+
+/**
+ * A breakdown stores the prompt history used to generate its message. Removing
+ * an earlier message therefore invalidates every later breakdown in the chat,
+ * even when those later messages remain visible.
+ */
+export function deleteBreakdownsAfterMessage(
+  userId: string,
+  chatId: string,
+  messageIndex: number,
+): void {
+  const db = getDb();
+  db.run(
+    `DELETE FROM message_breakdowns
+     WHERE user_id = ?
+       AND message_id IN (
+         SELECT id FROM messages
+         WHERE chat_id = ? AND index_in_chat > ?
+       )`,
+    [userId, chatId, messageIndex],
+  );
+}

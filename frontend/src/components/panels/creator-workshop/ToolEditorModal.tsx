@@ -83,6 +83,7 @@ export default function ToolEditorModal() {
   const { t } = useTranslation('panels')
   const modalProps = useStore((s) => s.modalProps)
   const closeModal = useStore((s) => s.closeModal)
+  const loadAvailableTools = useStore((s) => s.loadAvailableTools)
 
   const typeOptions = useMemo(() => [
     { value: 'string', label: t('creatorWorkshop.shared.schemaType.string') },
@@ -176,6 +177,7 @@ export default function ToolEditorModal() {
       } else {
         await packsApi.createLoomTool(packId, data)
       }
+      void loadAvailableTools()
       onSaved?.()
       closeModal()
     } catch (err) {

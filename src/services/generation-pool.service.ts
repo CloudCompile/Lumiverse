@@ -18,6 +18,7 @@ import { EventType } from "../ws/events";
 export type PoolStatus = "assembling" | "council" | "waiting" | "reasoning" | "streaming" | "completed" | "stopped" | "error";
 
 export interface PooledTokensEntry {
+  frontendSessionId?: string;
   generationId: string;
   userId: string;
   chatId: string;
@@ -42,6 +43,9 @@ export interface PooledTokensEntry {
   completedMessageId?: string;
   completedAt?: number;
   error?: string;
+  errorCode?: string;
+  errorMessage?: string;
+  connectionName?: string;
   /** Legacy field retained for old in-memory entries; attention is client-local. */
   acknowledged?: boolean;
   /** True while the generation is paused waiting for user to decide on failed council tools */
@@ -102,6 +106,7 @@ const SWEEP_INTERVAL_MS = 60 * 1000; // 60 seconds
 // ── CRUD ─────────────────────────────────────────────────────────────────────
 
 export function createPoolEntry(opts: {
+  frontendSessionId?: string;
   generationId: string;
   userId: string;
   chatId: string;
@@ -109,10 +114,12 @@ export function createPoolEntry(opts: {
   characterName: string;
   characterId?: string;
   model: string;
+  connectionName?: string;
   targetMessageId?: string;
   targetSwipeId?: number;
 }): void {
   const entry: PooledTokensEntry = {
+    frontendSessionId: opts.frontendSessionId,
     generationId: opts.generationId,
     userId: opts.userId,
     chatId: opts.chatId,
@@ -125,6 +132,7 @@ export function createPoolEntry(opts: {
     characterName: opts.characterName,
     characterId: opts.characterId,
     model: opts.model,
+    connectionName: opts.connectionName,
     startedAt: Date.now(),
     status: "assembling",
     lastActivityAt: Date.now(),
@@ -218,11 +226,18 @@ export function stopPool(generationId: string): void {
   trimTerminalEntries();
 }
 
-export function errorPool(generationId: string, message: string): void {
+export function errorPool(
+  generationId: string,
+  message: string,
+  details?: { errorCode?: string; errorMessage?: string; connectionName?: string },
+): void {
   const entry = pool.get(generationId);
   if (!entry) return;
   entry.status = "error";
   entry.error = message;
+  entry.errorCode = details?.errorCode;
+  entry.errorMessage = details?.errorMessage ?? message;
+  entry.connectionName = details?.connectionName ?? entry.connectionName;
   entry.completedAt = Date.now();
   trimTerminalEntries();
 }
@@ -347,10 +362,21 @@ function sweep(): void {
     if (now - entry.lastActivityAt <= STALE_ACTIVE_TIMEOUT_MS) continue;
     const message = "Generation timed out: no activity for 60 minutes";
     const priorStatus = entry.status;
-    errorPool(entry.generationId, message);
+    const failure = {
+      errorCode: "generation_timeout",
+      errorMessage: message,
+      connectionName: entry.connectionName,
+    };
+    errorPool(entry.generationId, message, failure);
     eventBus.emit(
       EventType.GENERATION_ENDED,
-      { generationId: entry.generationId, chatId: entry.chatId, error: message },
+      {
+        generationId: entry.generationId,
+        chatId: entry.chatId,
+        frontendSessionId: entry.frontendSessionId,
+        error: message,
+        ...failure,
+      },
       entry.userId,
     );
     console.warn(

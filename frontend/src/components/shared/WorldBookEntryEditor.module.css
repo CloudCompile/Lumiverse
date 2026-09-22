@@ -11,6 +11,95 @@
   border-radius: 0 0 10px 10px;
 }
 
+.compactEntryEditor {
+  gap: 8px;
+  padding: 10px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  container-type: inline-size;
+  container-name: wbEntryEditorCompact;
+}
+
+.compactEntryEditor .entryFieldGroup {
+  gap: 6px;
+}
+
+.compactEntryEditor .entryFieldRow {
+  gap: 6px;
+}
+
+.compactEntryEditor .entryInput,
+.compactEntryEditor .entrySelect,
+.compactEntryEditor .entryTextarea,
+.compactEntryEditor .readOnlyValue {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.identityContentSection {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.entryEditor:not(.compactEntryEditor) .identityContentSection {
+  gap: 0;
+}
+
+.entryEditor:not(.compactEntryEditor) .identityContentSection > .sectionHeading {
+  margin-bottom: 12px;
+}
+
+.entryEditor:not(.compactEntryEditor) .identityFields + .contentField {
+  margin-top: 8px;
+}
+
+.identityFields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.contentField {
+  min-width: 0;
+}
+
+.compactEntryEditor .identityContentSection {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.compactEntryEditor .identityFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  flex: 0 0 auto;
+}
+
+.compactEntryEditor .contentField {
+  flex: 1 1 240px;
+  min-height: 180px;
+}
+
+.compactEntryEditor .contentField > div:not(.fieldLabelRow) {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.compactEntryEditor .contentField .entryTextarea {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-height: 180px;
+  overflow: auto;
+}
+
 .sectionHeading {
   font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
@@ -54,6 +143,19 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+.disclosureSection {
+  min-width: 0;
+}
+
+.disclosurePanel {
+  margin-top: 6px;
+}
+.fieldHint {
+  color: var(--lumiverse-text-muted);
+  font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
+  margin: 4px 0 0;
 }
 
 .entryInput {
@@ -170,6 +272,8 @@
   display: flex;
   align-items: center;
   gap: 5px;
+  width: 100%;
+  min-width: 0;
   padding: 0;
   background: none;
   border: none;
@@ -182,6 +286,25 @@
   transition: color var(--lumiverse-transition-fast);
 }
 
+.groupToggleLabel {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+.groupToggleSummary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lumiverse-text-dim);
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  font-weight: 400;
+  text-align: left;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .groupToggle:hover {
   color: var(--lumiverse-text);
 }
@@ -192,6 +315,39 @@
 
 .groupToggleOpen {
   transform: rotate(90deg);
+}
+
+.vectorStatusTrigger {
+  margin-left: auto;
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@container wbEntryEditorCompact (max-width: 440px) {
+  .compactEntryEditor .identityFields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .compactEntryEditor .entryFieldRow {
+    flex-direction: column;
+  }
+
+  .compactEntryEditor .entryFieldRow > .entryField,
+  .compactEntryEditor .entryFieldSmall {
+    width: 100%;
+    flex-basis: auto;
+  }
+
+  .compactEntryEditor .groupToggle {
+    align-items: flex-start;
+  }
+
+  .compactEntryEditor .groupToggleSummary {
+    white-space: normal;
+  }
 }
 
 /* ── Read-only value ── */

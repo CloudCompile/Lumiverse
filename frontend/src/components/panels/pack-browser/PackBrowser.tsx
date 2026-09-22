@@ -20,6 +20,7 @@ export default function PackBrowser() {
   const addPack = useStore((s) => s.addPack)
   const updatePackInStore = useStore((s) => s.updatePackInStore)
   const removePack = useStore((s) => s.removePack)
+  const loadAvailableTools = useStore((s) => s.loadAvailableTools)
   const selectedPackId = useStore((s) => s.selectedPackId)
   const setSelectedPackId = useStore((s) => s.setSelectedPackId)
   const packSearchQuery = useStore((s) => s.packSearchQuery)
@@ -97,13 +98,14 @@ export default function PackBrowser() {
   const handleDeletePack = useCallback(async (id: string) => {
     try {
       await packsApi.delete(id)
+      void loadAvailableTools()
       removePack(id)
       if (selectedPackId === id) {
         setDetailPack(null)
         setSelectedPackId(null)
       }
     } catch {}
-  }, [removePack, selectedPackId, setSelectedPackId])
+  }, [removePack, selectedPackId, setSelectedPackId, loadAvailableTools])
 
   const handleImportDone = useCallback((pack: PackWithItems) => {
     loadPacks()

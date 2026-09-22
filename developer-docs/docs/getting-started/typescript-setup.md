@@ -40,6 +40,9 @@ bun build src/backend.ts --outfile dist/backend.js --target bun
 
 # Frontend (targeting browser)
 bun build src/frontend.ts --outfile dist/frontend.js --target browser
+
+# Optional lightweight Lumiverse Desktop floating-widget entry
+bun build src/widget.ts --outfile dist/widget.js --target browser --minify
 ```
 
 ## Backend Type Declaration
@@ -61,3 +64,24 @@ export function setup(ctx: SpindleFrontendContext) {
   // fully typed ctx
 }
 ```
+
+For an extension that declares `entry_frontend_widget`, type its dedicated
+entry with `SpindleFrontendWidgetTarget`:
+
+```ts
+import type {
+  SpindleFrontendContext,
+  SpindleFrontendWidgetTarget,
+} from 'lumiverse-spindle-types'
+
+export function setupWidget(
+  ctx: SpindleFrontendContext,
+  target: SpindleFrontendWidgetTarget,
+) {
+  // Register the floating widget needed by the native pop-out.
+  // The normal frontend entry continues to export setup(ctx).
+}
+```
+
+See [Float Widgets](../frontend-api/ui-placement.md#float-widgets-requires-ui_panels)
+for the runtime behavior, compatibility fallback, and bundle guidance.

@@ -1,6 +1,8 @@
+import { describeGenerationStop } from "../generation-stop";
+import { incompleteStream, readProviderSse, throwIfProviderError } from "../provider-sse";
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { cancelStreamAndCloseConnection, createCooperativeYielder, fetchWithPreflightAbort, readJsonWithAbort, readWithAbort } from "../stream-utils";
+import { fetchWithPreflightAbort, readJsonWithAbort } from "../stream-utils";
 import type {
   GenerationRequest,
   GenerationResponse,
@@ -11,6 +13,7 @@ import type {
 } from "../types";
 import { getTextContent } from "../types";
 import { throwProviderResponseError } from "../../utils/provider-errors";
+import { splitLeadingSystemMessagePrefix } from "../system-message-prefix";
 
 export class OpenAIProvider extends OpenAICompatibleProvider {
   readonly name = "openai";
@@ -122,16 +125,19 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
    * Key differences from /v1/chat/completions:
    * - `messages` → `input`
    * - `max_tokens` → `max_output_tokens`
-   * - System messages are extracted into the top-level `instructions` field
+   * - The leading system-message prefix becomes top-level `instructions`
+   *   while later system messages remain transcript items
    * - `frequency_penalty`, `presence_penalty`, `stop` are not supported
    * - Multipart content uses `input_text` / `input_image` / `input_audio` types
    */
   private buildResponsesBody(request: GenerationRequest): Record<string, any> {
     const params = request.parameters || {};
 
-    // Separate system messages → instructions, keep user/assistant as input
-    const systemMessages = request.messages.filter((m) => m.role === "system");
-    const inputMessages = request.messages.filter((m) => m.role !== "system");
+    // Only the leading system prefix belongs in top-level instructions.
+    // Later system messages may be depth-positioned inside/after history, and
+    // Responses supports compatible message items for preserving transcripts.
+    const { prefix: systemMessages, remainder: inputMessages } =
+      splitLeadingSystemMessagePrefix(request.messages);
 
     const body: Record<string, any> = {
       model: request.model,
@@ -184,6 +190,29 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     return body;
   }
 
+  private responseRefusal(data: any): string {
+    return (data.output || []).flatMap((item: any) => item.type === "message" ? item.content || [] : [])
+      .filter((part: any) => part.type === "refusal")
+      .map((part: any) => part.refusal || "").join("");
+  }
+
+  private responseOutcome(data: any, refusal: string): Pick<GenerationResponse, "finish_reason" | "stop_details"> {
+    if (data.status === "incomplete") {
+      const reason = data.incomplete_details?.reason || "incomplete";
+      return { finish_reason: reason, stop_details: { type: "incomplete", category: reason } };
+    }
+    if (data.status && data.status !== "completed") {
+      return { finish_reason: data.status, stop_details: {
+        type: "failed", category: data.error?.code || data.status,
+        explanation: data.error?.message || null,
+      } };
+    }
+    return {
+      finish_reason: "stop",
+      ...(refusal ? { stop_details: { type: "refusal", explanation: refusal } } : {}),
+    };
+  }
+
   // -- Non-streaming ----------------------------------------------------------
 
   private async generateResponsesApi(
@@ -198,11 +227,18 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "responses generate", res);
 
     const data = (await readJsonWithAbort<any>(res, request.signal)) as any;
+
+    // Failed Responses carry an error inside the response object; retain it
+    // as outcome metadata alongside any partial output.
+    if (data.status !== "failed") throwIfProviderError(data, this.displayName, "responses generate");
+    const refusal = this.responseRefusal(data);
+    const outcome = this.responseOutcome(data, refusal);
+    const failed = describeGenerationStop(outcome.finish_reason, outcome.stop_details);
 
     // Extract text content from response output
     let content = "";
@@ -225,15 +261,14 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
             .join("");
         }
         // Text message items
-        if (item.type === "message" && item.content && !content) {
+        if (item.type === "message" && item.content && data.output_text === undefined) {
           for (const part of item.content) {
-            if (part.type === "output_text") {
-              content += part.text;
-            }
+            if (part.type === "output_text") content += part.text;
+            else if (part.type === "refusal") content += part.refusal || "";
           }
         }
         // Function call items
-        if (item.type === "function_call") {
+        if (item.type === "function_call" && !failed) {
           fnCalls.push({
             name: item.name || "",
             args: typeof item.arguments === "string" ? JSON.parse(item.arguments) : (item.arguments ?? {}),
@@ -246,12 +281,10 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
     const toolCalls = fnCalls.length > 0 ? fnCalls : undefined;
 
     return {
-      content,
+      content: content || refusal,
       reasoning,
-      finish_reason: toolCalls ? "tool_calls"
-        : data.status === "completed"
-          ? "stop"
-          : data.incomplete_details?.reason || data.status || "stop",
+      ...outcome,
+      finish_reason: toolCalls && !failed ? "tool_calls" : outcome.finish_reason,
       tool_calls: toolCalls,
       usage: data.usage
         ? {
@@ -259,6 +292,10 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
             completion_tokens: data.usage.output_tokens || 0,
             total_tokens:
               (data.usage.input_tokens || 0) + (data.usage.output_tokens || 0),
+            // Retain `input_tokens_details.cached_tokens` (and any future
+            // cache telemetry) so the prompt inspector can report implicit
+            // OpenAI prompt-cache hits just as it can for Chat Completions.
+            provider_raw: { ...data.usage },
           }
         : undefined,
     };
@@ -279,128 +316,90 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "responses stream", res);
 
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const maybeYield = createCooperativeYielder(64, request.signal);
-
-    // Tool call accumulation for Responses API function_call streaming
-    const fnCallBuffer: Map<string, { name: string; argsJson: string; callId: string }> = new Map();
-
-    let streamDoneNaturally = false;
-    try {
-    while (true) {
-      const { done, value } = await readWithAbort(reader, request.signal);
-      if (done) { streamDoneNaturally = !request.signal?.aborted; break; }
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        for (const line of lines) {
-          await maybeYield();
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith("data: ")) continue;
-        const payload = trimmed.slice(6);
-        if (payload === "[DONE]") return;
-
-        try {
-          const parsed = JSON.parse(payload);
-          const eventType: string = parsed.type || "";
-
-          switch (eventType) {
-            // Text content delta
-            case "response.output_text.delta":
-              yield { token: parsed.delta || "" };
-              break;
-
-            // Reasoning summary delta (o-series models)
-            case "response.reasoning_summary_text.delta":
-              yield { token: "", reasoning: parsed.delta || "" };
-              break;
-
-            // Function call argument streaming
-            case "response.function_call_arguments.delta": {
-              const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
-              const existing = fnCallBuffer.get(itemId);
-              if (existing) {
-                existing.argsJson += parsed.delta || "";
-              }
-              break;
-            }
-            case "response.function_call_arguments.done": {
-              const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
-              const existing = fnCallBuffer.get(itemId);
-              if (existing && parsed.arguments) {
-                existing.argsJson = parsed.arguments;
-              }
-              break;
-            }
-
-            // Function call output item added — capture name and call_id
-            case "response.output_item.added": {
-              const item = parsed.item;
-              if (item?.type === "function_call") {
-                fnCallBuffer.set(item.id || parsed.output_index?.toString() || String(fnCallBuffer.size), {
-                  name: item.name || "",
-                  argsJson: "",
-                  callId: item.call_id || item.id || crypto.randomUUID(),
-                });
-              }
-              break;
-            }
-
-            // Response complete — extract usage and emit tool calls
-            case "response.completed":
-            case "response.done": {
-              const resp = parsed.response || parsed;
-              const usage = resp.usage
-                ? {
-                    prompt_tokens: resp.usage.input_tokens || 0,
-                    completion_tokens: resp.usage.output_tokens || 0,
-                    total_tokens:
-                      (resp.usage.input_tokens || 0) +
-                      (resp.usage.output_tokens || 0),
-                  }
-                : undefined;
-
-              const toolCalls: ToolCallResult[] | undefined = fnCallBuffer.size > 0
-                ? [...fnCallBuffer.values()].map(tc => ({
-                    name: tc.name,
-                    args: JSON.parse(tc.argsJson || "{}"),
-                    call_id: tc.callId,
-                  }))
-                : undefined;
-
-              yield {
-                token: "",
-                finish_reason: toolCalls ? "tool_calls"
-                  : resp.status === "completed"
-                    ? "stop"
-                    : resp.incomplete_details?.reason || resp.status || "stop",
-                tool_calls: toolCalls,
-                usage,
-              };
-              break;
-            }
-
-            // All other events (response.created, response.in_progress,
-            // response.content_part.added, response.output_text.done,
-            // response.output_item.done, etc.) are lifecycle events — silently skip.
-            default:
-              break;
+    const fnCallBuffer = new Map<string, { name: string; argsJson: string; callId: string }>();
+    let refusal = "";
+    let terminal: StreamChunk | undefined;
+    for await (const parsed of readProviderSse(res, this.displayName, request.signal)) {
+      throwIfProviderError(parsed, this.displayName, "responses stream");
+      switch (parsed.type) {
+        case "response.output_text.delta":
+          yield { token: parsed.delta || "" };
+          break;
+        case "response.reasoning_summary_text.delta":
+          yield { token: "", reasoning: parsed.delta || "" };
+          break;
+        case "response.refusal.delta":
+          refusal += parsed.delta || "";
+          yield { token: parsed.delta || "" };
+          break;
+        case "response.refusal.done":
+          if (!refusal && parsed.refusal) {
+            refusal = parsed.refusal;
+            yield { token: refusal };
           }
-        } catch {
-          // Skip malformed SSE lines
+          break;
+        case "response.function_call_arguments.delta":
+        case "response.function_call_arguments.done": {
+          const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
+          const existing = fnCallBuffer.get(itemId);
+          if (existing) {
+            if (parsed.type.endsWith(".done") && parsed.arguments) existing.argsJson = parsed.arguments;
+            else existing.argsJson += parsed.delta || "";
+          }
+          break;
         }
+        case "response.output_item.added": {
+          const item = parsed.item;
+          if (item?.type === "function_call") fnCallBuffer.set(item.id || parsed.output_index?.toString() || String(fnCallBuffer.size), {
+            name: item.name || "", argsJson: item.arguments || "",
+            callId: item.call_id || item.id || crypto.randomUUID(),
+          });
+          break;
+        }
+        case "response.completed":
+        case "response.done":
+        case "response.incomplete":
+        case "response.failed": {
+          const resp = parsed.response || parsed;
+          if (!refusal) {
+            refusal = this.responseRefusal(resp);
+            if (refusal) yield { token: refusal };
+          }
+          const outcome = this.responseOutcome({
+            ...resp, status: resp.status || (parsed.type === "response.done" ? "completed" : parsed.type.slice(9)),
+          }, refusal);
+          const failed = describeGenerationStop(outcome.finish_reason, outcome.stop_details);
+          const calls = fnCallBuffer.size ? [...fnCallBuffer.values()]
+            : (resp.output || []).filter((item: any) => item.type === "function_call").map((item: any) => ({
+                name: item.name, argsJson: item.arguments, callId: item.call_id || item.id || crypto.randomUUID(),
+              }));
+          const toolCalls: ToolCallResult[] | undefined = !failed && calls.length
+            ? calls.map((tc: { name: string; argsJson: string; callId: string }) => ({
+                name: tc.name, args: JSON.parse(tc.argsJson || "{}"), call_id: tc.callId,
+              })) : undefined;
+          terminal = {
+            token: "", ...outcome,
+            finish_reason: toolCalls && !failed ? "tool_calls" : outcome.finish_reason,
+            tool_calls: toolCalls,
+            usage: resp.usage ? {
+              prompt_tokens: resp.usage.input_tokens || 0,
+              completion_tokens: resp.usage.output_tokens || 0,
+              total_tokens: (resp.usage.input_tokens || 0) + (resp.usage.output_tokens || 0),
+              provider_raw: { ...resp.usage },
+            } : undefined,
+          };
+          break;
+        }
+        // Other lifecycle events do not mark completion.
       }
+      if (terminal) break;
     }
-    } finally {
-      if (!streamDoneNaturally) await cancelStreamAndCloseConnection(reader, res);
-    }
+    if (request.signal?.aborted) return;
+    if (!terminal) throw incompleteStream(this.displayName);
+    yield terminal;
   }
 }

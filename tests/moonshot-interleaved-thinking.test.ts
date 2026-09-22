@@ -94,4 +94,73 @@ describe("Moonshot/Kimi interleaved thinking", () => {
     };
     expect(provider.flatten(plain)[0].reasoning_content).toBeUndefined();
   });
+
+  test("uses Kimi Partial Mode for an assistant prefill", () => {
+    const body = provider.build(
+      {
+        messages: [
+          { role: "user", content: "Write a greeting" },
+          {
+            role: "assistant",
+            content: "Dear customer, hello,",
+            partial: true,
+          },
+        ],
+        model: "kimi-k3",
+      },
+      true,
+    );
+
+    expect(body.messages).toEqual([
+      { role: "user", content: "Write a greeting" },
+      {
+        role: "assistant",
+        content: "Dear customer, hello,",
+        partial: true,
+      },
+    ]);
+  });
+
+  test("preserves reasoning_content when a partial assistant message resumes thinking", () => {
+    const partial: LlmMessage = {
+      role: "assistant",
+      content: "The proof begins: ",
+      partial: true,
+      reasoning_content: "I should continue the previous proof.",
+    };
+
+    expect(provider.flatten(partial)).toEqual([
+      {
+        role: "assistant",
+        content: "The proof begins: ",
+        partial: true,
+        reasoning_content: "I should continue the previous proof.",
+      },
+    ]);
+  });
+
+  test("supports a reasoning-only partial prefill", () => {
+    const body = provider.build(
+      {
+        messages: [
+          { role: "user", content: "Solve the problem" },
+          {
+            role: "assistant",
+            content: "",
+            partial: true,
+            reasoning_content: "First, identify the constraints. ",
+          },
+        ],
+        model: "kimi-k3",
+      },
+      true,
+    );
+
+    expect(body.messages[1]).toEqual({
+      role: "assistant",
+      content: "",
+      partial: true,
+      reasoning_content: "First, identify the constraints. ",
+    });
+  });
 });

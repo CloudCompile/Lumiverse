@@ -5,6 +5,7 @@ import { getDb } from "../db/connection";
 import { hashPassword, verifyPassword } from "../crypto/password";
 import { rateLimit } from "../middleware/rate-limit";
 import { purgeUser } from "../services/user-data/purge.service";
+import { SYSTEM_SECRET_PRINCIPAL } from "../services/secrets.service";
 
 const app = new Hono();
 
@@ -86,11 +87,12 @@ app.post("/me/password", passwordLimiter, async (c) => {
 const admin = new Hono();
 admin.use("/*", requireOwner);
 
-// GET / — list all users
+// GET / — list all users (the reserved system principal is not a login
+// account and must never appear in the admin roster)
 admin.get("/", (c) => {
   const rows = getDb()
-    .query('SELECT id, name, email, username, role, banned, banReason, banExpires, createdAt, updatedAt FROM "user" ORDER BY createdAt DESC')
-    .all();
+    .query('SELECT id, name, email, username, role, banned, banReason, banExpires, createdAt, updatedAt FROM "user" WHERE id != ? ORDER BY createdAt DESC')
+    .all(SYSTEM_SECRET_PRINCIPAL);
   return c.json(rows);
 });
 
@@ -213,6 +215,12 @@ admin.post("/", async (c) => {
     return c.json({ error: `Invalid role. Allowed: ${[...VALID_ROLES].join(", ")}` }, 400);
   }
 
+  // Only the owner may mint privileged accounts. requireOwner admits admins
+  // too, and an admin creating an "owner"-role account would otherwise be a
+  // one-step self-escalation past every canManageTarget gate.
+  if (body.role && body.role !== "user" && !isOwnerSession(c)) {
+    return c.json({ error: "Only the owner can create admin or owner accounts" }, 403);
+  }
   const creationNonce = allowCreation();
 
   try {
@@ -339,9 +347,19 @@ admin.post("/:id/ban", async (c) => {
   return c.json({ success: true, banReason: reason, banExpires });
 });
 
-// POST /:id/unban — re-enable user login
 admin.post("/:id/unban", async (c) => {
   const { id } = c.req.param();
+
+  const targetUser = getTargetUser(id);
+  if (!targetUser) {
+    return c.json({ error: "User not found" }, 404);
+  }
+
+  // Mirror the ban gate: admins may only unban user-role accounts, so an
+  // admin cannot resurrect another admin the owner has banned.
+  if (!canManageTarget(c, targetUser.role)) {
+    return c.json({ error: "Admins can only unban user-role accounts" }, 403);
+  }
 
   const result = getDb().run(
     'UPDATE "user" SET banned = 0, banReason = NULL, banExpires = NULL WHERE id = ?',
@@ -363,6 +381,13 @@ admin.delete("/:id", async (c) => {
 
   if (session.user.id === id) {
     return c.json({ error: "Cannot delete yourself" }, 400);
+  }
+
+  // Deleting the reserved system principal would CASCADE-wipe every
+  // operator-provisioned system broker secret. Hard-reject regardless of
+  // caller role.
+  if (id === SYSTEM_SECRET_PRINCIPAL) {
+    return c.json({ error: "The system principal cannot be deleted: it owns the system broker secrets" }, 409);
   }
 
   if (!targetUser) {

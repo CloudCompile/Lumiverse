@@ -1,15 +1,23 @@
 import { useMemo, useRef, useLayoutEffect, useState, useEffect, useCallback, useSyncExternalStore, useDeferredValue } from 'react'
 import { useTranslation } from 'react-i18next'
+import { ChevronDown } from 'lucide-react'
 import { marked } from 'marked'
 import { highlightCode } from '@/lib/codeHighlight'
-import { processMarkdownInHtmlIsland } from './htmlIslandMarkdown'
+import { ISLAND_BLANK_LINE_RE, processMarkdownInHtmlIsland } from './htmlIslandMarkdown'
+import { resolveGalleryImageId, resolveGalleryImageSourcesInHtml } from '@/lib/galleryImageReference'
 import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { healFormattingArtifacts } from '@/lib/formatHealing'
+import { shouldSkipFormattingHealing, subscribeDisplayFormatting } from '@/lib/spindle/display-resolver-registry'
+import { normalizeLegacyFontTags } from '@/lib/legacyFontTags'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { sanitizeHtmlIsland, sanitizeRichHtml } from '@/lib/richHtmlSanitizer'
+import {
+  dispatchCollapsibleToggleLayoutEvent,
+  findDetailsToggleLayoutTarget,
+} from './collapsibleLayout'
 import {
   dispatchMessageTagIntercepts,
   stripMessageTags,
@@ -17,11 +25,32 @@ import {
   getTagInterceptorRegistryVersion,
 } from '@/lib/spindle/message-interceptors'
 import { SpindleMessageWidgets } from '@/lib/spindle/message-widgets'
+import {
+  dispatchMessageContentLayout,
+  MESSAGE_CONTENT_LAYOUT_EVENT,
+} from '@/lib/message-content-layout'
 import { useStore } from '@/store'
 import i18n from '@/i18n'
-import { useDisplayRegex } from '@/hooks/useDisplayRegex'
+import { useDisplayRegexState } from '@/hooks/useDisplayRegex'
+import {
+  getLongMessageCollapseHeight,
+  isLongMessageCollapseEligible,
+  isLongMessageOverflowing,
+  longMessageExpansionKey,
+} from '@/lib/longMessageCollapse'
+import {
+  REGEX_SELECTIONS_CHANGED_EVENT,
+  dispatchRegexAction,
+  getRegexBlockSelectionCost,
+  isRegexSelectionPending,
+  type RegexActionActivation,
+  type ResolvedRegexActionPayload,
+} from '@/lib/regex/actionBus'
+import { attachRegexActionLongPress } from '@/lib/regex/actionLongPress'
+import { toast } from '@/lib/toast'
 import { OOCBlock as OOCBlockComponent, OOCIrcChatRoom } from './ooc'
 import type { IrcEntry } from './ooc'
+import { hasImmediateUserReply } from './regexActionAvailability'
 import ImageLightbox from '@/components/shared/ImageLightbox'
 import styles from './MessageContent.module.css'
 import clsx from 'clsx'
@@ -37,9 +66,10 @@ interface MessageContentProps {
   characterNameOverride?: string
   risuAssetMapOverride?: Record<string, string> | null
   disableInterceptors?: boolean
+  findQuery?: string
 }
 
-// Custom renderer for sheld prose classes
+// Custom renderer for chat prose classes
 const renderer = createEmphasisAwareRenderer({
   emClass: styles.proseItalic,
   strongClass: styles.proseBold,
@@ -192,17 +222,6 @@ function addLazyLoadingToImages(html: string): string {
   return html.replace(/<img\b(?![^>]*\bloading=)/gi, '<img loading="lazy"')
 }
 
-function normalizeLegacyFontTags(html: string): string {
-  return html
-    .replace(/<font\b([^>]*)>/gi, (_match, attrs: string) => {
-      const color = attrs.match(/\bcolor\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/i)?.slice(1).find(Boolean)
-      const safeColor = color && /^[#\w\s(),.%+-]+$/.test(color) ? color : null
-
-      return safeColor ? `<span style="color:${escapeHtml(safeColor)}">` : '<span>'
-    })
-    .replace(/<\/font\s*>/gi, '</span>')
-}
-
 interface MarkdownFence {
   marker: '`' | '~'
   length: number
@@ -286,9 +305,9 @@ function escapeIsolatedOrderedListItems(text: string): string {
   }).join('\n')
 }
 
-function formatContent(raw: string): string {
+function formatContent(raw: string, skipFormattingHealing = false): string {
   if (!raw) return ''
-  const healed = healFormattingArtifacts(raw)
+  const healed = skipFormattingHealing ? raw : healFormattingArtifacts(raw)
   const normalized = normalizeQuotes(healed)
   const listSafe = escapeIsolatedOrderedListItems(normalized)
   let html = marked.parse(listSafe, { async: false }) as string
@@ -309,14 +328,14 @@ marked.setOptions({
 })
 
 // ── HTML Island Isolation ──
-// Detects self-contained HTML blocks containing <style> tags or significant
-// inline styling and extracts them for Shadow DOM rendering, preventing markdown
+// Detects self-contained HTML blocks containing <style> tags
+// and extracts them for Shadow DOM rendering, preventing markdown
 // parsing from breaking interactive/styled HTML (CSS checkbox/radio hacks, tabs,
 // phone screens, etc.) and isolating their styles.
 
 const HTML_ISLAND_TOKEN = 'LUMIVERSE_HTML_ISLAND'
 const YOUTUBE_EMBED_TOKEN = 'LUMIVERSE_YOUTUBE_EMBED'
-const MESSAGE_CONTENT_LAYOUT_EVENT = 'lumiverse:message-content-layout'
+const DETAILS_TOGGLE_KEYS = new Set(['Enter', ' ', 'Spacebar'])
 const SPECIAL_PIECE_RE = new RegExp(`<!--(${HTML_ISLAND_TOKEN}|${YOUTUBE_EMBED_TOKEN})_(\\d+)-->`, 'g')
 const YOUTUBE_NOCOOKIE_ORIGIN = 'https://www.youtube-nocookie.com'
 const YOUTUBE_EMBED_PATH_RE = /^\/embed\/[A-Za-z0-9_-]{6,}$/
@@ -329,9 +348,24 @@ const YOUTUBE_EMBED_ALLOWED_QUERY_PARAMS = new Set([
   ...YOUTUBE_EMBED_TOKEN_QUERY_PARAMS,
 ])
 const SAFE_YOUTUBE_EMBED_TOKEN_RE = /^[A-Za-z0-9_-]{1,128}$/
-const INLINE_STYLE_ATTR_RE = /\bstyle\s*=/gi
 const NO_ISLAND_ATTR_RE = /\bdata-no-island(?=[\s=>"'/]|$)/i
-const ROOT_HTML_TAG_RE = /^<([a-z][\w:-]*)\b[^>]*>/i
+const ROOT_HTML_TAG_PREFIX_RE = /^<([a-z][\w:-]*)\b/i
+const INLINE_HTML_CARD_ATTR = 'data-lumiverse-inline-html-card'
+const INLINE_HTML_CARD_STYLE_THRESHOLD = 3
+const INLINE_HTML_CARD_TAGS = new Set([
+  'article',
+  'aside',
+  'details',
+  'div',
+  'fieldset',
+  'figure',
+  'footer',
+  'form',
+  'header',
+  'main',
+  'nav',
+  'section',
+])
 const VOID_HTML_TAGS = new Set([
   'area',
   'base',
@@ -708,59 +742,145 @@ const ISLAND_BASE_CSS = `
   }
 `
 
-/** Detect HTML blocks with enough inline styling to warrant island extraction. */
-function hasSignificantInlineStyles(html: string): boolean {
-  INLINE_STYLE_ATTR_RE.lastIndex = 0
-  let count = 0
-  while (INLINE_STYLE_ATTR_RE.exec(html)) {
-    if (++count >= 3) return true
-  }
-  return false
-}
-
 function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 interface HtmlElementMatch {
-  openingTag: string
+  noIsland: boolean
   end: number
 }
 
-function findStyleBlockEnd(raw: string, start: number): number | null {
-  const open = raw.slice(start).match(/^<style(?=[\s>])[^>]*>/i)
+function lowerBound(positions: readonly number[], start: number): number {
+  let low = 0
+  let high = positions.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (positions[middle] < start) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function createHtmlIslandIndex(raw: string) {
+  const greaterEnds: number[] = []
+  const selfClosingEnds = new Set<number>()
+  for (let at = raw.indexOf('>'); at >= 0; at = raw.indexOf('>', at + 1)) {
+    greaterEnds.push(at + 1)
+    let last = at - 1
+    while (last >= 0 && /\s/.test(raw[last])) last--
+    if (raw[last] === '/') selfClosingEnds.add(at + 1)
+  }
+  const openingEnd = (start: number) => greaterEnds[lowerBound(greaterEnds, start + 1)] ?? 0
+  const styles = Array.from(raw.matchAll(/<style[\s>]/gi), match => match.index!)
+  const noIslands = Array.from(raw.matchAll(new RegExp(NO_ISLAND_ATTR_RE.source, 'gi')), match => match.index!)
+  const styleCloses = Array.from(raw.matchAll(/<\/style\s*>/gi), match => [match.index!, match.index! + match[0].length])
+  const styleCloseStarts = styleCloses.map(close => close[0])
+  const tags = new Map<string, {
+    starts: number[]
+    tokens: Array<{ group: number; kind: number }>
+    groups: Array<{ end: number; kind: number }>
+    nextClose: number[]
+  }>()
+  let end = 0
+  for (const match of raw.matchAll(/<\/?([a-z][\w:-]*)(?=[\s>/])/gi)) {
+    const start = match.index!
+    if (start >= end) end = openingEnd(start)
+    if (!end) break
+    const name = match[1].toLowerCase()
+    let tag = tags.get(name)
+    if (!tag) {
+      tag = { starts: [], tokens: [], groups: [], nextClose: [] }
+      tags.set(name, tag)
+    }
+    const kind = raw[start + 1] === '/' ? -1 : selfClosingEnds.has(end) ? 0 : 1
+    // Tokens inside an attribute share its '>'; the old per-tag regex consumes only the first.
+    if (tag.groups.at(-1)?.end !== end) tag.groups.push({ end, kind })
+    tag.starts.push(start)
+    tag.tokens.push({ group: tag.groups.length - 1, kind })
+  }
+  for (const tag of tags.values()) {
+    for (let i = tag.groups.length - 1; i >= 0; i--) {
+      const next = tag.nextClose[i + 1] ?? -1
+      tag.nextClose[i] = tag.groups[i].kind === -1 ? i
+        : tag.groups[i].kind === 0 ? next
+          : next < 0 ? -1 : tag.nextClose[next + 1] ?? -1
+    }
+  }
+  return {
+    openingEnd,
+    selfClosingEnds,
+    closingTrails: new Map<number, number>(),
+    styleEnd: (start: number) => styleCloses[lowerBound(styleCloseStarts, start)]?.[1] ?? null,
+    hasStyle: (start: number, end: number) => (styles[lowerBound(styles, start)] ?? Infinity) + 7 <= end,
+    noIsland: (start: number, end: number) => (noIslands[lowerBound(noIslands, start)] ?? Infinity) + 14 <= end,
+    elementEnd: (name: string, start: number): number | null => {
+      const tag = tags.get(name)
+      const first = tag?.tokens[lowerBound(tag.starts, start)]
+      if (!tag || !first) return null
+      if (first.kind <= 0) return tag.groups[first.group].end
+      const close = tag.nextClose[first.group + 1] ?? -1
+      return close < 0 ? null : tag.groups[close].end
+    },
+  }
+}
+
+type HtmlIslandIndex = ReturnType<typeof createHtmlIslandIndex>
+
+function findStyleBlockEnd(raw: string, start: number, index?: HtmlIslandIndex, work?: { characters: number }): number | null {
+  const open = raw.slice(start).match(/^<style(?=[\s>])/i)
   if (!open) return null
 
+  const openingEnd = index ? index.openingEnd(start) : raw.indexOf('>', start) + 1
+  if (!openingEnd) {
+    if (work && !index) work.characters += raw.length - start
+    return null
+  }
+  if (index) return index.styleEnd(openingEnd)
   const closeRe = /<\/style\s*>/gi
-  closeRe.lastIndex = start + open[0].length
+  closeRe.lastIndex = openingEnd
   const close = closeRe.exec(raw)
+  if (work) work.characters += (close ? close.index + close[0].length : raw.length) - start
   return close ? close.index + close[0].length : null
 }
 
-function parseHtmlElementAt(raw: string, start: number): HtmlElementMatch | null {
-  const open = raw.slice(start).match(ROOT_HTML_TAG_RE)
+function parseHtmlElementAt(raw: string, start: number, index?: HtmlIslandIndex, work?: { characters: number }): HtmlElementMatch | null {
+  const open = raw.slice(start).match(ROOT_HTML_TAG_PREFIX_RE)
   if (!open) return null
 
   const tag = open[1].toLowerCase()
-  const openingTag = open[0]
-  const openingEnd = start + openingTag.length
+  const openingEnd = index ? index.openingEnd(start) : raw.indexOf('>', start) + 1
+  if (!openingEnd) {
+    if (work && !index) work.characters += raw.length - start
+    return null
+  }
+  const openingTag = index ? '' : raw.slice(start, openingEnd)
+  const noIsland = index ? index.noIsland(start, openingEnd) : NO_ISLAND_ATTR_RE.test(openingTag)
 
   if (tag === 'style') {
-    const end = findStyleBlockEnd(raw, start)
-    return end == null ? null : { openingTag, end }
+    const end = findStyleBlockEnd(raw, start, index, work)
+    return end == null ? null : { noIsland, end }
   }
 
-  if (VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(openingTag)) {
-    return { openingTag, end: openingEnd }
+  if (VOID_HTML_TAGS.has(tag) || (index ? index.selfClosingEnds.has(openingEnd) : /\/\s*>$/.test(openingTag))) {
+    if (work && !index) work.characters += openingEnd - start
+    return { noIsland, end: openingEnd }
+  }
+  if (index) {
+    const end = index.elementEnd(tag, start)
+    return end == null ? null : { noIsland, end }
   }
 
-  const tagRe = new RegExp(`</?${escapeRegexLiteral(tag)}(?=[\\s>/])[^>]*>`, 'gi')
+  const tagRe = new RegExp(`</?${escapeRegexLiteral(tag)}(?=[\\s>/])`, 'gi')
   tagRe.lastIndex = start
 
   let depth = 0
   let match: RegExpExecArray | null
   while ((match = tagRe.exec(raw)) !== null) {
-    const token = match[0]
+    const tokenEnd = raw.indexOf('>', tagRe.lastIndex) + 1
+    if (!tokenEnd) break
+    const token = raw.slice(match.index, tokenEnd)
+    tagRe.lastIndex = tokenEnd
     if (/^<\//.test(token)) {
       depth -= 1
     } else if (!/\/\s*>$/.test(token)) {
@@ -768,10 +888,12 @@ function parseHtmlElementAt(raw: string, start: number): HtmlElementMatch | null
     }
 
     if (depth <= 0) {
-      return { openingTag, end: match.index + token.length }
+      if (work) work.characters += tokenEnd - start
+      return { noIsland, end: tokenEnd }
     }
   }
 
+  if (work) work.characters += raw.length - start
   return null
 }
 
@@ -781,14 +903,14 @@ function skipWhitespace(raw: string, start: number): number {
   return i
 }
 
-function extendThroughAdjacentHtmlSiblings(raw: string, start: number): number {
+function extendThroughAdjacentHtmlSiblings(raw: string, start: number, index?: HtmlIslandIndex): number {
   let end = start
   let pos = start
 
   while (pos < raw.length) {
     const next = skipWhitespace(raw, pos)
-    const element = parseHtmlElementAt(raw, next)
-    if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) break
+    const element = parseHtmlElementAt(raw, next, index)
+    if (!element || element.noIsland) break
 
     end = element.end
     pos = element.end
@@ -799,7 +921,7 @@ function extendThroughAdjacentHtmlSiblings(raw: string, start: number): number {
 
 function getMarkdownFenceRanges(raw: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = []
-  const lines = raw.match(/.*(?:\n|$)/g) || []
+  const lines = raw.match(/[^\r\n]*(?:\r\n?|\n|$)/g) || []
   let offset = 0
   let openFence: MarkdownFence | null = null
   let openStart = 0
@@ -834,37 +956,46 @@ function getFenceRangeContaining(ranges: Array<[number, number]>, pos: number, s
   return -1
 }
 
-function getIslandEndAt(raw: string, start: number, isStreaming: boolean): number | null {
-  const styleEnd = findStyleBlockEnd(raw, start)
+function getIslandEndAt(raw: string, start: number, isStreaming: boolean, index?: HtmlIslandIndex, work?: { characters: number }): number | null {
+  const styleEnd = findStyleBlockEnd(raw, start, index, work)
   if (styleEnd != null) {
-    return extendThroughAdjacentHtmlSiblings(raw, styleEnd)
+    return extendThroughAdjacentHtmlSiblings(raw, styleEnd, index)
   }
 
   if (isStreaming && /^<style(?=[\s>])/i.test(raw.slice(start))) return null
 
-  const element = parseHtmlElementAt(raw, start)
-  if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) return null
+  const element = parseHtmlElementAt(raw, start, index, work)
+  if (!element || element.noIsland) return null
 
-  const fragment = raw.slice(start, element.end)
-  if (/<style[\s>]/i.test(fragment) || hasSignificantInlineStyles(fragment)) {
+  if (index ? index.hasStyle(start, element.end) : /<style[\s>]/i.test(raw.slice(start, element.end))) {
     return element.end
   }
 
-  let peekStart = skipWhitespace(raw, element.end)
-  while (raw.startsWith('</', peekStart)) {
-    const closeEnd = raw.indexOf('>', peekStart + 2)
-    if (closeEnd < 0) break
-    peekStart = skipWhitespace(raw, closeEnd + 1)
+  const trail: number[] = []
+  let peekStart = element.end
+  while (true) {
+    const cached = index?.closingTrails.get(peekStart)
+    if (cached != null) {
+      peekStart = cached
+      break
+    }
+    if (index) trail.push(peekStart)
+    peekStart = skipWhitespace(raw, peekStart)
+    if (!raw.startsWith('</', peekStart)) break
+    const closeEnd = index ? index.openingEnd(peekStart) : raw.indexOf('>', peekStart + 2) + 1
+    if (!closeEnd) break
+    peekStart = closeEnd
   }
-  const trailingStyleEnd = findStyleBlockEnd(raw, peekStart)
-  if (trailingStyleEnd != null) return extendThroughAdjacentHtmlSiblings(raw, trailingStyleEnd)
+  for (const start of trail) index!.closingTrails.set(start, peekStart)
+  const trailingStyleEnd = findStyleBlockEnd(raw, peekStart, index)
+  if (trailingStyleEnd != null) return extendThroughAdjacentHtmlSiblings(raw, trailingStyleEnd, index)
 
   return null
 }
 
-function renderIslandMarkdownText(markdown: string): string {
+function renderIslandMarkdownText(markdown: string, messageProse = false): string {
   const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
-  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/(?<!\s)\s*$/)?.[0] ?? ''
   const core = markdown.trim()
 
   if (!core) return markdown
@@ -872,8 +1003,15 @@ function renderIslandMarkdownText(markdown: string): string {
   let html = marked.parse(core, { async: false }) as string
   html = normalizeQuotesInHTML(html)
 
+  // In message-prose islands, text set apart by a blank line is a paragraph:
+  // keep its <p> so it gets paragraph spacing next to images and panels.
+  // Otherwise a lone <p> is marked wrapping a piece of a tag-split sentence,
+  // so unwrap it to keep the sentence inline.
+  const blockSeparated =
+    messageProse
+    && (ISLAND_BLANK_LINE_RE.test(leadingWhitespace) || ISLAND_BLANK_LINE_RE.test(trailingWhitespace))
   const singleParagraphMatch = html.match(/^<p>([\s\S]*)<\/p>\s*$/)
-  if (singleParagraphMatch && !/<\/p>\s*<p\b/i.test(html)) {
+  if (!blockSeparated && singleParagraphMatch && !/<\/p>\s*<p\b/i.test(html)) {
     html = singleParagraphMatch[1]
   }
 
@@ -882,7 +1020,7 @@ function renderIslandMarkdownText(markdown: string): string {
 
 function renderIslandInlineMarkdownText(markdown: string): string {
   const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
-  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/(?<!\s)\s*$/)?.[0] ?? ''
   const core = markdown.trim()
 
   if (!core) return markdown
@@ -893,7 +1031,7 @@ function renderIslandInlineMarkdownText(markdown: string): string {
   return `${leadingWhitespace}${html}${trailingWhitespace}`
 }
 
-function extractHtmlIslands(
+export function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
 ): { content: string; islands: string[] } {
@@ -907,14 +1045,24 @@ function extractHtmlIslands(
   ) {
     return { content: `<!--${HTML_ISLAND_TOKEN}_0-->`, islands: [raw] }
   }
+  if (!hasStyleTag) return { content: raw, islands: [] }
 
   const islands: string[] = []
+  let index: HtmlIslandIndex | undefined
+  let lastStyle: number | undefined
+  const work = { characters: 0 }
   const fences = getMarkdownFenceRanges(raw)
   let fenceIdx = 0
   let content = ''
   let pos = 0
 
   while (pos < raw.length) {
+    // An island can consume several fences; never revisit those ranges.
+    while (fenceIdx < fences.length && fences[fenceIdx][1] <= pos) fenceIdx++
+    if (lastStyle !== undefined && lastStyle < pos && fenceIdx >= fences.length) {
+      content += raw.slice(pos)
+      break
+    }
     const containingFence = getFenceRangeContaining(fences, pos, fenceIdx)
     if (containingFence >= 0) {
       const [, end] = fences[containingFence]
@@ -940,13 +1088,18 @@ function extractHtmlIslands(
 
     content += raw.slice(pos, nextTag)
 
-    const islandEnd = getIslandEndAt(raw, nextTag, isStreaming)
+    const islandEnd = getIslandEndAt(raw, nextTag, isStreaming, index, work)
     if (islandEnd != null && islandEnd > nextTag) {
       const idx = islands.length
       islands.push(raw.slice(nextTag, islandEnd))
       content += `<!--${HTML_ISLAND_TOKEN}_${idx}-->`
       pos = islandEnd
     } else {
+      if (lastStyle === undefined) {
+        for (const match of raw.matchAll(/<style[\s>]/gi)) lastStyle = match.index
+      }
+      // Bound repeated subtree scans before paying for an index on simple HTML.
+      if (!index && work.characters > raw.length * 2) index = createHtmlIslandIndex(raw)
       content += raw[nextTag]
       pos = nextTag + 1
     }
@@ -955,9 +1108,12 @@ function extractHtmlIslands(
   return { content, islands }
 }
 
+const MESSAGE_PROSE_WRAP_RE = /^\s*<div[^>]*\bdata-message-prose\b/i
+
 function processMarkdownInIsland(html: string): string {
+  const messageProse = MESSAGE_PROSE_WRAP_RE.test(html)
   return processMarkdownInHtmlIsland(html, {
-    renderBlockText: renderIslandMarkdownText,
+    renderBlockText: (markdown) => renderIslandMarkdownText(markdown, messageProse),
     renderInlineText: renderIslandInlineMarkdownText,
     normalizeHtml: normalizeLegacyFontTags,
   })
@@ -1067,17 +1223,17 @@ function balanceStreamingDetails(raw: string): string {
   return raw + suffix
 }
 
-function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] {
+function formatContentPieces(raw: string, isStreaming: boolean, skipFormattingHealing = false): ContentPiece[] {
   if (!raw) return []
 
   const { content: rawWithoutEmbeds, embeds } = extractTrustedYouTubeEmbeds(raw)
   const { content, islands } = extractHtmlIslands(rawWithoutEmbeds, isStreaming)
 
   if (islands.length === 0 && embeds.length === 0) {
-    return [{ type: 'markup', content: sanitizeRichHtml(formatContent(rawWithoutEmbeds)) }]
+    return [{ type: 'markup', content: sanitizeRichHtml(formatContent(rawWithoutEmbeds, skipFormattingHealing)) }]
   }
 
-  const html = formatContent(content)
+  const html = formatContent(content, skipFormattingHealing)
   const pieces: ContentPiece[] = []
   let lastIdx = 0
 
@@ -1139,17 +1295,56 @@ function notifyMessageContentLayout(el: HTMLElement): void {
   // load/error listeners below already catch later size changes. The previous
   // immediate + 2x rAF triple dispatch fired ~3 events for every shadow-DOM
   // mutation/row mount and caused a measurement storm during scroll/streaming.
-  el.dispatchEvent(new CustomEvent(MESSAGE_CONTENT_LAYOUT_EVENT, { bubbles: true }))
+  dispatchMessageContentLayout(el)
 }
 
-function IsolatedHtml({ html, isStreaming }: { html: string; isStreaming: boolean }) {
+function replaceHtmlPreservingImages(root: HTMLElement | ShadowRoot, html: string): void {
+  const stableImgs = new Map<string, HTMLImageElement>()
+  for (const img of root.querySelectorAll<HTMLImageElement>('img[src]')) {
+    const src = img.getAttribute('src')
+    if (src && !stableImgs.has(src)) stableImgs.set(src, img)
+  }
+
+  root.innerHTML = html
+
+  for (const newImg of root.querySelectorAll<HTMLImageElement>('img[src]')) {
+    const src = newImg.getAttribute('src')
+    if (!src) continue
+    const preserved = stableImgs.get(src)
+    if (preserved && newImg.parentNode) {
+      // Reuse the decoded image, but keep the current render's layout and metadata.
+      if (!preserved.isEqualNode(newImg)) {
+        const oldAttributes = preserved.attributes
+        for (let i = oldAttributes.length - 1; i >= 0; i--) {
+          const attribute = oldAttributes[i]
+          const value = newImg.getAttribute(attribute.name)
+          if (value === null) preserved.removeAttribute(attribute.name)
+          else if (attribute.value !== value) attribute.value = value
+        }
+        const newAttributes = newImg.attributes
+        if (oldAttributes.length !== newAttributes.length) {
+          for (let i = 0; i < newAttributes.length; i++) {
+            const { name, value } = newAttributes[i]
+            if (!preserved.hasAttribute(name)) preserved.setAttribute(name, value)
+          }
+        }
+      }
+      newImg.replaceWith(preserved)
+      stableImgs.delete(src)
+    }
+  }
+}
+export function IsolatedHtml({ html, isStreaming }: { html: string; isStreaming: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
 
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
     const shadow = el.shadowRoot ?? el.attachShadow({ mode: 'open' })
-    shadow.innerHTML = `<style data-lumi-island-base>${ISLAND_BASE_CSS}</style>${html}`
+    replaceHtmlPreservingImages(shadow, `<style data-lumi-island-base>${ISLAND_BASE_CSS}</style>${html}`)
+    for (const actionEl of shadow.querySelectorAll<HTMLElement>('[data-lumiverse-regex-action]')) {
+      actionEl.style.cursor = 'pointer'
+    }
     if (
       el.classList.contains('not-prose')
       || el.classList.contains('not-island-prose')
@@ -1190,9 +1385,172 @@ function IsolatedHtml({ html, isStreaming }: { html: string; isStreaming: boolea
       shadow.removeEventListener('error', scheduleLayoutNotify, true)
       if (pendingRaf) cancelAnimationFrame(pendingRaf)
     }
-  }, [html])
+  }, [html, isStreaming])
 
-  return <div ref={ref} className={styles.htmlIsland} />
+  return <div ref={ref} className={styles.htmlIsland} data-lumiverse-html-island />
+}
+
+const CHAT_FIND_HIGHLIGHT_ATTR = 'data-chat-find-highlight'
+const CHAT_FIND_SKIP_SELECTOR = 'script,style,textarea,input,button,select,option,svg,math'
+
+type ChatFindHighlightRoot = HTMLElement | ShadowRoot
+
+function clearChatFindHighlights(root: ChatFindHighlightRoot): boolean {
+  const matches = root.querySelectorAll<HTMLElement>(`mark[${CHAT_FIND_HIGHLIGHT_ATTR}]`)
+  if (matches.length === 0) return false
+
+  for (const match of matches) {
+    const parent = match.parentNode
+    if (!parent) continue
+    parent.replaceChild(document.createTextNode(match.textContent ?? ''), match)
+    if (parent instanceof Element) parent.normalize()
+  }
+
+  return true
+}
+
+function highlightChatFindMatches(root: ChatFindHighlightRoot, query: string): boolean {
+  const normalizedQuery = query.trim()
+  if (!normalizedQuery) return false
+
+  const escapedQuery = normalizedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matcher = new RegExp(escapedQuery, 'giu')
+  const textNodes: Text[] = []
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parent = node.parentElement
+      if (!node.nodeValue || !parent) return NodeFilter.FILTER_REJECT
+      if (parent.closest(`mark[${CHAT_FIND_HIGHLIGHT_ATTR}]`)) return NodeFilter.FILTER_REJECT
+      if (parent.closest(CHAT_FIND_SKIP_SELECTOR)) return NodeFilter.FILTER_REJECT
+      return NodeFilter.FILTER_ACCEPT
+    },
+  })
+
+  while (walker.nextNode()) textNodes.push(walker.currentNode as Text)
+
+  let changed = false
+  for (const textNode of textNodes) {
+    const text = textNode.nodeValue ?? ''
+    matcher.lastIndex = 0
+    if (!matcher.test(text)) continue
+
+    matcher.lastIndex = 0
+    const fragment = document.createDocumentFragment()
+    let cursor = 0
+    let match: RegExpExecArray | null
+
+    while ((match = matcher.exec(text)) !== null) {
+      if (match.index > cursor) {
+        fragment.appendChild(document.createTextNode(text.slice(cursor, match.index)))
+      }
+
+      const mark = document.createElement('mark')
+      mark.className = styles.findMatch
+      mark.setAttribute(CHAT_FIND_HIGHLIGHT_ATTR, '')
+      // CSS modules do not cross into an HTML island's shadow root. Keep the
+      // same visual treatment there with inherited theme variables.
+      if (root instanceof ShadowRoot) {
+        mark.style.background = 'color-mix(in srgb, var(--lumiverse-warning, #f5b942) 58%, transparent)'
+        mark.style.color = 'inherit'
+        mark.style.borderRadius = '2px'
+        mark.style.padding = '0 1px'
+      }
+      mark.textContent = match[0]
+      fragment.appendChild(mark)
+
+      cursor = match.index + match[0].length
+      if (match[0].length === 0) break
+    }
+
+    if (cursor < text.length) {
+      fragment.appendChild(document.createTextNode(text.slice(cursor)))
+    }
+
+    textNode.parentNode?.replaceChild(fragment, textNode)
+    changed = true
+  }
+
+  return changed
+}
+
+function getChatFindHighlightRoots(container: HTMLElement): ChatFindHighlightRoot[] {
+  const roots: ChatFindHighlightRoot[] = [container]
+  for (const island of container.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')) {
+    if (island.shadowRoot) roots.push(island.shadowRoot)
+  }
+  return roots
+}
+
+function hasInlineHtmlCardStyleCount(html: string): boolean {
+  const inlineStyleRe = /\bstyle\s*=/gi
+  for (let count = 0; inlineStyleRe.exec(html); count++) {
+    if (count + 1 >= INLINE_HTML_CARD_STYLE_THRESHOLD) return true
+  }
+  return false
+}
+
+/**
+ * Keep the legacy visual breathing room for heavily inline-styled cards without
+ * moving the card into a shadow root. Counts are accumulated bottom-up and
+ * capped at the threshold, so both discovery and wrapping stay linear even for
+ * deeply nested or very long messages.
+ */
+function restoreInlineHtmlCardSpacing(root: HTMLElement, html: string): void {
+  root.classList.remove(styles.inlineHtmlCard)
+  root.removeAttribute(INLINE_HTML_CARD_ATTR)
+  if (!hasInlineHtmlCardStyleCount(html)) return
+
+  const elements = Array.from(root.querySelectorAll('*'))
+  const styleCounts = new Map<Element, number>()
+
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const element = elements[i]
+    let count = element.hasAttribute('style') ? 1 : 0
+    for (const child of element.children) {
+      count += styleCounts.get(child) ?? 0
+      if (count >= INLINE_HTML_CARD_STYLE_THRESHOLD) break
+    }
+    styleCounts.set(element, Math.min(count, INLINE_HTML_CARD_STYLE_THRESHOLD))
+  }
+
+  const insideCard = new Map<Element, boolean>()
+  const cards: Element[] = []
+  for (const element of elements) {
+    const parent = element.parentElement
+    const parentInsideCard = parent !== null
+      && parent !== root
+      && (insideCard.get(parent) ?? false)
+    const isCard = !parentInsideCard
+      && INLINE_HTML_CARD_TAGS.has(element.localName)
+      && (styleCounts.get(element) ?? 0) >= INLINE_HTML_CARD_STYLE_THRESHOLD
+
+    insideCard.set(element, parentInsideCard || isCard)
+    if (isCard) cards.push(element)
+  }
+
+  if (
+    cards.length === 1
+    && cards[0].parentElement === root
+    && Array.from(root.childNodes).every((node) => (
+      node === cards[0]
+      || node.nodeType === Node.COMMENT_NODE
+      || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim())
+    ))
+  ) {
+    root.classList.add(styles.inlineHtmlCard)
+    root.setAttribute(INLINE_HTML_CARD_ATTR, '')
+    return
+  }
+
+  for (const card of cards) {
+    const parent = card.parentNode
+    if (!parent) continue
+    const shell = document.createElement('div')
+    shell.className = styles.inlineHtmlCard
+    shell.setAttribute(INLINE_HTML_CARD_ATTR, '')
+    parent.insertBefore(shell, card)
+    shell.appendChild(card)
+  }
 }
 
 /**
@@ -1200,7 +1558,7 @@ function IsolatedHtml({ html, isStreaming }: { html: string; isStreaming: boolea
  * src across innerHTML replacements, so images don't redo the cache lookup,
  * decode, paint cycle on every chat re-render.
  */
-function ProseHtml({ html, className }: { html: string; className?: string }) {
+export function ProseHtml({ html, className }: { html: string; className?: string }) {
   const ref = useRef<HTMLDivElement>(null)
   const lastHtmlRef = useRef<string | null>(null)
 
@@ -1209,35 +1567,14 @@ function ProseHtml({ html, className }: { html: string; className?: string }) {
     if (!el) return
     if (lastHtmlRef.current === html) return
 
-    const stableImgs = new Map<string, HTMLImageElement>()
-    if (lastHtmlRef.current !== null) {
-      for (const img of el.querySelectorAll<HTMLImageElement>('img[src]')) {
-        const src = img.getAttribute('src')
-        if (src && !stableImgs.has(src)) stableImgs.set(src, img)
-      }
-    }
-
-    el.innerHTML = html
+    replaceHtmlPreservingImages(el, html)
+    restoreInlineHtmlCardSpacing(el, html)
     lastHtmlRef.current = html
-
-    if (stableImgs.size > 0) {
-      for (const newImg of el.querySelectorAll<HTMLImageElement>('img[src]')) {
-        const src = newImg.getAttribute('src')
-        if (!src) continue
-        const preserved = stableImgs.get(src)
-        if (preserved && newImg.parentNode) {
-          newImg.replaceWith(preserved)
-          stableImgs.delete(src)
-        }
-      }
-    }
-
     notifyMessageContentLayout(el)
   }, [html])
 
   return <div ref={ref} className={className} />
 }
-
 function TrustedYouTubeEmbed({ embed }: { embed: TrustedYouTubeEmbed }) {
   return (
     <div className={styles.youtubeEmbedWrap}>
@@ -1272,6 +1609,8 @@ function assetStem(name: string): string {
 
 /** Look up an asset reference in the map — tries exact, then stem. Handles embeded:// URIs. */
 function resolveAssetId(src: string, assetMap: Record<string, string>): string | undefined {
+  const galleryImageId = resolveGalleryImageId(src, assetMap)
+  if (galleryImageId) return galleryImageId
   // Strip Risu embeded:// prefix
   const cleaned = src.startsWith('embeded://') ? src.slice('embeded://'.length) : src
   return assetMap[cleaned] ?? assetMap[assetStem(cleaned)]
@@ -1293,6 +1632,10 @@ function resolveRisuAssetTags(text: string, assetMap: Record<string, string>): s
  *  custom renderer (proseImageWrap, lightbox) as Risu <img="..."> tags.
  *  Already-resolved URLs (absolute paths, http, data:) are left as raw HTML. */
 function resolveImgSrcAssetTags(text: string, assetMap: Record<string, string>): string {
+  // Gallery sources retain their original HTML tag so display-regex styling
+  // and wrapper behavior survive. Other legacy asset references continue to
+  // use the standard Markdown image renderer below.
+  text = resolveGalleryImageSourcesInHtml(text, assetMap)
   IMG_SRC_ASSET_RE.lastIndex = 0
   return text.replace(IMG_SRC_ASSET_RE, (match, before: string, src: string, after: string) => {
     // Skip already-resolved URLs — these are valid img tags that should render as-is
@@ -1335,9 +1678,20 @@ export default function MessageContent({
   characterNameOverride,
   risuAssetMapOverride,
   disableInterceptors = false,
+  findQuery = '',
 }: MessageContentProps) {
   const { t } = useTranslation('chat')
+  const getFormattingSnapshot = useCallback(() => shouldSkipFormattingHealing(chatId), [chatId])
+  const skipFormattingHealing = useSyncExternalStore(subscribeDisplayFormatting, getFormattingSnapshot, getFormattingSnapshot)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
+  const regexScripts = useStore((s) => s.regexScripts)
+  const actionUsage = useStore((s) => {
+    if (!messageId) return undefined
+    return s.messages.find((message) => message.id === messageId)?.extra?.associative_regex_action_usage
+  })
+  const regexActionsSuperseded = useStore((s) => (
+    !isUser && hasImmediateUserReply(s.messages, messageId)
+  ))
   const characters = useStore((s) => s.characters)
   const isGroupChat = useStore((s) => s.isGroupChat)
   const groupCharacterIds = useStore((s) => s.groupCharacterIds)
@@ -1373,9 +1727,13 @@ export default function MessageContent({
   )
   const deliveredTagInterceptsRef = useRef(new Set<string>())
   const interceptedMessageTags = useMemo(
-    () => disableInterceptors
-      ? { content, intercepts: [] }
-      : stripMessageTags(content, { messageId, chatId, isUser, isStreaming }),
+    () => {
+      // interceptorRegistryVersion is the external-store invalidation trigger.
+      void interceptorRegistryVersion
+      return disableInterceptors
+        ? { content, intercepts: [] }
+        : stripMessageTags(content, { messageId, chatId, isUser, isStreaming })
+    },
     [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion, disableInterceptors],
   )
 
@@ -1389,11 +1747,13 @@ export default function MessageContent({
   const macroCtx = useMemo(() => ({ charName, userName }), [charName, userName])
   const preprocessOpts = useMemo(
     () => (messageId
-      ? { messageId, role: (isUser ? 'user' : 'assistant') as 'user' | 'assistant' }
+      ? { messageId, chatId, role: (isUser ? 'user' : 'assistant') as 'user' | 'assistant' }
       : undefined),
-    [messageId, isUser],
+    [messageId, chatId, isUser],
   )
-  const regexAppliedContent = useDisplayRegex(interceptorCleanedContent, isUser, depth, macroCtx, preprocessOpts)
+  const { content: regexAppliedContent, pending: displayPending } = useDisplayRegexState(
+    interceptorCleanedContent, isUser, depth, macroCtx, preprocessOpts, isStreaming,
+  )
 
   const risuResolvedContent = useMemo(
     () => {
@@ -1412,12 +1772,70 @@ export default function MessageContent({
   )
   const deferredResolvedContent = useDeferredValue(resolvedContent)
   const renderContent = isStreaming ? balanceStreamingDetails(deferredResolvedContent) : resolvedContent
+  const previousRenderContentRef = useRef<string | null>(null)
   const blocks = useMemo(() => parseOOC(renderContent), [renderContent])
   const oocEnabled = useStore((s) => s.oocEnabled)
   const lumiaOOCStyle = useStore((s) => s.lumiaOOCStyle)
+  const longMessageCollapseEnabled = useStore((s) => s.longMessageCollapseEnabled)
+  const longMessageCollapsePreset = useStore((s) => s.longMessageCollapsePreset)
+  const longMessageCollapseCustomHeight = useStore((s) => s.longMessageCollapseCustomHeight)
+  const longMessageCollapseDepth = useStore((s) => s.longMessageCollapseDepth)
+  const expansionKey = chatId && messageId ? longMessageExpansionKey(chatId, messageId) : null
+  const longMessageExpanded = useStore((s) => (
+    expansionKey ? s.expandedLongMessageKeys.includes(expansionKey) : false
+  ))
+  const setLongMessageExpanded = useStore((s) => s.setLongMessageExpanded)
+  const longMessageEligible = isLongMessageCollapseEligible({
+    enabled: longMessageCollapseEnabled,
+    isUser,
+    depth,
+    collapseDepth: longMessageCollapseDepth,
+    chatId,
+    messageId,
+  })
+  const longMessageMaxHeight = getLongMessageCollapseHeight(
+    longMessageCollapsePreset,
+    longMessageCollapseCustomHeight,
+  )
   const containerRef = useRef<HTMLDivElement>(null)
+  const contentBodyRef = useRef<HTMLDivElement>(null)
   const prevTextLenRef = useRef(0)
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null)
+  const [regexSelectionVersion, setRegexSelectionVersion] = useState(0)
+  const [longMessageOverflowing, setLongMessageOverflowing] = useState(false)
+
+  const measureLongMessageOverflow = useCallback(() => {
+    const body = contentBodyRef.current
+    const next = longMessageEligible
+      && !!body
+      && isLongMessageOverflowing(Math.max(body.scrollHeight, body.offsetHeight), longMessageMaxHeight)
+    setLongMessageOverflowing((current) => current === next ? current : next)
+  }, [longMessageEligible, longMessageMaxHeight])
+
+  useEffect(() => {
+    const refresh = () => setRegexSelectionVersion((version) => version + 1)
+    window.addEventListener(REGEX_SELECTIONS_CHANGED_EVENT, refresh)
+    window.addEventListener('storage', refresh)
+    return () => {
+      window.removeEventListener(REGEX_SELECTIONS_CHANGED_EVENT, refresh)
+      window.removeEventListener('storage', refresh)
+    }
+  }, [])
+
+  // Regex macro resolution and tag-interceptor registration can replace an
+  // already-mounted message after the user has scrolled away from the tail.
+  // Mark that reflow before ResizeObserver delivers the row's new height so
+  // the virtual list can preserve the viewport independently of its stale
+  // scrollDirection value. Initial mounts deliberately remain unmarked.
+  useLayoutEffect(() => {
+    const previous = previousRenderContentRef.current
+    previousRenderContentRef.current = renderContent
+    if (previous === null || previous === renderContent) return
+
+    const container = containerRef.current
+    if (!container) return
+    dispatchMessageContentLayout(container, { preserveScrollAnchor: true })
+  }, [renderContent])
 
   const handleLightboxClose = useCallback(() => setLightboxSrc(null), [])
 
@@ -1426,6 +1844,7 @@ export default function MessageContent({
     const container = containerRef.current
     if (!container) return
     const handleClick = (e: MouseEvent) => {
+      if (e.composedPath().some((node) => node instanceof Element && node.hasAttribute('data-lumiverse-regex-action'))) return
       const img = (e.target as HTMLElement).closest('img[data-lightbox], .prose img') as HTMLImageElement | null
       if (img?.src) setLightboxSrc(img.src)
     }
@@ -1433,11 +1852,280 @@ export default function MessageContent({
     return () => container.removeEventListener('click', handleClick)
   }, [])
 
+  // Display-regex actions can live in ordinary prose or inside an HTML
+  // island's shadow root. composedPath() finds the authored target in both.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || isStreaming || !chatId) return
+
+    const findActionTarget = (event: Event): Element | null => (
+      event.composedPath().find((node): node is Element => (
+        node instanceof Element && node.hasAttribute('data-lumiverse-regex-action')
+      )) ?? null
+    )
+
+    type ConfiguredAction = (typeof regexScripts)[number]['actions'][number]
+    type ResolvedAction = { payload: ResolvedRegexActionPayload; configured: ConfiguredAction }
+
+    const findConfiguredAction = (payload: Partial<ResolvedRegexActionPayload>) => regexScripts
+      .find((script) => script.id === payload.scriptId && !script.disabled && script.target.includes('display'))
+      ?.actions.find((action) => action.id === payload.id)
+
+    // Shared shape/config validation — silently ignores anything that is not
+    // a well-formed, currently-configured regex action.
+    const resolveConfigured = (target: Element): ResolvedAction | null => {
+      const encoded = target.getAttribute('data-lumiverse-regex-action')
+      if (!encoded) return null
+      try {
+        const payload = JSON.parse(decodeURIComponent(encoded)) as Partial<ResolvedRegexActionPayload>
+        if (
+          (payload.type !== 'send' && payload.type !== 'append' && payload.type !== 'effects') ||
+          typeof payload.id !== 'string' || typeof payload.scriptId !== 'string' ||
+          typeof payload.instanceId !== 'string' ||
+          typeof payload.multi_select !== 'boolean' ||
+          typeof payload.cost !== 'number' || !Number.isFinite(payload.cost) || payload.cost <= 0 ||
+          typeof payload.limit !== 'number' || !Number.isFinite(payload.limit) || payload.limit < 0 ||
+          typeof payload.content !== 'string' || (payload.type !== 'effects' && !payload.content.trim())
+        ) return null
+        const configured = findConfiguredAction(payload)
+        if (!configured) return null
+        if (configured.type !== payload.type || configured.multi_select !== payload.multi_select) return null
+        return { payload: payload as ResolvedRegexActionPayload, configured }
+      } catch {
+        return null
+      }
+    }
+
+    const isUsedOrDisabled = (target: Element, configured: ConfiguredAction, payload: ResolvedRegexActionPayload): boolean => {
+      const usageKey = configured.multi_select ? `${payload.instanceId}:${payload.id}` : payload.instanceId
+      const blockHasSelection = Object.keys(actionUsage || {}).some((key) => (
+        key === payload.instanceId || key.startsWith(`${payload.instanceId}:`)
+      ))
+      const alreadyUsed = configured.multi_select
+        ? !!actionUsage?.[payload.instanceId] || !!actionUsage?.[usageKey]
+        : blockHasSelection
+      return target.getAttribute('aria-disabled') === 'true' || alreadyUsed
+    }
+
+    const dispatchActivation = (resolved: ResolvedAction, queue: boolean): void => {
+      const { payload, configured } = resolved
+      dispatchRegexAction({
+        id: payload.id,
+        type: payload.type,
+        multi_select: configured.multi_select,
+        cost: payload.cost,
+        limit: payload.limit,
+        title: typeof payload.title === 'string' ? payload.title : '',
+        subtitle: typeof payload.subtitle === 'string' ? payload.subtitle : '',
+        content: payload.content,
+        scriptId: payload.scriptId,
+        instanceId: payload.instanceId,
+        chatId,
+        messageId,
+        ...(configured.effects?.length ? { effects: configured.effects } : {}),
+        ...(queue ? { queue: true } : {}),
+      })
+    }
+
+    // Ctrl/cmd-click or right-click queues the action content into the
+    // composer instead of claiming and sending it, so the user can build on
+    // top of it. Plain clicks and keyboard activation keep sending.
+    const queueIntent = (event: MouseEvent | KeyboardEvent): boolean => (
+      event instanceof MouseEvent && (event.type === 'contextmenu' || event.ctrlKey || event.metaKey)
+    )
+
+    // Touch/pen long-press produces the same queue activation. The
+    // controller suppresses the synthetic click (and any synthesized
+    // contextmenu) that follow the hold, so the gesture queues exactly once.
+    const longPress = attachRegexActionLongPress({
+      container,
+      findTarget: findActionTarget,
+      isQueueable: (target) => {
+        const resolved = resolveConfigured(target)
+        if (!resolved) return false
+        const { payload, configured } = resolved
+        if (configured.multi_select || payload.type !== 'send') return false
+        if (regexActionsSuperseded) return false
+        if (isUser && configured.effects?.length) return false
+        return !isUsedOrDisabled(target, configured, payload)
+      },
+      onQueue: (target) => {
+        const resolved = resolveConfigured(target)
+        if (!resolved) return
+        dispatchActivation(resolved, true)
+      },
+    })
+
+    const activate = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Enter' && event.key !== ' ') return
+      const target = findActionTarget(event)
+      if (!target) return
+      if (longPress.shouldSuppressEvent(event, target)) {
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      const resolved = resolveConfigured(target)
+      if (!resolved) return
+      const { payload, configured } = resolved
+      if (regexActionsSuperseded) {
+        event.preventDefault()
+        event.stopPropagation()
+        toast.info(t('toast.regexActionExpired'))
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      if (isUser && configured.effects?.length) {
+        toast.info(t('toast.regexActionAssistantOnly'))
+        return
+      }
+      if (isUsedOrDisabled(target, configured, payload)) {
+        toast.info(t('toast.regexActionAlreadyUsed'))
+        return
+      }
+      dispatchActivation(resolved, queueIntent(event))
+    }
+
+    container.addEventListener('click', activate)
+    container.addEventListener('keydown', activate)
+    container.addEventListener('contextmenu', activate)
+    return () => {
+      container.removeEventListener('click', activate)
+      container.removeEventListener('keydown', activate)
+      container.removeEventListener('contextmenu', activate)
+      longPress.destroy()
+    }
+  }, [chatId, messageId, isUser, isStreaming, regexScripts, actionUsage, regexActionsSuperseded, t, regexSelectionVersion])
+
+  useLayoutEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const elements: Element[] = Array.from(container.querySelectorAll('[data-lumiverse-regex-action]'))
+    for (const island of container.querySelectorAll<HTMLElement>(`.${styles.htmlIsland}`)) {
+      if (island.shadowRoot) {
+        elements.push(...Array.from(island.shadowRoot.querySelectorAll('[data-lumiverse-regex-action]')))
+      }
+    }
+    for (const element of elements) {
+      const encoded = element.getAttribute('data-lumiverse-regex-action')
+      if (!encoded) continue
+      try {
+        const payload = JSON.parse(decodeURIComponent(encoded)) as Partial<ResolvedRegexActionPayload>
+        if (
+          !payload.instanceId || !payload.id || !payload.scriptId ||
+          (payload.type !== 'send' && payload.type !== 'append' && payload.type !== 'effects') ||
+          typeof payload.cost !== 'number' || typeof payload.limit !== 'number'
+        ) continue
+        const configured = regexScripts
+          .find((script) => script.id === payload.scriptId)
+          ?.actions.find((action) => action.id === payload.id)
+        if (!configured) continue
+        const usageKey = configured.multi_select ? `${payload.instanceId}:${payload.id}` : payload.instanceId
+        const blockHasSelection = Object.keys(actionUsage || {}).some((key) => (
+          key === payload.instanceId || key.startsWith(`${payload.instanceId}:`)
+        ))
+        const used = configured.multi_select
+          ? !!actionUsage?.[payload.instanceId] || !!actionUsage?.[usageKey]
+          : blockHasSelection
+        const activation: RegexActionActivation = {
+          id: payload.id,
+          type: payload.type,
+          multi_select: configured.multi_select,
+          cost: payload.cost,
+          limit: payload.limit,
+          title: typeof payload.title === 'string' ? payload.title : '',
+          subtitle: typeof payload.subtitle === 'string' ? payload.subtitle : '',
+          content: typeof payload.content === 'string' ? payload.content : '',
+          scriptId: payload.scriptId,
+          instanceId: payload.instanceId,
+          chatId: chatId || '',
+          messageId,
+        }
+        const selected = configured.multi_select && !!chatId && isRegexSelectionPending(activation)
+        const budgetBlocked = configured.multi_select && !selected && payload.limit > 0 && (
+          getRegexBlockSelectionCost(activation) + payload.cost > payload.limit
+        )
+        element.toggleAttribute('data-lumiverse-regex-action-selected', selected)
+        element.toggleAttribute('data-lumiverse-regex-action-budget-blocked', budgetBlocked)
+        if (configured.multi_select) element.setAttribute('aria-pressed', selected ? 'true' : 'false')
+        else element.removeAttribute('aria-pressed')
+        const stateEffectBlocked = isUser && !!configured.effects?.length
+        const disabled = used || regexActionsSuperseded || stateEffectBlocked
+        element.toggleAttribute('data-lumiverse-regex-action-superseded', regexActionsSuperseded)
+        element.toggleAttribute('data-lumiverse-regex-action-state-blocked', stateEffectBlocked)
+        if (disabled) {
+          element.setAttribute('aria-disabled', 'true')
+          element.toggleAttribute('data-lumiverse-regex-action-used', used)
+          element.setAttribute('tabindex', '-1')
+          if (element instanceof HTMLElement || element instanceof SVGElement) {
+            element.style.cursor = 'not-allowed'
+            element.style.opacity = '0.55'
+            element.style.filter = 'saturate(0.45)'
+          }
+        } else {
+          element.removeAttribute('aria-disabled')
+          element.removeAttribute('data-lumiverse-regex-action-used')
+          element.setAttribute('tabindex', '0')
+          if (element instanceof HTMLElement || element instanceof SVGElement) {
+            if (budgetBlocked) {
+              element.style.cursor = 'not-allowed'
+              element.style.opacity = '0.55'
+            } else {
+              element.style.removeProperty('cursor')
+              element.style.removeProperty('opacity')
+            }
+            element.style.removeProperty('filter')
+          }
+        }
+        if (element instanceof HTMLElement || element instanceof SVGElement) {
+          if (selected) {
+            element.style.outline = '2px solid var(--lumiverse-primary)'
+            element.style.outlineOffset = '2px'
+          } else {
+            element.style.removeProperty('outline')
+            element.style.removeProperty('outline-offset')
+          }
+        }
+      } catch {}
+    }
+  }, [actionUsage, regexActionsSuperseded, regexScripts, renderContent, regexSelectionVersion, chatId, isUser, messageId])
+
   // Attach click handler for code copy buttons
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
     return attachCodeCopyHandler(container)
+  }, [])
+
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const signalCollapsibleToggle = (event: Event) => {
+      const details = findDetailsToggleLayoutTarget(event)
+      if (details) dispatchCollapsibleToggleLayoutEvent(details)
+    }
+
+    const handleSummaryClickCapture = (event: MouseEvent) => {
+      signalCollapsibleToggle(event)
+    }
+
+    const handleSummaryKeyDownCapture = (event: KeyboardEvent) => {
+      if (!DETAILS_TOGGLE_KEYS.has(event.key)) return
+      signalCollapsibleToggle(event)
+    }
+
+    // Native <details> elements toggle immediately after activation. Mark the
+    // row before that happens so the virtualizer treats the resulting resize as
+    // a user-controlled collapse/expand, just like the dedicated reasoning box.
+    container.addEventListener('click', handleSummaryClickCapture, true)
+    container.addEventListener('keydown', handleSummaryKeyDownCapture, true)
+
+    return () => {
+      container.removeEventListener('click', handleSummaryClickCapture, true)
+      container.removeEventListener('keydown', handleSummaryKeyDownCapture, true)
+    }
   }, [])
 
   useLayoutEffect(() => {
@@ -1453,6 +2141,7 @@ export default function MessageContent({
       pendingRaf = window.requestAnimationFrame(() => {
         pendingRaf = 0
         if (cancelled) return
+        measureLongMessageOverflow()
         notifyMessageContentLayout(container)
       })
     }
@@ -1471,7 +2160,7 @@ export default function MessageContent({
     let observer: ResizeObserver | null = null
     if (isStreaming) {
       observer = new ResizeObserver(scheduleLayoutNotify)
-      observer.observe(container)
+      observer.observe(contentBodyRef.current ?? container)
 
       mutationObserver = new MutationObserver(scheduleLayoutNotify)
       mutationObserver.observe(container, { childList: true, subtree: true, attributes: true, characterData: true })
@@ -1501,38 +2190,37 @@ export default function MessageContent({
     // layout events already notify MessageList via scheduleLayoutNotify(), so
     // re-creating observers on every renderContent change is unnecessary and
     // causes observer churn during fast streaming.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [isStreaming, measureLongMessageOverflow])
 
   // While streaming, ratchet the content container's min-height upward so that
   // transient DOM shrinkage (unclosed tags snapping shut, image placeholders
   // collapsing, etc.) cannot make the virtualized row height oscillate. The
   // lock is applied directly to the DOM to avoid React re-render thrash.
   useLayoutEffect(() => {
-    const container = containerRef.current
-    if (!container) return
+    const contentBody = contentBodyRef.current
+    if (!contentBody) return
 
     if (!isStreaming) {
-      container.style.minHeight = ''
+      contentBody.style.minHeight = ''
       return
     }
 
     // offsetHeight is zoom-invariant under Lumiverse's body-level CSS zoom,
     // whereas getBoundingClientRect() would return scaled pixels and the lock
     // would be applied twice.
-    let maxHeight = container.offsetHeight
-    container.style.minHeight = `${maxHeight}px`
+    let maxHeight = contentBody.offsetHeight
+    contentBody.style.minHeight = `${maxHeight}px`
 
     const updateMinHeight = () => {
-      const h = container.offsetHeight
+      const h = contentBody.offsetHeight
       if (h > maxHeight) {
         maxHeight = h
-        container.style.minHeight = `${h}px`
+        contentBody.style.minHeight = `${h}px`
       }
     }
 
     const observer = new ResizeObserver(updateMinHeight)
-    observer.observe(container)
+    observer.observe(contentBody)
 
     return () => observer.disconnect()
   }, [isStreaming])
@@ -1567,7 +2255,7 @@ export default function MessageContent({
           }
           // Otherwise skip — OOC content is hidden until rendered in the grouped box
         } else {
-          const pieces = formatContentPieces(block.content, isStreaming)
+          const pieces = formatContentPieces(block.content, isStreaming, skipFormattingHealing)
           for (let p = 0; p < pieces.length; p++) {
             const piece = pieces[p]
             elements.push(
@@ -1590,7 +2278,7 @@ export default function MessageContent({
           )
           oocIndex++
         } else {
-          const pieces = formatContentPieces(block.content, isStreaming)
+          const pieces = formatContentPieces(block.content, isStreaming, skipFormattingHealing)
           for (let p = 0; p < pieces.length; p++) {
             const piece = pieces[p]
             elements.push(
@@ -1606,7 +2294,46 @@ export default function MessageContent({
     }
 
     return elements
-  }, [blocks, oocEnabled, lumiaOOCStyle, isStreaming])
+  }, [blocks, oocEnabled, lumiaOOCStyle, isStreaming, skipFormattingHealing])
+
+  useLayoutEffect(() => {
+    measureLongMessageOverflow()
+  }, [measureLongMessageOverflow, renderContent, renderedBlocks])
+
+  const handleLongMessageToggle = useCallback(() => {
+    if (!chatId || !messageId) return
+    const container = containerRef.current
+    dispatchCollapsibleToggleLayoutEvent(container)
+    setLongMessageExpanded(chatId, messageId, !longMessageExpanded)
+    window.requestAnimationFrame(() => {
+      const current = containerRef.current
+      if (!current) return
+      measureLongMessageOverflow()
+      dispatchMessageContentLayout(current)
+    })
+  }, [chatId, longMessageExpanded, measureLongMessageOverflow, messageId, setLongMessageExpanded])
+
+  // Highlight rendered text nodes instead of rewriting the source Markdown or
+  // sanitized HTML. This preserves formatting, display regexes, OOC layouts,
+  // and isolated HTML islands while making query matches visible everywhere.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+
+    const roots = getChatFindHighlightRoots(container)
+    for (const root of roots) clearChatFindHighlights(root)
+    if (!findQuery.trim()) return
+
+    let changed = false
+    for (const root of roots) changed = highlightChatFindMatches(root, findQuery) || changed
+    if (changed) notifyMessageContentLayout(container)
+
+    return () => {
+      let didClear = false
+      for (const root of roots) didClear = clearChatFindHighlights(root) || didClear
+      if (didClear) notifyMessageContentLayout(container)
+    }
+  }, [findQuery, renderedBlocks])
 
   // Chunk fade animation for streaming tokens
   useLayoutEffect(() => {
@@ -1667,11 +2394,41 @@ export default function MessageContent({
     <>
       <div
         data-component="MessageContent"
+        data-display-pending={!isStreaming && displayPending || undefined}
         ref={containerRef}
         className={clsx(styles.content, isUser ? styles.contentUser : styles.contentChar)}
       >
-        {renderedBlocks}
-        <SpindleMessageWidgets messageId={messageId} />
+        <div
+          id={longMessageEligible ? `long-message-body-${messageId}` : undefined}
+          className={clsx(
+            styles.longMessageViewport,
+            longMessageEligible && !longMessageExpanded && styles.longMessageViewportConstrained,
+            longMessageEligible && !longMessageExpanded && longMessageOverflowing && styles.longMessageViewportOverflowing,
+          )}
+          style={longMessageEligible && !longMessageExpanded ? { maxHeight: longMessageMaxHeight } : undefined}
+        >
+          <div ref={contentBodyRef} className={styles.longMessageBody}>
+            {renderedBlocks}
+      <SpindleMessageWidgets messageId={messageId} chatId={chatId} />
+          </div>
+        </div>
+        {longMessageEligible && longMessageOverflowing && (
+          <button
+            type="button"
+            className={clsx(styles.longMessageToggle, longMessageExpanded && styles.longMessageToggleExpanded)}
+            onClick={handleLongMessageToggle}
+            aria-expanded={longMessageExpanded}
+            aria-controls={`long-message-body-${messageId}`}
+            data-long-message-toggle="true"
+          >
+            <span className={styles.longMessageTogglePill}>
+              <span>{longMessageExpanded ? t('messageContent.showLess') : t('messageContent.readMore')}</span>
+              <span className={styles.longMessageToggleIconFrame} aria-hidden="true">
+                <ChevronDown className={styles.longMessageToggleIcon} size={13} strokeWidth={2.4} />
+              </span>
+            </span>
+          </button>
+        )}
       </div>
       <ImageLightbox src={lightboxSrc} onClose={handleLightboxClose} />
     </>

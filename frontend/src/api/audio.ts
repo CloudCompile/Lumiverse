@@ -1,4 +1,4 @@
-import { BASE_URL } from './client'
+import { BASE_URL, upload } from './client'
 import type { Message } from '@/types/api'
 
 export interface SavedTtsAudio {
@@ -13,7 +13,21 @@ export interface SavedTtsAudio {
   muxed_with_ffmpeg: boolean
 }
 
+export interface StoredAudio {
+  id: string
+  mime_type: string
+  original_filename: string
+  size_bytes: number
+  duration_ms: number | null
+}
+
 export const audioApi = {
+  upload(file: File): Promise<StoredAudio> {
+    const form = new FormData()
+    form.append('audio', file)
+    return upload<StoredAudio>('/audio', form)
+  },
+
   /** URL to stream a stored audio file (immutable; safe to bind directly to <audio src>). */
   url(id: string): string {
     return `${BASE_URL}/audio/${id}`

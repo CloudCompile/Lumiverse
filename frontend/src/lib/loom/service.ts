@@ -1,13 +1,18 @@
+import type { PromptBlockDTO, PromptVariableDefDTO, PromptVariableOptionDTO, PromptVariableValuesDTO } from 'lumiverse-spindle-types'
 import type { Preset, CreatePresetInput, UpdatePresetInput, ProviderInfo } from '@/types/api'
 import type {
   PromptBlock,
+  PromptBlockPlacement,
   PromptVariableValue,
+  PromptVariableDef,
+  PromptVariableValues,
   LoomPreset,
   LoomRegistryEntry,
   LoomConnectionProfile,
   MacroGroup,
   CategoryGroup,
 } from './types'
+import { sanitizeCharacterTagTrigger } from './characterTagTrigger'
 import { generateUUID } from '@/lib/uuid'
 import {
   MARKER_NAMES,
@@ -44,6 +49,7 @@ export function createBlock(overrides: Partial<PromptBlock> = {}): PromptBlock {
     isLocked: false,
     color: null,
     injectionTrigger: [],
+    characterTagTrigger: [],
     group: null,
     categoryMode: null,
     ...overrides,
@@ -60,6 +66,131 @@ export function createMarkerBlock(markerType: string, name?: string): PromptBloc
     content: '',
     isLocked: isStructural,
   })
+}
+
+function isPromptBlockPlacement(value: unknown): value is PromptBlockPlacement {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const placement = value as Partial<PromptBlockPlacement>
+  return (
+    (placement.role === 'system' || placement.role === 'user' || placement.role === 'assistant' || placement.role === 'user_append' || placement.role === 'assistant_append')
+    && (placement.position === 'pre_history' || placement.position === 'post_history' || placement.position === 'in_history')
+    && typeof placement.depth === 'number'
+    && Number.isFinite(placement.depth)
+    && placement.depth >= 0
+  )
+}
+
+/**
+ * Project select-variable placement bindings for UI surfaces that need to
+ * display the same role/position/depth the prompt assembler will use. This is
+ * read-only and leaves each preset block's persisted fallback unchanged.
+ */
+export function resolvePromptBlockPlacements(
+  blocks: PromptBlock[],
+  values: PromptVariableValues,
+): PromptBlock[] {
+  return blocks.map((block) => {
+    const binding = block.placementBinding
+    if (
+      !binding
+      || typeof binding.variableId !== 'string'
+      || !binding.variableId
+      || !binding.options
+      || typeof binding.options !== 'object'
+      || Array.isArray(binding.options)
+    ) return block
+
+    const selector = block.variables?.find(
+      (variable): variable is Extract<PromptVariableDef, { type: 'select' }> => (
+        variable.id === binding.variableId && variable.type === 'select'
+      ),
+    )
+    if (!selector) return block
+
+    const validIds = new Set(selector.options.map((option) => option.id))
+    const configured = values[block.id]?.[selector.name]
+    const fallback = validIds.has(selector.defaultValue)
+      ? selector.defaultValue
+      : selector.options[0]?.id ?? ''
+    const selectedId = typeof configured === 'string' && validIds.has(configured)
+      ? configured
+      : fallback
+    if (!selectedId || !Object.prototype.hasOwnProperty.call(binding.options, selectedId)) return block
+
+    const placement = binding.options[selectedId]
+    if (!isPromptBlockPlacement(placement)) return block
+    return {
+      ...block,
+      role: placement.role,
+      position: placement.position,
+      depth: Math.floor(placement.depth),
+    }
+  })
+}
+
+function projectPublicPromptVariableOption(option: PromptVariableOptionDTO): PromptVariableOptionDTO {
+  return {
+    id: option.id,
+    label: option.label,
+    value: option.value,
+  }
+}
+
+function projectPublicPromptVariable(variable: PromptVariableDef): PromptVariableDefDTO {
+  const projected: Record<string, unknown> = {
+    id: variable.id,
+    name: variable.name,
+    label: variable.label,
+    type: variable.type,
+    defaultValue: Array.isArray(variable.defaultValue)
+      ? [...variable.defaultValue]
+      : variable.defaultValue,
+  }
+  if (variable.description !== undefined) projected.description = variable.description
+  if (variable.type === 'textarea' && variable.rows !== undefined) projected.rows = variable.rows
+  if ((variable.type === 'number' || variable.type === 'slider') && variable.min !== undefined) {
+    projected.min = variable.min
+  }
+  if ((variable.type === 'number' || variable.type === 'slider') && variable.max !== undefined) {
+    projected.max = variable.max
+  }
+  if ((variable.type === 'number' || variable.type === 'slider') && variable.step !== undefined) {
+    projected.step = variable.step
+  }
+  if (variable.type === 'select' || variable.type === 'multiselect') {
+    projected.options = variable.options.map(projectPublicPromptVariableOption)
+  }
+  if (variable.type === 'multiselect' && variable.separator !== undefined) {
+    projected.separator = variable.separator
+  }
+  return projected as PromptVariableDefDTO
+}
+
+export function projectPublicPromptBlock(block: PromptBlock): PromptBlockDTO {
+  const projected: PromptBlockDTO = {
+    id: block.id,
+    name: block.name,
+    content: block.content,
+    role: block.role,
+    enabled: block.enabled,
+    position: block.position,
+    depth: block.depth,
+    marker: block.marker,
+    isLocked: block.isLocked,
+    color: block.color,
+    injectionTrigger: [...block.injectionTrigger],
+    characterTagTrigger: [...(block.characterTagTrigger ?? [])],
+    group: block.group ?? null,
+    categoryMode: block.categoryMode ?? null,
+  }
+  if (block.variables !== undefined) {
+    projected.variables = block.variables.map(projectPublicPromptVariable)
+  }
+  return projected
+}
+
+export function projectPublicPromptBlocks(blocks: PromptBlock[]): PromptBlockDTO[] {
+  return blocks.map(projectPublicPromptBlock)
 }
 
 // ============================================================================
@@ -81,15 +212,27 @@ function migratePreset(preset: LoomPreset): LoomPreset {
     ? preset.presetVersion.trim()
     : null
   preset.lumihubMeta = isRecord(preset.lumihubMeta) ? preset.lumihubMeta : null
+  preset.passthroughMetadata = isRecord(preset.passthroughMetadata) ? preset.passthroughMetadata : {}
+  const installedSource = preset.lumihubMeta?._lumiverse_install_source
   if (Array.isArray(preset.blocks)) {
     for (const block of preset.blocks) {
       if (!Array.isArray(block.injectionTrigger)) {
         block.injectionTrigger = []
       }
+      block.characterTagTrigger = sanitizeCharacterTagTrigger(block.characterTagTrigger)
       block.categoryMode = block.marker === 'category'
         ? coerceCategoryMode(block.categoryMode)
         : null
-      if (block.sealedSource === 'lumihub') {
+      // Blanket-disable snapshots only make sense on category blocks.
+      block.savedChildEnabled = block.marker === 'category' && isRecord(block.savedChildEnabled)
+        ? Object.fromEntries(Object.entries(block.savedChildEnabled).filter((entry): entry is [string, boolean] => typeof entry[0] === 'string' && typeof entry[1] === 'boolean'))
+        : undefined
+      // Older Illarin deliveries carried the sealed flag/key but predated the
+      // per-block source marker. Backfill it from authoritative install metadata.
+      if (block.sealed === true && block.sealedSource == null && installedSource === 'illarin') {
+        block.sealedSource = 'illarin'
+      }
+      if (isProtectedSealedSource(block.sealedSource)) {
         block.sealed = true
       }
       if (block.sealed !== true) {
@@ -114,6 +257,21 @@ function isRecord(value: unknown): value is Record<string, any> {
 
 /** Version key is surfaced separately as `presetVersion`; the rest of the bag round-trips verbatim. */
 const LUMIHUB_VERSION_META_KEY = '_lumiverse_preset_version'
+const LOOM_OWNED_META_KEYS = new Set([
+  'source',
+  'modelProfiles',
+  'schemaVersion',
+  'description',
+  'coverUrl',
+  'cover_url',
+  'isDefault',
+  'lastProfileKey',
+  'promptVariables',
+])
+
+export function isLoomOwnedPresetMetadataKey(key: string): boolean {
+  return LOOM_OWNED_META_KEYS.has(key) || key.startsWith('_lumiverse_')
+}
 
 /**
  * Pull the LumiHub provenance bag (install source, hub id, slug, creator) out of a stored
@@ -130,6 +288,54 @@ function extractLumihubMeta(meta: Record<string, any>): Record<string, unknown> 
     }
   }
   return Object.keys(bag).length > 0 ? bag : null
+}
+
+/**
+ * New installs carry an authoritative source marker. Older LumiHub presets
+ * predate that marker, so a stored published version remains the compatibility
+ * fallback only when no explicit source has been recorded.
+ */
+export function shouldShowLumiHubPresetBadge(
+  preset: Pick<LoomPreset, 'presetVersion' | 'lumihubMeta'>,
+): boolean {
+  return getRemotePresetOrigin(preset) === 'lumihub'
+}
+
+export type RemotePresetOrigin = 'lumihub' | 'illarin'
+
+/** Sources whose installed sealed blocks must never export materialized content. */
+export function isProtectedSealedSource(source: unknown): source is RemotePresetOrigin {
+  return source === 'lumihub' || source === 'illarin'
+}
+
+/** Resolve explicit provenance, retaining the legacy LumiHub-version fallback. */
+export function getRemotePresetOrigin(
+  preset: Pick<LoomPreset, 'presetVersion' | 'lumihubMeta'>,
+): RemotePresetOrigin | null {
+  const installSource = preset.lumihubMeta?._lumiverse_install_source
+  if (installSource === 'lumihub' || installSource === 'illarin') return installSource
+  if (typeof installSource === 'string') return null
+  return preset.presetVersion ? 'lumihub' : null
+}
+
+function markPresetAsLocalImport(preset: LoomPreset): LoomPreset {
+  const migrated = migratePreset(preset)
+  migrated.lumihubMeta = {
+    ...(migrated.lumihubMeta ?? {}),
+    // A file import is a local copy even when its export retains attribution.
+    // This prevents it from presenting as, or being updated as, a Hub install.
+    _lumiverse_install_source: 'local',
+  }
+  return migrated
+}
+
+function extractPassthroughMetadata(meta: Record<string, any>): Record<string, unknown> {
+  const bag: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(meta)) {
+    if (isLoomOwnedPresetMetadataKey(key)) continue
+    bag[key] = value
+  }
+  return bag
 }
 
 function hasLegacyPromptOrderShape(promptOrder: unknown): boolean {
@@ -173,32 +379,41 @@ export function detectImportedPresetKind(data: unknown): 'loom' | 'legacy' | nul
 
 export function coerceImportedLoomPreset(data: unknown, fallbackName: string): LoomPreset {
   if (looksLikeWrappedLumiHubPresetData(data)) {
-    return migratePreset({
+    const wrappedCoverUrl = typeof data.cover_url === 'string'
+      ? data.cover_url
+      : typeof data.coverUrl === 'string'
+        ? data.coverUrl
+        : typeof data.preset.coverUrl === 'string'
+          ? data.preset.coverUrl
+          : typeof (data.preset as any).cover_url === 'string'
+            ? (data.preset as any).cover_url
+            : null
+    return markPresetAsLocalImport({
       ...data.preset,
       name: data.preset.name || fallbackName,
-      coverUrl: typeof data.cover_url === 'string' ? data.cover_url : null,
+      coverUrl: wrappedCoverUrl,
     } as LoomPreset)
   }
 
   if (looksLikeLoomPresetData(data)) {
-    return migratePreset({
+    return markPresetAsLocalImport({
       ...data,
       name: data.name || fallbackName,
     })
   }
 
   if (looksLikeBackendLoomPresetData(data)) {
-    return unmarshalPreset(data)
+    return markPresetAsLocalImport(unmarshalPreset(data))
   }
 
   if (looksLikeLegacyPresetData(data)) {
-    return importFromSTPreset(data, fallbackName)
+    return markPresetAsLocalImport(importFromSTPreset(data, fallbackName))
   }
 
   throw new Error('Unrecognized preset JSON format')
 }
 
-function looksLikeWrappedLumiHubPresetData(data: unknown): data is { preset: LoomPreset; cover_url?: unknown } {
+function looksLikeWrappedLumiHubPresetData(data: unknown): data is { preset: LoomPreset; cover_url?: unknown; coverUrl?: unknown } {
   return isRecord(data)
     && data.type === 'lumiverse_preset'
     && isRecord(data.preset)
@@ -286,6 +501,51 @@ export function toggleBlockWithCategoryRules(
   })
 }
 
+/**
+ * Blanket enable/disable for a category and all of its children — the
+ * distinct category-row control beside the marker's own eye toggle.
+ *
+ * Disabling snapshots every child's enabled state onto the category block
+ * (`savedChildEnabled`, persisted with the preset) and turns the marker and
+ * all children off. Enabling restores that exact snapshot — a mixed
+ * child state comes back mixed — instead of enabling everything
+ * indiscriminately. Children missing from the snapshot (added while the
+ * category was blanket-disabled) keep their current state. The result runs
+ * through category normalization so a radio category still ends with at
+ * most one active child even when the snapshot predates that rule.
+ */
+export function toggleCategoryWithChildren(
+  blocks: PromptBlock[],
+  categoryId: string,
+): PromptBlock[] {
+  const category = blocks.find((block) => block.id === categoryId && block.marker === 'category')
+  if (!category) return blocks
+
+  const group = computeGroups(blocks).find((candidate) => candidate.categoryBlock?.id === categoryId)
+  const childIds = new Set((group?.children ?? []).map((child) => child.id))
+  const disabling = category.enabled
+  const snapshot = category.savedChildEnabled
+
+  const toggled = blocks.map((block) => {
+    if (block.id === categoryId) {
+      return {
+        ...block,
+        enabled: !disabling,
+        // Capture on disable; consume on enable.
+        savedChildEnabled: disabling
+          ? Object.fromEntries((group?.children ?? []).map((child) => [child.id, child.enabled === true]))
+          : undefined,
+      }
+    }
+    if (!childIds.has(block.id)) return block
+    if (disabling) return { ...block, enabled: false }
+    if (!snapshot || !(block.id in snapshot)) return block
+    return { ...block, enabled: snapshot[block.id] === true }
+  })
+
+  return normalizeCategoryBlockState(toggled)
+}
+
 // ============================================================================
 // MARSHAL / UNMARSHAL — Convert between Loom shape and backend API shape
 // ============================================================================
@@ -306,6 +566,7 @@ export function marshalPreset(loom: LoomPreset): CreatePresetInput {
       advancedSettings: loom.advancedSettings,
     },
     metadata: {
+      ...extractPassthroughMetadata(loom.passthroughMetadata ?? {}),
       source: loom.source,
       modelProfiles: loom.modelProfiles,
       schemaVersion: loom.schemaVersion,
@@ -333,9 +594,11 @@ export function unmarshalPreset(preset: Preset): LoomPreset {
     coverUrl: typeof meta.coverUrl === 'string' ? meta.coverUrl : (typeof meta.cover_url === 'string' ? meta.cover_url : null),
     presetVersion: typeof meta._lumiverse_preset_version === 'string' ? meta._lumiverse_preset_version : null,
     lumihubMeta: extractLumihubMeta(meta),
+    passthroughMetadata: extractPassthroughMetadata(meta),
     schemaVersion: meta.schemaVersion || 1,
     createdAt: preset.created_at,
     updatedAt: preset.updated_at,
+    ...(typeof preset.cache_revision === 'number' ? { cacheRevision: preset.cache_revision } : {}),
     blocks: (preset.prompt_order || []) as PromptBlock[],
     source: meta.source || null,
     isDefault: meta.isDefault || false,
@@ -358,6 +621,9 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
   const blocks = normalizeCategoryBlockState(loom.blocks)
   return {
     name: loom.name,
+    ...(typeof loom.cacheRevision === 'number'
+      ? { expected_cache_revision: loom.cacheRevision }
+      : {}),
     parameters: {
       samplerOverrides: loom.samplerOverrides,
       customBody: loom.customBody,
@@ -369,6 +635,7 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
       advancedSettings: loom.advancedSettings,
     },
     metadata: {
+      ...extractPassthroughMetadata(loom.passthroughMetadata ?? {}),
       source: loom.source,
       modelProfiles: loom.modelProfiles,
       schemaVersion: loom.schemaVersion,
@@ -384,28 +651,48 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
   }
 }
 
-export function sanitizeLumiHubSealedBlocksForExport<T extends LoomPreset>(loom: T): T {
-  const manifestKeys = getLumiHubSealedManifestKeys(loom)
-  if (!manifestKeys.size && !loom.blocks.some((block) => isLumiHubSealedBlock(block))) return loom
+export function sanitizeRemoteSealedBlocksForExport<T extends LoomPreset>(loom: T): T {
+  const manifestKeys = getSealedManifestKeys(loom)
+  const inferIllarinSource = loom.lumihubMeta?._lumiverse_install_source === 'illarin'
+  if (!manifestKeys.size && !loom.blocks.some((block) => (
+    isProtectedInstalledSealedBlock(block) || (inferIllarinSource && block.sealed === true)
+  ))) return loom
 
   return {
     ...loom,
     blocks: loom.blocks.map((block) => {
-      const key = getLumiHubSealedExportKey(block, manifestKeys)
+      const inferredIllarinBlock = inferIllarinSource && block.sealed === true
+      const key = getProtectedSealedExportKey(block, manifestKeys, inferredIllarinBlock)
       if (!key) return block
       return {
         ...block,
         content: sealedPresetBlockPlaceholder(key),
         sealed: true,
         sealedKey: key,
+        ...(inferredIllarinBlock ? { sealedSource: 'illarin' } : {}),
       }
     }),
   }
 }
 
-function getLumiHubSealedExportKey(block: PromptBlock, manifestKeys: Set<string>): string | null {
+/** Remove the installation-local identity before a Loom preset leaves this library. */
+export function createPortableLoomPresetExport(loom: LoomPreset): Omit<LoomPreset, 'id'> {
+  const sanitized = sanitizeRemoteSealedBlocksForExport(loom)
+  const { id: _localPresetId, ...portable } = sanitized
+  return portable
+}
+
+function getProtectedSealedExportKey(
+  block: PromptBlock,
+  manifestKeys: Set<string>,
+  inferredIllarinBlock: boolean,
+): string | null {
   const sealedKey = typeof block.sealedKey === 'string' && block.sealedKey.trim() ? block.sealedKey.trim() : null
-  if (sealedKey && (block.sealedSource === 'lumihub' || manifestKeys.has(sealedKey))) return sealedKey
+  if (sealedKey && (
+    isProtectedSealedSource(block.sealedSource)
+    || manifestKeys.has(sealedKey)
+    || inferredIllarinBlock
+  )) return sealedKey
 
   const placeholderKey = extractExactSealedPlaceholder(block.content || '')
   if (placeholderKey && manifestKeys.has(placeholderKey)) return placeholderKey
@@ -413,11 +700,11 @@ function getLumiHubSealedExportKey(block: PromptBlock, manifestKeys: Set<string>
   return null
 }
 
-function isLumiHubSealedBlock(block: PromptBlock): boolean {
-  return block.sealedSource === 'lumihub'
+function isProtectedInstalledSealedBlock(block: PromptBlock): boolean {
+  return isProtectedSealedSource(block.sealedSource)
 }
 
-function getLumiHubSealedManifestKeys(loom: LoomPreset): Set<string> {
+function getSealedManifestKeys(loom: LoomPreset): Set<string> {
   const sealedPreset = isRecord(loom.lumihubMeta?._lumiverse_sealed_preset)
     ? loom.lumihubMeta._lumiverse_sealed_preset
     : null
@@ -440,24 +727,532 @@ function extractExactSealedPlaceholder(content: string): string | null {
   return match?.[1]?.trim() || null
 }
 
-function pruneOrphanPromptVariables(
+function hasEnumerableDataProperty(value: unknown, key: string): { value: unknown } | null {
+  if (!value || typeof value !== 'object') return null
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) return null
+    return { value: descriptor.value }
+  } catch {
+    return null
+  }
+}
+
+function clonePromptVariableValue(value: unknown): PromptVariableValue | undefined {
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (!Array.isArray(value)) return undefined
+
+  const length = readOwnDataProperty(value, 'length')
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) return undefined
+  let ownKeys: (string | symbol)[]
+  let enumerableKeys: string[]
+  try {
+    ownKeys = Reflect.ownKeys(value)
+    enumerableKeys = Object.keys(value)
+  } catch {
+    return undefined
+  }
+  if (enumerableKeys.length !== length) return undefined
+  for (const key of ownKeys) {
+    if (
+      key !== 'length'
+      && (
+        typeof key !== 'string'
+        || !/^(0|[1-9]\d*)$/.test(key)
+        || Number(key) >= length
+      )
+    ) {
+      return undefined
+    }
+  }
+  const entries: string[] = []
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = hasEnumerableDataProperty(value, String(index))
+    if (!descriptor || typeof descriptor.value !== 'string') return undefined
+    entries.push(descriptor.value)
+  }
+  return entries
+}
+
+function isPromptVariableValueCompatible(
+  variable: PromptVariableDef,
+  value: PromptVariableValue,
+): boolean {
+  if (variable.type === 'text' || variable.type === 'textarea') {
+    return typeof value === 'string'
+  }
+  if (variable.type === 'number' || variable.type === 'slider') {
+    return typeof value === 'number'
+      && Number.isFinite(value)
+      && (variable.min === undefined || value >= variable.min)
+      && (variable.max === undefined || value <= variable.max)
+  }
+  if (variable.type === 'switch') {
+    return value === 0 || value === 1
+  }
+  const optionIds = new Set(variable.options.map((option) => option.id))
+  if (variable.type === 'select') {
+    return typeof value === 'string' && optionIds.has(value)
+  }
+  return Array.isArray(value)
+    && Object.keys(value).length === value.length
+    && Reflect.ownKeys(value).every((key) => (
+      key === 'length'
+      || (typeof key === 'string' && /^(0|[1-9]\d*)$/.test(key) && Number(key) < value.length)
+    ))
+    && value.every((entry) => typeof entry === 'string' && optionIds.has(entry))
+    && new Set(value).size === value.length
+}
+
+function cloneCompatiblePromptVariableValue(
+  variable: PromptVariableDef,
+  value: unknown,
+): PromptVariableValue | undefined {
+  const cloned = clonePromptVariableValue(value)
+  return cloned !== undefined && isPromptVariableValueCompatible(variable, cloned)
+    ? cloned
+    : undefined
+}
+
+export interface PromptVariableSchemaValidationOptions {
+  /** Existing native graph used to tolerate only its already-persisted anomalies. */
+  legacyBaseline?: PromptBlock[] | null
+}
+
+function hasLegacyVariableIdentity(variables: unknown): variables is PromptVariableDef[] {
+  if (!Array.isArray(variables)) return false
+  const ids = new Set<string>()
+  const names = new Set<string>()
+  return variables.some((variable) => {
+    if (!variable || typeof variable !== 'object') return true
+    const id = (variable as PromptVariableDef).id
+    const name = (variable as PromptVariableDef).name
+    if (typeof id !== 'string' || !id.trim() || typeof name !== 'string' || !name.trim()) return true
+    if (ids.has(id) || names.has(name)) return true
+    ids.add(id)
+    names.add(name)
+    return false
+  })
+}
+
+function preservesLegacyVariableIdentity(
+  baseline: unknown,
+  next: unknown,
+): boolean {
+  if (!Array.isArray(baseline) || !Array.isArray(next)) return false
+  const idCounts = new Map<string, number>()
+  const nameCounts = new Map<string, number>()
+  for (const variable of next) {
+    if (!variable || typeof variable !== 'object') continue
+    const id = (variable as PromptVariableDef).id
+    const name = (variable as PromptVariableDef).name
+    if (typeof id === 'string') idCounts.set(id, (idCounts.get(id) ?? 0) + 1)
+    if (typeof name === 'string') nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1)
+  }
+  return next.every((variable, index) => {
+    if (!variable || typeof variable !== 'object') return false
+    const id = (variable as PromptVariableDef).id
+    const name = (variable as PromptVariableDef).name
+    const invalid = typeof id !== 'string'
+      || !id.trim()
+      || typeof name !== 'string'
+      || !name.trim()
+      || idCounts.get(id) !== 1
+      || nameCounts.get(name) !== 1
+    if (!invalid) return true
+    const prior = baseline[index]
+    return !!prior
+      && typeof prior === 'object'
+      && (prior as PromptVariableDef).id === id
+      && (prior as PromptVariableDef).name === name
+  })
+}
+
+function samePromptVariableIdentity(previous: PromptBlock, next: PromptBlock): boolean {
+  if (previous.variables === undefined || next.variables === undefined) {
+    return previous.variables === undefined && next.variables === undefined
+  }
+  if (!Array.isArray(previous.variables) || !Array.isArray(next.variables)) return false
+  return previous.variables.length === next.variables.length
+    && previous.variables.every((variable, index) => (
+      variable.id === next.variables?.[index]?.id
+      && variable.name === next.variables?.[index]?.name
+    ))
+}
+
+function sameOrRepairablePromptVariableIdentity(previous: PromptBlock, next: PromptBlock): boolean {
+  if (samePromptVariableIdentity(previous, next)) return true
+  return hasLegacyVariableIdentity(previous.variables)
+    && !hasLegacyVariableIdentity(next.variables)
+}
+
+const PROMPT_BLOCK_IDENTITY_KEYS = [
+  'id',
+  'name',
+  'content',
+  'role',
+  'enabled',
+  'position',
+  'depth',
+  'marker',
+  'isLocked',
+  'color',
+  'injectionTrigger',
+  'characterTagTrigger',
+  'group',
+  'categoryMode',
+  'placementBinding',
+] as const
+
+function sameNativePromptBlockOccurrence(previous: PromptBlock, next: PromptBlock): boolean {
+  if (!sameOrRepairablePromptVariableIdentity(previous, next)) return false
+  return PROMPT_BLOCK_IDENTITY_KEYS.every((key) => {
+    const left = previous[key]
+    const right = next[key]
+    if (Object.is(left, right)) return true
+    try {
+      return JSON.stringify(left) === JSON.stringify(right)
+    } catch {
+      return false
+    }
+  })
+}
+
+/**
+ * Validate the stable identity and name invariants required to migrate prompt
+ * values. A native save may pass its current graph as `legacyBaseline`; only
+ * duplicate block IDs and invalid variable identities already present there
+ * are tolerated, and only when they are unchanged or reduced. Extension draft
+ * validation remains strict by default.
+ */
+export function validatePromptVariableSchema(
+  blocks: PromptBlock[],
+  options?: PromptVariableSchemaValidationOptions,
+): void {
+  if (!Array.isArray(blocks)) throw new Error('Invalid Loom prompt-variable schema: blocks must be an array')
+  const baseline = options?.legacyBaseline
+  const baselineById = new Map<string, PromptBlock[]>()
+  for (const block of baseline ?? []) {
+    if (!block || typeof block !== 'object' || typeof block.id !== 'string') continue
+    const entries = baselineById.get(block.id) ?? []
+    entries.push(block)
+    baselineById.set(block.id, entries)
+  }
+  const finalById = new Map<string, PromptBlock[]>()
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object' || typeof block.id !== 'string') continue
+    const entries = finalById.get(block.id) ?? []
+    entries.push(block)
+    finalById.set(block.id, entries)
+  }
+  const legacyBlockIds = new Set<string>()
+  const selectedBaselineOccurrences = new Map<string, number[]>()
+  for (const [id, baselineOccurrences] of baselineById) {
+    const finalOccurrences = finalById.get(id) ?? []
+    if (baselineOccurrences.length < 2 || finalOccurrences.length > baselineOccurrences.length) continue
+    if (finalOccurrences.length === 0) {
+      legacyBlockIds.add(id)
+      selectedBaselineOccurrences.set(id, [])
+      continue
+    }
+    let safe = true
+    const selected: number[] = []
+    if (finalOccurrences.length === baselineOccurrences.length) {
+      finalOccurrences.forEach((block, index) => {
+        if (sameNativePromptBlockOccurrence(baselineOccurrences[index]!, block)) selected.push(index)
+        else safe = false
+      })
+    } else {
+      let baselineIndex = 0
+      for (const block of finalOccurrences) {
+        const match = baselineOccurrences.findIndex((candidate, index) => (
+          index >= baselineIndex && sameNativePromptBlockOccurrence(candidate, block)
+        ))
+        if (match < 0) {
+          safe = false
+          break
+        }
+        selected.push(match)
+        baselineIndex = match + 1
+      }
+    }
+    if (safe) {
+      legacyBlockIds.add(id)
+      selectedBaselineOccurrences.set(id, selected)
+    }
+  }
+  const blockIds = new Set<string>()
+  const blockOccurrences = new Map<string, number>()
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object' || typeof block.id !== 'string' || !block.id.trim()) {
+      throw new Error('Invalid Loom prompt-variable schema: block id must be non-empty')
+    }
+    if (blockIds.has(block.id) && !legacyBlockIds.has(block.id)) {
+      throw new Error(`Invalid Loom prompt-variable schema: duplicate block id "${block.id}"`)
+    }
+    blockIds.add(block.id)
+    const occurrence = blockOccurrences.get(block.id) ?? 0
+    blockOccurrences.set(block.id, occurrence + 1)
+    if (block.variables === undefined) continue
+    if (!Array.isArray(block.variables)) {
+      throw new Error(`Invalid Loom prompt-variable schema: variables for "${block.id}" must be an array`)
+    }
+    const selectedOccurrence = selectedBaselineOccurrences.get(block.id)?.[occurrence]
+    const baselineIndex = selectedOccurrence ?? occurrence
+    const baselineBlock = baselineById.get(block.id)?.[baselineIndex]
+    const allowLegacyIdentity = hasLegacyVariableIdentity(baselineBlock?.variables)
+      && preservesLegacyVariableIdentity(baselineBlock?.variables, block.variables)
+    const variableIds = new Set<string>()
+    const variableNames = new Set<string>()
+    for (const variable of block.variables) {
+      if (!variable || typeof variable !== 'object') {
+        throw new Error(`Invalid Loom prompt-variable schema: invalid variable in block "${block.id}"`)
+      }
+      if (typeof variable.id !== 'string' || !variable.id.trim()) {
+        if (!allowLegacyIdentity) {
+          throw new Error(`Invalid Loom prompt-variable schema: variable id in block "${block.id}" must be non-empty`)
+        }
+      }
+      if (typeof variable.name !== 'string' || !variable.name.trim()) {
+        if (!allowLegacyIdentity) {
+          throw new Error(`Invalid Loom prompt-variable schema: variable name in block "${block.id}" must be non-empty`)
+        }
+      }
+      if (typeof variable.id === 'string' && variableIds.has(variable.id) && !allowLegacyIdentity) {
+        throw new Error(`Invalid Loom prompt-variable schema: duplicate variable id "${variable.id}" in block "${block.id}"`)
+      }
+      if (typeof variable.name === 'string' && variableNames.has(variable.name) && !allowLegacyIdentity) {
+        throw new Error(`Invalid Loom prompt-variable schema: duplicate variable name "${variable.name}" in block "${block.id}"`)
+      }
+      if (typeof variable.id === 'string') variableIds.add(variable.id)
+      if (typeof variable.name === 'string') variableNames.add(variable.name)
+    }
+  }
+}
+
+function setPromptVariableValue(
+  bucket: Record<string, PromptVariableValue>,
+  name: string,
+  value: PromptVariableValue,
+): void {
+  Object.defineProperty(bucket, name, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  })
+}
+
+function setPromptVariableBucket(
+  output: LoomPreset['promptVariables'],
+  blockId: string,
+  bucket: Record<string, PromptVariableValue>,
+): void {
+  if (Object.keys(bucket).length === 0) return
+  Object.defineProperty(output, blockId, {
+    value: bucket,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  })
+}
+
+function readOwnDataProperty(value: unknown, key: string): unknown {
+  if (!value || typeof value !== 'object') return undefined
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    return descriptor && 'value' in descriptor ? descriptor.value : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function readEnumerableArrayItems(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return []
+  const length = readOwnDataProperty(value, 'length')
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) return []
+  const items: unknown[] = []
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = hasEnumerableDataProperty(value, String(index))
+    if (descriptor) items.push(descriptor.value)
+  }
+  return items
+}
+
+function normalizeTolerantPromptVariable(value: unknown): {
+  name: string
+  variable: PromptVariableDef
+} | undefined {
+  if (!isRecord(value)) return undefined
+  const name = readOwnDataProperty(value, 'name')
+  const type = readOwnDataProperty(value, 'type')
+  if (typeof name !== 'string' || !name.trim() || typeof type !== 'string') return undefined
+
+  if (type === 'text' || type === 'textarea' || type === 'switch') {
+    return { name, variable: { type } as PromptVariableDef }
+  }
+  if (type === 'number' || type === 'slider') {
+    const min = readOwnDataProperty(value, 'min')
+    const max = readOwnDataProperty(value, 'max')
+    if (
+      (min !== undefined && (typeof min !== 'number' || !Number.isFinite(min)))
+      || (max !== undefined && (typeof max !== 'number' || !Number.isFinite(max)))
+    ) {
+      return undefined
+    }
+    return {
+      name,
+      variable: {
+        type,
+        ...(min !== undefined ? { min } : {}),
+        ...(max !== undefined ? { max } : {}),
+      } as PromptVariableDef,
+    }
+  }
+  if (type !== 'select' && type !== 'multiselect') return undefined
+
+  const options = readEnumerableArrayItems(readOwnDataProperty(value, 'options'))
+  const optionIds: string[] = []
+  for (const option of options) {
+    const optionId = readOwnDataProperty(option, 'id')
+    if (typeof optionId !== 'string') return undefined
+    optionIds.push(optionId)
+  }
+  return {
+    name,
+    variable: {
+      type,
+      options: optionIds.map((id) => ({ id })),
+    } as PromptVariableDef,
+  }
+}
+
+function getTolerantPromptVariableSchemas(
+  blocks: unknown,
+): Map<string, Map<string, PromptVariableDef[]>> {
+  const schemas = new Map<string, Map<string, PromptVariableDef[]>>()
+  if (!Array.isArray(blocks)) return schemas
+  for (const block of readEnumerableArrayItems(blocks)) {
+    const blockId = readOwnDataProperty(block, 'id')
+    if (typeof blockId !== 'string' || !blockId.trim()) continue
+    const variables = readOwnDataProperty(block, 'variables')
+    let byName = schemas.get(blockId)
+    if (!byName) {
+      byName = new Map<string, PromptVariableDef[]>()
+      schemas.set(blockId, byName)
+    }
+    if (!Array.isArray(variables)) continue
+    for (const variable of readEnumerableArrayItems(variables)) {
+      const normalized = normalizeTolerantPromptVariable(variable)
+      if (!normalized) continue
+      const definitions = byName.get(normalized.name)
+      if (definitions) {
+        definitions.push(normalized.variable)
+      } else {
+        byName.set(normalized.name, [normalized.variable])
+      }
+    }
+  }
+  return schemas
+}
+
+function readEnumerableObjectKeys(value: unknown): string[] {
+  if (!isRecord(value)) return []
+  try {
+    return Object.keys(value)
+  } catch {
+    return []
+  }
+}
+
+function cloneCompatibleTolerantPromptVariableValue(
+  definitions: PromptVariableDef[],
+  value: unknown,
+): PromptVariableValue | undefined {
+  for (const variable of definitions) {
+    const compatible = cloneCompatiblePromptVariableValue(variable, value)
+    if (compatible !== undefined) return compatible
+  }
+  return undefined
+}
+
+export function pruneOrphanPromptVariables(
   values: LoomPreset['promptVariables'] | undefined,
   blocks: PromptBlock[],
 ): LoomPreset['promptVariables'] {
-  if (!values || typeof values !== 'object') return {}
-  const out: LoomPreset['promptVariables'] = {}
-  const blockById = new Map(blocks.map((b) => [b.id, b]))
-  for (const [blockId, bucket] of Object.entries(values)) {
-    const block = blockById.get(blockId)
-    if (!block || !block.variables?.length) continue
-    const validNames = new Set(block.variables.map((v) => v.name))
-    const kept: Record<string, PromptVariableValue> = {}
-    for (const [name, value] of Object.entries(bucket || {})) {
-      if (validNames.has(name)) kept[name] = value
+  const out = Object.create(null) as LoomPreset['promptVariables']
+  const schemas = getTolerantPromptVariableSchemas(blocks)
+  if (!isRecord(values)) return out
+
+  for (const [blockId, definitionsByName] of schemas) {
+    if (definitionsByName.size === 0) continue
+    const bucketDescriptor = hasEnumerableDataProperty(values, blockId)
+    if (!bucketDescriptor || !isRecord(bucketDescriptor.value)) continue
+    const kept = Object.create(null) as Record<string, PromptVariableValue>
+    for (const name of readEnumerableObjectKeys(bucketDescriptor.value)) {
+      const valueDescriptor = hasEnumerableDataProperty(bucketDescriptor.value, name)
+      const definitions = definitionsByName.get(name)
+      if (!valueDescriptor || !definitions) continue
+      const compatible = cloneCompatibleTolerantPromptVariableValue(definitions, valueDescriptor.value)
+      if (compatible !== undefined) setPromptVariableValue(kept, name, compatible)
     }
-    if (Object.keys(kept).length) out[blockId] = kept
+    setPromptVariableBucket(out, blockId, kept)
   }
   return out
+}
+
+/**
+ * Project values against a new block schema. When a prior schema is present,
+ * values are migrated by stable block id + variable id before being keyed by
+ * the new variable names. A missing prior schema deliberately falls back to
+ * current-name pruning for backwards compatibility with older presets.
+ */
+export function reconcilePromptVariableValues(
+  values: LoomPreset['promptVariables'] | undefined,
+  previousBlocks: PromptBlock[] | null | undefined,
+  nextBlocks: PromptBlock[],
+  validationOptions?: PromptVariableSchemaValidationOptions,
+): LoomPreset['promptVariables'] {
+  validatePromptVariableSchema(nextBlocks, validationOptions)
+  if (!Array.isArray(previousBlocks) || previousBlocks.length === 0) {
+    return pruneOrphanPromptVariables(values, nextBlocks)
+  }
+  validatePromptVariableSchema(previousBlocks, validationOptions)
+
+  const output = Object.create(null) as LoomPreset['promptVariables']
+  if (!values || typeof values !== 'object' || Array.isArray(values)) return output
+  const previousByBlockId = new Map(previousBlocks.map((block) => [block.id, block]))
+
+  for (const block of nextBlocks) {
+    const bucketDescriptor = hasEnumerableDataProperty(values, block.id)
+    if (!bucketDescriptor || !isRecord(bucketDescriptor.value) || !block.variables?.length) continue
+    const previousBlock = previousByBlockId.get(block.id)
+    const previousByVariableId = new Map(
+      (previousBlock?.variables ?? []).map((variable) => [variable.id, variable]),
+    )
+    const kept = Object.create(null) as Record<string, PromptVariableValue>
+
+    for (const variable of block.variables) {
+      const previousVariable = previousByVariableId.get(variable.id)
+      const sourceName = previousVariable?.name ?? variable.name
+      const sourceDescriptor = hasEnumerableDataProperty(bucketDescriptor.value, sourceName)
+      if (sourceDescriptor) {
+        const compatible = cloneCompatiblePromptVariableValue(variable, sourceDescriptor.value)
+        if (compatible !== undefined) setPromptVariableValue(kept, variable.name, compatible)
+        continue
+      }
+      // A new variable (or a variable in a new block) has no stable source;
+      // preserve a compatible value already keyed by its current name.
+      if (previousVariable) continue
+      const currentDescriptor = hasEnumerableDataProperty(bucketDescriptor.value, variable.name)
+      if (!currentDescriptor) continue
+      const compatible = cloneCompatiblePromptVariableValue(variable, currentDescriptor.value)
+      if (compatible !== undefined) setPromptVariableValue(kept, variable.name, compatible)
+    }
+    setPromptVariableBucket(output, block.id, kept)
+  }
+  return output
 }
 
 // ============================================================================
@@ -468,6 +1263,7 @@ export function buildRegistryEntry(preset: LoomPreset): LoomRegistryEntry {
   return {
     name: preset.name,
     blockCount: preset.blocks?.length || 0,
+    coverUrl: preset.coverUrl ?? null,
     updatedAt: preset.updatedAt || Date.now(),
     isDefault: preset.isDefault || false,
   }
@@ -658,6 +1454,8 @@ interface STPrompt {
   content?: string
   role?: string
   enabled?: boolean
+  injection_trigger?: string[]
+  lumiverse_character_tag_trigger?: string[]
   system_prompt?: boolean
   marker?: boolean
   injection_position?: number
@@ -691,6 +1489,8 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
   if (markerType) {
     const block = createMarkerBlock(markerType, p.name || undefined)
     block.enabled = enabled
+    block.injectionTrigger = Array.isArray(p.injection_trigger) ? p.injection_trigger.filter((value): value is string => typeof value === 'string') : []
+    block.characterTagTrigger = sanitizeCharacterTagTrigger(p.lumiverse_character_tag_trigger)
     if (CONTENT_BEARING_MARKERS.has(markerType) && p.content) {
       block.content = p.content
     }
@@ -725,6 +1525,8 @@ function convertSTPromptToBlock(p: STPrompt, enabled: boolean): PromptBlock {
     content: p.content || '',
     role: (p.role as PromptBlock['role']) || 'system',
     enabled,
+    injectionTrigger: Array.isArray(p.injection_trigger) ? p.injection_trigger.filter((value): value is string => typeof value === 'string') : [],
+    characterTagTrigger: sanitizeCharacterTagTrigger(p.lumiverse_character_tag_trigger),
     position,
     depth,
     marker: isCategory ? 'category' : null,
@@ -819,10 +1621,16 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
     coverUrl: null,
     presetVersion: null,
     lumihubMeta: null,
+    passthroughMetadata: {},
     schemaVersion: 1,
     createdAt: now,
     updatedAt: now,
-    blocks,
+    // `createBlock` gives every block a `group: null` default. That is the
+    // right default for a manually-created block, but a null group is explicit
+    // to the category renderer, so it prevents the imported blocks from being
+    // associated with the preceding ST category heading. Preserve ST's
+    // sequential category layout by assigning each prompt to that heading.
+    blocks: assignSTCategoryGroups(blocks),
     source: {
       type: 'st_import',
       slug: null,
@@ -850,6 +1658,22 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
   }
 }
 
+/**
+ * SillyTavern represents categories solely as ordered heading prompts. Its
+ * child prompts do not carry a category id, so derive one from their position.
+ */
+function assignSTCategoryGroups(blocks: PromptBlock[]): PromptBlock[] {
+  let currentCategoryId: string | null = null
+
+  return blocks.map((block) => {
+    if (block.marker === 'category') {
+      currentCategoryId = block.id
+      return { ...block, group: null }
+    }
+    return { ...block, group: currentCategoryId }
+  })
+}
+
 
 /**
  * Export a Loom preset to SillyTavern-compatible JSON format.
@@ -857,7 +1681,7 @@ export function importFromSTPreset(stPresetData: STPresetData, name: string): Lo
  * and flattens behavior/sampler settings to ST root-level fields.
  */
 export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
-  const exportLoom = sanitizeLumiHubSealedBlocksForExport(loom)
+  const exportLoom = sanitizeRemoteSealedBlocksForExport(loom)
   const prompts: Array<Record<string, any>> = []
   const orderEntries: Array<{ identifier: string; enabled: boolean }> = []
 
@@ -906,6 +1730,9 @@ export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
     // Include injection_trigger for non-marker prompts (maps 1:1 with ST)
     if (!isWellKnown) {
       stPrompt.injection_trigger = block.injectionTrigger ?? []
+    }
+    if (block.characterTagTrigger?.length) {
+      stPrompt.lumiverse_character_tag_trigger = block.characterTagTrigger
     }
 
     prompts.push(stPrompt)
@@ -988,6 +1815,7 @@ export function createNewLoomPreset(name: string, description = ''): LoomPreset 
     coverUrl: null,
     presetVersion: null,
     lumihubMeta: null,
+    passthroughMetadata: {},
     schemaVersion: 1,
     createdAt: now,
     updatedAt: now,

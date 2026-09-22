@@ -1,5 +1,6 @@
 import { createAuthClient } from 'better-auth/react'
 import { usernameClient, adminClient } from 'better-auth/client/plugins'
+import { oauthProviderClient } from '@better-auth/oauth-provider/client'
 
 type AuthClientErrorLike = {
   message?: string
@@ -19,7 +20,7 @@ export type AuthErrorResponseMeta = {
 
 export const authClient = createAuthClient({
   baseURL: window.location.origin,
-  plugins: [usernameClient(), adminClient()],
+  plugins: [usernameClient(), adminClient(), oauthProviderClient()],
 })
 
 export const { signIn, signOut, signUp, useSession } = authClient

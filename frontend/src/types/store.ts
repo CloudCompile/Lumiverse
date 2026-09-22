@@ -1,5 +1,6 @@
 import type { Message, Character, Persona, Preset, ConnectionProfile, ProviderInfo, RecentChat, GroupedRecentChat, PaginatedResult, Pack, PackWithItems, LumiaItem, LoomItem, ImageGenConnectionProfile, ImageGenProviderInfo } from './api'
 import type { WeaverSession, WeaverStage, WeaverExtraction, WeaverSpineSlot, WeaverSynthesisGroup, WeaverBookRole, WeaverBuildType, WeaverNarrationMode, WeaverPersonaRegister, WeaverPersonaPlan, PersonaDraft, CreateWeaverSessionInput, WeaverCommittedFact, WeaverGap, WeaverInterviewQuestion, WeaverInterviewState, WeaverResponseKind, WeaverCandidate, WeaverBible, UpdateWeaverBibleInput, WeaverFieldDef, WeaverField, WeaverFinalizeResult, WeaverFinalizeInput, WeaverStartChatResult } from '@/api/weaver'
+import type { ImpersonationPreference } from '@/lib/impersonationPreset'
 
 // ---- Chat Slice ----
 export interface ChatSlice {
@@ -20,6 +21,9 @@ export interface ChatSlice {
   activeChatName: string | null
   messages: Message[]
   isStreaming: boolean
+  /** True while the chat is fading out to another route. The last rendered
+   * stream frame stays visible, but live/recovery writes are paused. */
+  streamingNavigationPaused: boolean
   streamingContent: string
   streamingReasoning: string
   streamingReasoningDuration: number | null
@@ -48,19 +52,32 @@ export interface ChatSlice {
    */
   landingRecentChats: PaginatedResult<GroupedRecentChat> | null
   setLandingRecentChats: (result: PaginatedResult<GroupedRecentChat> | null) => void
-  setActiveChat: (chatId: string | null, characterId?: string | null) => void
+  setActiveChat: (
+    chatId: string | null,
+    characterId?: string | null,
+    hydration?: {
+      messages: Message[]
+      total: number
+      displayOwner: string | null
+      name: string | null
+      metadata: Record<string, any> | null
+      wallpaper: WallpaperRef | null
+    },
+  ) => void
   setActiveChatWallpaper: (wallpaper: WallpaperRef | null) => void
   setActiveChatAvatarId: (imageId: string | null) => void
   setActiveChatMetadata: (metadata: Record<string, any> | null) => void
   setActiveChatDisplayOwner: (owner: string | null) => void
   setActiveChatName: (name: string | null) => void
   setMessages: (messages: Message[], total?: number) => void
+  reconcileMessagesTail: (page: Pick<PaginatedResult<Message>, 'data' | 'total' | 'offset'>) => void
   prependMessages: (messages: Message[]) => void
   addMessage: (message: Message) => void
   updateMessage: (id: string, updates: Partial<Message>) => void
   removeMessage: (id: string) => void
   beginStreaming: (regeneratingMessageId?: string, generationType?: string) => void
   startStreaming: (generationId: string, regeneratingMessageId?: string, generationType?: string) => void
+  pauseStreamingForNavigation: () => void
   /** Append a live stream segment. When `offset` (char position of the segment
    *  start in the server's cumulative buffer) is provided, overlap with already-
    *  rendered content is sliced off exactly; returns 'gap' when the segment
@@ -75,19 +92,21 @@ export interface ChatSlice {
   /** Current raw (unflushed) streaming buffers — used to request pool deltas. */
   getStreamBuffers: () => { content: string; reasoning: string }
   setStreamingReasoningStartedAt: (ts: number | null) => void
-  /** Set the swipe index the active generation streams into (null when unknown). */
+  /** Set the confirmed streaming swipe index and recover its slot if a staging event was missed. */
   setStreamingSwipeId: (swipeId: number | null) => void
   /** Flag a freshly-generated swipe as unseen (drives the "new swipe ready" badge). */
   setUnseenSwipe: (messageId: string, swipeId: number) => void
   /** Clear the unseen-swipe flag for a message (e.g. once the user views it). */
   clearUnseenSwipe: (messageId: string) => void
-  endStreaming: () => void
+  endStreaming: (message?: Message) => void
   stopStreaming: () => void
   setStreamingError: (error: string | null) => void
   /** Set the regenerating message ID independently (e.g. when council sidecar stages a message after streaming started) */
   setRegeneratingMessageId: (messageId: string | null) => void
   /** Mark a generation ID as ended (prevents zombie resurrection from late HTTP responses) */
-  markGenerationEnded: (generationId: string) => void
+  markGenerationEnded: (generationId: string, completed?: boolean) => void
+  hasGenerationEnded: (generationId: string) => boolean
+  getGenerationEpoch: () => number
   /** Set impersonate draft content (from completed impersonate-draft generation) */
   setImpersonateDraftContent: (content: string | null) => void
 
@@ -103,23 +122,31 @@ export interface ChatSlice {
 
 // ---- Characters Slice ----
 export type CharacterFilterTab = 'characters' | 'favorites' | 'groups'
-export type CharacterSortField = 'name' | 'recent' | 'created' | 'shuffle'
+export type CharacterSortField = 'name' | 'recent' | 'most_chats' | 'created' | 'shuffle'
 export type CharacterSortDirection = 'asc' | 'desc'
 export type CharacterViewMode = 'grid' | 'single' | 'list'
 
 export interface StartupSettings {
   favorites?: string[]
+  landingHiddenCharacterIds?: string[]
   filterTab?: CharacterFilterTab
   sortField?: CharacterSortField
   sortDirection?: CharacterSortDirection
   viewMode?: CharacterViewMode
   charactersPerPage?: number
   favoritesBarCollapsed?: boolean
+  importChubExpressions?: boolean
   theme?: ThemeConfig | null
   landingPageChatsDisplayed?: number
   landingPageLayoutMode?: 'cards' | 'compact'
+  landingPageGalleryWidth?: 'compact' | 'expanded'
   wallpaper?: WallpaperSettings
   drawerSettings?: DrawerSettings
+  spindleSettings?: Partial<SpindleSettings>
+  connectionsOrder?: Partial<Record<'llm' | 'imageGen' | 'stt' | 'tts', string[]>>
+  activeProfileId?: string | null
+  toastPosition?: ToastPosition
+  defaultImpersonationMode?: ImpersonationPreference
 }
 
 export interface CharactersSlice {
@@ -170,7 +197,7 @@ export interface CharactersSlice {
 
 // ---- Personas Slice ----
 export type PersonaFilterType = 'all' | 'default' | 'connected'
-export type PersonaSortField = 'name' | 'created'
+export type PersonaSortField = 'name' | 'created' | 'updated_at'
 export type PersonaSortDirection = 'asc' | 'desc'
 export type PersonaViewMode = 'grid' | 'list'
 export type PersonaTagBindingMode = 'any' | 'all'
@@ -191,7 +218,10 @@ export interface ResolvedPersonaBinding {
 
 export interface PersonasSlice {
   personas: Persona[]
+  personasLoaded: boolean
   activePersonaId: string | null
+  /** Persona ids ordered by most recent activation, independent of edit timestamps. */
+  recentPersonaIds: string[]
   /** Map of characterId → personaId or binding object */
   characterPersonaBindings: Record<string, string | import('@/types/api').CharacterPersonaBinding>
   /** Map of personaId → tag-based auto-switch binding */
@@ -231,9 +261,32 @@ export interface Toast {
   message: string
   duration?: number
   dismissible?: boolean
+  action?: { label: string; onClick: () => void }
 }
 
 // ---- UI Slice ----
+export interface CustomCSSEditorSession {
+  search: string
+  selected: string
+  activeTab: 'css' | 'tsx'
+  sidebarOpen: boolean
+  showReference: boolean
+  showAssets: boolean
+}
+
+export interface MessageEditDraft {
+  chatId: string
+  messageId: string
+  messageOffset: number
+  messageIndexInChat: number
+  content: string
+  reasoning: string
+  showReasoningEditor: boolean
+  hadReasoning: boolean
+  dirty: boolean
+  focusRequested: boolean
+}
+
 export interface UISlice {
   activeModal: string | null
   modalProps: Record<string, any>
@@ -243,23 +296,34 @@ export interface UISlice {
   drawerTab: string | null
   settingsModalOpen: boolean
   settingsActiveView: string
-  settingsScrollTarget: { extensionId?: string; nonce: number } | null
+  settingsScrollTarget: { extensionId?: string; anchorId?: string; nonce: number } | null
   portraitPanelOpen: boolean
   commandPaletteOpen: boolean
+  customCSSDockOpen: boolean
+  customCSSDockSize: number
+  customCSSDockSide: 'left' | 'right'
+  customCSSEditorSession: CustomCSSEditorSession
   toasts: Toast[]
   openModal: (name: string, props?: Record<string, any>) => void
   closeModal: () => void
+  openCustomCSSDock: () => void
+  closeCustomCSSDock: () => void
+  setCustomCSSDockSize: (size: number) => void
+  setCustomCSSDockSide: (side: 'left' | 'right') => void
+  setCustomCSSEditorSession: (patch: Partial<CustomCSSEditorSession>) => void
   setLoading: (loading: boolean) => void
   setError: (error: string | null) => void
   openDrawer: (tab?: string) => void
   closeDrawer: () => void
   setDrawerTab: (tab: string) => void
-  openSettings: (view?: string, target?: { extensionId?: string }) => void
+  openSettings: (view?: string, target?: { extensionId?: string; anchorId?: string }) => void
+  setSettingsActiveView: (view: string) => void
   closeSettings: () => void
   togglePortraitPanel: () => void
   openCommandPalette: () => void
   closeCommandPalette: () => void
   addToast: (toast: Omit<Toast, 'id'>) => string
+  updateToast: (id: string, update: Partial<Omit<Toast, 'id'>>) => void
   removeToast: (id: string) => void
   clearToasts: () => void
 
@@ -268,17 +332,27 @@ export interface UISlice {
   incrementBadgeCount: () => void
   resetBadgeCount: () => void
 
-  // Regen feedback text retention
-  lastRegenFeedback: string
-  setLastRegenFeedback: (text: string) => void
+  // Regen feedback text retention (keyed by chat id so drafts don't leak across chats)
+  lastRegenFeedback: Record<string, string>
+  setLastRegenFeedback: (chatId: string, text: string) => void
 
   // Message editing (globally single-slot)
   editingMessageId: string | null
+  messageEditDraft: MessageEditDraft | null
   setEditingMessageId: (id: string | null) => void
+  beginMessageEdit: (draft: Omit<MessageEditDraft, 'dirty' | 'focusRequested'>) => void
+  updateMessageEditDraft: (patch: Partial<Pick<MessageEditDraft, 'content' | 'reasoning'>>) => void
+  resumeMessageEdit: () => void
+  consumeMessageEditFocusRequest: () => void
+  clearMessageEdit: () => void
 
   // Transient highlight target for navigation feedback (e.g. greeting switch)
   highlightedMessageId: string | null
   setHighlightedMessageId: (id: string | null) => void
+
+  // Session-only expansion state for height-collapsed assistant messages.
+  expandedLongMessageKeys: string[]
+  setLongMessageExpanded: (chatId: string, messageId: string, expanded: boolean) => void
 }
 
 // ---- OOC Style Type ----
@@ -314,6 +388,9 @@ export type RegenFeedbackPosition = 'system' | 'user'
 export interface RegenFeedbackSettings {
   enabled: boolean
   position: RegenFeedbackPosition
+  includePreviousGeneration: boolean
+  /** Freeform prompt template. {{$regenInput}} is replaced with the submitted feedback. */
+  format: string
 }
 
 // ---- Reasoning Settings ----
@@ -337,6 +414,12 @@ export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | '
  *  ('omitted' on Opus 4.7 / Mythos Preview, 'summarized' elsewhere). */
 export type ThinkingDisplay = 'auto' | 'summarized' | 'omitted'
 
+/** Extra JSON fields spread onto the provider request body. */
+export interface ReasoningCustomBody {
+  enabled: boolean
+  rawJson: string
+}
+
 export interface ReasoningSettings {
   prefix: string
   suffix: string
@@ -350,6 +433,15 @@ export interface ReasoningSettings {
   /** Anthropic-only. Maps to `thinking.display` in the Messages API request body.
    *  'auto' leaves the field unset so the API picks a model-appropriate default. */
   thinkingDisplay: ThinkingDisplay
+  /** Z.AI-only. Omitted means use Z.AI's API/model default. */
+  clearThinking?: boolean
+  /** Google Gemini / Vertex only. Replays optional non-tool thought signatures. */
+  replayThoughtSignatures?: boolean
+  /**
+   * Extra request-body fields. Omitted for legacy settings so the backend can
+   * continue honoring an old preset-level custom body until this is saved.
+   */
+  customBody?: ReasoningCustomBody
 }
 
 /** Reasoning settings snapshot bound to a connection profile. */
@@ -367,6 +459,11 @@ export interface GuidedGeneration {
   mode: 'persistent' | 'oneshot'
   enabled: boolean
   color?: string | null
+  /** Optional context rule that activates this guide in addition to the manual switch. */
+  autoEnable?: {
+    scope: 'connection' | 'chat' | 'character'
+    id: string
+  } | null
 }
 
 export interface QuickReply {
@@ -426,7 +523,7 @@ export type SavedThemeInput =
   | Omit<SavedThemeConfigEntry, 'id' | 'createdAt'>
   | Omit<SavedThemePackEntry, 'id' | 'createdAt'>
 
-export type WorldBookEntrySortBy = 'custom' | 'priority' | 'created' | 'updated' | 'name'
+export type WorldBookEntrySortBy = 'custom' | 'order' | 'priority' | 'created' | 'updated' | 'name'
 export type WorldBookEntrySortDir = 'asc' | 'desc'
 export type WorldBookEntryPageSize = 50 | 100 | 200 | 'all'
 export type WorldBookListSortDir = 'asc' | 'desc'
@@ -437,23 +534,243 @@ export interface WorldBookEntryViewPreference {
   pageSize: WorldBookEntryPageSize
 }
 
+export type QuickToolbarVariant = 'v1-free' | 'v2-settings-adjacent'
+export type QuickToolbarDensity = 'comfortable' | 'compact'
+export type ToolbarOrientation = 'horizontal' | 'vertical'
+export type LoreIndicatorVariant = 'v2-compact' | 'v4-bottom-strip' | 'v5-command-palette'
+export type LoreIndicatorBookDisplay = 'grouped' | 'first-only' | 'markers'
+export type LoreIndicatorGroupBy = 'lorebook' | 'type' | 'none'
+export type ConnectionsPickerVariant = 'provider-tags' | 'split' | 'full'
+export type TriggerDisplayMode = 'words' | 'icons'
+
+export interface SurfaceSizePrefs {
+  width: number
+  height: number
+}
+
+export interface ConnectionProfileTag {
+  id: string
+  name: string
+  color: string
+  order: number
+}
+
+export interface QuickToolbarSettings {
+  enabled: boolean
+  variant: QuickToolbarVariant
+  visibleTabIds: string[]
+  iconOrder: string[]
+  iconSize: number
+  labelVisible: boolean
+  labelTextSize: number
+  scale: number
+  orientation: ToolbarOrientation
+  rotationDeg: number
+  opacity: number
+  snapToEdge: boolean
+  resizeHandlesEnabled: boolean
+  rect: SurfaceRectPrefs
+  verticalSize: SurfaceSizePrefs
+  rectVersion: number
+  /** Undefined keeps the responsive default: hide only on mobile overlays. */
+  hideWhenOverlaid?: boolean
+  /** Dock-chrome hide only. Undefined/false keeps the docked toolbar in `chat_top_dock`. */
+  hideInChatTopDock?: boolean
+  modalRestoreHandle: boolean
+  v2IconSize: number
+  v2LabelTextSize: number
+  v2LabelVisible: boolean
+  v2Density: QuickToolbarDensity
+  /** Optional V2 chrome overrides used by the host surface. */
+  gap?: number
+  padding?: number
+  /** One-time migration marker for stale V2 floating rail rectangles. */
+  v2ViewportGeometryVersion?: 2
+  quickToolbarPlacement?: 'floating' | 'chat_top_dock'
+  autoFitBounds?: boolean
+  v2IconOnly?: boolean
+  /** Stretch docked V2 across leftover `.chatToolbar` width. Default on. */
+  fillTopDockWidth?: boolean
+  /** Native ChatView ListChecks. Default on (`!== false`). */
+  showNativeSelectMessages?: boolean
+  /** Native ChatView ArrowUp (Go to oldest message). Default on (`!== false`). */
+  showNativeScrollToTop?: boolean
+  /** Native ChatView List (Browse messages). Default on (`!== false`). */
+  showNativeBrowseMessages?: boolean
+  editAndSendSide?: 'left' | 'right'
+  branchChatOnEditAndSend?: boolean
+  /** Edit-and-Send only: use the active connection profile even when the chat is pinned. */
+  editAndSendAlwaysUseActiveConnection?: boolean
+  /** Native chat-top-dock controls placement when the Suite toolbar is absent. */
+  nativeDockActionSide?: 'left' | 'right'
+  /** Paint a solid backdrop behind the toolbar when enabled. */
+  opaqueToolbarBackdrop?: boolean
+  /** Optional solid backdrop color for the opaque toolbar plate. */
+  backdropColor?: string
+  /** Card width override in px (0 or undefined for auto content width). */
+  cardWidth?: number
+  /** Card minimum width override in px. */
+  cardMinWidth?: number
+  /** Card maximum width override in px. */
+  cardMaxWidth?: number
+  /** Card padding-inline (space between text and border) in px. */
+  cardPadding?: number
+  /** Card gap (space between icon, text, chevron) in px. */
+  cardGap?: number
+}
+
+export interface ConnectionsPickerSettings {
+  enabled: boolean
+  variant: ConnectionsPickerVariant
+  launcherEnabled: boolean
+  launcherIconSize: number
+  opacity: number
+  rect: SurfaceRectPrefs
+  positionInitialized: boolean
+  thumbnailSize: number
+  density: 'compact' | 'balanced' | 'spacious' | 'custom'
+  showFavorites: boolean
+  showRecent: boolean
+  showSearch: boolean
+  showModelMetadata: boolean
+  profileTags: ConnectionProfileTag[]
+  visibleTagIds: string[]
+  favoriteProfileIds: string[]
+  recentProfileIds: string[]
+  rowPadding: number
+  rowGap: number
+  sectionSpacing: number
+  columnWidths: Record<string, number>
+  modelLayout?: 'grid' | 'list'
+}
+
+export interface LoreIndicatorSettings {
+  enabled: boolean
+  variant: LoreIndicatorVariant
+  v2ActivationMode: 'hover' | 'click'
+  v2BookDisplay: LoreIndicatorBookDisplay
+  v5Keybind: string
+  visibleMetadata: string[]
+  iconSize: number
+  textSize: number
+  entryTypeAppearance: Record<'constant' | 'sticky' | 'keyword' | 'vector', { color: string; icon: string }>
+  v4Items: Array<{ id: string; visible: boolean; removed: boolean; mode: 'icon' | 'iconText'; order: number }>
+  v4Spacing: number
+  v4GroupBy: LoreIndicatorGroupBy
+  v4BookPreviewCount: number
+  v5ShowShortcutHints: boolean
+  /** Chooses where Lore Indicator entry navigation opens. */
+  editorLaunchTarget?: 'native' | 'half' | 'full'
+}
+
+export interface CharacterDisplaySettings {
+  thumbnailWidth: number
+  thumbnailHeight: number
+  density: 'compact' | 'balanced' | 'large' | 'custom'
+  footerMode: 'compact' | 'balanced' | 'spacious'
+  visibleMetadata: string[]
+  tagRows: number
+  viewMode: CharacterViewMode
+  defaultSort: CharacterSortField
+  defaultFilter: CharacterFilterTab
+}
+
+export interface HomepageCharacterLibrarySettings extends CharacterDisplaySettings {
+  enabled: boolean
+  maxVisibleTags: number
+  showNameBackground: boolean
+  panelWidth: number
+  panelImageHeight: number
+  panelPinned: boolean
+  lastSelectedCharacterId: string | null
+}
+
+export interface CharacterTabDisplaySettings extends CharacterDisplaySettings {
+  useHomepageSettings: boolean
+}
+
+export interface PortraitDockSettings {
+  enabled: boolean
+  openAtOriginalSize: boolean
+  rememberSizePosition: boolean
+  defaultDockSide: 'left' | 'right'
+  snapToEdge: boolean
+  hoverControls: boolean
+  hoverControlSize: number
+  defaultAspectRatioLock: boolean
+  minWidth: number
+  minHeight: number
+  maxWidth: number
+  maxHeight: number
+  rect: SurfaceRectPrefs
+  pinned: boolean
+  aspectRatioLocked: boolean
+  dockSide: 'left' | 'right' | 'floating'
+  open: boolean
+  lastPortrait: { imageUrl: string; displayName: string } | null
+}
+
+export interface LorebookEditorSettings {
+  defaultVariant: 'full' | 'half'
+  fullEditorLaunchMode: 'windowed' | 'fullscreen'
+  triggerDisplay: TriggerDisplayMode
+  halfButtonEnabled: boolean
+  loreIndicatorActionEnabled: boolean
+  allowSimultaneousEditors: boolean
+  halfEditorMode: 'docked' | 'floating'
+  fullRect: SurfaceRectPrefs
+  halfRect: SurfaceRectPrefs
+  minChatWidth: number
+  minEditorPaneWidth: number
+  halfEntriesPaneWidth: number
+  booksPaneWidth: number
+  entriesPaneWidth: number
+  inspectorPaneWidth: number
+  rowDensity: 'compact' | 'comfortable' | 'spacious'
+  visibleEntryMetadata: string[]
+  entryMetadataVersion?: number
+  tokenCountMode: 'live' | 'delayed' | 'manual'
+  tokenCountDelayMs: number
+  tokenPrefetchHover: boolean
+  tokenPrefetchHoverDelayMs: number
+  tokenCountAllEntries: boolean
+}
+
 // ---- Settings Slice ----
+export type LongMessageCollapsePreset = 'compact' | 'comfortable' | 'tall' | 'custom'
+
+export interface EnterToSendSettings {
+  desktop: boolean
+  mobile: boolean
+}
+
 export interface SettingsSlice {
   settingsLoaded: boolean
+  /** Full persisted settings loaded; startup settings intentionally set only `settingsLoaded`. */
+  fullSettingsLoaded: boolean
   landingPageChatsDisplayed: number
   landingPageLayoutMode: 'cards' | 'compact'
+  /** Keeps the landing gallery comfortable on wide screens unless expanded by the user. */
+  landingPageGalleryWidth: 'compact' | 'expanded'
+  landingHiddenCharacterIds: string[]
   charactersPerPage: number
   personasPerPage: number
   messagesPerPage: number
-  chatSheldDisplayMode: 'minimal' | 'immersive' | 'bubble'
+  chatDisplayMode: 'minimal' | 'immersive' | 'bubble'
+  longMessageCollapseEnabled: boolean
+  longMessageCollapsePreset: LongMessageCollapsePreset
+  longMessageCollapseCustomHeight: number
+  longMessageCollapseDepth: number
+  minimalUseFullAvatar: boolean
   bubbleUserAlign: 'left' | 'right'
   bubbleDisableHover: boolean
   bubbleHideAvatarBg: boolean
   bubbleUseFullAvatar: boolean
   /** Bubble background opacity, 0–1. 1 = the theme's natural bubble fill (default). */
   bubbleOpacity: number
-  chatSheldEnterToSend: boolean
+  inputBarEnterToSend: EnterToSendSettings
   saveDraftInput: boolean
+  defaultImpersonationMode: ImpersonationPreference
   chatWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
   chatContentMaxWidth: number
   modalWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
@@ -482,7 +799,11 @@ export interface SettingsSlice {
   swipeGesturesEnabled: boolean
   showMessageTokenCount: boolean
   messageContextMenuEnabled: boolean
+  /** Suppress toasts when older chat messages are omitted from generation context. */
+  suppressContextDropWarnings: boolean
   favoritesBarCollapsed: boolean
+  /** Pull a Chub card's expression pack during URL import. Defaults to on. */
+  importChubExpressions: boolean
   guidedGenerations: GuidedGeneration[]
   quickReplySets: QuickReplySet[]
   wallpaper: WallpaperSettings
@@ -505,10 +826,24 @@ export interface SettingsSlice {
   savedThemes: SavedTheme[]
   spindleSettings: SpindleSettings
   voiceSettings: VoiceSettings
+  connectionsOrder: Record<'llm' | 'imageGen' | 'stt' | 'tts', string[]>
+  quickToolbarSettings: QuickToolbarSettings
+  connectionsPickerSettings: ConnectionsPickerSettings
+  loreIndicatorSettings: LoreIndicatorSettings
+  homepageCharacterLibrarySettings: HomepageCharacterLibrarySettings
+  characterTabDisplaySettings: CharacterTabDisplaySettings
+  portraitDockSettings: PortraitDockSettings
+  lorebookEditorSettings: LorebookEditorSettings
+  showEmbeddingFallbackUi: boolean
+  showCortexSecondaryUi: boolean
+  showEditAndSend: boolean
+  enableToolbarIconReorder: boolean
+  productivityTabPosition: string
   hydrateStartupSettings: (settings: StartupSettings) => void
   setVoiceSettings: (partial: Partial<VoiceSettings>) => void
   setWallpaper: (settings: Partial<WallpaperSettings>) => void
-  setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K]) => void
+  setInputBarEnterToSend: (settings: EnterToSendSettings) => void
+  setSetting: <K extends keyof SettingsSlice>(key: K, value: SettingsSlice[K], source?: SettingsWriteSource) => void
   setTheme: (theme: ThemeConfig | null) => void
   setCharacterThemeOverlay: (overlay: CharacterThemeOverlay | null) => void
   setCustomCSS: (css: string) => void
@@ -523,9 +858,22 @@ export interface SettingsSlice {
   renameSavedTheme: (id: string, name: string) => void
   deleteSavedTheme: (id: string) => Promise<void>
   applySavedTheme: (id: string) => void
-  updateSavedTheme: (id: string) => void
+  /** Replace a saved theme with the complete current theme snapshot and persist it. */
+  updateSavedTheme: (id: string) => Promise<void>
   loadSettings: () => Promise<void>
 }
+
+export type SettingsWriteSource =
+  | 'user'
+  | 'user-interaction'
+  | 'portrait-dock-init'
+  | 'automatic-sync'
+  | 'state-sync'
+  | 'suite-normalization'
+  | 'suite-reconciliation'
+  | 'host-load'
+  | 'compatibility'
+  | 'unknown'
 
 import type { ThemeConfig } from './theme'
 export type { ThemeConfig } from './theme'
@@ -547,12 +895,17 @@ export interface DrawerSettings {
 export interface SpindleSettings {
   interceptorTimeoutMs: number
   dockPanelDesktopSide: 'left' | 'right'
+  /** Show routine WebSocket and Spindle lifecycle events in the browser console. */
+  infoLoggingEnabled: boolean
+  /** Per-extension opt-out for update notification toasts. */
+  extensionUpdateToastDisabled: Record<string, boolean>
 }
 
 // ---- Loom Registry Entry ----
 export interface LoomRegistryEntry {
   name: string
   blockCount: number
+  coverUrl: string | null
   updatedAt: number
   isDefault: boolean
 }
@@ -563,24 +916,32 @@ export interface PresetsSlice {
   activePresetId: string | null
   activeLoomPresetId: string | null
   loomRegistry: Record<string, LoomRegistryEntry>
+  setActiveLoomPreset: (id: string | null) => void
   setPresets: (presets: Record<string, Preset>) => void
   setActivePreset: (id: string | null) => void
-  setActiveLoomPreset: (id: string | null) => void
   setLoomRegistry: (registry: Record<string, LoomRegistryEntry>) => void
   /** Resolves the preset id that should drive generation. */
   getActivePresetForGeneration: () => string | null
 }
 
 // ---- Connections Slice ----
+export type ActiveProfileSwitchReason =
+  | 'user_selection'
+  | 'bootstrap_reconcile'
+  | 'profile_deleted'
+  | 'profile_invalidated'
+  | 'settings_reconcile'
+
 export interface ConnectionsSlice {
   profiles: ConnectionProfile[]
   activeProfileId: string | null
   setProfiles: (profiles: ConnectionProfile[]) => void
-  setActiveProfile: (id: string | null) => void
+  setActiveProfile: (id: string | null, reason?: ActiveProfileSwitchReason) => void
 
   addProfile: (profile: ConnectionProfile) => void
   updateProfile: (id: string, updates: Partial<ConnectionProfile>) => void
   removeProfile: (id: string) => void
+  applyProfileOrder: (orderedIds: string[]) => void
 
   providers: ProviderInfo[]
   setProviders: (providers: ProviderInfo[]) => void
@@ -673,9 +1034,9 @@ export interface CouncilSlice {
   setCouncilExecuting: (executing: boolean) => void
   setCouncilToolsFailure: (failure: CouncilToolsFailedInfo | null) => void
 
-  loadCouncilSettings: () => Promise<void>
+  loadCouncilSettings: (shouldApply?: () => boolean) => Promise<void>
   saveCouncilSettings: (partial: Partial<CouncilSettings>) => Promise<void>
-  loadAvailableTools: () => Promise<void>
+  loadAvailableTools: (shouldApply?: () => boolean) => Promise<void>
   /** Set merged council tools from pre-fetched data (bootstrap payload).
    *  Same merge rules as `loadAvailableTools`, zero network round trips. */
   hydrateCouncilTools: (
@@ -694,6 +1055,8 @@ export interface CouncilSlice {
 // ---- Generation Slice ----
 export interface GenerationSlice {
   imageGeneration: ImageGenSettings
+  /** User edits made before the full settings row has hydrated. */
+  pendingImageGenerationPatch?: Partial<ImageGenSettings>
   sceneBackground: string | null
   sceneGenerating: boolean
   setImageGenSettings: (settings: Partial<ImageGenSettings>) => void
@@ -705,11 +1068,19 @@ export interface ImageGenSettings {
   enabled: boolean
   activeImageGenConnectionId?: string | null
   includeCharacters: boolean
+  includePersona: boolean
   promptMode?: 'scene' | 'custom' | 'parsed_custom'
   customPrompt?: string
   customNegativePrompt?: string
+  /** Last prompt entered in the Image Captioner modal. */
+  captionPrompt?: string
   activePromptPresetId?: string | null
   promptPresets?: ImageGenPromptPreset[]
+  loraPresets?: LoraPreset[]
+  activeLoraPresetId?: string | null
+  bypassCharacterLora?: boolean
+  bypassActiveLoraPreset?: boolean
+  loraStrengthScale?: number
   promptParserConnectionId?: string | null
   promptParserModel?: string
   promptParserParameters?: Record<string, any>
@@ -752,6 +1123,19 @@ export interface ImageGenPromptPreset {
   parserParameters?: Record<string, any>
   /** Whether the preset is intended as a main scene preset or a per-character snippet. Legacy entries are treated as 'main'. */
   kind?: ImageGenPresetKind
+}
+
+export interface LoraEntry {
+  lora_name: string
+  weight_model: number
+  weight_clip?: number
+}
+
+export interface LoraPreset {
+  id: string
+  name: string
+  loras: LoraEntry[]
+  base_tags?: string
 }
 
 // ---- Spindle Slice ----
@@ -871,6 +1255,7 @@ export interface BulkUpdateStatus {
 
 export interface SpindleSlice {
   extensions: ExtensionInfo[]
+  extensionUpdates: import('./spindle-updates').ExtensionUpdateInfo[]
   /** Active theme overrides from Spindle extensions, keyed by extensionId */
   extensionThemeOverrides: Record<string, ExtensionThemeOverride>
   /** Extension IDs whose theme overrides are suppressed by the user */
@@ -889,6 +1274,7 @@ export interface SpindleSlice {
   pendingConfirm: PendingConfirmRequest | null
   pendingInputPrompt: PendingInputPromptRequest | null
   pendingContextMenu: PendingContextMenuRequest | null
+  setExtensionUpdates: (updates: import('./spindle-updates').ExtensionUpdateInfo[]) => void
   loadExtensions: () => Promise<void>
   installExtension: (githubUrl: string, branch?: string | null) => Promise<void>
   updateExtension: (id: string) => Promise<void>
@@ -903,6 +1289,7 @@ export interface SpindleSlice {
   showPermissionRequest: (request: PendingPermissionRequest) => void
   resolvePermissionRequest: (id: string, approved: boolean) => Promise<void>
   openTextEditor: (request: PendingTextEditorRequest) => void
+  dismissTextEditor: (requestId: string) => void
   closeTextEditor: (requestId: string, text: string, cancelled: boolean) => void
   openSpindleModal: (request: PendingModalRequest) => void
   closeSpindleModal: (requestId: string, dismissedBy: 'user' | 'extension' | 'cleanup') => void
@@ -993,6 +1380,16 @@ export interface WorldInfoSlice {
   /** Book id the Lorebook tab should select on next mount/visit (cross-component navigation). */
   pendingWorldBookEditId: string | null
   setPendingWorldBookEditId: (id: string | null) => void
+  /** Entry id to reveal after the requested book has been selected. */
+  pendingWorldBookEditEntryId: string | null
+  setPendingWorldBookEditEntryId: (id: string | null) => void
+  lorebookHalfEditor: {
+    open: boolean
+    bookId: string | null
+    entryId: string | null
+  }
+  openLorebookHalfEditor: (bookId?: string | null, entryId?: string | null) => void
+  closeLorebookHalfEditor: () => void
 }
 
 // Lumi Feedback Slice
@@ -1017,6 +1414,7 @@ export interface MentionQueueOpts {
   persona_addon_states?: Record<string, boolean>
   preset_id?: string
   force_preset_id?: boolean
+  user_input?: string
 }
 
 export interface MentionQueue {
@@ -1100,20 +1498,44 @@ export interface MultiplayerSlice {
 }
 
 // ---- Spindle Placement Slice ----
+/** A persisted rectangle in zoom-layer layout pixels. */
+export interface SurfaceRectPrefs {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+/** Dimension constraints shared by host-managed floating placements. */
+export interface PlacementGeometryBounds {
+  minWidth: number
+  minHeight: number
+  maxWidth?: number
+  maxHeight?: number
+}
+
 import type {
   DrawerTabState,
   CharacterEditorTabState,
+  PresetEditorTabState,
+  PresetEditorToolbarItemState,
   FloatWidgetState,
   DockPanelState,
   AppMountState,
   InputBarActionState,
   ExtensionCommandState,
+  SettingsTabState,
+  ConnectionEditorTabState,
 } from '@/store/slices/spindle-placement'
-import type { TabLocation } from '@/lib/spindle/tab-mobility-types'
+import type { SpindleTabLocation as TabLocation } from 'lumiverse-spindle-types'
 
 export interface SpindlePlacementSlice {
   drawerTabs: DrawerTabState[]
+  settingsTabs: SettingsTabState[]
   characterEditorTabs: CharacterEditorTabState[]
+  connectionEditorTabs: ConnectionEditorTabState[]
+  presetEditorTabs: PresetEditorTabState[]
+  presetEditorToolbarItems: PresetEditorToolbarItemState[]
   floatWidgets: FloatWidgetState[]
   dockPanels: DockPanelState[]
   appMounts: AppMountState[]
@@ -1130,17 +1552,38 @@ export interface SpindlePlacementSlice {
   unregisterDrawerTab: (tabId: string) => void
   updateDrawerTab: (tabId: string, updates: Partial<Pick<DrawerTabState, 'title' | 'shortName' | 'badge'>>) => void
 
+  registerSettingsTab: (tab: SettingsTabState) => void
+  unregisterSettingsTab: (tabId: string) => void
+  updateSettingsTab: (tabId: string, updates: Partial<Pick<SettingsTabState, 'title'>>) => void
+
   registerCharacterEditorTab: (tab: CharacterEditorTabState) => void
   unregisterCharacterEditorTab: (tabId: string) => void
   updateCharacterEditorTab: (tabId: string, updates: Partial<Pick<CharacterEditorTabState, 'title'>>) => void
 
+  registerConnectionEditorTab: (tab: ConnectionEditorTabState) => void
+  unregisterConnectionEditorTab: (tabId: string) => void
+  updateConnectionEditorTab: (tabId: string, updates: Partial<Pick<ConnectionEditorTabState, 'title'>>) => void
+
+  registerPresetEditorTab: (tab: PresetEditorTabState) => void
+  unregisterPresetEditorTab: (tabId: string) => void
+  updatePresetEditorTab: (tabId: string, updates: Partial<Pick<PresetEditorTabState, 'title'>>) => void
+
+  registerPresetEditorToolbarItem: (item: PresetEditorToolbarItemState) => void
+  unregisterPresetEditorToolbarItem: (itemId: string) => void
+  setPresetEditorToolbarItemVisible: (itemId: string, visible: boolean) => void
+
   registerFloatWidget: (widget: FloatWidgetState) => void
   unregisterFloatWidget: (widgetId: string) => void
-  updateFloatWidget: (widgetId: string, updates: Partial<Pick<FloatWidgetState, 'x' | 'y' | 'width' | 'height' | 'visible' | 'fullscreen' | 'preFullscreen'>>) => void
+  updateFloatWidget: (widgetId: string, updates: Partial<Pick<FloatWidgetState, 'x' | 'y' | 'width' | 'height' | 'visible' | 'desktopPoppedOut' | 'fullscreen' | 'preFullscreen' | 'resizable' | 'bounds' | 'aspectLock' | 'persistGeometry' | 'mobileClamp'>>) => void
 
   registerDockPanel: (panel: DockPanelState) => void
   unregisterDockPanel: (panelId: string) => void
-  updateDockPanel: (panelId: string, updates: Partial<Pick<DockPanelState, 'title' | 'collapsed' | 'size'>>) => void
+  updateDockPanel: (panelId: string, updates: Partial<Pick<DockPanelState, 'title' | 'collapsed' | 'size' | 'minSize' | 'maxSize' | 'respectRequestedEdge' | 'persistGeometry'>>) => void
+
+  /** Host-owned, namespaced geometry cache used by H6 placement handles. */
+  persistedPlacementGeometry: Record<string, SurfaceRectPrefs>
+  setPersistedPlacementGeometry: (key: string, rect: SurfaceRectPrefs) => void
+  clearPersistedPlacementGeometry: (key: string) => void
 
   registerAppMount: (mount: AppMountState) => void
   unregisterAppMount: (mountId: string) => void
@@ -1208,7 +1651,7 @@ import type { RegexScript, CreateRegexScriptInput, UpdateRegexScriptInput } from
 export interface RegexSlice {
   regexScripts: RegexScript[]
   regexEditingId: string | null
-  loadRegexScripts: () => Promise<void>
+  loadRegexScripts: (shouldApply?: () => boolean) => Promise<void>
   /** Pure setter for hydrating from pre-fetched data (bootstrap payload). */
   setRegexScripts: (scripts: RegexScript[]) => void
   addRegexScript: (input: CreateRegexScriptInput) => Promise<RegexScript>
@@ -1217,6 +1660,8 @@ export interface RegexSlice {
   bulkRemoveRegexScripts: (ids: string[]) => Promise<number>
   reorderRegexScripts: (orderedIds: string[], folderChange?: { id: string; folder: string }) => Promise<void>
   toggleRegexScript: (id: string, disabled: boolean) => Promise<void>
+  toggleSelectedRegexScripts: (ids: string[], disabled: boolean) => Promise<{ changedIds: string[]; skippedIds: string[] }>
+  toggleRegexFolder: (folder: string, disabled: boolean) => Promise<{ changedIds: string[]; skippedIds: string[] }>
   setRegexEditingId: (id: string | null) => void
 }
 
@@ -1236,12 +1681,16 @@ export interface ExpressionSlice {
   expressionDisplay: ExpressionDisplaySettings
   /** Per-character expression state for group chats (characterId → label+imageId) */
   groupExpressions: Record<string, GroupExpressionEntry>
+  /** Per-group sprite state for a single card containing multiple characters. */
+  multiCharacterExpressions: Record<string, GroupExpressionEntry>
   /** Character currently generating a response (set via GENERATION_STARTED, cleared on GENERATION_ENDED) */
   respondingCharacterId: string | null
   setActiveExpression: (label: string | null, imageId: string | null, characterId: string | null) => void
   setGroupExpression: (characterId: string, label: string, imageId: string) => void
   setGroupExpressions: (map: Record<string, GroupExpressionEntry>) => void
   clearGroupExpressions: () => void
+  setMultiCharacterExpressions: (map: Record<string, GroupExpressionEntry>) => void
+  clearMultiCharacterExpressions: () => void
   setRespondingCharacterId: (characterId: string | null) => void
   setExpressionDisplay: (partial: Partial<ExpressionDisplaySettings>) => void
   toggleExpressionMinimized: () => void
@@ -1250,14 +1699,19 @@ export interface ExpressionSlice {
 // ---- Image Gen Connections Slice ----
 export interface ImageGenConnectionsSlice {
   imageGenProfiles: ImageGenConnectionProfile[]
+  /** True once the current user's image-gen profile list has been fetched. */
+  imageGenProfilesLoaded: boolean
+  /** Monotonic local revision used to reject stale async profile results. */
+  imageGenProfilesVersion: number
   activeImageGenConnectionId: string | null
   imageGenProviders: ImageGenProviderInfo[]
 
-  setImageGenProfiles: (profiles: ImageGenConnectionProfile[]) => void
+  setImageGenProfiles: (profiles: ImageGenConnectionProfile[], expectedVersion?: number) => void
   setActiveImageGenConnection: (id: string | null) => void
   addImageGenProfile: (profile: ImageGenConnectionProfile) => void
   updateImageGenProfile: (id: string, updates: Partial<ImageGenConnectionProfile>) => void
   removeImageGenProfile: (id: string) => void
+  applyImageGenProfileOrder: (orderedIds: string[]) => void
   setImageGenProviders: (providers: ImageGenProviderInfo[]) => void
 }
 
@@ -1282,6 +1736,7 @@ export interface SttConnectionsSlice {
   addSttProfile: (profile: import('@/types/api').SttConnectionProfile) => void
   updateSttProfile: (id: string, updates: Partial<import('@/types/api').SttConnectionProfile>) => void
   removeSttProfile: (id: string) => void
+  applySttProfileOrder: (orderedIds: string[]) => void
   setSttProviders: (providers: import('@/types/api').SttProviderInfo[]) => void
 }
 
@@ -1294,6 +1749,7 @@ export interface TtsConnectionsSlice {
   addTtsProfile: (profile: import('@/types/api').TtsConnectionProfile) => void
   updateTtsProfile: (id: string, updates: Partial<import('@/types/api').TtsConnectionProfile>) => void
   removeTtsProfile: (id: string) => void
+  applyTtsProfileOrder: (orderedIds: string[]) => void
   setTtsProviders: (providers: import('@/types/api').TtsProviderInfo[]) => void
 }
 
@@ -1359,17 +1815,19 @@ export interface MigrationSlice {
 }
 
 // ---- Operator Slice ----
-import type { OperatorLogEntry, OperatorStatusPayload } from '@/types/ws-events'
+import type { ImageThumbnailQueuePayload, OperatorLogEntry, OperatorStatusPayload } from '@/types/ws-events'
 
 export interface OperatorSlice {
   operatorLogs: OperatorLogEntry[]
   operatorStatus: OperatorStatusPayload | null
   operatorBusy: string | null
   operatorProgressMessage: string | null
+  thumbnailQueue: ImageThumbnailQueuePayload
   appendOperatorLogs: (entries: OperatorLogEntry[]) => void
   setOperatorStatus: (status: OperatorStatusPayload) => void
   setOperatorBusy: (operation: string | null) => void
   setOperatorProgressMessage: (message: string | null) => void
+  setThumbnailQueue: (status: ImageThumbnailQueuePayload) => void
   clearOperatorLogs: () => void
 }
 
@@ -1377,6 +1835,7 @@ export interface OperatorSlice {
 export interface FloatingAvatarState {
   imageUrl: string
   displayName: string
+  owner: 'native' | 'portrait-dock'
   x: number
   y: number
   width: number
@@ -1385,7 +1844,7 @@ export interface FloatingAvatarState {
 
 export interface FloatingAvatarSlice {
   floatingAvatar: FloatingAvatarState | null
-  openFloatingAvatar: (imageUrl: string, displayName: string) => void
+  openFloatingAvatar: (imageUrl: string, displayName: string, owner?: FloatingAvatarState['owner']) => void
   updateFloatingAvatar: (partial: Partial<FloatingAvatarState>) => void
   closeFloatingAvatar: () => void
 }
@@ -1441,6 +1900,8 @@ export interface ConnectionSlice {
   wsAuthSynced: boolean
   /** True after a pong has been received since the last open — confirms the round-trip works. */
   wsRoundTripVerified: boolean
+  /** True while a previously healthy PWA is proving a fresh foreground round trip. */
+  wsResumeRecovering: boolean
   /**
    * Flips to true the first time all three healthy signals coincide. Stays true for the rest of
    * the session so the connection-lost overlay only appears AFTER an initial healthy connection.
@@ -1449,12 +1910,13 @@ export interface ConnectionSlice {
   /**
    * True once a new service worker bundle has been detected (post-reconnect bundle check).
    * Keeps the connection-lost overlay mounted with "Updating…" messaging until the page reloads
-   * — the existing controllerchange handler in main.tsx performs the reload itself.
+   * — vite-plugin-pwa's onNeedReload callback in main.tsx performs the reload itself.
    */
   wsUpdatePending: boolean
   setWsConnected: (connected: boolean) => void
   setWsAuthSynced: (synced: boolean) => void
   setWsRoundTripVerified: (verified: boolean) => void
+  setWsResumeRecovering: (recovering: boolean) => void
   setWsUpdatePending: (pending: boolean) => void
   resetConnectionState: () => void
 }

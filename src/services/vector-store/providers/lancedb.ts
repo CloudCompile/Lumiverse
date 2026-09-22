@@ -22,11 +22,12 @@ import { connect, Index, type Connection, type Table } from "@lancedb/lancedb";
 
 export type { Table } from "@lancedb/lancedb";
 import { dirname, join } from "path";
-import { mkdirSync, readdirSync, renameSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync, type Dirent } from "fs";
 import { env } from "../../../env";
 import { getDb } from "../../../db/connection";
 import { embeddingCache } from "../../embedding-cache";
 import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../../../utils/lancedb-path";
+import { repairMixedLanceManifestPaths } from "../../../utils/lancedb-manifests";
 import type { WorldBookVectorIndexStatus } from "../../../types/world-book";
 import { LANCEDB_CAPABILITIES } from "../capabilities";
 import { toSimilarity } from "../addressing";
@@ -125,9 +126,103 @@ let lancedbPathDiagnosticsLogged = false;
 let optimizeTimer: ReturnType<typeof setTimeout> | null = null;
 const OPTIMIZE_DEBOUNCE_MS = 15_000; // 15 seconds after last write (reduced from 30s)
 /** Grace period for version cleanup — keeps old versions alive long enough for
- *  in-flight reads to complete. Without this, optimize() can delete manifests
- *  that concurrent queries still reference, causing "Object not found" errors. */
-const CLEANUP_GRACE_PERIOD_MS = 2 * 60_000;
+ *  in-flight reads and eventually-consistent handles to advance. Without this,
+ *  optimize() can delete manifests that concurrent queries still reference,
+ *  causing "Object not found" errors. */
+const CLEANUP_GRACE_PERIOD_MS = 5 * 60_000;
+const READ_CONSISTENCY_INTERVAL_SECONDS = 5;
+const LANCE_INDEX_UUID_DIR_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const STARTUP_FULL_MAINTENANCE_INTERVAL_MS = 24 * 60 * 60_000;
+const STARTUP_MAINTENANCE_STATE_PATH = join(env.dataDir, ".lancedb-maintenance.json");
+
+type StartupMaintenanceState = {
+  tables?: Record<string, { lastFullMaintenanceAt?: number }>;
+};
+
+function readStartupMaintenanceState(): StartupMaintenanceState {
+  try {
+    const value = JSON.parse(readFileSync(STARTUP_MAINTENANCE_STATE_PATH, "utf8")) as StartupMaintenanceState;
+    return value && typeof value === "object" ? value : {};
+  } catch {
+    return {};
+  }
+}
+
+function shouldRunFullStartupMaintenance(
+  state: StartupMaintenanceState,
+  tableName: string,
+  now = Date.now(),
+): boolean {
+  const lastRun = state.tables?.[tableName]?.lastFullMaintenanceAt;
+  return typeof lastRun !== "number" || now - lastRun >= STARTUP_FULL_MAINTENANCE_INTERVAL_MS;
+}
+
+function recordFullStartupMaintenance(
+  state: StartupMaintenanceState,
+  tableName: string,
+  completedAt = Date.now(),
+): void {
+  state.tables ??= {};
+  state.tables[tableName] = { lastFullMaintenanceAt: completedAt };
+}
+
+function persistStartupMaintenanceState(state: StartupMaintenanceState): void {
+  try {
+    writeFileSync(STARTUP_MAINTENANCE_STATE_PATH, JSON.stringify(state), "utf8");
+  } catch (err) {
+    // Maintenance still succeeded; only its restart cadence is lost.
+    console.warn("[embeddings] Failed to persist LanceDB maintenance cadence:", err);
+  }
+}
+
+/**
+ * Lance's object-store cleanup removes orphaned index files but local object
+ * stores leave the now-empty UUID directory behind. Reclaim only direct UUID
+ * children which have remained empty beyond the cleanup grace period.
+ *
+ * rmdirSync is intentionally used instead of recursive removal: if a native
+ * index build creates a file between the directory scan and removal, rmdirSync
+ * fails without deleting any index data.
+ */
+export function sweepEmptyIndexDirs(
+  indicesDir: string,
+  gracePeriodMs = CLEANUP_GRACE_PERIOD_MS,
+  now = Date.now(),
+): number {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(indicesDir, { withFileTypes: true });
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return 0;
+    console.warn(`[embeddings] Failed to inspect LanceDB index directory ${indicesDir}:`, err);
+    return 0;
+  }
+
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !LANCE_INDEX_UUID_DIR_RE.test(entry.name)) continue;
+    const indexDir = join(indicesDir, entry.name);
+    try {
+      const ageMs = now - statSync(indexDir).mtimeMs;
+      if (ageMs <= gracePeriodMs) continue;
+      rmdirSync(indexDir);
+      removed += 1;
+    } catch (err: any) {
+      // ENOTEMPTY/EEXIST means the directory is live (or became live while we
+      // inspected it). ENOENT means another cleanup already won the race.
+      if (err?.code === "ENOTEMPTY" || err?.code === "EEXIST" || err?.code === "ENOENT") continue;
+      console.warn(`[embeddings] Failed to remove empty LanceDB index directory ${indexDir}:`, err);
+    }
+  }
+  return removed;
+}
+
+function sweepTableEmptyIndexDirs(tableName: string): void {
+  const removed = sweepEmptyIndexDirs(join(LANCEDB_PATH, `${tableName}.lance`, "_indices"));
+  if (removed > 0) {
+    console.info(`[embeddings] Reclaimed ${removed} empty LanceDB index director${removed === 1 ? "y" : "ies"} for ${tableName}`);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Write serialization — prevents concurrent LanceDB mutations from racing.
@@ -150,6 +245,10 @@ const CROSS_PROCESS_WRITE_LOCK_STALE_MS = 5 * 60_000;
 const CROSS_PROCESS_WRITE_LOCK_ENABLED = shouldUseCrossProcessWriteLock();
 const RETRYABLE_LANCE_WRITE_CONFLICT_MAX_ATTEMPTS = 4;
 const RETRYABLE_LANCE_WRITE_CONFLICT_BASE_BACKOFF_MS = 100;
+// A container restart commonly reuses PID 1. Keep this separately from the
+// lock's PID so a lock left by the previous container instance cannot appear
+// live merely because the replacement process has the same PID.
+const PROCESS_STARTED_AT = Date.now() - Math.floor(process.uptime() * 1_000);
 const _writeLockQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 let _writeLockHeld = false;
 
@@ -195,10 +294,25 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+export function isCrossProcessLockFromPriorProcessInstance(
+  info: { pid?: number; acquiredAt?: number } | null,
+  processId: number = process.pid,
+  processStartedAt: number = PROCESS_STARTED_AT,
+): boolean {
+  // PID liveness alone is not an identity check: Docker (and other process
+  // namespaces) can reuse PID 1 after a restart. If this process has the
+  // lock owner's PID but the lock predates this process, it necessarily came
+  // from an earlier process instance.
+  return info?.pid === processId
+    && typeof info.acquiredAt === "number"
+    && info.acquiredAt < processStartedAt;
+}
+
 function shouldBreakStaleCrossProcessLock(): boolean {
   if (!existsSync(CROSS_PROCESS_WRITE_LOCK_DIR)) return false;
 
   const info = readCrossProcessLockInfo();
+  if (isCrossProcessLockFromPriorProcessInstance(info)) return true;
   const fallbackAcquiredAt = (() => {
     try {
       return statSync(CROSS_PROCESS_WRITE_LOCK_DIR).mtimeMs;
@@ -250,6 +364,11 @@ async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | nu
 }
 
 export async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  // A child maintenance process asks the serving process to close this gate
+  // before it starts mutating Lance files. Writers need to honor the same
+  // gate as readers; the cross-process write lock alone cannot protect a
+  // native read from optimize() deleting its version files.
+  await awaitMaintenanceGate();
   if (!_writeLockHeld) {
     _writeLockHeld = true;
   } else {
@@ -271,8 +390,9 @@ export async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
       entry.resolve = () => { clearTimeout(timer); origResolve(); };
     });
   }
-  const releaseCrossProcessLock = await acquireCrossProcessWriteLockIfNeeded();
+  let releaseCrossProcessLock: (() => void) | null = null;
   try {
+    releaseCrossProcessLock = await acquireCrossProcessWriteLockIfNeeded();
     return await fn();
   } finally {
     releaseCrossProcessLock?.();
@@ -310,6 +430,59 @@ let _activeReadCount = 0;
 // run under withWriteLock(), so only one is ever active and the gate has a
 // single owner at a time.
 let _maintenanceGate: Promise<void> | null = null;
+type NativeReadWaiter = {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+const _nativeReadQueue: NativeReadWaiter[] = [];
+let _nativeReadHeld = false;
+
+/**
+ * The Android/Termux LanceDB build has shown process-fatal instability when
+ * several Arrow scans settle concurrently. Keep native scans single-flight on
+ * that platform; desktop/server builds retain their normal read concurrency.
+ */
+async function acquireNativeReadSlot(signal?: AbortSignal): Promise<() => void> {
+  if (!LANCEDB_TERMUX_LIKE) return () => {};
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException("Aborted", "AbortError");
+  }
+
+  if (_nativeReadHeld) {
+    await new Promise<void>((resolve, reject) => {
+      const waiter: NativeReadWaiter = { resolve, reject, signal };
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = _nativeReadQueue.indexOf(waiter);
+          if (index < 0) return;
+          _nativeReadQueue.splice(index, 1);
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+        };
+        signal.addEventListener("abort", waiter.onAbort, { once: true });
+      }
+      _nativeReadQueue.push(waiter);
+    });
+  } else {
+    _nativeReadHeld = true;
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = _nativeReadQueue.shift();
+    if (!next) {
+      _nativeReadHeld = false;
+      return;
+    }
+    if (next.signal && next.onAbort) {
+      next.signal.removeEventListener("abort", next.onAbort);
+    }
+    next.resolve();
+  };
+}
 
 /**
  * Block until any in-progress file-mutating maintenance op finishes, WITHOUT
@@ -353,11 +526,11 @@ function raceMaintenanceGate(gate: Promise<void>, signal?: AbortSignal): Promise
   });
 }
 
-async function waitForReadsToDrain(timeoutMs = 30_000): Promise<void> {
+async function waitForReadsToDrain(timeoutMs?: number): Promise<void> {
   if (_activeReadCount === 0) return;
   const startedAt = Date.now();
   while (_activeReadCount > 0) {
-    if (Date.now() - startedAt >= timeoutMs) {
+    if (timeoutMs !== undefined && Date.now() - startedAt >= timeoutMs) {
       console.warn(
         `[embeddings] Compaction proceeding with ${_activeReadCount} read(s) still in flight (drain wait timed out after ${timeoutMs}ms)`,
       );
@@ -374,16 +547,46 @@ async function waitForReadsToDrain(timeoutMs = 30_000): Promise<void> {
  * withWriteLock(), which serializes maintenance ops against each other so the
  * gate never has competing owners.
  */
-async function withMaintenanceExclusive<T>(fn: () => Promise<T>): Promise<T> {
+async function withMaintenanceExclusive<T>(fn: () => Promise<T>, drainAllReads = false): Promise<T> {
   let release!: () => void;
   _maintenanceGate = new Promise<void>((resolve) => { release = resolve; });
   try {
-    await waitForReadsToDrain();
+    await waitForReadsToDrain(drainAllReads ? undefined : 30_000);
     return await fn();
   } finally {
     _maintenanceGate = null;
     release();
   }
+}
+
+/**
+ * Close the serving process's LanceDB gate while maintenance runs in a child
+ * process. Unlike the in-process maintenance path, this waits indefinitely
+ * for existing scans: once the child has started, it has no visibility into
+ * this process's read count and therefore must never compact under a reader.
+ *
+ * The caller must invoke the returned release function after the child exits.
+ * The child separately takes the existing cross-process write lock, which also
+ * serializes it with any write that was already underway when this gate closed.
+ */
+export async function pauseLanceDbForExternalMaintenance(): Promise<() => void> {
+  // Do not overwrite an active in-process gate. This is normally unreachable
+  // because the supervisor serializes jobs, but waiting here keeps the helper
+  // safe if a manual optimize is already finishing.
+  await awaitMaintenanceGate();
+
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  _maintenanceGate = gate;
+  await waitForReadsToDrain();
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (_maintenanceGate === gate) _maintenanceGate = null;
+    release();
+  };
 }
 
 /**
@@ -524,6 +727,9 @@ function collectErrorMessages(err: unknown): string[] {
 }
 
 function isIncompleteEmbeddingsTableError(err: unknown, tableName: string): boolean {
+  // A manifest naming conflict is recoverable metadata, not a missing table.
+  // Never let a failed repair fall through to deleting the vector store.
+  if (err instanceof LanceManifestRecoveryError || isMixedLanceManifestError(err)) return false;
   const text = collectErrorMessages(err).join(" | ").toLowerCase();
   if (!text) return false;
   if (!text.includes(`${tableName}.lance`) && !text.includes(`table '${tableName}' was not found`)) {
@@ -570,6 +776,16 @@ function resetInMemoryVectorStoreState(): void {
       state.indexHealthTimer = null;
     }
   }
+}
+
+/**
+ * Drop every serving-process handle after a child process changed Lance files.
+ * The parent did not execute the transaction and may otherwise retain a table
+ * handle pointing at a pre-compaction manifest or index generation.
+ */
+export function refreshLanceDbAfterExternalMaintenance(): void {
+  resetInMemoryVectorStoreState();
+  startIndexHealthMonitor(EMBEDDINGS_TABLE);
 }
 
 export function resetSqliteVectorizationState(): void {
@@ -740,7 +956,11 @@ async function getConnection(): Promise<Connection> {
   const generation = connGeneration;
   logLanceDbPathDiagnostics();
   cleanupBrokenTermuxLanceDbMirror();
-  if (!connPromise) connPromise = connect(LANCEDB_URI);
+  if (!connPromise) {
+    connPromise = connect(LANCEDB_URI, {
+      readConsistencyInterval: READ_CONSISTENCY_INTERVAL_SECONDS,
+    });
+  }
 
   const conn = await connPromise;
   if (generation !== connGeneration) {
@@ -759,6 +979,51 @@ async function tableExists(conn: Connection, name: string): Promise<boolean> {
   return names.includes(name);
 }
 
+function isMixedLanceManifestError(err: unknown): boolean {
+  return collectErrorMessages(err).some((message) =>
+    message.toLowerCase().includes("found multiple manifest naming schemes"),
+  );
+}
+
+class LanceManifestRecoveryError extends Error {}
+
+async function openTableWithManifestRecovery(conn: Connection, tableName: string, lockHeld: boolean): Promise<Table> {
+  try {
+    return await conn.openTable(tableName);
+  } catch (err) {
+    if (!isMixedLanceManifestError(err)) throw err;
+  }
+
+  const repairAndOpen = async (): Promise<Table> => {
+    // Another caller/process may have repaired the table while we waited.
+    // Keep its healthy cached handle alive for any callers already using it.
+    try {
+      return await conn.openTable(tableName);
+    } catch (err) {
+      if (!isMixedLanceManifestError(err)) throw err;
+    }
+    await waitForReadsToDrain();
+    const state = getTableState(tableName);
+    state.tableHandle?.close();
+    invalidateTableHandle(tableName);
+    const result = repairMixedLanceManifestPaths(join(LANCEDB_PATH, `${tableName}.lance`));
+    if (result.migrated > 0) {
+      console.info(`[embeddings] Repaired ${result.migrated} mixed LanceDB manifest name(s) for ${tableName}; originals saved at ${result.backupPath}`);
+    }
+    return await conn.openTable(tableName);
+  };
+  const repairUnderWriteLock = () => {
+    // optimize/index maintenance can reopen a table while already owning the
+    // gate. Do not replace that gate or reacquire its write lock.
+    return _maintenanceGate ? repairAndOpen() : withMaintenanceExclusive(repairAndOpen, true);
+  };
+  try {
+    return await (lockHeld ? repairUnderWriteLock() : withWriteLock(repairUnderWriteLock));
+  } catch (cause) {
+    throw new LanceManifestRecoveryError(`Unable to repair mixed LanceDB manifests for ${tableName}; vector store preserved`, { cause });
+  }
+}
+
 export async function getTableIfExists(tableName = EMBEDDINGS_TABLE, lockHeld = false): Promise<Table | null> {
   const state = getTableState(tableName);
   if (state.tableHandle) return state.tableHandle;
@@ -772,7 +1037,7 @@ export async function getTableIfExists(tableName = EMBEDDINGS_TABLE, lockHeld = 
   const exists = await tableExists(conn, tableName);
   if (!exists) return null;
   try {
-    state.tableHandle = await conn.openTable(tableName);
+    state.tableHandle = await openTableWithManifestRecovery(conn, tableName, lockHeld);
   } catch (err) {
     if (await recoverBrokenEmbeddingsTable(tableName, `opening ${tableName} table`, err, lockHeld)) {
       return null;
@@ -793,7 +1058,7 @@ export async function getOrCreateTable(tableName = EMBEDDINGS_TABLE, seedRows?: 
   const exists = await tableExists(conn, tableName);
   if (exists) {
     try {
-      state.tableHandle = await conn.openTable(tableName);
+      state.tableHandle = await openTableWithManifestRecovery(conn, tableName, lockHeld);
       return state.tableHandle;
     } catch (err) {
       if (!(await recoverBrokenEmbeddingsTable(tableName, `opening ${tableName} before write`, err, lockHeld))) {
@@ -857,8 +1122,10 @@ const MIN_ROWS_FOR_PQ_VECTOR_INDEX = 65_536;
 export const MAX_LANCE_SOURCE_FILTER_IDS = 250;
 const OPTIMIZE_MAX_WAIT_MS = 2 * 60_000; // 2 minutes (reduced from 5 min to prevent fragment buildup)
 const CHAT_OPTIMIZE_MIN_INTERVAL_MS = 30 * 60_000; // Avoid full-table optimize churn from active chat writes
+const WORLD_BOOK_OPTIMIZE_MIN_INTERVAL_MS = 10 * 60_000; // Lorebook edits used to rewrite the table every 15s
 let optimizeQueuedAt: number | null = null;
 let lastChatOptimizeScheduledAt = 0;
+let lastWorldBookOptimizeScheduledAt = 0;
 let optimizeWorldBooksQueued = false;
 
 // ---------------------------------------------------------------------------
@@ -902,6 +1169,23 @@ export async function ensureVectorIndex(tableName: string, table: Table): Promis
   let activeTable = table;
   let rebuilt = false;
   try {
+    // Runtime state is reset on every server restart, but the index is not.
+    // Do not turn that reset into an expensive replace:true rebuild: optimize()
+    // already incorporates new data into a healthy index, and the health
+    // monitor repairs a genuinely missing/unreadable one.
+    const existingIndexes = await activeTable.listIndices();
+    const hasVectorIndex = existingIndexes.some((index: any) => {
+      const name = index.name || index.indexName || "";
+      return name.includes("vector");
+    });
+    if (hasVectorIndex) {
+      state.vectorIndexReady = true;
+      if (tableName !== WORLD_BOOK_EMBEDDINGS_TABLE) {
+        startIndexHealthMonitor(tableName);
+      }
+      return activeTable;
+    }
+
     const rowCount = await activeTable.countRows();
     const indexConfig = getVectorIndexConfig(rowCount);
     if (indexConfig === null) {
@@ -914,11 +1198,14 @@ export async function ensureVectorIndex(tableName: string, table: Table): Promis
       activeTable = await reopenTableForWrite(tableName);
       await activeTable.createIndex("vector", {
         config: indexConfig,
+        replace: true,
       } as any);
     });
     rebuilt = true;
-  } catch {
-    // Index may already exist - that's fine
+  } catch (err) {
+    state.vectorIndexReady = false;
+    console.warn(`[embeddings] Failed to ensure vector index for ${tableName}:`, err);
+    return activeTable;
   }
   state.vectorIndexReady = true;
   state.lastIndexRebuildAt = Date.now();
@@ -933,16 +1220,61 @@ export async function ensureVectorIndex(tableName: string, table: Table): Promis
   }
 }
 
+type IndexProbe =
+  | { status: "present"; stats: any }
+  | { status: "missing" }
+  | { status: "error"; error: unknown };
+
+async function probeIndex(table: Table, indexName: string): Promise<IndexProbe> {
+  try {
+    const stats = await (table as any).indexStats(indexName);
+    return stats ? { status: "present", stats } : { status: "missing" };
+  } catch (error) {
+    return { status: "error", error };
+  }
+}
+
+function expectedScalarIndexNames(tableName: string): string[] {
+  const names = ["id_idx", "user_id_idx", "owner_id_idx", "source_id_idx"];
+  if (tableName !== WORLD_BOOK_EMBEDDINGS_TABLE) names.push("source_type_idx");
+  return names;
+}
+
+async function probeIndexesWithRefresh(
+  tableName: string,
+  table: Table,
+  indexNames: string[],
+): Promise<Map<string, IndexProbe>> {
+  const run = async (handle: Table) => new Map(
+    await Promise.all(indexNames.map(async (name) => [name, await probeIndex(handle, name)] as const)),
+  );
+
+  let activeTable = table;
+  let probes = await run(activeTable);
+  if (Array.from(probes.values()).every((probe) => probe.status === "present")) {
+    return probes;
+  }
+
+  // A cached handle can legitimately be behind another process. Retry every
+  // suspect result against a newly opened handle before deciding to rebuild.
+  invalidateTableHandle(tableName);
+  const refreshed = await getTableIfExists(tableName);
+  if (refreshed) {
+    activeTable = refreshed;
+    probes = await run(activeTable);
+  }
+  return probes;
+}
+
 /**
  * Ensure scalar indexes exist on filter columns for fast prefiltering.
  * BTree for high-cardinality (user_id, owner_id, id), Bitmap for low-cardinality (source_type).
  * The `id` BTree is critical for mergeInsert performance — without it, every upsert
  * does a full table scan to find matching rows.
  *
- * When `force` is true, indexes are rebuilt with `replace: true` even if they already
- * exist. This is needed after compaction cleanup, which can leave stale index files
- * referencing deleted data versions (manifests as "Object not found" errors on Windows
- * and other platforms).
+ * When `force` is true, indexes are rebuilt with `replace: true` even if they
+ * already exist. Startup maintenance uses this to recover installations which
+ * already contain an unreadable or incomplete index generation.
  */
 export async function ensureScalarIndexes(tableName: string, table: Table, force = false): Promise<Table> {
   const state = getTableState(tableName);
@@ -950,44 +1282,31 @@ export async function ensureScalarIndexes(tableName: string, table: Table, force
 
   let activeTable = table;
   let rebuilt = false;
-
-  let indexNames: Set<string>;
+  let failed = false;
   try {
     activeTable = await reopenTableForWrite(tableName);
-    indexNames = new Set((await activeTable.listIndices()).map((i: any) => i.name || i.indexName || ""));
-  } catch {
-    // listIndices can fail if index files are orphaned from a previous compaction.
-    // Treat as empty so every index gets (re)created below.
-    indexNames = new Set();
-  }
+  } catch {}
 
   const create = async (col: string, config?: any) => {
     // LanceDB names indexes as {col}_idx by convention
     const indexName = `${col}_idx`;
-    const hasExistingIndex = indexNames.has(indexName);
-    if (!force && hasExistingIndex) return;
-    const build = async (replace: boolean) => {
+    if (!force) {
+      const probe = await probeIndex(activeTable, indexName);
+      if (probe.status === "present") return;
+    }
+    const build = async () => {
       await withRetryableLanceWriteConflictRetry(`${tableName}: create scalar index ${col}`, tableName, async () => {
         activeTable = await reopenTableForWrite(tableName);
-        const opts: any = config ? { config } : {};
-        if (replace) opts.replace = true;
+        const opts: any = config ? { config, replace: true } : { replace: true };
         await activeTable.createIndex(col, opts);
       });
       rebuilt = true;
-      indexNames.add(indexName);
     };
     try {
-      await build(force && hasExistingIndex);
+      await build();
     } catch (err) {
-      // replace: true can fail when the old index references orphaned files.
-      // Fall back to a plain create (LanceDB overwrites by column name).
-      if (force) {
-        try {
-          await build(false);
-        } catch {
-          // Index may already exist in a usable state
-        }
-      }
+      failed = true;
+      console.warn(`[embeddings] Failed to ensure scalar index ${indexName} for ${tableName}:`, err);
     }
   };
   await create("id"); // Critical for mergeInsert("id") join performance
@@ -997,7 +1316,7 @@ export async function ensureScalarIndexes(tableName: string, table: Table, force
   if (tableName !== WORLD_BOOK_EMBEDDINGS_TABLE) {
     await create("source_type", Index.bitmap());
   }
-  state.scalarIndexReady = true;
+  state.scalarIndexReady = !failed;
   if (!rebuilt) return activeTable;
   try {
     return await reopenTableForWrite(tableName);
@@ -1016,41 +1335,29 @@ export async function ensureFtsIndex(tableName: string, table: Table, force = fa
 
   let activeTable = table;
   let rebuilt = false;
-
-  let indexNames: Set<string>;
+  let failed = false;
   try {
     activeTable = await reopenTableForWrite(tableName);
-    indexNames = new Set((await activeTable.listIndices()).map((i: any) => i.name || i.indexName || ""));
-  } catch {
-    indexNames = new Set();
-  }
+  } catch {}
 
-  if (!force && indexNames.has("content_idx")) {
-    state.ftsIndexReady = true;
-    return activeTable;
+  if (!force) {
+    const probe = await probeIndex(activeTable, "content_idx");
+    if (probe.status === "present") {
+      state.ftsIndexReady = true;
+      return activeTable;
+    }
   }
   try {
     await withRetryableLanceWriteConflictRetry(`${tableName}: create FTS index`, tableName, async () => {
       activeTable = await reopenTableForWrite(tableName);
-      const opts: any = { config: Index.fts() };
-      if (force && indexNames.has("content_idx")) opts.replace = true;
-      await activeTable.createIndex("content", opts);
+      await activeTable.createIndex("content", { config: Index.fts(), replace: true });
     });
     rebuilt = true;
-  } catch {
-    if (force) {
-      try {
-        await withRetryableLanceWriteConflictRetry(`${tableName}: create FTS index`, tableName, async () => {
-          activeTable = await reopenTableForWrite(tableName);
-          await activeTable.createIndex("content", { config: Index.fts() });
-        });
-        rebuilt = true;
-      } catch {
-        // Index may already exist in a usable state
-      }
-    }
+  } catch (err) {
+    failed = true;
+    console.warn(`[embeddings] Failed to ensure FTS index content_idx for ${tableName}:`, err);
   }
-  state.ftsIndexReady = true;
+  state.ftsIndexReady = !failed;
   if (!rebuilt) return activeTable;
   try {
     return await reopenTableForWrite(tableName);
@@ -1060,9 +1367,9 @@ export async function ensureFtsIndex(tableName: string, table: Table, force = fa
 }
 
 /**
- * Periodic index health monitor. Checks unindexed row count and triggers
- * a vector index rebuild when too many rows have drifted out of the index
- * (which happens naturally with mergeInsert updates).
+ * Periodic index health monitor. It retries suspect results through a fresh
+ * handle, repairs missing/unreadable scalar and FTS indexes, and rebuilds the
+ * vector index when it is damaged or too many rows have drifted out of it.
  */
 function startIndexHealthMonitor(tableName = EMBEDDINGS_TABLE): void {
   const state = getTableState(tableName);
@@ -1100,57 +1407,54 @@ async function checkAndRebuildIndexes(tableName: string, table: Table): Promise<
   if (now - state.lastIndexRebuildAt < INDEX_REBUILD_COOLDOWN_MS) return;
 
   try {
-    const indices = await table.listIndices();
-    const vectorIdx = indices.find((i: any) => {
-      const name = i.name || i.indexName || "";
-      return name.includes("vector");
-    });
-    if (!vectorIdx) return;
-
-    const idxName = vectorIdx.name || (vectorIdx as any).indexName;
-    let unindexed = 0;
-    try {
-      const stats = await (table as any).indexStats(idxName);
-      if (stats) {
-        unindexed = (stats as any).num_unindexed_rows ?? (stats as any).numUnindexedRows ?? 0;
-      }
-    } catch {
-      // indexStats may not be supported for this index type — fall back to
-      // heuristic: rebuild if enough time has passed since last rebuild and
-      // we've been writing (optimizeQueuedAt !== null indicates recent writes).
-      if (optimizeQueuedAt !== null && now - state.lastIndexRebuildAt > INDEX_REBUILD_COOLDOWN_MS * 3) {
-        unindexed = UNINDEXED_ROW_THRESHOLD; // Force rebuild
-      }
-    }
+    const rowCount = await table.countRows();
+    const scalarIndexNames = expectedScalarIndexNames(tableName);
+    const expectsVectorIndex = getVectorIndexConfig(rowCount) !== null;
+    const expectedIndexNames = [
+      ...scalarIndexNames,
+      "content_idx",
+      ...(expectsVectorIndex ? ["vector_idx"] : []),
+    ];
+    const probes = await probeIndexesWithRefresh(tableName, table, expectedIndexNames);
+    const scalarNeedsRepair = scalarIndexNames.some((name) => probes.get(name)?.status !== "present");
+    const ftsNeedsRepair = probes.get("content_idx")?.status !== "present";
+    const vectorProbe = expectsVectorIndex ? probes.get("vector_idx") : undefined;
+    const vectorNeedsRepair = expectsVectorIndex && vectorProbe?.status !== "present";
+    const vectorStats = vectorProbe?.status === "present" ? vectorProbe.stats : undefined;
+    const unindexed = vectorStats
+      ? (vectorStats.num_unindexed_rows ?? vectorStats.numUnindexedRows ?? 0)
+      : 0;
     state.unindexedRowEstimate = unindexed;
 
-    if (unindexed >= UNINDEXED_ROW_THRESHOLD) {
-      console.info(`[embeddings] ${unindexed} unindexed rows detected, rebuilding vector index...`);
+    if (scalarNeedsRepair || ftsNeedsRepair || vectorNeedsRepair || unindexed >= UNINDEXED_ROW_THRESHOLD) {
+      const reasons = [
+        scalarNeedsRepair ? "scalar" : null,
+        ftsNeedsRepair ? "FTS" : null,
+        vectorNeedsRepair ? "vector" : null,
+        unindexed >= UNINDEXED_ROW_THRESHOLD ? `${unindexed} unindexed rows` : null,
+      ].filter(Boolean).join(", ");
+      console.info(`[embeddings] Repairing indexes for ${tableName} (${reasons})...`);
       await withWriteLock(async () => {
-        let tableForRebuild = await getTableIfExists(tableName, true);
+        const tableForRebuild = await getTableIfExists(tableName, true);
         if (!tableForRebuild) return;
-        const rowCount = await tableForRebuild.countRows();
-        const indexConfig = getVectorIndexConfig(rowCount);
-        if (indexConfig === null) {
-          state.vectorIndexReady = true;
-          state.unindexedRowEstimate = 0;
-          state.lastIndexRebuildAt = Date.now();
-          return;
-        }
-        // createIndex(replace) rewrites index files out from under any reader —
-        // the periodic rebuild fires mid-chat, exactly when retrieval is busy.
+        let activeRepairTable: Table = tableForRebuild;
         await withMaintenanceExclusive(async () => {
-          await withRetryableLanceWriteConflictRetry(`${tableName}: rebuild vector index`, tableName, async () => {
-            tableForRebuild = await reopenTableForWrite(tableName);
-            await tableForRebuild.createIndex("vector", {
-              config: indexConfig,
-              replace: true,
-            } as any);
-          });
+          if (scalarNeedsRepair) {
+            state.scalarIndexReady = false;
+            activeRepairTable = await ensureScalarIndexes(tableName, activeRepairTable);
+          }
+          if (ftsNeedsRepair) {
+            state.ftsIndexReady = false;
+            activeRepairTable = await ensureFtsIndex(tableName, activeRepairTable);
+          }
+          if (vectorNeedsRepair || unindexed >= UNINDEXED_ROW_THRESHOLD) {
+            state.vectorIndexReady = false;
+            activeRepairTable = await ensureVectorIndex(tableName, activeRepairTable);
+          }
         });
         state.lastIndexRebuildAt = Date.now();
         state.unindexedRowEstimate = 0;
-        console.info(`[embeddings] Vector index rebuilt (${rowCount} rows)`);
+        console.info(`[embeddings] Index repair completed for ${tableName} (${rowCount} rows)`);
       });
     }
   } catch (err) {
@@ -1174,6 +1478,8 @@ export async function runStartupVectorMaintenance(): Promise<void> {
     console.warn(`[embeddings] Startup WI split: legacy world-book rows still appear present in ${EMBEDDINGS_TABLE}`);
   }
   const tablesToMaintain = [EMBEDDINGS_TABLE, WORLD_BOOK_EMBEDDINGS_TABLE];
+  const maintenanceState = readStartupMaintenanceState();
+  let maintenanceStateChanged = false;
 
   await withWriteLock(async () => {
     for (const tableName of tablesToMaintain) {
@@ -1196,19 +1502,28 @@ export async function runStartupVectorMaintenance(): Promise<void> {
       const idxType = vectorIdx ? ((vectorIdx as any).indexType || (vectorIdx as any).type || "") : "";
       const needsMigration = vectorIdx && /hnsw/i.test(idxType);
       let activeTable: Table = table;
+      const fullMaintenanceDue = shouldRunFullStartupMaintenance(maintenanceState, tableName);
 
       try {
-        console.info(`[embeddings] Running startup compaction for ${tableName}...`);
-        // optimize() unlinks superseded version files and the index rebuilds
-        // below rewrite index files; hold reads off for the whole sequence.
+        if (fullMaintenanceDue) {
+          console.info(`[embeddings] Running scheduled startup compaction for ${tableName}...`);
+        } else {
+          console.info(`[embeddings] Skipping recent startup compaction for ${tableName}; checking indexes only.`);
+        }
+        // optimize() and any index repair can rewrite or unlink files; hold
+        // reads off for the whole sequence.
         await withMaintenanceExclusive(async () => {
-          try {
-            await withRetryableLanceWriteConflictRetry(`${tableName}: startup optimize`, tableName, async () => {
-              activeTable = await reopenTableForWrite(tableName);
-              await activeTable.optimize({ cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS) });
-            });
-          } catch (err) {
-            console.warn(`[embeddings] Startup compaction failed for ${tableName}:`, err);
+          if (fullMaintenanceDue) {
+            try {
+              await withRetryableLanceWriteConflictRetry(`${tableName}: startup optimize`, tableName, async () => {
+                activeTable = await reopenTableForWrite(tableName);
+                await activeTable.optimize({ cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS) });
+              });
+              recordFullStartupMaintenance(maintenanceState, tableName);
+              maintenanceStateChanged = true;
+            } catch (err) {
+              console.warn(`[embeddings] Startup compaction failed for ${tableName}:`, err);
+            }
           }
 
           try {
@@ -1237,15 +1552,22 @@ export async function runStartupVectorMaintenance(): Promise<void> {
             }
           }
 
-          activeTable = await ensureScalarIndexes(tableName, activeTable, true);
-          activeTable = await ensureFtsIndex(tableName, activeTable, true);
+          // Only repair missing/broken indexes. Replacing every index at every
+          // startup doubles the file churn immediately after optimize().
+          activeTable = await ensureScalarIndexes(tableName, activeTable);
+          activeTable = await ensureFtsIndex(tableName, activeTable);
           activeTable = await ensureVectorIndex(tableName, activeTable);
+          sweepTableEmptyIndexDirs(tableName);
         });
       } catch (err) {
         console.warn(`[embeddings] Startup maintenance failed for ${tableName}:`, err);
       }
     }
   });
+
+  if (maintenanceStateChanged) {
+    persistStartupMaintenanceState(maintenanceState);
+  }
 
   startIndexHealthMonitor(EMBEDDINGS_TABLE);
 }
@@ -1261,9 +1583,9 @@ export async function optimizeTable(tableNames?: string[]): Promise<void> {
         if (!table) continue;
         let activeTable: Table = table;
 
-        // Block new reads and drain in-flight ones, then compact: optimize()
-        // unlinks superseded version files and the forced index rebuilds rewrite
-        // index files — either is fatal to a read scanning them concurrently.
+        // Block new reads and drain in-flight ones, then compact. Lance's
+        // optimize already updates indexes; rebuilding every scalar/FTS index
+        // again here only creates a second orphaned UUID generation.
         await withMaintenanceExclusive(async () => {
           await withRetryableLanceWriteConflictRetry(`${tableName}: optimize`, tableName, async () => {
             activeTable = await reopenTableForWrite(tableName);
@@ -1271,8 +1593,7 @@ export async function optimizeTable(tableNames?: string[]): Promise<void> {
               cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS),
             });
           });
-          activeTable = await ensureScalarIndexes(tableName, activeTable, true);
-          activeTable = await ensureFtsIndex(tableName, activeTable, true);
+          sweepTableEmptyIndexDirs(tableName);
         });
       } catch (err) {
         console.warn(`[embeddings] Optimize failed for ${tableName}:`, err);
@@ -1407,14 +1728,18 @@ export function scheduleOptimize(reason: "general" | "chat_chunk" | "world_book"
     // Chat memory writes are high-frequency, but they share the same Lance table
     // as large static world-book corpora. Running full optimize/index rebuilds on
     // every chat-churn window can make disk usage balloon during active chats.
-    // Rate-limit the background optimize for chat-only writes and leave startup,
-    // manual, and bulk world-book/databank maintenance paths unchanged.
+    // Rate-limit the background optimize for chat-only writes. Lorebook edits are
+    // independently rate-limited below so typing does not rewrite the table.
     if (now - lastChatOptimizeScheduledAt < CHAT_OPTIMIZE_MIN_INTERVAL_MS) {
       return;
     }
     lastChatOptimizeScheduledAt = now;
   }
   if (reason === "world_book") {
+    if (now - lastWorldBookOptimizeScheduledAt < WORLD_BOOK_OPTIMIZE_MIN_INTERVAL_MS) {
+      return;
+    }
+    lastWorldBookOptimizeScheduledAt = now;
     optimizeWorldBooksQueued = true;
   }
   if (optimizeQueuedAt == null) optimizeQueuedAt = now;
@@ -1830,6 +2155,7 @@ export class LanceDbStore implements VectorStore {
       const q = table
         .query()
         .nearestTo(opts.vector)
+        .distanceType("cosine")
         .where(where)
         .select(columns)
         .limit(opts.limit) as any;
@@ -1958,15 +2284,27 @@ const FTS_QUERY_MAX_CHARS = 4096;
  *  actually settles. Decrementing the read count before then would reopen the
  *  very unlink-during-read window the gate exists to close. */
 export async function raceWithSignal<T>(makePromise: () => Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  const endRead = await beginRead(signal);
+  const releaseNativeRead = await acquireNativeReadSlot(signal);
+  let endRead: () => void;
+  try {
+    endRead = await beginRead(signal);
+  } catch (err) {
+    releaseNativeRead();
+    throw err;
+  }
   let promise: Promise<T>;
   try {
     promise = makePromise();
   } catch (err) {
     endRead();
+    releaseNativeRead();
     throw err;
   }
-  promise.then(endRead, endRead);
+  const finishRead = () => {
+    endRead();
+    releaseNativeRead();
+  };
+  promise.then(finishRead, finishRead);
 
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));

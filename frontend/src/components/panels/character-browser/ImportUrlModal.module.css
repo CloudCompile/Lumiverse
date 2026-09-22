@@ -138,3 +138,35 @@
     padding: 20px 16px calc(env(safe-area-inset-bottom, 0px) + 16px);
   }
 }
+
+.optionRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 10px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.optionRow input[type='checkbox'] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.optionRow:has(input:disabled) {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.optionText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.optionHint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+}

@@ -22,6 +22,11 @@ const DEFAULT_FLAGS: MacroFlags = {
 const AST_CACHE_MAX = 128;
 const astCache = new Map<string, AstNode[]>();
 
+/** Drop parsed templates; they are rebuilt on the next macro evaluation. */
+export function clearMacroAstCache(): void {
+  astCache.clear();
+}
+
 /**
  * Parse a macro template string into an AST.
  * Input is first lexed, then the token stream is walked to produce nodes.
@@ -44,9 +49,9 @@ export function parse(input: string): AstNode[] {
   }
 
   const tokens = lex(input);
-  const ctx = new ParseContext(tokens);
+  const ctx = new ParseContext(tokens, input);
   const nodes = parseDocument(ctx);
-  const result = pairScopedMacros(nodes);
+  const result = pairScopedMacros(nodes, input);
 
   // Evict oldest entry if at capacity
   if (astCache.size >= AST_CACHE_MAX) {
@@ -60,7 +65,7 @@ export function parse(input: string): AstNode[] {
 
 class ParseContext {
   pos = 0;
-  constructor(public tokens: Token[]) {}
+  constructor(public tokens: Token[], public source: string) {}
 
   peek(): Token {
     return this.tokens[this.pos] ?? { type: TokenType.EOF, value: "", offset: -1 };
@@ -171,7 +176,7 @@ function parseMacroExpr(ctx: ParseContext): MacroNode {
   }
 
   const endOffset = closeTok.offset + closeTok.value.length;
-  const raw = `{{${name}${args.length > 0 ? "::" : ""}}}`;
+  const raw = ctx.source.slice(startOffset, endOffset);
 
   return {
     type: "macro",
@@ -239,7 +244,9 @@ function parseVariableShorthand(ctx: ParseContext, flags: MacroFlags, startOffse
   }
 
   // Consume closing }}
+  const closeTok = ctx.peek();
   if (ctx.at(TokenType.MACRO_CLOSE)) ctx.advance();
+  const endOffset = closeTok.offset + closeTok.value.length;
 
   // Translate variable shorthand to macro calls
   const macroName = translateVarShorthand(scope, operator);
@@ -253,7 +260,7 @@ function parseVariableShorthand(ctx: ParseContext, flags: MacroFlags, startOffse
     name: macroName,
     args,
     flags,
-    raw: `{{${scopeTok.value}${varName}${operator}}}`,
+    raw: ctx.source.slice(startOffset, endOffset),
     offset: startOffset,
   };
 }
@@ -293,7 +300,7 @@ function translateVarShorthand(scope: "local" | "global" | "chat", operator: str
  * Post-parse pass: pair opening macros with their corresponding closing macros
  * to form ScopedMacroNode entries.
  */
-function pairScopedMacros(nodes: AstNode[]): AstNode[] {
+function pairScopedMacros(nodes: AstNode[], source: string): AstNode[] {
   const result: AstNode[] = [];
   let i = 0;
 
@@ -305,13 +312,22 @@ function pairScopedMacros(nodes: AstNode[]): AstNode[] {
       const closingIdx = findClosingMacro(nodes, i + 1, node.name);
       if (closingIdx >= 0) {
         // Collect body nodes between open and close
+        const closingNode = nodes[closingIdx] as MacroNode;
         const bodyNodes = nodes.slice(i + 1, closingIdx);
         const scoped: ScopedMacroNode = {
           type: "scoped_macro",
           name: node.name,
-          args: pairArgs(node.args), // pair scoped macros nested in arguments
+          args: pairArgs(node.args, source), // pair scoped macros nested in arguments
           flags: node.flags,
-          body: pairScopedMacros(bodyNodes), // recurse into body
+          body: pairScopedMacros(bodyNodes, source), // recurse into body
+          ...(node.offset >= 0 && closingNode.offset >= node.offset
+            ? {
+                bodySource: source.slice(
+                  node.offset + node.raw.length,
+                  closingNode.offset,
+                ),
+              }
+            : {}),
           raw: node.raw,
           offset: node.offset,
         };
@@ -322,7 +338,7 @@ function pairScopedMacros(nodes: AstNode[]): AstNode[] {
       // Open macro with no matching close tag — keep it as a plain macro, but
       // still pair any scoped macros nested inside its arguments (e.g.
       // {{count::{{filter::...}}...{{/filter}}}}).
-      result.push(node.args.length > 0 ? { ...node, args: pairArgs(node.args) } : node);
+      result.push(node.args.length > 0 ? { ...node, args: pairArgs(node.args, source) } : node);
       i++;
       continue;
     }
@@ -341,9 +357,9 @@ function pairScopedMacros(nodes: AstNode[]): AstNode[] {
 }
 
 /** Pair scoped macros within each argument's node list. */
-function pairArgs(args: AstNode[][]): AstNode[][] {
+function pairArgs(args: AstNode[][], source: string): AstNode[][] {
   if (args.length === 0) return args;
-  return args.map((arg) => pairScopedMacros(arg));
+  return args.map((arg) => pairScopedMacros(arg, source));
 }
 
 function findClosingMacro(nodes: AstNode[], startIdx: number, name: string): number {

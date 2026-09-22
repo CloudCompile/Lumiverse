@@ -4,11 +4,15 @@
  * Core can adopt the new API shape immediately, before the published
  * `lumiverse-spindle-types` package version used by this repo is bumped.
  */
-import type { SpindleFrontendContext } from 'lumiverse-spindle-types'
+import type {
+  SpindleFrontendContext,
+  SpindleGuideDefinition,
+} from 'lumiverse-spindle-types'
 
 export interface SpindleCharacterEditorTabOptions {
   id: string
   title: string
+  guide?: SpindleGuideDefinition
 }
 
 export interface SpindleCharacterEditorTabHandle {

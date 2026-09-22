@@ -6,10 +6,14 @@ import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
 import { charactersApi } from '@/api/characters'
-import type { Character, BulkImportResultItem } from '@/types/api'
+import { ApiError } from '@/api/client'
+import type { Character, BulkImportResultItem, CharacterImportJob } from '@/types/api'
 import styles from './BulkImportProgressModal.module.css'
 
-const CHUNK_SIZE = 20
+const JOB_POLL_INTERVAL_MS = 250
+const JOB_RETRY_INTERVAL_MS = 1000
+const JOB_MAX_RETRY_INTERVAL_MS = 5000
+type ImportOutcome = 'complete' | 'cancelled' | 'error'
 
 interface BulkImportProgressModalProps {
   isOpen: boolean
@@ -36,10 +40,16 @@ export default function BulkImportProgressModal({
   const [processed, setProcessed] = useState(0)
   const [results, setResults] = useState<BulkImportResultItem[]>([])
   const [currentFile, setCurrentFile] = useState('')
-  const [done, setDone] = useState(false)
+  const [outcome, setOutcome] = useState<ImportOutcome | null>(null)
+  const [importError, setImportError] = useState('')
+  const [reconnecting, setReconnecting] = useState(false)
+  const done = outcome !== null
   const [skipDuplicates, setSkipDuplicates] = useState(false)
   const [started, setStarted] = useState(false)
+  const [phase, setPhase] = useState<'idle' | 'uploading' | 'processing'>('idle')
   const cancelledRef = useRef(false)
+  const activeJobIdRef = useRef<string | null>(null)
+  const uploadAbortRef = useRef<AbortController | null>(null)
   const resultsEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -47,9 +57,14 @@ export default function BulkImportProgressModal({
       setProcessed(0)
       setResults([])
       setCurrentFile('')
-      setDone(false)
+      setOutcome(null)
+      setImportError('')
+      setReconnecting(false)
       setStarted(false)
+      setPhase('idle')
       cancelledRef.current = false
+      activeJobIdRef.current = null
+      uploadAbortRef.current = null
     }
   }, [isOpen, files])
 
@@ -59,36 +74,97 @@ export default function BulkImportProgressModal({
 
   const startImport = useCallback(async () => {
     setStarted(true)
-    const allResults: BulkImportResultItem[] = []
+    setPhase('uploading')
+    setProcessed(0)
+    let allResults: BulkImportResultItem[] = []
+    let finalOutcome: ImportOutcome = 'error'
+    let startRequested = false
 
-    for (let i = 0; i < files.length; i += CHUNK_SIZE) {
-      if (cancelledRef.current) break
+    try {
+      const created = await charactersApi.createImportJob(files.length, skipDuplicates)
+      activeJobIdRef.current = created.jobId
 
-      const chunk = files.slice(i, i + CHUNK_SIZE)
-      setCurrentFile(
-        chunk.length === 1
-          ? chunk[0].name
-          : t('bulkImport.chunkFiles', { first: chunk[0].name, count: chunk.length }),
-      )
-
-      try {
-        const response = await charactersApi.importBulk(chunk, skipDuplicates)
-        allResults.push(...response.results)
-        setResults([...allResults])
-        setProcessed(Math.min(i + chunk.length, files.length))
-      } catch (err: any) {
-        const errorMessage = err?.body?.error || err?.body?.message || err?.message || t('bulkImport.requestFailed')
-        for (const file of chunk) {
-          allResults.push({ filename: file.name, success: false, error: errorMessage })
-        }
-        setResults([...allResults])
-        setProcessed(Math.min(i + chunk.length, files.length))
+      // One raw file per request keeps both the browser and Bun working sets
+      // bounded. The server streams each body to disk before parsing begins.
+      for (let i = 0; i < files.length; i++) {
+        if (cancelledRef.current) throw new DOMException('Import cancelled', 'AbortError')
+        setCurrentFile(files[i].name)
+        const controller = new AbortController()
+        uploadAbortRef.current = controller
+        await charactersApi.uploadImportJobFile(created.jobId, i, files[i], controller.signal)
+        uploadAbortRef.current = null
+        setProcessed(i + 1)
       }
+
+      if (cancelledRef.current) throw new DOMException('Import cancelled', 'AbortError')
+      setPhase('processing')
+      setProcessed(0)
+      setCurrentFile(files[0]?.name || '')
+      startRequested = true
+      await charactersApi.startImportJob(created.jobId)
+
+      let retryDelay = JOB_RETRY_INTERVAL_MS
+      while (true) {
+        let snapshot: CharacterImportJob
+        try {
+          snapshot = await charactersApi.getImportJob(created.jobId)
+        } catch (err) {
+          if (cancelledRef.current) {
+            finalOutcome = 'cancelled'
+            break
+          }
+          // A failed status request says nothing about the running import.
+          // Retry network failures, timeouts, rate limits and server errors;
+          // permanent client errors (such as a missing job) need user attention.
+          if (err instanceof ApiError && err.status >= 400 && err.status < 500
+            && err.status !== 408 && err.status !== 429) throw err
+          setReconnecting(true)
+          await new Promise((resolve) => setTimeout(resolve, retryDelay))
+          retryDelay = Math.min(retryDelay * 2, JOB_MAX_RETRY_INTERVAL_MS)
+          if (cancelledRef.current) {
+            finalOutcome = 'cancelled'
+            break
+          }
+          continue
+        }
+        retryDelay = JOB_RETRY_INTERVAL_MS
+        setReconnecting(false)
+        allResults = snapshot.results
+        setResults(snapshot.results)
+        setProcessed(snapshot.processed)
+        setCurrentFile(snapshot.processed < files.length ? files[snapshot.processed].name : '')
+
+        if (snapshot.status === 'complete' || snapshot.status === 'cancelled' || snapshot.status === 'error') {
+          if (snapshot.status === 'error') {
+            throw new Error(snapshot.error || t('bulkImport.requestFailed'))
+          }
+          if (snapshot.status === 'complete' && snapshot.processed !== files.length) {
+            throw new Error(t('bulkImport.incomplete'))
+          }
+          finalOutcome = snapshot.status
+          break
+        }
+        await new Promise((resolve) => setTimeout(resolve, JOB_POLL_INTERVAL_MS))
+      }
+    } catch (err: any) {
+      if (cancelledRef.current) {
+        finalOutcome = 'cancelled'
+      } else {
+        setImportError(err?.body?.error || err?.body?.message || err?.message || t('bulkImport.requestFailed'))
+      }
+      // Clean up failed uploads, but never cancel a processing job merely
+      // because its response could not be received.
+      const jobId = activeJobIdRef.current
+      if (jobId && !startRequested) void charactersApi.cancelImportJob(jobId).catch(() => {})
+    } finally {
+      uploadAbortRef.current = null
+      activeJobIdRef.current = null
+      setOutcome(finalOutcome)
+      setReconnecting(false)
+      setCurrentFile('')
     }
 
-    setDone(true)
-    setCurrentFile('')
-
+    // Successful files still belong in the browser after an interruption.
     const imported = allResults
       .filter((r) => r.success && !r.skipped && r.character)
       .map((r) => r.character!)
@@ -110,6 +186,9 @@ export default function BulkImportProgressModal({
       onClose()
     } else {
       cancelledRef.current = true
+      uploadAbortRef.current?.abort()
+      const jobId = activeJobIdRef.current
+      if (jobId) void charactersApi.cancelImportJob(jobId).catch(() => {})
     }
   }, [done, onClose])
 
@@ -118,6 +197,11 @@ export default function BulkImportProgressModal({
   const successCount = results.filter((r) => r.success && !r.skipped).length
   const skippedCount = results.filter((r) => r.skipped).length
   const errorCount = results.filter((r) => !r.success).length
+  const outcomeLabel = outcome === 'complete'
+    ? t('bulkImport.complete')
+    : outcome === 'cancelled'
+      ? t('bulkImport.cancelled')
+      : t('bulkImport.interrupted')
 
   // Detail line for a successful import: combine the embedded lorebook entry
   // count and the portable LoRA reference, whichever are present.
@@ -135,7 +219,7 @@ export default function BulkImportProgressModal({
     <ModalShell isOpen={isOpen} onClose={onClose} maxWidth={520} closeOnBackdrop={done} closeOnEscape={done}>
       <div className={styles.header}>
         <span className={styles.title}>
-          {done ? t('bulkImport.complete') : started ? t('bulkImport.importing') : t('bulkImport.title')}
+          {done ? outcomeLabel : started ? t('bulkImport.importing') : t('bulkImport.title')}
         </span>
         {done && (
           <CloseButton onClick={onClose} />
@@ -158,8 +242,12 @@ export default function BulkImportProgressModal({
             <span>
               {started
                 ? done
-                  ? t('bulkImport.done')
-                  : t('bulkImport.processing')
+                  ? outcome === 'complete' ? t('bulkImport.done') : outcomeLabel
+                  : reconnecting
+                    ? t('bulkImport.reconnecting')
+                    : phase === 'uploading'
+                      ? t('bulkImport.uploading')
+                      : t('bulkImport.processing')
                 : t('bulkImport.filesSelected', { count: total })}
             </span>
             <span className={styles.progressCount}>
@@ -171,6 +259,8 @@ export default function BulkImportProgressModal({
           </div>
           {currentFile && <div className={styles.currentFile}>{currentFile}</div>}
         </div>
+
+        {importError && <div role="alert" className={styles.importError}>{importError}</div>}
 
         {results.length > 0 && (
           <>

@@ -27,6 +27,32 @@ describe("resolveEffectiveApiUrl", () => {
       metadata: { use_coding_plan_endpoint: true },
     })).toBe("https://api.z.ai/api/coding/paas/v4");
   });
+
+  test("resolves Google Vertex and Vertex TTS endpoints from vertex_region", () => {
+    expect(resolveEffectiveApiUrl({
+      provider: "google_vertex",
+      api_url: "",
+      metadata: { vertex_region: "us-central1" },
+    })).toBe("https://us-central1-aiplatform.googleapis.com");
+
+    expect(resolveEffectiveApiUrl({
+      provider: "google_vertex_tts",
+      api_url: "",
+      metadata: { vertex_region: "us-central1" },
+    })).toBe("https://us-central1-aiplatform.googleapis.com");
+
+    expect(resolveEffectiveApiUrl({
+      provider: "google_vertex_tts",
+      api_url: "",
+      metadata: { vertex_region: "global" },
+    })).toBe("https://aiplatform.googleapis.com");
+
+    expect(resolveEffectiveApiUrl({
+      provider: "google_vertex_tts",
+      api_url: "",
+      metadata: {},
+    })).toBe("https://aiplatform.googleapis.com");
+  });
 });
 
 describe("getConnectionRouletteConfig", () => {

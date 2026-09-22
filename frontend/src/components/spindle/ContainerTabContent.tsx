@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { useStore } from '@/store'
 import { ensureRegistryRoot } from '@/lib/drawer-tab-registry'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 
 /**
  * React renderer that re-parents tab persistent roots into registered
@@ -20,10 +21,12 @@ export default function ContainerTabContent() {
   const containers = useStore((s) => s.containers)
   const tabLocations = useStore((s) => s.tabLocations)
   const drawerTabs = useStore((s) => s.drawerTabs)
+  const extensions = useStore((s) => s.extensions)
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
 
   useEffect(() => {
     const hiddenPlacementIds = new Set(hiddenPlacements)
+    const enabledDrawerTabs = filterEnabledFrontendContributions(drawerTabs, extensions)
 
     // Pass 1: mount tabs into their matching registered container
     for (const container of containers) {
@@ -35,7 +38,7 @@ export default function ContainerTabContent() {
         if (hiddenPlacementIds.has(tabId)) continue
 
         const registryRoot = ensureRegistryRoot(tabId)
-        const extTab = drawerTabs.find((t) => t.id === tabId)
+        const extTab = enabledDrawerTabs.find((t) => t.id === tabId)
         const root = registryRoot ?? extTab?.root
         if (!root) continue
 
@@ -51,7 +54,7 @@ export default function ContainerTabContent() {
 
       for (const [tabId, location] of Object.entries(tabLocations)) {
         const registryRoot = ensureRegistryRoot(tabId)
-        const extTab = drawerTabs.find((t) => t.id === tabId)
+        const extTab = enabledDrawerTabs.find((t) => t.id === tabId)
         const root = registryRoot ?? extTab?.root
         if (!root) continue
 
@@ -71,7 +74,7 @@ export default function ContainerTabContent() {
       if (containers.some((c) => c.id === location.containerId)) continue
       moveTabTo(tabId, { kind: 'main-drawer' })
     }
-  }, [containers, tabLocations, drawerTabs, hiddenPlacements])
+  }, [containers, tabLocations, drawerTabs, extensions, hiddenPlacements])
 
   return null
 }

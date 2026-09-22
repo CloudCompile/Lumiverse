@@ -120,6 +120,7 @@ export async function invokeExtensionCouncilTool(
   toolName: string,
   args: Record<string, unknown>,
   timeoutMs: number,
+  userId: string,
   councilMember?: CouncilMemberContext,
   contextMessages?: LlmMessage[],
 ): Promise<string> {
@@ -127,5 +128,5 @@ export async function invokeExtensionCouncilTool(
   if (!host) {
     throw new Error(`Extension worker '${extensionId}' is not running`);
   }
-  return host.invokeExtensionTool(toolName, args, timeoutMs, councilMember, contextMessages);
+  return host.invokeExtensionTool(toolName, args, timeoutMs, userId, councilMember, contextMessages);
 }

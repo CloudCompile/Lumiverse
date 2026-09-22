@@ -3,6 +3,7 @@ import { requireOwner } from "../auth/middleware";
 import * as svc from "../services/mcp-servers.service";
 import { getMcpClientManager } from "../services/mcp-client-manager";
 import { assertStdioLaunchAllowed } from "../services/mcp-stdio-policy";
+import { validateMcpServerCreateInput } from "../services/mcp-server-policy";
 import { parsePagination } from "../services/pagination";
 
 const app = new Hono();
@@ -14,29 +15,20 @@ function touchesRuntimeConfig(input: Record<string, unknown>): boolean {
 }
 
 /** List MCP servers (paginated) */
-app.get("/", (c) => {
+app.get("/", async (c) => {
   const userId = c.get("userId");
   const pagination = parsePagination(c.req.query("limit"), c.req.query("offset"));
-  return c.json(svc.listServers(userId, pagination));
+  return c.json(await svc.listServersForApi(userId, pagination));
 });
 
 /** Create MCP server */
 app.post("/", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json();
-  if (!body.name || !body.transport_type) {
-    return c.json({ error: "name and transport_type are required" }, 400);
-  }
-  const valid = ["streamable_http", "sse", "stdio"];
-  if (!valid.includes(body.transport_type)) {
-    return c.json({ error: `transport_type must be one of: ${valid.join(", ")}` }, 400);
-  }
-  if (body.transport_type === "stdio") {
-    try {
-      assertStdioLaunchAllowed(body.command, body.args || []);
-    } catch (err: any) {
-      return c.json({ error: err.message || "Invalid MCP stdio launch configuration" }, 400);
-    }
+  let body;
+  try {
+    body = validateMcpServerCreateInput(await c.req.json());
+  } catch (err: any) {
+    return c.json({ error: err.message || "Invalid MCP server configuration" }, 400);
   }
   const server = await svc.createServer(userId, body);
   return c.json(server, 201);
@@ -61,11 +53,11 @@ app.get("/status", (c) => {
 });
 
 /** Get MCP server by ID */
-app.get("/:id", (c) => {
+app.get("/:id", async (c) => {
   const userId = c.get("userId");
   const server = svc.getServer(userId, c.req.param("id"));
   if (!server) return c.json({ error: "Not found" }, 404);
-  return c.json(server);
+  return c.json(await svc.withReadableMcpSecretStatus(userId, server));
 });
 
 /** Update MCP server */
@@ -101,14 +93,14 @@ app.put("/:id", async (c) => {
 
   if (!server.is_enabled) {
     await manager.disconnect(userId, server.id);
-    return c.json(server);
+    return c.json(await svc.withReadableMcpSecretStatus(userId, server));
   }
 
   if (wasConnected && touchesRuntimeConfig(body)) {
     await manager.reconnect(userId, server);
   }
 
-  return c.json(server);
+  return c.json(await svc.withReadableMcpSecretStatus(userId, server));
 });
 
 /** Delete MCP server */

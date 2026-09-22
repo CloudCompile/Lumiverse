@@ -12,6 +12,8 @@ export interface ImageParameterSchema {
   options?: Array<{ id: string; label: string }>;
   /** UI grouping — parameters with the same group render together (e.g. "advanced", "references") */
   group?: string;
+  /** Optional model-id prefixes that control when this parameter is shown. */
+  modelPrefixes?: string[];
   /**
    * When set, the UI should offer a model picker populated by fetching
    * `GET /image-gen-connections/:id/models/:modelSubtype` for this field.
@@ -29,4 +31,13 @@ export interface ImageProviderCapabilities {
   modelListStyle: "static" | "dynamic" | "google";
   staticModels?: Array<{ id: string; label: string }>;
   defaultUrl: string;
+  /**
+   * The provider can stream both generation status and preview images over a
+   * WebSocket. This opt-in keeps extension streaming limited to providers
+   * whose preview/status protocol is implemented and supported by Lumiverse.
+   */
+  websocketPreviewStreaming?: {
+    previews: true;
+    status: true;
+  };
 }

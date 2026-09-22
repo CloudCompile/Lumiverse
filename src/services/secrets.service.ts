@@ -9,7 +9,49 @@ interface SecretRow {
   updated_at: number;
 }
 
+/**
+ * Reserved principal for system-scope Spindle extension brokers. Real user
+ * ids are UUIDs, so this principal is unreachable through normal login.
+ * Operators provision system broker secrets under it explicitly via the
+ * operator secrets route; system-scoped brokers resolve their credentials
+ * from these rows host-side at request time.
+ */
+export const SYSTEM_SECRET_PRINCIPAL = "__system__";
+
+/**
+ * Reserved email of the system principal row. First-user resolution queries
+ * (owner seeding, migrations, default presets) exclude this address so the
+ * synthetic row can never be mistaken for a real account.
+ */
+export const SYSTEM_SECRET_PRINCIPAL_EMAIL = "system@lumiverse.local";
+
 let _cachedKey: CryptoKey | null = null;
+const warnedUnreadableSecrets = new Set<string>();
+
+export class SecretDecryptionError extends Error {
+  readonly code = "SECRET_DECRYPTION_FAILED";
+
+  constructor(secretKey: string, cause?: unknown) {
+    super(
+      `Stored credential "${secretKey}" cannot be decrypted. Restore the matching identity file or replace the credential in Settings.`,
+      { cause },
+    );
+    this.name = "SecretDecryptionError";
+  }
+}
+
+export function isSecretDecryptionFailure(err: unknown): boolean {
+  return err instanceof DOMException && (err.name === "OperationError" || err.name === "DataError");
+}
+
+export function isSecretDecryptionError(err: unknown): err is SecretDecryptionError {
+  return err instanceof SecretDecryptionError
+    || (err instanceof Error && (err as Error & { code?: unknown }).code === "SECRET_DECRYPTION_FAILED");
+}
+
+function normalizeSecretReadError(err: unknown, secretKey: string): unknown {
+  return isSecretDecryptionFailure(err) ? new SecretDecryptionError(secretKey, err) : err;
+}
 
 async function getEncryptionKey(): Promise<CryptoKey> {
   if (_cachedKey) return _cachedKey;
@@ -58,7 +100,53 @@ export function listSecretKeys(userId: string): string[] {
   return rows.map((r) => r.key);
 }
 
+/**
+ * The reserved system principal is not a login account, so it must be
+ * materialized once before secrets can reference it via the
+ * secrets.user_id -> user(id) foreign key.
+ */
+function ensureSystemPrincipalRow(): void {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+
+  // Resolve on the reserved id/email explicitly instead of INSERT OR IGNORE:
+  // a silent skip (e.g. an unrelated account already holding the reserved
+  // email) would leave secrets writes failing on the foreign key with no
+  // explanation. Fail loudly instead.
+  const existing = db
+    .query('SELECT id FROM "user" WHERE id = ? OR email = ?')
+    .get(SYSTEM_SECRET_PRINCIPAL, SYSTEM_SECRET_PRINCIPAL_EMAIL) as { id: string } | null;
+
+  if (!existing) {
+    // Real timestamps: createdAt = 0 would sort the synthetic row before every
+    // real user in ORDER BY createdAt ASC consumers (owner seeding, ST
+    // migration, default presets).
+    db.query(
+      `INSERT INTO "user" (id, name, email, emailVerified, role, createdAt, updatedAt)
+       VALUES (?, 'System', ?, 1, 'system', ?, ?)`,
+    ).run(SYSTEM_SECRET_PRINCIPAL, SYSTEM_SECRET_PRINCIPAL_EMAIL, now, now);
+    return;
+  }
+
+  if (existing.id !== SYSTEM_SECRET_PRINCIPAL) {
+    throw new Error(
+      `Reserved system principal email "${SYSTEM_SECRET_PRINCIPAL_EMAIL}" is held by account "${existing.id}". ` +
+        "Rename or delete that account before provisioning system broker secrets.",
+    );
+  }
+
+  // Repair legacy rows created with createdAt = 0 so first-user ordering
+  // consumers never see the synthetic row as the oldest account.
+  db.query(
+    `UPDATE "user"
+     SET createdAt = CASE WHEN createdAt IS NULL OR createdAt = 0 THEN ? ELSE createdAt END,
+         updatedAt = ?
+     WHERE id = ?`,
+  ).run(now, now, SYSTEM_SECRET_PRINCIPAL);
+}
+
 export async function putSecret(userId: string, key: string, value: string): Promise<void> {
+  if (userId === SYSTEM_SECRET_PRINCIPAL) ensureSystemPrincipalRow();
   const { encrypted, iv, tag } = await encrypt(value);
   const now = Math.floor(Date.now() / 1000);
 
@@ -73,7 +161,41 @@ export async function putSecret(userId: string, key: string, value: string): Pro
 export async function getSecret(userId: string, key: string): Promise<string | null> {
   const row = getDb().query("SELECT * FROM secrets WHERE key = ? AND user_id = ?").get(key, userId) as SecretRow | null;
   if (!row) return null;
-  return decrypt(row.encrypted_value, row.iv, row.tag);
+  try {
+    return await decrypt(row.encrypted_value, row.iv, row.tag);
+  } catch (err) {
+    throw normalizeSecretReadError(err, key);
+  }
+}
+
+async function recoverUnreadableSecretForStatus(
+  userId: string,
+  key: string,
+  read: () => Promise<string | null>,
+): Promise<string | null> {
+  const warningKey = `${userId}:${key}`;
+  try {
+    const value = await read();
+    warnedUnreadableSecrets.delete(warningKey);
+    return value;
+  } catch (err) {
+    const normalized = normalizeSecretReadError(err, key);
+    if (!isSecretDecryptionError(normalized)) throw normalized;
+    if (!warnedUnreadableSecrets.has(warningKey)) {
+      warnedUnreadableSecrets.add(warningKey);
+      console.warn(`[secrets] ${normalized.message} Treating it as missing until it is replaced.`);
+    }
+    return null;
+  }
+}
+
+/**
+ * Read a credential for a presence/status response. An unreadable encrypted row
+ * is reported as missing so its settings UI remains available for recovery.
+ * Database and other non-crypto failures still propagate.
+ */
+export function getSecretForStatus(userId: string, key: string): Promise<string | null> {
+  return recoverUnreadableSecretForStatus(userId, key, () => getSecret(userId, key));
 }
 
 export function deleteSecret(userId: string, key: string): boolean {
@@ -81,10 +203,11 @@ export function deleteSecret(userId: string, key: string): boolean {
 }
 
 export async function validateSecret(userId: string, key: string): Promise<boolean> {
-  try {
-    const value = await getSecret(userId, key);
-    return value !== null && value.length > 0;
-  } catch {
-    return false;
-  }
+  const value = await getSecretForStatus(userId, key);
+  return value !== null && value.length > 0;
 }
+
+export const __test__ = {
+  normalizeSecretReadError,
+  recoverUnreadableSecretForStatus,
+};

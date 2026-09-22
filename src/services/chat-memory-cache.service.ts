@@ -216,7 +216,10 @@ function getRecentFallbackChunks(
     .query(
       `SELECT id, content, message_ids FROM chat_chunks
        WHERE chat_id = ?
-       ORDER BY created_at DESC
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start DESC,
+                message_range_end DESC,
+                id DESC
        LIMIT ?`,
     )
     .all(chatId, fetchLimit) as Array<{ id: string; content: string; message_ids: string | null }>;
@@ -452,10 +455,8 @@ async function computeFreshMemoryResult(
   }
 
   try {
-    // Shrink-and-retry on oversized-input errors so a long multi-message query
-    // doesn't silently collapse to the recency fallback on token-limited
-    // embedding backends (llama.cpp n_ubatch, 512-token models, etc.).
-    const queryVector = await embeddingsSvc.embedQueryAdaptive(userId, queryText);
+    // Provider failures use the recency fallback below without resending the query.
+    const queryVector = await embeddingsSvc.embedQuery(userId, queryText);
     if (!queryVector || queryVector.length === 0) {
       return {
         settingsKey,

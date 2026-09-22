@@ -49,3 +49,35 @@ export interface McpServerStatus {
   tools: McpDiscoveredTool[];
   error?: string;
 }
+
+/** Redacted MCP server view exposed to Spindle extensions. */
+export interface SpindleMcpServerDTO {
+  id: string;
+  name: string;
+  transport_type: McpTransportType;
+  has_headers: boolean;
+  env_keys: string[];
+  is_enabled: boolean;
+  auto_connect: boolean;
+  last_connected_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SpindleMcpServerCreateDTO {
+  name: string;
+  transport_type: McpTransportType;
+  url?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  headers?: Record<string, string>;
+  is_enabled?: boolean;
+  auto_connect?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SpindleMcpToolCallOptionsDTO {
+  userId?: string;
+  timeoutMs?: number;
+}

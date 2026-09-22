@@ -7,11 +7,13 @@ export interface MessageListScrollAdjustmentInput {
   hasMeasuredSize: boolean
   isPinned: boolean
   isStreamingTail: boolean
+  isSwipeVariantChange?: boolean
   isFocusedEditableRow?: boolean
+  isUserToggledCollapsibleRow?: boolean
+  isProgrammaticContentReflow?: boolean
 }
 
 export function shouldAdjustMessageListScrollOnResize({
-  delta,
   itemStart,
   itemEnd,
   scrollOffset,
@@ -19,14 +21,27 @@ export function shouldAdjustMessageListScrollOnResize({
   hasMeasuredSize,
   isPinned,
   isStreamingTail,
+  isSwipeVariantChange,
   isFocusedEditableRow,
+  isUserToggledCollapsibleRow,
+  isProgrammaticContentReflow,
 }: MessageListScrollAdjustmentInput) {
   const overlapsViewportTop = itemStart < scrollOffset && itemEnd > scrollOffset
 
-  // For the active streaming tail row, height only grows downward as tokens
-  // arrive. Once the user has manually unpinned, compensating scrollTop while
-  // the viewport sits inside that row makes the whole list climb upward.
-  if (!isPinned && isStreamingTail && delta > 0 && overlapsViewportTop) {
+  // Regeneration first replaces the existing body with a much shorter stream,
+  // then grows it again as tokens arrive. Once the user has manually unpinned,
+  // compensating scrollTop for either half of that resize makes the whole list
+  // jump even though the reader did not move it.
+  if (!isPinned && isStreamingTail && overlapsViewportTop) {
+    return false
+  }
+
+  // An existing-swipe navigation is replacement content, not a layout change
+  // within the content the reader was looking at. Keep the same physical
+  // scroll offset when the replaced row crosses the viewport top. Rows wholly
+  // above the viewport retain normal compensation so unrelated visible
+  // messages remain anchored.
+  if (!isPinned && isSwipeVariantChange && overlapsViewportTop) {
     return false
   }
 
@@ -38,6 +53,23 @@ export function shouldAdjustMessageListScrollOnResize({
   // leave subsequent growth/shrink of the focused row to the browser.
   if (hasMeasuredSize && isFocusedEditableRow && overlapsViewportTop) {
     return false
+  }
+
+  // User-driven collapses/expands inside the viewport should feel local to the
+  // row. Compensating scrollTop while the row animates makes the whole chat
+  // appear to lurch even though only a collapsible section changed.
+  if (hasMeasuredSize && isUserToggledCollapsibleRow && overlapsViewportTop) {
+    return false
+  }
+
+  // A regex result, message-tag interceptor, or extension widget may replace
+  // an already measured row asynchronously. The virtualizer's scrollDirection
+  // can still say "backward" long after the gesture that set it, which would
+  // otherwise suppress compensation and visibly move the viewport. This flag
+  // is scoped to explicit programmatic layout notifications, so ordinary row
+  // mounting while the user scrolls upward keeps the default behavior.
+  if (isProgrammaticContentReflow && itemStart < scrollOffset) {
+    return true
   }
 
   return itemStart < scrollOffset && (!hasMeasuredSize || scrollDirection !== 'backward')

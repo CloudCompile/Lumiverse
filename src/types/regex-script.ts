@@ -1,7 +1,64 @@
 export type RegexPlacement = "user_input" | "ai_output" | "world_info" | "reasoning" | "memory";
 export type RegexScope = "global" | "character" | "chat";
 export type RegexTarget = "prompt" | "response" | "display";
-export type RegexMacroMode = "none" | "raw" | "escaped" | "after";
+export type RegexMacroMode = "none" | "find" | "raw" | "escaped" | "after";
+export type RegexActionType = "send" | "append" | "effects";
+
+/** Stored in metadata.prompt_activation; only meaningful on preset-bound scripts. */
+export interface RegexPromptActivation {
+  source: "user_input" | "ai_output";
+  lifetime: "latest" | "chat";
+  mappings: RegexPromptActivationMapping[];
+}
+
+export interface RegexPromptActivationMapping {
+  /** 0 = full match, 1..99 = numbered group, otherwise a named capture. */
+  capture: string;
+  /** One exact capture value, or any of a list; trimmed and compared using the script's i flag. */
+  value: string | string[];
+  /** Stable block IDs in the linked preset. Category IDs include their children. */
+  block_ids: string[];
+  enabled: boolean;
+}
+
+export interface RegexActionSetStateEffect {
+  type: "set_state";
+  /** Fixed creator-defined chat-variable key. Capture references are not allowed. */
+  key: string;
+  /** Capture-aware value template resolved from the assistant message match. */
+  value: string;
+}
+
+export interface RegexActionDraftEffect {
+  type: "draft";
+  /** Capture-aware text placed into the composer after the action is claimed. */
+  content: string;
+  mode: "replace" | "append";
+}
+
+export interface RegexActionForkEffect {
+  type: "fork";
+}
+
+export type RegexActionEffect = RegexActionSetStateEffect | RegexActionDraftEffect | RegexActionForkEffect;
+
+export interface RegexAction {
+  /** Matches data-regex-action="..." (preferred) or id="..." in replacement HTML. */
+  id: string;
+  type: RegexActionType;
+  /** When true, this option is claimed independently and staged until the next send signal. */
+  multi_select: boolean;
+  /** Capture-aware numeric cost template used by multi-select actions. */
+  cost: string;
+  /** Capture-aware positive total-cost bound for the rendered action block. */
+  limit: string;
+  title: string;
+  subtitle: string;
+  /** Visible message text for send, or hidden prompt appendix for append. */
+  content: string;
+  /** Optional additive effects. Omitted legacy actions retain their exact behavior. */
+  effects?: RegexActionEffect[];
+}
 
 export interface RegexScript {
   id: string;
@@ -10,6 +67,7 @@ export interface RegexScript {
   script_id: string;
   find_regex: string;
   replace_string: string;
+  actions: RegexAction[];
   flags: string;
   placement: RegexPlacement[];
   scope: RegexScope;
@@ -27,6 +85,8 @@ export interface RegexScript {
   pack_id: string | null;
   preset_id: string | null;
   character_id: string | null;
+  /** Trusted host attribution. Null denotes a user/import/system-created script. */
+  owner_extension_identifier: string | null;
   metadata: Record<string, any>;
   created_at: number;
   updated_at: number;
@@ -37,6 +97,7 @@ export interface CreateRegexScriptInput {
   find_regex: string;
   script_id?: string;
   replace_string?: string;
+  actions?: RegexAction[];
   flags?: string;
   placement?: RegexPlacement[];
   scope?: RegexScope;

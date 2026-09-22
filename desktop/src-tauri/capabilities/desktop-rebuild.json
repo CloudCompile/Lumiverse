@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-rebuild",
+  "description": "Lets the hidden tray host reveal a freshly built desktop bundle in the file manager. Deliberately scoped to the tray window only — the frontend WebView loads the Lumiverse app and must not be able to reveal local paths.",
+  "windows": ["main"],
+  "permissions": ["opener:allow-reveal-item-in-dir"]
+}

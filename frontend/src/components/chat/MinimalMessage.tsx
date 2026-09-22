@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from 'react'
 import { useMessageCard } from '@/hooks/useMessageCard'
 import { useComponentOverride } from '@/hooks/useComponentOverride'
+import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 import MinimalMessageDefault, { type MinimalMessageDefaultProps } from './MinimalMessageDefault'
 import MessageContent from './MessageContent'
 import ReasoningBlock from './ReasoningBlock'
@@ -18,18 +19,21 @@ interface MinimalMessageProps {
   isSelectMode?: boolean
   isSelected?: boolean
   onToggleSelect?: (e: React.MouseEvent) => void
+  findQuery?: string
 }
 
-export default function MinimalMessage({ message, chatId, depth = 0, isSelectMode = false, isSelected = false, onToggleSelect }: MinimalMessageProps) {
+function MinimalMessageNative({ message, chatId, depth = 0, isSelectMode = false, isSelected = false, onToggleSelect, findQuery = '' }: MinimalMessageProps) {
+  const minimalUseFullAvatar = useStore((s) => s.minimalUseFullAvatar ?? false)
   const {
     isEditing, editContent, setEditContent, editReasoning, setEditReasoning, showReasoningEditor,
     isUser, isLastMessage, isActivelyStreaming, displayContent, reasoning, reasoningDuration, reasoningStartedAt,
-    tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, avatar, displayName, macroUserName, isHidden,
-    handleEdit, handleSaveEdit, handleCancelEdit, handleDelete, handleToggleHidden, handleFork,
+    tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, avatar, displayName, macroUserName, isHidden, isContextAnchor,
+    handleEdit, handleSaveEdit, handleEditAndSend, handleCancelEdit, handleDelete, handleToggleHidden, handleToggleContextAnchor, handleFork,
+    editAndSendPending,
   } = useMessageCard(message, chatId)
 
   const openModal = useStore((s) => s.openModal)
-  const displayAvatarUrl = avatarUrl
+  const displayAvatarUrl = minimalUseFullAvatar && fullAvatarUrl ? fullAvatarUrl : avatarUrl
   const handlePromptBreakdown = useCallback(() => {
     openModal('promptItemizer', { messageId: message.id })
   }, [openModal, message.id])
@@ -43,10 +47,11 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
       isUser,
       displayName,
       initial: (displayName || '').charAt(0).toUpperCase() || '?',
-      avatarUrl,
+      avatarUrl: displayAvatarUrl,
       fullAvatarUrl,
       avatar,
       isHidden,
+      isContextAnchor,
       isStreaming: isActivelyStreaming,
       isLastMessage,
       tokenCount: tokenCount ?? null,
@@ -83,6 +88,7 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
       edit: handleEdit,
       delete: handleDelete,
       toggleHidden: handleToggleHidden,
+      toggleContextAnchor: handleToggleContextAnchor,
       fork: handleFork,
       promptBreakdown: handlePromptBreakdown,
       swipeLeft: () => {},
@@ -90,10 +96,10 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
     }),
     styles,
   }), [
-    message, isUser, displayName, avatarUrl, fullAvatarUrl, displayAvatarUrl, avatar, isHidden, isActivelyStreaming,
+    message, isUser, displayName, fullAvatarUrl, displayAvatarUrl, avatar, isHidden, isContextAnchor, isActivelyStreaming,
     isLastMessage, tokenCount, displayContent, reasoning, reasoningDuration,
     isEditing, editContent, editReasoning, setEditContent, setEditReasoning,
-    handleSaveEdit, handleCancelEdit, handleEdit, handleDelete, handleToggleHidden,
+    handleSaveEdit, handleCancelEdit, handleEdit, handleDelete, handleToggleHidden, handleToggleContextAnchor,
     handleFork, handlePromptBreakdown,
   ])
 
@@ -111,6 +117,7 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
         messageId={message.id}
         chatId={chatId}
         depth={depth}
+        findQuery={findQuery}
       />
     ),
     Reasoning: reasoning ? (
@@ -125,19 +132,23 @@ export default function MinimalMessage({ message, chatId, depth = 0, isSelectMod
       <MessageAttachments attachments={attachments} isUser={isUser} chatId={chatId} messageId={message.id} />
     ) : null,
   }), [
-    displayContent, isUser, macroUserName, isActivelyStreaming, message.id, chatId, depth,
+    displayContent, isUser, macroUserName, isActivelyStreaming, message.id, chatId, depth, findQuery,
     reasoning, reasoningDuration, reasoningStartedAt, attachments,
   ])
 
   // ── Default props for the built-in renderer ──
   const defaultProps: MinimalMessageDefaultProps = {
-    message, chatId, depth, isSelectMode, isSelected, onToggleSelect,
+    message, chatId, depth, isSelectMode, isSelected, onToggleSelect, findQuery,
     isEditing, editContent, setEditContent, editReasoning, setEditReasoning, showReasoningEditor,
     isUser, isActivelyStreaming, displayContent, reasoning, reasoningDuration, reasoningStartedAt,
-    tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden,
-    handleEdit, handleSaveEdit, handleCancelEdit, handleDelete, handleToggleHidden,
-    handleFork, handlePromptBreakdown,
+    tokenCount, generationMetrics, avatarUrl, fullAvatarUrl, displayAvatarUrl, displayName, macroUserName, isHidden, isContextAnchor,
+    handleEdit, handleSaveEdit, handleEditAndSend, handleCancelEdit, handleDelete, handleToggleHidden, handleToggleContextAnchor,
+    handleFork, handlePromptBreakdown, editAndSendPending,
   }
 
   return useComponentOverride('MinimalMessage', MinimalMessageDefault, overrideProps, defaultProps, hostSlots)
+}
+
+export default function MinimalMessage(props: MinimalMessageProps) {
+  return useSpindleComponentOverride('MinimalMessage', MinimalMessageNative, props)
 }

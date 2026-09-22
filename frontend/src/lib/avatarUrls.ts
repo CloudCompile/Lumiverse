@@ -6,7 +6,25 @@ type AvatarEntity = {
   id: string
   image_id?: string | null
   extensions?: { avatar_crop_image_id?: string | null } & Record<string, any>
+  metadata?: {
+    avatar_crop_image_id?: string | null
+    original_image_id?: string | null
+  } & Record<string, any>
 } | null | undefined
+
+/** Chat context is required to resolve persona add-on avatar overrides. */
+export interface PersonaAvatarContext {
+  chatId?: string | null
+  /** Server-issued value changed by every chat-level add-on toggle. */
+  version?: string | null
+}
+
+/** Which source image the chat-aware persona resolver should return. */
+export type PersonaAvatarVariant = 'crop' | 'original'
+
+function asImageId(value: unknown): string | null {
+  return typeof value === 'string' && value ? value : null
+}
 
 function resolveAvatarUrl(
   id: string | null | undefined,
@@ -32,8 +50,32 @@ export function pickCharacterThumbImageId(
   entity: AvatarEntity
 ): string | null | undefined {
   if (!entity) return null
-  const crop = entity.extensions?.avatar_crop_image_id
-  if (typeof crop === 'string' && crop) return crop
+  const crop = asImageId(entity.extensions?.avatar_crop_image_id)
+  if (crop) return crop
+  return entity.image_id
+}
+
+/**
+ * Personas now mirror characters: the original upload lives on `image_id`,
+ * while a square crop is tracked separately in metadata for avatar surfaces.
+ * Older personas only have the cropped image on `image_id` plus an optional
+ * `metadata.original_image_id`, so both selectors fall back accordingly.
+ */
+export function pickPersonaThumbImageId(
+  entity: AvatarEntity
+): string | null | undefined {
+  if (!entity) return null
+  const crop = asImageId(entity.metadata?.avatar_crop_image_id)
+  if (crop) return crop
+  return entity.image_id
+}
+
+export function pickPersonaOriginalImageId(
+  entity: AvatarEntity
+): string | null | undefined {
+  if (!entity) return null
+  const original = asImageId(entity.metadata?.original_image_id)
+  if (original) return original
   return entity.image_id
 }
 
@@ -48,10 +90,21 @@ export function getCharacterAvatarUrlById(characterId?: string | null, imageId?:
 }
 
 export function getPersonaAvatarUrl(entity: AvatarEntity) {
-  return getPersonaAvatarUrlById(entity?.id, entity?.image_id)
+  return getPersonaAvatarUrlById(entity?.id, pickPersonaOriginalImageId(entity))
 }
 
-export function getPersonaAvatarUrlById(personaId?: string | null, imageId?: string | null) {
+export function getPersonaAvatarUrlById(
+  personaId?: string | null,
+  imageId?: string | null,
+  context?: PersonaAvatarContext,
+) {
+  if (personaId && context?.chatId) {
+    return personasApi.avatarUrl(personaId, {
+      chatId: context.chatId,
+      variant: 'original',
+      version: context.version,
+    })
+  }
   return resolveAvatarUrl(personaId, imageId, personasApi.avatarUrl)
 }
 
@@ -75,10 +128,22 @@ export function getCharacterAvatarThumbUrlById(characterId?: string | null, imag
 }
 
 export function getPersonaAvatarThumbUrl(entity: AvatarEntity) {
-  return getPersonaAvatarThumbUrlById(entity?.id, entity?.image_id)
+  return getPersonaAvatarThumbUrlById(entity?.id, pickPersonaThumbImageId(entity))
 }
 
-export function getPersonaAvatarThumbUrlById(personaId?: string | null, imageId?: string | null) {
+export function getPersonaAvatarThumbUrlById(
+  personaId?: string | null,
+  imageId?: string | null,
+  context?: PersonaAvatarContext,
+) {
+  if (personaId && context?.chatId) {
+    return personasApi.avatarUrl(personaId, {
+      chatId: context.chatId,
+      size: 'sm',
+      variant: 'crop',
+      version: context.version,
+    })
+  }
   return resolveAvatarUrl(personaId, imageId, personasApi.avatarUrl, 'sm')
 }
 
@@ -102,10 +167,22 @@ export function getCharacterAvatarLargeUrlById(characterId?: string | null, imag
 }
 
 export function getPersonaAvatarLargeUrl(entity: AvatarEntity) {
-  return getPersonaAvatarLargeUrlById(entity?.id, entity?.image_id)
+  return getPersonaAvatarLargeUrlById(entity?.id, pickPersonaThumbImageId(entity))
 }
 
-export function getPersonaAvatarLargeUrlById(personaId?: string | null, imageId?: string | null) {
+export function getPersonaAvatarLargeUrlById(
+  personaId?: string | null,
+  imageId?: string | null,
+  context?: PersonaAvatarContext,
+) {
+  if (personaId && context?.chatId) {
+    return personasApi.avatarUrl(personaId, {
+      chatId: context.chatId,
+      size: 'lg',
+      variant: 'crop',
+      version: context.version,
+    })
+  }
   return resolveAvatarUrl(personaId, imageId, personasApi.avatarUrl, 'lg')
 }
 
@@ -146,7 +223,19 @@ export function getCharacterAvatarTiers(characterId?: string | null, imageId?: s
   return buildTierUrls(characterId, imageId, charactersApi.avatarUrl)
 }
 
-export function getPersonaAvatarTiers(personaId?: string | null, imageId?: string | null): AvatarTierUrls {
+export function getPersonaAvatarTiers(
+  personaId?: string | null,
+  imageId?: string | null,
+  context?: PersonaAvatarContext,
+  variant: PersonaAvatarVariant = 'crop',
+): AvatarTierUrls {
+  if (personaId && context?.chatId) {
+    return {
+      sm: personasApi.avatarUrl(personaId, { chatId: context.chatId, size: 'sm', variant, version: context.version }),
+      lg: personasApi.avatarUrl(personaId, { chatId: context.chatId, size: 'lg', variant, version: context.version }),
+      full: personasApi.avatarUrl(personaId, { chatId: context.chatId, variant, version: context.version }),
+    }
+  }
   return buildTierUrls(personaId, imageId, personasApi.avatarUrl)
 }
 

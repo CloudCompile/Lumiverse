@@ -1,3 +1,6 @@
+/** Homepage/library ownership scope for a character. */
+export type CharacterLibraryScope = "mine" | "shared";
+
 export interface Character {
   id: string;
   name: string;
@@ -12,9 +15,11 @@ export interface Character {
   creator_notes: string;
   system_prompt: string;
   post_history_instructions: string;
+  folder: string;
   tags: string[];
   alternate_greetings: string[];
   extensions: Record<string, any>;
+  library_scope?: CharacterLibraryScope;
   created_at: number;
   updated_at: number;
 }
@@ -30,9 +35,11 @@ export interface CreateCharacterInput {
   creator_notes?: string;
   system_prompt?: string;
   post_history_instructions?: string;
+  folder?: string;
   tags?: string[];
   alternate_greetings?: string[];
   extensions?: Record<string, any>;
+  library_scope?: CharacterLibraryScope;
   created_at?: number;
 }
 
@@ -62,9 +69,11 @@ export function makeAssistantCharacter(): Character {
     creator_notes: "",
     system_prompt: "",
     post_history_instructions: "",
+    folder: "",
     tags: [],
     alternate_greetings: [],
     extensions: {},
+    library_scope: "mine",
     created_at: 0,
     updated_at: 0,
   };
@@ -81,10 +90,21 @@ export function getEffectiveCharacterName(character: Character): string {
 export interface CharacterSummary {
   id: string;
   name: string;
+  description: string;
+  preview_description: string;
   creator: string;
+  folder: string;
   tags: string[];
   image_id: string | null;
   created_at: number;
   updated_at: number;
   has_alternate_greetings: boolean;
+  library_scope: CharacterLibraryScope;
+}
+
+export interface CharacterPreview {
+  character: CharacterSummary;
+  lorebooks: { id: string; name: string }[];
+  last_chat: { id: string; name: string; updated_at: number; last_message_preview: string } | null;
+  open_chat_id: string | null;
 }

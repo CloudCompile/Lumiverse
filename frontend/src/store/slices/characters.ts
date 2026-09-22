@@ -62,7 +62,7 @@ export const createCharactersSlice: StateCreator<CharactersSlice> = (set, get) =
       const isFav = state.favorites.includes(id)
       const favorites = isFav
         ? state.favorites.filter((f) => f !== id)
-        : [...state.favorites, id].slice(0, 15)
+        : [...state.favorites, id]
       settingsApi.put('favorites', favorites).catch(() => {})
       return { favorites }
     }),
@@ -98,8 +98,10 @@ export const createCharactersSlice: StateCreator<CharactersSlice> = (set, get) =
   },
 
   setSortField: (field) => {
-    set({ sortField: field })
+    const sortDirection = field === 'most_chats' ? 'desc' : get().sortDirection
+    set({ sortField: field, sortDirection })
     settingsApi.put('sortField', field).catch(() => {})
+    if (field === 'most_chats') settingsApi.put('sortDirection', sortDirection).catch(() => {})
   },
 
   toggleSortDirection: () =>

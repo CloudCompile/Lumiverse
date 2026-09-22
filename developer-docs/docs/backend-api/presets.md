@@ -38,8 +38,9 @@ const newPreset = await spindle.presets.create({
   metadata: { description: 'Created by my extension' },
 })
 
-// Update the preset metadata
+// Update the preset metadata using the revision returned by create/get.
 const updated = await spindle.presets.update(newPreset.id, {
+  expected_cache_revision: newPreset.cache_revision,
   metadata: {
     ...newPreset.metadata,
     description: 'Updated description',
@@ -57,7 +58,7 @@ const deleted = await spindle.presets.delete(newPreset.id)
 | `list(options?)` | `Promise<{ data: UserPresetDTO[], total: number }>` | List presets. Options: `{ limit?, offset? }`. Defaults: limit 50, max 200. |
 | `get(presetId)` | `Promise<UserPresetDTO \| null>` | Get a preset by ID. Returns `null` if not found. |
 | `create(input)` | `Promise<UserPresetDTO>` | Create a new preset. `name` and `provider` are required. |
-| `update(presetId, input)` | `Promise<UserPresetDTO>` | Update a preset. All fields are optional. |
+| `update(presetId, input)` | `Promise<UserPresetDTO>` | Update a preset. `expected_cache_revision` is required; pass the `cache_revision` from the read/create response. |
 | `delete(presetId)` | `Promise<boolean>` | Delete a preset. Returns `true` if deleted. |
 
 ## UserPresetDTO
@@ -72,6 +73,7 @@ const deleted = await spindle.presets.delete(newPreset.id)
   prompt_order: PromptBlockDTO[]
   prompts: Record<string, unknown>
   metadata: Record<string, unknown>
+  cache_revision: number
   created_at: number   // unix epoch seconds
   updated_at: number
 }
@@ -91,7 +93,10 @@ const deleted = await spindle.presets.delete(newPreset.id)
 
 ## UserPresetUpdateDTO
 
-Same fields as `UserPresetCreateDTO`, but all are optional, including `name` and `provider`.
+`expected_cache_revision` is required and must be the `cache_revision` returned by
+the most recent `get`, `list`, `create`, or successful `update` response. All
+other fields from `UserPresetCreateDTO` are optional, including `name` and
+`provider`.
 
 !!! note "Prompt variable cleanup"
     When `prompt_order` or `metadata` is updated, Lumiverse prunes stale `metadata.promptVariables` entries that no longer correspond to a variable definition on a block. This matches the built-in preset editor behavior.
@@ -189,6 +194,27 @@ Common fields:
 | `marker` | `string \| null` | Structural marker. Use `'category'` for category headers |
 | `categoryMode` | `'radio' \| 'checkbox' \| null` | Category selection mode; meaningful only on category marker blocks |
 | `variables` | `PromptVariableDefDTO[]` | Prompt variable definitions for this block |
+
+Prompt-variable names are scoped to their defining block while Lumiverse renders
+that block. If another block defines the same name, `{{var::name}}`,
+`{{getvar::name}}`, and `{{.name}}` still resolve the current block's own saved
+instance. Runtime `{{setvar::name::value}}` writes remain effective for the rest
+of that block and the outer local-variable scope is restored afterward.
+
+When a chat, persona, character, connection, or default preset profile is
+active, its saved prompt-variable values are overrides rather than a complete
+replacement. Blocks and variable keys absent from the profile inherit the
+current values in `metadata.promptVariables`; bindings created before profile
+variable snapshots therefore continue to use the preset configuration.
+
+Lumiverse evaluates preset blocks and prompt settings itself; macro
+interceptors do not receive the complete preset template. If a block references
+a character field such as `{{description}}` or `{{system}}`, that field is
+offered to interceptors separately. `ctx.sourceHint` identifies which field was
+provided. This keeps preset variables and system macros stable while still
+allowing extensions to process character content. Regex scripts attached to a
+preset follow the same rule. Character fields receive the same local, chat, and
+global variables available at their original position in the preset.
 
 ---
 

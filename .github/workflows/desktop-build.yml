@@ -1,0 +1,142 @@
+name: Build Desktop
+
+# Builds installers as downloadable workflow artifacts whenever the desktop
+# manifests or tray-runner integration changes on a non-main branch. Releases
+# are handled separately by desktop-release.yml on staging→main merges.
+on:
+  push:
+    branches-ignore: [main]
+    paths:
+      - "desktop/package.json"
+      - "desktop/src-tauri/Cargo.toml"
+      - "desktop/src-tauri/Cargo.lock"
+      - "desktop/src-tauri/tauri.conf.json"
+      - "scripts/finalize-appimage.sh"
+      - "scripts/smoke-test-appimage.sh"
+      - "scripts/tauri-finalized.ts"
+      - "scripts/verify-appimage-gstreamer.sh"
+      - "scripts/runner.ts"
+      - "scripts/runner/**"
+      - "src/main.ts"
+      - "src/services/operator.service.ts"
+      - "src/services/runner-channel.ts"
+      - "src/services/runner-control-transport.ts"
+      - "src/services/runner-control-transport.test.ts"
+      - "src/types/operator.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate desktop manifests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify versions and Cargo.lock
+        run: |
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            | jq -r '.packages[] | select(.name == "lumiverse-tray") | .version')"
+          package_version="$(jq -r .version desktop/package.json)"
+          tauri_version="$(jq -r .version desktop/src-tauri/tauri.conf.json)"
+          if [[ "$cargo_version" != "$package_version" || "$cargo_version" != "$tauri_version" ]]; then
+            echo "::error::Desktop versions differ: Cargo.toml=$cargo_version, package.json=$package_version, tauri.conf.json=$tauri_version"
+            exit 1
+          fi
+
+  build:
+    name: Desktop (${{ matrix.target }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: nsis,msi
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage,deb
+          # AppImage cannot be cross-compiled, so build Linux ARM64 natively.
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: appimage,deb
+          - os: macos-15
+            target: aarch64-apple-darwin
+            bundles: dmg
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: dmg
+          # ARM64 Windows: NSIS only — WiX/MSI has no ARM64 support.
+          # Cross-compiled on the x64 runner, the documented approach.
+          - os: windows-2022
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Test Windows tray runner transport
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        run: >-
+          bun test
+          src/services/runner-control-transport.test.ts
+          scripts/runner/server-manager.test.ts
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf xdg-utils \
+            dbus-x11 xauth xvfb gstreamer1.0-tools gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good
+
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+
+      - name: Build desktop installers
+        uses: tauri-apps/tauri-action@v1
+        env:
+          # Ad-hoc signing needs no Apple certificate, but is NOT notarization.
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+          # Let AppImage packaging run without a FUSE mount in hosted CI.
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        with:
+          projectPath: desktop
+          # Finalize Linux AppImages before tauri-action uploads the artifacts.
+          tauriScript: bun run tauri:finalized
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
+          uploadUpdaterJson: false
+          uploadUpdaterSignatures: false
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: desktop-[platform]-[arch]-[bundle]
+
+      - name: Smoke-test Linux AppImage startup
+        if: runner.os == 'Linux'
+        run: >-
+          bash scripts/smoke-test-appimage.sh
+          desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage

@@ -1,12 +1,24 @@
-import ts from "typescript";
+import * as ts from "typescript";
 import path from "path";
 import { Glob } from "bun";
+import {
+  componentRegistryKeyFromPath,
+  joinComponentRegistryPaths,
+} from "../src/lib/componentRegistryJoin";
 
 // A script to extract props AND module css for components
 console.time("Total Extraction Time");
 
 const glob = new Glob("src/components/**/*.tsx");
 const componentFiles = Array.from(glob.scanSync({ cwd: process.cwd(), absolute: true }));
+const cssFiles = Array.from(
+  new Glob("src/components/**/*.module.css").scanSync({ cwd: process.cwd(), absolute: true }),
+);
+const cssPathByTsxPath = new Map(
+  joinComponentRegistryPaths(cssFiles, componentFiles)
+    .filter((entry) => entry.cssPath && entry.tsxPath)
+    .map((entry) => [componentRegistryKeyFromPath(entry.tsxPath!), entry.cssPath!] as const),
+);
 
 console.time("createProgram");
 const program = ts.createProgram(componentFiles, {
@@ -39,7 +51,7 @@ function serializeType(type: ts.Type, depth = 0): any[] {
     
     // Get doc comments
     const docTags = prop.getDocumentationComment(checker);
-    const description = docTags.map(tag => tag.text).join('\n').trim();
+    const description = docTags.map(tag => tag.text).join('\n').replace(/[ \t]+$/gm, '').trim();
 
     const propDoc: any = {
       name: propName,
@@ -77,17 +89,11 @@ async function processAST() {
       }
 
       const checkAndAddCss = (componentName: string, filePath: string) => {
-        const dir = path.dirname(filePath);
-        const cssPath = path.join(dir, `${componentName}.module.css`);
-        promises.push(
-          Bun.file(cssPath).exists().then((exists) => {
-            if (exists) {
-              return Bun.file(cssPath).text().then(text => {
-                cssResult[componentName] = text;
-              });
-            }
-          })
-        );
+        const cssPath = cssPathByTsxPath.get(componentRegistryKeyFromPath(filePath));
+        if (!cssPath) return;
+        promises.push(Bun.file(cssPath).text().then(text => {
+          cssResult[componentName] = text;
+        }));
       };
 
       // Support: export function MyComponent() ...

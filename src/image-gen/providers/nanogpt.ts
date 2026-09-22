@@ -85,11 +85,21 @@ export class NanoGPTImageProvider implements ImageProvider {
       response_format: "b64_json",
     };
 
-    const refs = params.referenceImages;
-    if (Array.isArray(refs) && refs.length > 0) {
-      requestBody.imageDataUrls = refs
-        .filter((r: any) => !!r.data)
-        .map((r: any) => `data:${r.mimeType || "image/png"};base64,${r.data}`);
+    const refs = Array.isArray(params.referenceImages)
+      ? params.referenceImages
+          .filter((ref: any) => typeof ref?.data === "string" && ref.data.length > 0)
+          .map((ref: any) =>
+            ref.data.startsWith("data:")
+              ? ref.data
+              : `data:${ref.mimeType || "image/png"};base64,${ref.data}`,
+          )
+      : [];
+    if (refs.length > 0) {
+      // NanoGPT uses separate legacy aliases for single- and multi-image
+      // inputs. The array form is only supported by models that advertise
+      // multiple image inputs, so keep a single reference on imageDataUrl.
+      if (refs.length === 1) requestBody.imageDataUrl = refs[0];
+      else requestBody.imageDataUrls = refs;
       if (params.strength != null) requestBody.strength = params.strength;
       if (params.guidanceScale != null) requestBody.guidance_scale = params.guidanceScale;
       if (params.numInferenceSteps != null) requestBody.num_inference_steps = params.numInferenceSteps;

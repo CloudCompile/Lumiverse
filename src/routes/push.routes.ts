@@ -12,7 +12,23 @@ app.get("/vapid-public-key", (c) => {
 
 app.get("/subscriptions", (c) => {
   const userId = c.get("userId");
-  return c.json(pushSvc.listSubscriptions(userId));
+  return c.json(pushSvc.listNotificationDestinations(userId));
+});
+
+app.get("/desktop/info", (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json({ serverInstanceId: pushSvc.getDesktopNotificationServerInstanceId() });
+});
+
+app.post("/desktop", async (c) => {
+  c.header("Cache-Control", "no-store");
+  const userId = c.get("userId");
+  const body = await c.req.json();
+  try {
+    return c.json(pushSvc.createDesktopDestination(userId, body), 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid desktop destination" }, 400);
+  }
 });
 
 app.post("/subscriptions", async (c) => {
@@ -50,16 +66,18 @@ app.post("/subscriptions", async (c) => {
 
 app.delete("/subscriptions/:id", (c) => {
   const userId = c.get("userId");
-  const deleted = pushSvc.deleteSubscription(userId, c.req.param("id"));
+  const deleted = pushSvc.deleteNotificationDestination(userId, c.req.param("id"));
   if (!deleted) return c.json({ error: "Not found" }, 404);
   return c.json({ success: true });
 });
 
 app.post("/subscriptions/test", async (c) => {
   const userId = c.get("userId");
+  const body = await c.req.json().catch(() => ({})) as { destinationId?: unknown };
+  const destinationId = typeof body.destinationId === "string" ? body.destinationId : undefined;
   const result = await pushSvc.dispatchGenerationEndedPush(userId, {
     content: "Automatic push notifications are working!",
-  });
+  }, { bypassPresence: true, destinationId });
   return c.json({ success: result.sent > 0, ...result });
 });
 

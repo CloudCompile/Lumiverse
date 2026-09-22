@@ -7,6 +7,7 @@ import {
 } from './prompts'
 import { DEFAULT_SUMMARY_REQUEST_TIMEOUT_MS, LOOM_SUMMARY_KEY, LOOM_LAST_SUMMARIZED_KEY } from './types'
 import type { LastSummarizedInfo } from './types'
+import { eligibleSummaryMessageCount, normalizeSummaryMessageLag } from './scheduling'
 
 /**
  * In-memory cache for the backend's default prompt templates. Fetched on first
@@ -51,6 +52,8 @@ interface GenerateSummaryOpts {
   connectionId?: string
   /** Number of recent messages to include in the summary prompt. */
   messageContext: number
+  /** Number of newest messages to exclude from the summary prompt. */
+  messageLag?: number
   /** Active persona / user name. */
   userName: string
   /** Active character name. */
@@ -81,6 +84,7 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
     chatId,
     connectionId,
     messageContext,
+    messageLag,
     userName,
     characterName,
     systemPromptOverride,
@@ -92,12 +96,14 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
   const chat = await chatsApi.get(chatId)
   const existingSummary = (chat.metadata?.[LOOM_SUMMARY_KEY] as string) || ''
   const msgCountPage = await messagesApi.list(chatId, { limit: 1 })
+  const normalizedMessageLag = normalizeSummaryMessageLag(messageLag)
 
   // Send chatId + settings to the backend — it fetches messages and builds the prompt
   const result = await generateApi.summarize(
     {
       chat_id: chatId,
       message_context: messageContext,
+      message_lag: normalizedMessageLag,
       existingSummary,
       userName,
       characterName,
@@ -120,7 +126,7 @@ export async function generateSummary(opts: GenerateSummaryOpts): Promise<string
   await chatsApi.patchMetadata(chatId, {
     [LOOM_SUMMARY_KEY]: summaryText,
     [LOOM_LAST_SUMMARIZED_KEY]: {
-      messageCount: msgCountPage.total,
+      messageCount: eligibleSummaryMessageCount(msgCountPage.total, normalizedMessageLag),
       timestamp: Date.now(),
     } satisfies LastSummarizedInfo,
   })
@@ -165,16 +171,4 @@ export async function getSummary(chatId: string): Promise<string> {
 export async function getLastSummarizedInfo(chatId: string): Promise<LastSummarizedInfo | null> {
   const chat = await chatsApi.get(chatId)
   return (chat.metadata?.[LOOM_LAST_SUMMARIZED_KEY] as LastSummarizedInfo) || null
-}
-
-/**
- * Check if auto-summarization should trigger.
- */
-export function shouldAutoSummarize(
-  totalMessages: number,
-  lastSummarizedCount: number,
-  interval: number,
-): boolean {
-  const messagesSinceLast = totalMessages - lastSummarizedCount
-  return totalMessages >= interval && messagesSinceLast >= interval
 }

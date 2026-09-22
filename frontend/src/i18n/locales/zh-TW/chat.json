@@ -43,7 +43,7 @@
     "backHome": "返回主頁",
     "regenerate": "重新生成",
     "continue": "繼續",
-    "sendAsPersona": "以人設身份發送下一條消息",
+    "sendAsPersona": "為此聊天切換人設",
     "personaAddons": "人設附加項",
     "personaAddonsCustomized": "人設附加項 — 已為本聊天定製",
     "guidedGenerations": "引導生成",
@@ -57,7 +57,7 @@
     "switchConnectionActive": "連接：{{name}}",
     "attachFiles": "附加文件",
     "attachFile": "附加文件",
-    "attachImageOrAudio": "附加圖片或音頻",
+    "attachImageOrAudio": "附加圖片、音訊或影片",
     "removeAttachment": "移除附件",
     "message": "消息",
     "stopGeneration": "停止生成",
@@ -86,12 +86,25 @@
     "modCmd": "Cmd",
     "modCtrl": "Ctrl"
   },
+  "findInChat": {
+    "open": "在聊天中尋找",
+    "placeholder": "在聊天中尋找…",
+    "clear": "清除尋找文字",
+    "previous": "上一個結果",
+    "next": "下一個結果",
+    "close": "關閉尋找",
+    "matchCount": "第 {{current}} 個，共 {{total}} 個",
+    "noMatches": "沒有結果",
+    "loading": "正在尋找…",
+    "searchFailed": "無法搜尋此聊天"
+  },
   "quickMenu": {
     "noGuidedGenerations": "未配置引導生成。",
+    "disableAllGuidedGenerations": "停用全部引導生成",
     "manageInSettings": "在設置中管理",
     "noQuickReplySets": "沒有已啟用的快捷回覆集。",
     "untitledReply": "未命名回覆",
-    "clearOneShotPersona": "清除一次性人設",
+    "clearOneShotPersona": "清除此聊天的人設",
     "noPersonas": "暫無可用人設。",
     "manageChats": "管理聊天",
     "manageConnections": "管理連接",
@@ -107,6 +120,8 @@
     "restoreLastInput": "恢復上次輸入",
     "presetPrompts": "預設提示詞",
     "presetPromptsDesc": "完整組裝，含代寫觸發的區塊",
+    "impersonationPreset": "代寫預設",
+    "impersonationPresetDesc": "完整的指定預設 + 聊天歷史 + 代寫提示",
     "oneLiner": "單行代寫",
     "oneLinerDesc": "僅聊天曆史 + 代寫提示",
     "comingSoon": "即將推出",
@@ -164,6 +179,7 @@
     "creatingChatCortex": "正在創建聊天並在後臺準備記憶皮層…",
     "failedCreateChat": "創建聊天失敗",
     "failedStartNewChat": "開始新聊天失敗",
+    "failedDeleteChat": "刪除此聊天失敗",
     "failedOpenChat": "打開聊天失敗",
     "characterImported": "已導入「{{name}}」",
     "importFailed": "導入失敗",
@@ -199,7 +215,8 @@
     "noMemoryRebuildNeeded": "此聊天無需重建記憶。",
     "failedRecompileMemories": "重新編譯記憶失敗",
     "chatDocuments": "聊天文檔",
-    "chatDocumentsNamed": "{{name}} 聊天"
+    "chatDocumentsNamed": "{{name}} 聊天",
+    "failedSaveChatPersona": "無法儲存此聊天的人設"
   },
   "addGroupMember": {
     "title": "添加群組成員",
@@ -220,7 +237,8 @@
     "active": "· 已啟用",
     "ariaLabel": "作者附註",
     "placeholder": "為 AI 編寫說明或上下文…",
-    "depth": "深度",
+    "depth": "從最新訊息起算的深度",
+    "depthHint": "0 = 最新訊息之後；1 = 最新訊息之前。數值越大，附註在聊天記錄中的位置越靠前。",
     "role": "角色",
     "roleAria": "角色"
   },
@@ -235,7 +253,7 @@
     "exitSelectionMode": "退出選擇模式",
     "selectMessages": "選擇消息",
     "memory": "記憶",
-    "memoryRebuildFailed": "聊天記憶重建失敗。",
+    "memoryRebuildFailed": "記憶皮層重建失敗。",
     "switchedPersona": "已切換人設：{{name}}",
     "appliedLoadout": "已應用配置：{{name}}",
     "cortexQueued": "排隊等待處理",
@@ -247,10 +265,11 @@
     "cortexProcessingFailed": "處理失敗",
     "cortexJobsPending": "，{{count}} 個任務等待中",
     "cortexChunks": "，{{current}}/{{total}} 塊",
-    "cortexPreparingMemory": "正在準備長期聊天記憶",
-    "cortexRebuildingMemory": "正在重建長期聊天記憶",
-    "backgroundMemoryFailed": "後臺記憶處理失敗。",
-    "cortexCombined": "正在準備長期聊天記憶 + 皮層{{chunks}}",
+    "cortexPreparingMemory": "正在準備記憶皮層",
+    "cortexRebuildingMemory": "正在重建記憶皮層",
+    "backgroundMemoryFailed": "記憶皮層處理失敗。",
+    "cortexCombined": "正在準備記憶皮層並處理更新{{chunks}}",
+    "dismissMemoryNotice": "關閉記憶通知",
     "spindleProcessingMessage": "正在處理你的消息",
     "spindleProcessingContext": "正在準備生成上下文",
     "spindleProcessingInterceptor": "正在運行提示詞攔截器",
@@ -325,12 +344,15 @@
     "copyCode": "複製代碼",
     "copy": "複製",
     "copied": "已複製！",
+    "readMore": "閱讀更多",
+    "showLess": "收起",
     "youtubeVideo": "YouTube 視頻"
   },
   "messageMeta": {
     "hidden": "已隱藏",
     "model": "模型",
     "provider": "提供商",
+    "preset": "預設",
     "firstToken": "首 token",
     "speed": "速度",
     "tokPerSec": "{{count}} tok/s"
@@ -349,7 +371,11 @@
     "next": "下一個變體"
   },
   "portrait": {
-    "setChatBackground": "設為聊天背景"
+    "setChatBackground": "設為聊天背景",
+    "copyImageReference": "複製圖片參照",
+    "imageReferenceCopied": "圖片參照已複製",
+    "imageReferenceCopyFailed": "無法複製圖片參照",
+    "galleryImage": "圖庫圖片"
   },
   "attachments": {
     "removeImage": "移除圖片",
@@ -367,7 +393,9 @@
     "fork": {
       "title": "分叉聊天",
       "message": "從此消息創建新的聊天分支？將複製此點之前的所有消息。",
-      "confirm": "分叉"
+      "confirm": "分叉",
+      "nameLabel": "聊天名稱（可選）",
+      "namePlaceholder": "留空即可使用自動產生的名稱"
     },
     "delete": {
       "title": "刪除",
@@ -380,5 +408,11 @@
       "message": "這將永久從聊天中移除此消息。",
       "confirm": "刪除"
     }
+  },
+  "newChatConfirm": {
+    "title": "開始新聊天",
+    "message": "確定要開始新聊天嗎？",
+    "confirm": "開始新聊天",
+    "deleteThisChat": "刪除此聊天"
   }
 }

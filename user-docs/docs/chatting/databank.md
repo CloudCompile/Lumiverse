@@ -43,6 +43,8 @@ A chat sees all currently-attached databanks at once — global + character-boun
 
 Chat documents auto-create a chat-scoped databank the first time you upload a file in that chat — no manual setup required.
 
+Character- and chat-scoped databanks are active automatically when their matching character or chat is open. The attachment areas show both these automatic bindings and any additional banks you attached manually. Use the **Enabled** switch on a selected databank to exclude it from retrieval and `#` mentions everywhere without deleting its documents.
+
 ---
 
 ## Uploading Documents
@@ -86,7 +88,7 @@ Every document gets an auto-generated, kebab-cased **slug** based on its name:
 
 Type `#` in the chat input and an autocomplete popover lets you pick a document from any attached databank. The mention is removed from the message before it's sent — the AI sees the document content instead.
 
-**Sizing behavior:** if a full document fits within a 2,000-token budget, the entire text is injected. If it doesn't, Lumiverse runs a semantic search inside the mentioned document and injects the most relevant chunks. Either way, the inserted content is labeled with `[Source: <document name>]` so the AI knows where it came from.
+An explicit mention injects the document's entire parsed text. It bypasses semantic chunk retrieval; automatic retrieval still selects relevant chunks normally. Full documents can consume substantial context, so the model's configured context-window limit still applies to the assembled prompt.
 
 **Renaming changes the slug.** If you rename a document, update any presets or chat templates that reference it.
 

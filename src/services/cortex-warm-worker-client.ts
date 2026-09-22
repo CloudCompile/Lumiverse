@@ -1,12 +1,12 @@
 /**
  * Host-side client for the cortex warm-cache worker.
  *
- * Unlike the prompt-assembly worker (spawned and terminated per request), warm
- * jobs fire on *every* generation, so a spawn-per-call would pay the LanceDB +
- * DB init cost constantly. This keeps a single long-lived worker and feeds it a
- * FIFO queue with concurrency 1 — one heavy LanceDB retrieval at a time, in
+ * Warm jobs fire on *every* generation, so a spawn-per-call would pay the
+ * LanceDB + DB init cost constantly. This keeps a reusable worker and feeds it
+ * a FIFO queue with concurrency 1 — one heavy LanceDB retrieval at a time, in
  * submission order, so the last warm job for a chat is also the last to write
- * the cache (no stale overwrite).
+ * the cache (no stale overwrite). Memory-pressure handling may reap it while
+ * idle; the next job recreates it lazily.
  *
  * Per-chat dedup: if a queued (not yet started) job for the same chat is still
  * waiting when a newer one arrives, the older one is dropped and resolved as a
@@ -49,6 +49,13 @@ function disposeWorker(): void {
     worker.terminate();
     worker = null;
   }
+}
+
+/** Release the warm worker only when no request depends on its isolate. */
+export function releaseIdleCortexWarmWorker(): number {
+  if (!worker || inflight || queue.length > 0) return 0;
+  disposeWorker();
+  return 1;
 }
 
 function handleMessage(event: MessageEvent<WorkerResponse>): void {

@@ -44,9 +44,53 @@ function extForMime(mime: string): string {
       return ".aac";
     case "audio/flac":
       return ".flac";
+    case "audio/aiff":
+      return ".aiff";
     default:
       return ".bin";
   }
+}
+
+const AUDIO_MIME_ALIASES: Readonly<Record<string, string>> = {
+  "audio/mpeg": "audio/mp3",
+  "audio/x-mp3": "audio/mp3",
+  "audio/x-wav": "audio/wav",
+  "audio/wave": "audio/wav",
+  "audio/x-aiff": "audio/aiff",
+  "audio/x-flac": "audio/flac",
+};
+
+const AUDIO_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  ".mp3": "audio/mp3",
+  ".wav": "audio/wav",
+  ".aif": "audio/aiff",
+  ".aiff": "audio/aiff",
+  ".aac": "audio/aac",
+  ".ogg": "audio/ogg",
+  ".oga": "audio/ogg",
+  ".flac": "audio/flac",
+};
+
+const SUPPORTED_AUDIO_MIME_TYPES = new Set([
+  "audio/wav",
+  "audio/mp3",
+  "audio/aiff",
+  "audio/aac",
+  "audio/ogg",
+  "audio/flac",
+]);
+
+/** Return a Gemini-compatible MIME type for a supported uploaded audio file. */
+export function normalizeSupportedAudioMimeType(
+  mimeType: string | null | undefined,
+  filename: string,
+): string | null {
+  const declared = (mimeType || "").trim().toLowerCase();
+  const normalized = AUDIO_MIME_ALIASES[declared] ?? declared;
+  if (SUPPORTED_AUDIO_MIME_TYPES.has(normalized)) return normalized;
+
+  const inferred = AUDIO_MIME_BY_EXTENSION[extname(filename).toLowerCase()];
+  return inferred ?? null;
 }
 
 export interface SaveAudioInput {

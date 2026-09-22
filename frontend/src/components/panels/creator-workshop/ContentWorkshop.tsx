@@ -36,6 +36,7 @@ export default function ContentWorkshop() {
   const removePackWithItems = useStore((s) => s.removePackWithItems)
   const updatePackInStore = useStore((s) => s.updatePackInStore)
   const openModal = useStore((s) => s.openModal)
+  const loadAvailableTools = useStore((s) => s.loadAvailableTools)
 
   const [loading, setLoading] = useState(true)
   const [editingPack, setEditingPack] = useState<Pack | null>(null)
@@ -143,6 +144,7 @@ export default function ContentWorkshop() {
     try {
       if (deleteTarget.type === 'pack') {
         await packsApi.delete(deleteTarget.packId)
+        void loadAvailableTools()
         removePack(deleteTarget.packId)
         removePackWithItems(deleteTarget.packId)
         if (selectedPackId === deleteTarget.packId) {
@@ -156,13 +158,14 @@ export default function ContentWorkshop() {
         await refreshPack(deleteTarget.packId)
       } else if (deleteTarget.type === 'tool') {
         await packsApi.deleteLoomTool(deleteTarget.packId, deleteTarget.itemId!)
+        void loadAvailableTools()
         await refreshPack(deleteTarget.packId)
       }
     } catch (err) {
       console.error('Failed to delete:', err)
     }
     setDeleteTarget(null)
-  }, [deleteTarget, removePack, removePackWithItems, selectedPackId, customPacks, refreshPack])
+  }, [deleteTarget, removePack, removePackWithItems, selectedPackId, customPacks, refreshPack, loadAvailableTools])
 
   const handleExport = useCallback(async (packId: string) => {
     try {
@@ -199,6 +202,7 @@ export default function ContentWorkshop() {
       const raw = JSON.parse(text)
       const payload = normalizePackJson(raw)
       const result = await packsApi.importJson(payload)
+      void loadAvailableTools()
       // Mark as custom so it appears in the Creator Workshop as editable
       await packsApi.update(result.id, { is_custom: true })
       const updated = { ...result, is_custom: true }
@@ -212,7 +216,7 @@ export default function ContentWorkshop() {
       setImporting(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
-  }, [addPack, setPackWithItems])
+  }, [addPack, setPackWithItems, loadAvailableTools])
 
   const handleCreatePack = useCallback(async () => {
     try {
