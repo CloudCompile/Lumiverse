@@ -167,4 +167,53 @@ describe('atomic frontend build promotion', () => {
     expect(readFileSync(join(dist, 'index.html'), 'utf8')).toBe('old')
     expect(readFileSync(join(dist, 'sw.js'), 'utf8')).toBe('old')
   })
+
+  test('copies over a lower-layer dist when rename fails with EXDEV', async () => {
+    const root = makeTempDir()
+    const staged = join(root, 'staged')
+    const dist = join(root, 'dist')
+    const backup = join(root, 'backup')
+    writeBuild(staged, 'new')
+    writeBuild(dist, 'old')
+    writeFileSync(join(dist, 'assets', 'old-hash.js'), 'old asset retained for active clients')
+
+    // Mirrors overlayfs: the tracked dist extracted in a lower Docker layer
+    // cannot be moved aside, even though both paths share a device.
+    const renamePath: typeof rename = async (source, destination) => {
+      if (source === dist && destination === backup) {
+        throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' })
+      }
+      return rename(source, destination)
+    }
+
+    await promoteFrontendBuild(staged, dist, backup, { renamePath })
+
+    expect(readFileSync(join(dist, 'index.html'), 'utf8')).toBe('new')
+    expect(readFileSync(join(dist, 'assets', 'index.js'), 'utf8')).toBe('new')
+    expect(readFileSync(join(dist, 'sw.js'), 'utf8')).toBe('new')
+    expect(existsSync(join(dist, 'assets', 'old-hash.js'))).toBe(true)
+    expect(existsSync(staged)).toBe(false)
+    expect(existsSync(backup)).toBe(false)
+  })
+
+  test('promotes a fresh dist into a missing bundle across devices via EXDEV', async () => {
+    const root = makeTempDir()
+    const staged = join(root, 'staged')
+    const dist = join(root, 'dist')
+    const backup = join(root, 'backup')
+    writeBuild(staged, 'new')
+
+    const renamePath: typeof rename = async (source, destination) => {
+      if (source === staged && destination === dist) {
+        throw Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' })
+      }
+      return rename(source, destination)
+    }
+
+    await promoteFrontendBuild(staged, dist, backup, { renamePath })
+
+    expect(readFileSync(join(dist, 'index.html'), 'utf8')).toBe('new')
+    expect(readFileSync(join(dist, 'sw.js'), 'utf8')).toBe('new')
+    expect(existsSync(staged)).toBe(false)
+  })
 })

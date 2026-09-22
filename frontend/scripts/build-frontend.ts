@@ -35,6 +35,21 @@ type PromoteFrontendBuildOptions = RenameRetryOptions & {
   renamePath?: typeof rename
 }
 
+/**
+ * `rename` across overlayfs layers fails with EXDEV even though both paths
+ * report the same device, because the source directory has not been copied up
+ * yet. Docker builds hit this constantly: the tracked `frontend/dist` is
+ * extracted in a lower layer, so moving it aside to promote a fresh build
+ * always throws. Unlike the Windows lock case this is deterministic, so it is
+ * handled by the same file-by-file copy fallback rather than by retrying.
+ */
+function isCrossDeviceError(error: unknown): boolean {
+  return !!error
+    && typeof error === 'object'
+    && 'code' in error
+    && (error as { code?: unknown }).code === 'EXDEV'
+}
+
 function buildFilesInPromotionOrder(buildDir: string): string[] {
   const files: string[] = []
   const visit = (dir: string): void => {
@@ -56,7 +71,12 @@ function buildFilesInPromotionOrder(buildDir: string): string[] {
   return files.sort((a, b) => priority(a) - priority(b) || a.localeCompare(b))
 }
 
-async function copyBuildOverLockedDirectory(
+/**
+ * Replace the live bundle file by file, entry points last, so a partially
+ * copied build is never exposed. Used when a directory rename cannot succeed:
+ * a Windows handle still holds dist, or overlayfs refuses a cross-layer rename.
+ */
+async function copyBuildIntoLiveDirectory(
   stagedDir: string,
   distDir: string,
   renameWithRetry: (source: string, destination: string) => Promise<void>,
@@ -159,8 +179,8 @@ export async function promoteFrontendBuild(
       } catch (error) {
         const isTransientLock = platform === 'win32'
           && (await import('../../scripts/windows-fs-retry')).isTransientWindowsRenameError(error)
-        if (isTransientLock) {
-          await copyBuildOverLockedDirectory(stagedDir, distDir, renameWithRetry)
+        if (isTransientLock || isCrossDeviceError(error)) {
+          await copyBuildIntoLiveDirectory(stagedDir, distDir, renameWithRetry)
           return
         }
         throw error
@@ -169,6 +189,14 @@ export async function promoteFrontendBuild(
 
     await renameWithRetry(stagedDir, distDir)
   } catch (error) {
+    // The staged bundle lives in the writable layer, so a rename onto a
+    // lower-layer dist can still fail with EXDEV. dist does not exist at this
+    // point, so seed it from the staged output file by file.
+    if (isCrossDeviceError(error) && !existsSync(distDir)) {
+      mkdirSync(distDir, { recursive: true })
+      await copyBuildIntoLiveDirectory(stagedDir, distDir, renameWithRetry)
+      return
+    }
     if (!existsSync(distDir) && movedPreviousBuild && existsSync(backupDir)) {
       await renameWithRetry(backupDir, distDir)
       movedPreviousBuild = false
