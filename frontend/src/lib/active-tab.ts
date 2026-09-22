@@ -18,7 +18,13 @@ export class ActiveTab {
   }
 
   isEnforced(userId: string): boolean {
-    return this.browser.localStorage.getItem(`lumiverse:allow-multiple-tabs:${userId}`) !== 'true'
+    try {
+      return this.browser.localStorage.getItem(`lumiverse:allow-multiple-tabs:${userId}`) !== 'true'
+    } catch {
+      // Without storage there is nothing to enforce against, and this runs
+      // during render — report it as inactive rather than crashing the panel.
+      return false
+    }
   }
 
   setEnforced(userId: string, enforced: boolean): void {

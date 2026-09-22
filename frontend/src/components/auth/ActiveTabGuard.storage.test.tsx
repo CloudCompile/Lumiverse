@@ -15,17 +15,40 @@ const { default: ActiveTabGuard } = await import('./ActiveTabGuard')
 const root = createRoot(document.getElementById('root')!)
 afterAll(async () => { await act(async () => root.unmount()); dom.window.close() })
 
-test('the application still renders when browser storage rejects the ownership claim', async () => {
+async function renderWith(storage: unknown) {
+  Object.defineProperty(dom.window, 'localStorage', { configurable: true, value: storage })
+  await act(async () => {
+    root.render(<StrictMode><ActiveTabGuard><button>Generate</button></ActiveTabGuard></StrictMode>)
+  })
+}
+
+test('renders when localStorage access itself is disabled', async () => {
   Object.defineProperty(dom.window, 'localStorage', {
     configurable: true,
-    value: {
-      getItem: () => null,
-      setItem: () => { throw new Error('QuotaExceededError') },
-      removeItem: () => {},
-    },
+    get() { throw new Error('SecurityError: storage disabled') },
   })
   await act(async () => {
     root.render(<StrictMode><ActiveTabGuard><button>Generate</button></ActiveTabGuard></StrictMode>)
+  })
+  expect(document.body.textContent).toContain('Generate')
+})
+
+test('renders when storage writes throw', async () => {
+  await renderWith({
+    getItem: () => null,
+    setItem: () => { throw new Error('QuotaExceededError') },
+    removeItem: () => {},
+  })
+  expect(document.body.textContent).toContain('Generate')
+})
+
+test('renders when storage silently drops writes', async () => {
+  const map = new Map<string, string>()
+  await renderWith({
+    getItem: (key: string) => map.get(key) ?? null,
+    // A partitioned/embedded webview can accept a write and never persist it.
+    setItem: () => {},
+    removeItem: (key: string) => { map.delete(key) },
   })
   expect(document.body.textContent).toContain('Generate')
 })
