@@ -2,7 +2,7 @@ import { getDb } from "../../db/connection";
 import { getSession, setStage } from "./session.service";
 import { getBible } from "./bible.service";
 import { addSteer } from "./interview.service";
-import { getField as getFieldDef, rankByOrder, isFieldId } from "./fields";
+import { getField as getFieldDef, groupFieldsIntoDependencyWaves, rankByOrder, isFieldId } from "./fields";
 import { getBuildRegistry, type WeaverBuildRegistry } from "./build-registry";
 import {
   criteriaForKind,
@@ -255,6 +255,21 @@ function isAbort(err: unknown): boolean {
   );
 }
 
+/** Rendered content of a field's declared dependencies, for use as established context. */
+function establishedContent(
+  userId: string,
+  sessionId: string,
+  field: WeaverFieldDef,
+): Map<string, string> {
+  const established = new Map<string, string>();
+  for (const depId of field.dependsOn ?? []) {
+    const dep = getField(userId, sessionId, depId);
+    const text = dep?.content.trim();
+    if (text) established.set(depId, text);
+  }
+  return established;
+}
+
 /** A verdict synthesized for a hard render failure — the reason lives in summary. */
 function failureVerdict(message: string): WeaverGateVerdict {
   return { passed: false, criteria: [], summary: message };
@@ -332,14 +347,15 @@ export async function renderField(
   }
 
   const steer = nudge?.trim() || undefined;
+  const established = establishedContent(userId, sessionId, field);
   try {
     const render = await weaverGenerateTextWithUsage({
       userId,
       session,
       system: buildFieldRenderPrompt(reg, field, getNarrationMode(session.narration_mode)),
       user: steer
-        ? buildFieldNudgeUserMessage(reg, { field, spine, nudge: steer, previous: existing?.content })
-        : buildFieldRenderUserMessage(reg, { field, spine }),
+        ? buildFieldNudgeUserMessage(reg, { field, spine, nudge: steer, previous: existing?.content, established })
+        : buildFieldRenderUserMessage(reg, { field, spine, established }),
       temperature: 0.7,
       signal,
     });
@@ -356,7 +372,7 @@ export async function renderField(
         userId,
         session,
         system: buildFieldRenderPrompt(reg, field, getNarrationMode(session.narration_mode)),
-        user: buildFieldReviseUserMessage(reg, { field, spine, previous: content, verdict: gate.verdict }),
+        user: buildFieldReviseUserMessage(reg, { field, spine, previous: content, verdict: gate.verdict, established }),
         temperature: 0.7,
         signal,
       });
@@ -409,16 +425,21 @@ export async function renderAllFields(
       .map((f) => f.field_name),
   );
   const defs = rankByOrder(reg.fieldDefs).filter((def) => !locked.has(def.id));
-  let cursor = 0;
-  async function worker(): Promise<void> {
-    while (cursor < defs.length) {
-      if (signal?.aborted) throw new Error("Render cancelled");
-      const def = defs[cursor++];
-      await renderField(userId, sessionId, def.id, { signal });
+
+  // Fields declaring dependsOn render in a later wave than the fields they
+  // build on, so a greeting is never written before the scenario it sits in.
+  for (const batch of groupFieldsIntoDependencyWaves(defs)) {
+    let cursor = 0;
+    async function worker(): Promise<void> {
+      while (cursor < batch.length) {
+        if (signal?.aborted) throw new Error("Render cancelled");
+        const def = batch[cursor++];
+        await renderField(userId, sessionId, def.id, { signal });
+      }
     }
+    const workerCount = Math.min(RENDER_CONCURRENCY, batch.length);
+    if (workerCount > 0) await Promise.all(Array.from({ length: workerCount }, () => worker()));
   }
-  const workerCount = Math.min(RENDER_CONCURRENCY, defs.length);
-  if (workerCount > 0) await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
   return getFields(userId, sessionId);
 }

@@ -2,7 +2,7 @@ import { getSlot, type SpineSlot, type SynthesisGroupDef } from "./slots";
 import { compactLine } from "./text";
 import type { GateCriterion } from "./gate";
 import { criteriaForKind } from "./field-gate";
-import type { WeaverFieldDef } from "./fields";
+import { getField as getFieldDef, type WeaverFieldDef } from "./fields";
 import type { NarrationMode } from "./narration";
 import type { WeaverBuildRegistry } from "./build-registry";
 import type {
@@ -413,7 +413,7 @@ You may also be given THE ${sourceNoun.toUpperCase()} — the source text this $
 
 AUTHOR THE TARGETS. For each target under TO AUTHOR, write one concrete, specific statement that follows believably from the locked facts and the earlier passes. A target is one part of the spine: write the content for exactly that part. The statement must be a complete, particular thing — a real behavior, belief, sound, limit, or detail — never a bare adjective or a hedge. Do not drift toward the statistical mean: the first thing that comes to mind for this premise is the average; go past it.
 
-A target marked [author] is your craft — the author wants you to invent it from the spine. A target marked [infer] is one the author left open: make your best, overturnable guess from the ${sourceNoun} and their taste, and keep it modest and consistent rather than inventing bold new canon.
+A target marked [author] is your craft — the author wants you to invent it from the spine. A target marked [infer] is one the author left open: make your best, overturnable guess from the ${sourceNoun} and their taste. Modesty here means avoiding sweeping new CANON — do not invent a new faction, backstory, or relationship the author never implied. It does NOT mean reaching for the average: still choose one concrete, particular thing (a specific habit, object, phrase, or preference) rather than a hedge, a vibe, or a bare adjective. An overturnable guess is still a definite one.
 
 Output STRICT JSON, no prose, no code fence:
 {
@@ -601,11 +601,15 @@ export function buildFieldRenderPrompt(
     field.narrated && narrationMode
       ? `\n\nNARRATION POV — applies to the prose narration in this field (dialogue always stays in {{char}}'s own idiolect):\n${narrationMode.guidance}`
       : "";
+  const isolationNote =
+    (field.dependsOn ?? []).length > 0
+      ? `You are writing this field on top of the siblings named under ALREADY WRITTEN in the brief, and must open within them. Every OTHER field you will not see, and must not reference or assume the exact wording of.`
+      : `You are writing this field in ISOLATION. You will NOT see the other rendered fields and must not reference or assume their exact wording.`;
   return `You are the Weaver's render stage. You are writing ONE field of a ${noun} — the "${field.label}" field — from the ${noun}'s FROZEN BIBLE.
 
 The Bible is the single shared source of truth. Write ONLY from it: every choice must trace to the Bible's brief, spine, and causal links. Never invent details that contradict the Bible, and never drift toward the generic, average version of this ${noun} — the Bible exists precisely to keep this ${noun} specific. The first thing that comes to mind for a premise is usually the mean; the Bible is how you reach past it.
 
-You are writing this field in ISOLATION. You will NOT see the other rendered fields and must not reference or assume their exact wording. Anything that must agree across fields agrees because it is drawn from the same Bible — so stay faithful to the Bible and coherence takes care of itself.
+${isolationNote} Anything that must agree across fields agrees because it is drawn from the same Bible — so stay faithful to the Bible and coherence takes care of itself.
 
 Lean especially on these parts of the spine for this field: ${focus}. The whole Bible remains available as context.
 
@@ -620,9 +624,11 @@ export function buildFieldRenderUserMessage(
   input: {
     field: WeaverFieldDef;
     spine: WeaverBibleSpine;
+    /** Rendered content of fields this one is written on top of, keyed by field id. */
+    established?: ReadonlyMap<string, string>;
   },
 ): string {
-  const { field, spine } = input;
+  const { field, spine, established } = input;
   const parts: string[] = [];
   parts.push(`THE FROZEN BIBLE\n\nBrief:\n${spine.brief || "(none)"}`);
   parts.push(`\nSpine:\n${formatSpineEntries(reg, spine) || "(no entries)"}`);
@@ -638,6 +644,21 @@ export function buildFieldRenderUserMessage(
     }
   }
 
+  // Already-rendered sibling fields this one is written on top of. This is the
+  // one place the render isolation rule is deliberately lifted: a field told to
+  // sit "in the scenario's moment" cannot honor that without the scenario's
+  // words. The framing stays neutral so the field's own guidance governs how
+  // the material is used.
+  for (const depId of field.dependsOn ?? []) {
+    const content = established?.get(depId)?.trim();
+    if (!content) continue;
+    const depDef = getFieldDef(reg.fieldDefs, depId);
+    const depLabel = depDef?.label ?? depId;
+    parts.push(
+      `\nALREADY WRITTEN — ${depLabel.toUpperCase()} (written from this same Bible, and this field is built on top of it; use it as the field guidance above directs, and never contradict it):\n${content}`,
+    );
+  }
+
   parts.push(`\nNow write the ${field.label} field.`);
   return parts.join("\n");
 }
@@ -649,6 +670,7 @@ export function buildFieldReviseUserMessage(
     spine: WeaverBibleSpine;
     previous: string;
     verdict: WeaverGateVerdict;
+    established?: ReadonlyMap<string, string>;
   },
 ): string {
   const { field, previous, verdict } = input;
@@ -659,7 +681,7 @@ export function buildFieldReviseUserMessage(
       : "- (the gate did not pass, but gave no per-criterion notes)";
 
   const parts: string[] = [];
-  parts.push(buildFieldRenderUserMessage(reg, { field: input.field, spine: input.spine }));
+  parts.push(buildFieldRenderUserMessage(reg, { field: input.field, spine: input.spine, established: input.established }));
   parts.push(`\nA prior attempt at the ${field.label} field did NOT pass the gate.`);
   parts.push(`\nPrior attempt:\n${previous}`);
   parts.push(`\nWhat the gate flagged (fix exactly these):\n${flags}`);
@@ -677,11 +699,12 @@ export function buildFieldNudgeUserMessage(
     spine: WeaverBibleSpine;
     nudge: string;
     previous?: string;
+    established?: ReadonlyMap<string, string>;
   },
 ): string {
   const { field, nudge, previous } = input;
   const parts: string[] = [];
-  parts.push(buildFieldRenderUserMessage(reg, { field: input.field, spine: input.spine }));
+  parts.push(buildFieldRenderUserMessage(reg, { field: input.field, spine: input.spine, established: input.established }));
   if (previous && previous.trim()) {
     parts.push(`\nThe current ${field.label} field:\n${previous.trim()}`);
   }

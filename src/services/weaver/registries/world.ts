@@ -299,9 +299,10 @@ const FIELD_DEFS: readonly WeaverFieldDef[] = [
     kind: "voiced",
     render: "synthesize",
     usesVoiceMaterial: true,
+    dependsOn: ["scenario"],
     primarySlots: ["narration_voice", "setting", "hooks", "stance_toward_player"],
     renderGuidance:
-      "Write the world's opening narration to {{user}}, in the narration voice, in the scenario's moment. Establish the place and its atmosphere through specific sensory material from the Bible's setting, bring the scene to life around {{user}}, and present one concrete hook that invites a response. This is scene-running narration, not a single persona speaking in first person; if an NPC speaks, voice them inside the narration. Use {{user}} for the player where natural. Do not write {{user}}'s actions, words, thoughts, or choices. No meta or preamble.",
+      "Write the world's opening narration to {{user}}, in the narration voice, in the scenario's moment. OPEN IN MOTION: something is already underway as {{user}} arrives — start inside it rather than panning across the setting first. Establish the place and its atmosphere through specific sensory material from the Bible's setting, brought in through what is happening, not as a recited inventory. Present one concrete hook that invites a response, and build toward the tension rather than resolving it. Length: several substantial paragraphs — a scene someone can step into, not a scene-setting caption. This is scene-running narration, not a single persona speaking in first person; if an NPC speaks, voice them inside the narration. Use {{user}} for the player where natural. Do not write {{user}}'s actions, words, thoughts, or choices. No meta or preamble.",
   },
   {
     id: "alternate_greetings",
@@ -311,10 +312,11 @@ const FIELD_DEFS: readonly WeaverFieldDef[] = [
     kind: "greetings",
     render: "synthesize",
     usesVoiceMaterial: true,
+    dependsOn: ["first_mes"],
     list: { separator: GREETING_SEPARATOR },
     primarySlots: ["hooks", "narration_voice", "setting"],
     renderGuidance:
-      "Write 2 to 4 alternate opening narrations — the world's other front doors. Each one enters through a DIFFERENT hook from the Bible: a different location, situation, or role for {{user}}, genuinely distinct from the main opening and from each other. Each is a complete scene-running opening in the narration voice: establish the place, bring the scene to life, present its hook. Do not write {{user}}'s actions, words, thoughts, or choices. Separate the openings with a line containing only \"---\" (three hyphens, nothing else on the line). No numbering, no titles, no meta or preamble.",
+      "Write 2 to 4 alternate opening narrations — the world's other front doors. Each one enters through a DIFFERENT hook from the Bible: a different location, situation, or role for {{user}}, genuinely distinct from the main opening and from each other. Each is a complete scene-running opening in the narration voice: OPEN IN MOTION, with something already underway rather than panning across the setting, establish the place through what is happening, and present its hook. Length: at least three substantial paragraphs each — these are scenes, not captions. Do not reuse the main opening's hook or imagery. Do not write {{user}}'s actions, words, thoughts, or choices. Separate the openings with a line containing only \"---\" (three hyphens, nothing else on the line). No numbering, no titles, no meta or preamble.",
   },
   {
     id: "mes_example",
@@ -435,7 +437,7 @@ const FIELD_GATE_CRITERIA: readonly FieldGateCriterion[] = [
     key: "well_formed",
     label: "Well-formed",
     description:
-      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a narrator card.",
+      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a narrator card. Length floors by field kind: an opening or alternate greeting must be at least three substantial paragraphs and start inside something already happening — a bare scene-setting caption or a one-line invitation fails this criterion outright; an example-message set must fill every required beat rather than one thin exchange.",
     appliesTo: "all",
   },
 ] as const;

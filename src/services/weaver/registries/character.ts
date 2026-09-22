@@ -322,9 +322,10 @@ const FIELD_DEFS: readonly WeaverFieldDef[] = [
     render: "synthesize",
     usesVoiceMaterial: true,
     narrated: true,
+    dependsOn: ["scenario"],
     primarySlots: ["voice", "stance_toward_user", "central_contradiction", "gradient"],
     renderGuidance:
-      "Write the character's opening message to {{user}}, in the scenario's moment. The dialogue must sound like this specific person (the Bible's voice material is the source of truth); reflect their stance toward {{user}} and let them act on an intent. Use {{user}} for the user and {{char}} for the character where natural. Do not write {{user}}'s actions or words. No meta or preamble.",
+      "Write the character's opening message to {{user}}, in the scenario's moment. OPEN IN MOTION: start with the character already doing or saying something in that scene, not with weather, a description of the room, or a reflection. Let the setting reach the reader through what the character touches, wants, or reacts to, never through a recited inventory of it. Give the character's body and face something to do while they speak — one or two concrete beats, chosen from the physical facts in the Bible. The dialogue must sound like this specific person (the Bible's voice material is the source of truth); reflect their stance toward {{user}} and let them act on an intent rather than merely react. Build toward the live tension rather than resolving it. Length: several substantial paragraphs — a scene someone can answer, not a salutation. Use {{user}} for the user and {{char}} for the character where natural. Do not write {{user}}'s actions or words. No meta or preamble.",
   },
   {
     id: "mes_example",
@@ -447,7 +448,7 @@ const FIELD_GATE_CRITERIA: readonly FieldGateCriterion[] = [
     key: "well_formed",
     label: "Well-formed",
     description:
-      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a character card.",
+      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a character card. Length floors by field kind: a voiced opening or greeting must be at least three substantial paragraphs and open in motion — a bare salutation, a one-line greeting, or a scene-setting caption fails this criterion outright; an example-message set must fill every required beat rather than one thin exchange.",
     appliesTo: "all",
   },
 ] as const;
