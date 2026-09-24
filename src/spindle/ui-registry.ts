@@ -64,6 +64,7 @@ export const BUILT_IN_DRAWER_TABS: readonly SpindleUIDrawerTabEntry[] = [
   { id: "theme", shortName: "Theme", tabName: "Theme", tabDescription: "Customize colors, accent, and visual style", keywords: ["theme", "colors", "accent", "appearance", "dark", "light", "glass", "radius", "font", "css", "style", "customize", "ui", "mode"] },
   { id: "leaderboard", shortName: "Board", tabName: "Leaderboard", tabDescription: "View Elo-ranked model leaderboard based on your feedback", keywords: ["leaderboard", "elo", "rating", "rank", "model", "vote", "thumbs", "feedback", "roulette", "compare", "best"] },
   { id: "spindle", shortName: "Extend", tabName: "Extensions", tabDescription: "Manage Spindle extensions", keywords: ["extensions", "spindle", "plugins", "addons", "install", "manage", "enable", "disable", "uninstall", "github"] },
+  { id: "card-agent", shortName: "Cards", tabName: "Card Agent", tabDescription: "Chat with an agent that reads your cards and proposes edits for your approval", keywords: ["card agent", "cards", "character", "edit", "propose", "approval", "revision", "history", "revert", "agent", "library", "inspect"] },
 ];
 
 export const BUILT_IN_SETTINGS_TABS: readonly SpindleUISettingsTabEntry[] = [

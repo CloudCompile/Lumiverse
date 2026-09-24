@@ -1801,6 +1801,77 @@ CREATE INDEX IF NOT EXISTS idx_leaderboard_votes_canonical ON leaderboard_votes(
 CREATE INDEX IF NOT EXISTS idx_leaderboard_alias_user ON leaderboard_model_aliases(user_id, provider_scope);
 CREATE INDEX IF NOT EXISTS idx_leaderboard_roulette_user_created ON leaderboard_roulette_votes(user_id, created_at DESC);
 
+-- ── Card Agent (custom) ──────────────────────────────────────────────────────
+-- Reversible revision history for characters, a human-approved edit-proposal
+-- queue, and agent sessions that propose but never write.
+CREATE TABLE IF NOT EXISTS character_revisions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  character_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL,
+  snapshot TEXT NOT NULL,
+  origin TEXT NOT NULL DEFAULT 'user',
+  session_id TEXT,
+  label TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE(user_id, character_id, revision_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_revisions_character
+  ON character_revisions(user_id, character_id, revision_number DESC);
+
+CREATE TABLE IF NOT EXISTS character_edit_proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  character_id TEXT NOT NULL,
+  session_id TEXT,
+  character_name TEXT NOT NULL DEFAULT '',
+  changes TEXT NOT NULL,
+  rationale TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  base_content_hash TEXT NOT NULL,
+  base_updated_at INTEGER,
+  applied_revision_id INTEGER,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  resolved_at INTEGER,
+  CHECK(status IN ('pending', 'applied', 'rejected', 'stale'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_character_edit_proposals_pending
+  ON character_edit_proposals(user_id, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_character_edit_proposals_character
+  ON character_edit_proposals(user_id, character_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS card_agent_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  connection_id TEXT,
+  model TEXT,
+  scope_mode TEXT NOT NULL DEFAULT 'all',
+  scope_character_ids TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  CHECK(scope_mode IN ('all', 'selection'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_card_agent_sessions_user
+  ON card_agent_sessions(user_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS card_agent_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL DEFAULT '',
+  tool_activity TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  CHECK(role IN ('user', 'assistant', 'system'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_card_agent_messages_session
+  ON card_agent_messages(session_id, id ASC);
+
 -- ── Signup audit (custom) ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS signup_audit (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

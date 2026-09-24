@@ -2048,6 +2048,33 @@ export interface LeaderboardSlice {
   resetLeaderboard: () => Promise<void>
 }
 
+export interface CardAgentSlice {
+  cardAgentSessions: import('@/api/card-agent').CardAgentSession[]
+  cardAgentActiveSessionId: string | null
+  cardAgentMessages: import('@/api/card-agent').CardAgentMessage[]
+  cardAgentProposals: import('@/api/card-agent').EditProposal[]
+  cardAgentRevisions: Record<string, import('@/api/card-agent').CharacterRevision[]>
+  cardAgentBusy: boolean
+  cardAgentLoading: boolean
+  loadCardAgentSessions: () => Promise<void>
+  createCardAgentSession: (input: {
+    title?: string
+    connectionId?: string | null
+    model?: string | null
+    scopeMode?: import('@/api/card-agent').CardAgentScopeMode
+    scopeCharacterIds?: string[]
+  }) => Promise<import('@/api/card-agent').CardAgentSession>
+  selectCardAgentSession: (sessionId: string | null) => Promise<void>
+  deleteCardAgentSession: (sessionId: string) => Promise<void>
+  sendCardAgentTurn: (message: string) => Promise<void>
+  loadCardAgentProposals: (params?: { sessionId?: string; characterId?: string }) => Promise<void>
+  applyCardAgentProposal: (proposalId: number) => Promise<void>
+  rejectCardAgentProposal: (proposalId: number) => Promise<void>
+  applyCardAgentProposalBatch: (params?: { sessionId?: string; characterIds?: string[] }) => Promise<void>
+  loadCardAgentRevisions: (characterId: string) => Promise<void>
+  revertCardAgentRevision: (characterId: string, revisionId: number) => Promise<void>
+}
+
 export type AppStore = ChatSlice &
   CharactersSlice &
   PersonasSlice &
@@ -2082,4 +2109,5 @@ export type AppStore = ChatSlice &
   DatabankSlice &
   ConnectionSlice &
   ContainersSlice &
-  LeaderboardSlice
+  LeaderboardSlice &
+  CardAgentSlice
