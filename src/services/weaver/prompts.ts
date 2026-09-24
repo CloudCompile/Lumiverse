@@ -715,16 +715,27 @@ export function buildFieldNudgeUserMessage(
   return parts.join("\n");
 }
 
-export function buildFieldGatePrompt(reg: WeaverBuildRegistry, field: WeaverFieldDef): string {
+export function buildFieldGatePrompt(
+  reg: WeaverBuildRegistry,
+  field: WeaverFieldDef,
+  narrationMode?: NarrationMode,
+): string {
   const { noun } = reg.subject;
   const rubric = criteriaForKind(reg.fieldGateCriteria, field.kind)
     .map((c) => `- ${c.key} (${c.label}): ${c.description}`)
     .join("\n");
+  // The gate must judge narration against the POV the field was actually written
+  // in. Without this it sees only the field text and fails correct second/third
+  // person prose as "not first person", forcing a pointless rewrite.
+  const narration =
+    field.narrated && narrationMode
+      ? `\n\nNARRATION POV this field was written in — judge the narration against THIS, and do not fail it for choosing a different grammatical person:\n${narrationMode.guidance}`
+      : "";
   return `You are the Weaver's field gate. A single ${noun} field — the "${field.label}" field — has been written FROM the ${noun}'s Bible, and you must judge whether it is good enough to keep. Be a demanding critic, not a cheerleader: passing a weak field puts generic writing on the card.
 
 The Bible has ALREADY been judged for whether the ${noun} CONCEPT is strong — do not re-judge the concept or the idea. Judge only this rendering: did it project the Bible faithfully and specifically, in the right shape, without sliding toward the generic?
 
-Judge the field against each criterion below. For each, decide pass or fail and write one sharp sentence naming exactly what is strong or what is weak — be specific, never vague. A criterion fails if the field only half-meets it.
+Judge the field against each criterion below. For each, decide pass or fail and write one sharp sentence naming exactly what is strong or what is weak — be specific, never vague. A criterion fails if the field only half-meets it.${narration}
 
 CRITERIA:
 ${rubric}

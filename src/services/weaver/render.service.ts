@@ -287,7 +287,7 @@ async function gateContent(
   const res = await weaverGenerateJsonWithUsage({
     userId,
     session,
-    system: buildFieldGatePrompt(reg, field),
+    system: buildFieldGatePrompt(reg, field, getNarrationMode(session.narration_mode)),
     user: buildFieldGateUserMessage(reg, { field, content, spine }),
     temperature: 0.2,
     kind: "review",

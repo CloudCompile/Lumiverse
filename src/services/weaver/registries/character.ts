@@ -169,7 +169,7 @@ const SPINE_SLOTS: readonly SpineSlot[] = [
     category: "expression",
     label: "Voice",
     description:
-      "How the character actually sounds — register and dialect, sentence rhythm, characteristic lexicon and terms of address, the words they would never use, and one or two verbal tics. The single most imitable signal; built first.",
+      "How the character actually sounds — register and dialect, sentence rhythm, characteristic lexicon and terms of address, the words they would never use, and one or two verbal tics. Pair the description with two or three sample lines written verbatim in their voice, so later fields can imitate the sound rather than infer it from a spec. The single most imitable signal; built first.",
     impact: "high",
     fill: "generate",
   },
@@ -325,7 +325,7 @@ const FIELD_DEFS: readonly WeaverFieldDef[] = [
     dependsOn: ["scenario"],
     primarySlots: ["voice", "stance_toward_user", "central_contradiction", "gradient"],
     renderGuidance:
-      "Write the character's opening message to {{user}}, in the scenario's moment. OPEN IN MOTION: start with the character already doing or saying something in that scene, not with weather, a description of the room, or a reflection. Let the setting reach the reader through what the character touches, wants, or reacts to, never through a recited inventory of it. Give the character's body and face something to do while they speak — one or two concrete beats, chosen from the physical facts in the Bible. The dialogue must sound like this specific person (the Bible's voice material is the source of truth); reflect their stance toward {{user}} and let them act on an intent rather than merely react. Build toward the live tension rather than resolving it. Length: several substantial paragraphs — a scene someone can answer, not a salutation. Use {{user}} for the user and {{char}} for the character where natural. Do not write {{user}}'s actions or words. No meta or preamble.",
+      "Write the character's opening message to {{user}}, in the scenario's moment. OPEN IN MOTION: start with the character already doing or saying something in that scene, not with weather, a description of the room, or a reflection. Let the setting reach the reader through what the character touches, wants, or reacts to, never through a recited inventory of it. Give the character's body and face something to do while they speak — one or two concrete beats, chosen from the physical facts in the Bible. The dialogue must sound like this specific person (the Bible's voice material is the source of truth); reflect their stance toward {{user}} and let them act on an intent rather than merely react. Build toward the live tension rather than resolving it. Length: several substantial paragraphs — a scene someone can answer, not a salutation. Use {{user}} for the user and {{char}} for the character where natural. Do not write {{user}}'s actions or words. No meta or preamble.\n\nWrite for subtext, not statement. Have the character say less than they mean and let the gap between what they say and what they want be legible to a reader without being announced — understatement, deflection, a subject changed on purpose, a question that is really a confession. Include one betraying tell: a small physical act that contradicts or qualifies the words, so the body admits what the dialogue denies. Anchor the scene in one concrete, particular detail from this character's life that could not belong to anyone else, and let that detail carry weight rather than decorate. Do not resolve the tension or summarise the character's feelings — end on an unresolved want that gives {{user}} something to answer.",
   },
   {
     id: "mes_example",
@@ -427,7 +427,7 @@ const FIELD_GATE_CRITERIA: readonly FieldGateCriterion[] = [
     key: "voiced_narration",
     label: "Voiced narration",
     description:
-      "The narration around the dialogue is in the character's own first-person lens and idiolect — action beats and inner thought sound like this specific person, not a neutral third-person camera reporting events.",
+      "The narration around the dialogue is carried in the character's own lens and idiolect — action beats and inner thought sound like this specific person, not a neutral camera reporting events. Judge the voice and intimacy of the narration, NOT the grammatical person: the required POV for this field is stated in the prompt, and narration that follows that POV correctly passes this criterion.",
     appliesTo: ["voiced", "alichat"],
   },
   {
@@ -448,7 +448,7 @@ const FIELD_GATE_CRITERIA: readonly FieldGateCriterion[] = [
     key: "well_formed",
     label: "Well-formed",
     description:
-      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a character card. Length floors by field kind: a voiced opening or greeting must be at least three substantial paragraphs and open in motion — a bare salutation, a one-line greeting, or a scene-setting caption fails this criterion outright; an example-message set must fill every required beat rather than one thin exchange.",
+      "The field has the right shape and length for what it is, carries no meta-commentary, preamble, or instructions to the reader, and is valid to drop straight into a character card. Length floors by field kind: a voiced opening or greeting must be at least three substantial paragraphs and open in motion — a bare salutation, a one-line greeting, or a scene-setting caption fails this criterion outright; an example-message set must fill every required beat rather than one thin exchange. An opening also fails if it is merely competent and generic: dialogue that states feelings outright instead of carrying them in subtext, a body doing nothing but generic gestures, or a scene built from interchangeable details anyone could have written, rather than this one character in this one place.",
     appliesTo: "all",
   },
 ] as const;
