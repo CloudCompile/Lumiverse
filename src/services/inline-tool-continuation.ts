@@ -20,6 +20,8 @@ export interface InlineCouncilToolResult {
   inlineWebSearchContext?: string;
   /** True when this was Lumiverse's direct, non-Council web-search tool. */
   isInlineWebSearch?: boolean;
+  /** Proposal ids filed by a Card Creator tool call during this turn. */
+  proposalIds?: number[];
 }
 
 /**

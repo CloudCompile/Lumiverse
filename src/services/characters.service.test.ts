@@ -19,6 +19,7 @@ function initCharactersTestDb(): void {
     image_id TEXT,
     alternate_greetings TEXT NOT NULL DEFAULT '[]',
     library_scope TEXT NOT NULL DEFAULT 'mine',
+    character_kind TEXT NOT NULL DEFAULT 'standard',
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     deleting INTEGER NOT NULL DEFAULT 0

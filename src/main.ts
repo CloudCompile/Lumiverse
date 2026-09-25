@@ -122,11 +122,17 @@ try {
 }
 
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
-const { seedOwner, backfillUserIds, backfillDefaultPresets, getFirstUserId } = await import("./auth/seed");
+const { seedOwner, backfillUserIds, backfillDefaultPresets, backfillCardCreators, getFirstUserId } = await import("./auth/seed");
 const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
 const presetBackfill = backfillDefaultPresets();
+const cardCreatorBackfill = backfillCardCreators();
+if (cardCreatorBackfill.created > 0) {
+  console.log(
+    `[Auth] Card Creator backfill: seeded ${cardCreatorBackfill.created} of ${cardCreatorBackfill.usersScanned} users`,
+  );
+}
 if (presetBackfill.seeded > 0 || presetBackfill.upgradedLegacy > 0 || presetBackfill.activated > 0) {
   console.log(
     `[Auth] Default preset backfill: seeded ${presetBackfill.seeded}, upgraded ${presetBackfill.upgradedLegacy}, activated ${presetBackfill.activated}`,

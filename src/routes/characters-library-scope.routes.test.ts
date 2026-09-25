@@ -21,6 +21,7 @@ function initCharactersScopeTestDb(): void {
     user_id TEXT NOT NULL,
     name TEXT NOT NULL,
     library_scope TEXT NOT NULL DEFAULT 'mine' CHECK(library_scope IN ('mine', 'shared')),
+    character_kind TEXT NOT NULL DEFAULT 'standard',
     avatar_path TEXT,
     image_id TEXT,
     description TEXT NOT NULL DEFAULT '',

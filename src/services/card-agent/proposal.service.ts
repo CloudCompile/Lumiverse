@@ -35,6 +35,7 @@ export interface EditProposal {
   character_id: string;
   character_name: string;
   session_id: string | null;
+  chat_id: string | null;
   changes: ProposalChanges;
   rationale: string | null;
   status: ProposalStatus;
@@ -50,6 +51,7 @@ interface ProposalRow {
   character_id: string;
   character_name: string;
   session_id: string | null;
+  chat_id: string | null;
   changes: string;
   rationale: string | null;
   status: string;
@@ -113,6 +115,8 @@ export interface CreateProposalInput {
   changes: ProposalChanges;
   rationale?: string | null;
   sessionId?: string | null;
+  /** Chat the proposal was filed in, when it came from a conversation. */
+  chatId?: string | null;
 }
 
 /**
@@ -132,13 +136,14 @@ export function createProposal(userId: string, input: CreateProposalInput): Edit
   const db = getDb();
   db.run(
     `INSERT INTO character_edit_proposals
-     (user_id, character_id, session_id, character_name, changes, rationale,
+     (user_id, character_id, session_id, chat_id, character_name, changes, rationale,
       base_content_hash, base_updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       userId,
       input.characterId,
       input.sessionId ?? null,
+      input.chatId ?? null,
       character.name,
       JSON.stringify(input.changes),
       input.rationale ?? null,
@@ -156,7 +161,7 @@ export function createProposal(userId: string, input: CreateProposalInput): Edit
 export function getProposal(userId: string, proposalId: number): EditProposal | null {
   const row = getDb()
     .query(
-      `SELECT id, character_id, character_name, session_id, changes, rationale, status,
+      `SELECT id, character_id, character_name, session_id, chat_id, changes, rationale, status,
               base_content_hash, base_updated_at, applied_revision_id, created_at, resolved_at
        FROM character_edit_proposals
        WHERE user_id = ? AND id = ?`,
@@ -167,7 +172,7 @@ export function getProposal(userId: string, proposalId: number): EditProposal | 
 
 export function listProposals(
   userId: string,
-  options: { status?: ProposalStatus; characterId?: string; sessionId?: string; limit?: number } = {},
+  options: { status?: ProposalStatus; characterId?: string; sessionId?: string; chatId?: string; limit?: number } = {},
 ): EditProposal[] {
   const where: string[] = ["user_id = ?"];
   const params: unknown[] = [userId];
@@ -184,13 +189,17 @@ export function listProposals(
     where.push("session_id = ?");
     params.push(options.sessionId);
   }
+  if (options.chatId) {
+    where.push("chat_id = ?");
+    params.push(options.chatId);
+  }
 
   const limit = Math.min(Math.max(options.limit ?? 100, 1), 500);
   params.push(limit);
 
   const rows = getDb()
     .query(
-      `SELECT id, character_id, character_name, session_id, changes, rationale, status,
+      `SELECT id, character_id, character_name, session_id, chat_id, changes, rationale, status,
               base_content_hash, base_updated_at, applied_revision_id, created_at, resolved_at
        FROM character_edit_proposals
        WHERE ${where.join(" AND ")}

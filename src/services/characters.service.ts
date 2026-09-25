@@ -1,7 +1,7 @@
 import { getDb } from "../db/connection";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
-import type { Character, CharacterLibraryScope, CharacterPreview, CharacterSummary, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
+import type { Character, CharacterKind, CharacterLibraryScope, CharacterPreview, CharacterSummary, CreateCharacterInput, UpdateCharacterInput } from "../types/character";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import * as filesSvc from "./files.service";
@@ -207,7 +207,7 @@ export function listCharacterSummaries(
     return listCharacterSummariesDiscover(userId, pagination, options);
   }
 
-  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0"];
+  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0", STANDARD_CARD_PREDICATE];
   const whereParams: any[] = [userId];
   if (scope) { whereClauses.push("c.library_scope = ?"); whereParams.push(scope); }
   if (options.chatId) {
@@ -384,7 +384,7 @@ function listCharacterSummariesDiscover(
     };
   }
 
-  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0"];
+  const whereClauses: string[] = ["c.user_id = ?", "c.deleting = 0", STANDARD_CARD_PREDICATE];
   const whereParams: any[] = [userId];
   if (scope) { whereClauses.push("c.library_scope = ?"); whereParams.push(scope); }
   if (options.chatId) {
@@ -660,12 +660,19 @@ function sanitizePerspectiveLayerInputs(inputs: unknown): LandingPerspectiveLaye
   return normalizeLandingPerspectiveLayers(inputs).slice(0, MAX_LANDING_PERSPECTIVE_LAYERS);
 }
 
+/**
+ * SQL predicate that keeps the seeded Card Creator out of ordinary listings.
+ * Aliased to `c` so it can be appended to the existing multi-table queries.
+ */
+const STANDARD_CARD_PREDICATE = "c.character_kind = 'standard'";
+
 function rowToCharacter(row: any): Character {
-  const { deleting: _deleting, ...rest } = row;
+  const { deleting: _deleting, character_kind, ...rest } = row;
   const libraryScope = normalizeCharacterLibraryScope(row.library_scope);
   return {
     ...rest,
     library_scope: libraryScope,
+    kind: character_kind === "card_creator" ? "card_creator" : "standard",
     avatar_path: row.avatar_path || null,
     image_id: row.image_id || null,
     folder: row.folder || "",
@@ -791,7 +798,7 @@ export function listCharactersForManifest(userId: string): Array<{ name: string;
 export function listCharacterExtensions(userId: string): Array<{ id: string; name: string; extensions: Record<string, any> }> {
   const db = getDb();
   const rows = db
-    .query("SELECT id, name, extensions FROM characters WHERE user_id = ? AND deleting = 0")
+    .query("SELECT id, name, extensions FROM characters WHERE user_id = ? AND deleting = 0 AND character_kind = 'standard'")
     .all(userId) as any[];
   return rows.map((row) => {
     let extensions: Record<string, any> = {};
@@ -806,8 +813,8 @@ export function listCharacterExtensions(userId: string): Array<{ id: string; nam
 
 export function listCharacters(userId: string, pagination: PaginationParams): PaginatedResult<Character> {
   return paginatedQuery(
-    "SELECT * FROM characters WHERE user_id = ? AND deleting = 0 ORDER BY updated_at DESC",
-    "SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0",
+    "SELECT * FROM characters WHERE user_id = ? AND deleting = 0 AND character_kind = 'standard' ORDER BY updated_at DESC",
+    "SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0 AND character_kind = 'standard'",
     [userId],
     pagination,
     rowToCharacter
@@ -836,7 +843,7 @@ export function listCharactersDiscover(
   const shuffleValueSql = buildSeededShuffleValueSql(shuffleSeed);
 
   const countRow = db
-    .query("SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0")
+    .query("SELECT COUNT(*) as count FROM characters WHERE user_id = ? AND deleting = 0 AND character_kind = 'standard'")
     .get(userId) as { count: number } | null;
   const total = countRow?.count ?? 0;
 
@@ -851,7 +858,7 @@ export function listCharactersDiscover(
       WHERE user_id = ? AND COALESCE(json_extract(metadata, '$.group'), 0) != 1
       GROUP BY character_id
     ) cs ON cs.character_id = c.id
-    WHERE c.user_id = ? AND c.deleting = 0
+    WHERE c.user_id = ? AND c.deleting = 0 AND c.character_kind = 'standard'
     ORDER BY ((${shuffleValueSql}) - (${discoverBoostSql})) ASC,
              ${shuffleKeySql} ASC,
              c.updated_at DESC,
@@ -935,6 +942,97 @@ export function getCharactersByIds(userId: string, ids: string[]): Map<string, C
 export interface CreateCharacterOptions {
   /** Bulk workflows publish one library invalidation after committing. */
   emitEvent?: boolean;
+}
+
+export const CARD_CREATOR_NAME = "Card Creator";
+
+const CARD_CREATOR_FIELDS = {
+  description:
+    "The curator of your character library. I can read any card you have, and I can propose edits to them — nothing changes until you approve it.",
+  personality:
+    "Attentive, opinionated about character writing, and concise. I would rather make one sharp suggestion than five vague ones.",
+  scenario:
+    "You are talking with the Card Creator about your library. Ask me to review a card, tighten a description, fix a greeting, or invent something new.",
+  first_mes:
+    "*I set down my pen and look up from a stack of half-finished cards.*\n\n\"There you are. Tell me what we're working on — I can pull up any card in your library and take a look, or we can start something new. If I suggest a change, it lands in this conversation for you to approve before it touches the card.\"",
+  mes_example: "",
+  creator_notes:
+    "Built-in character. Its turns carry the card authoring tools; edits it proposes require your approval.",
+  system_prompt: `You are the Card Creator, a character in the user's library who helps them author and revise character cards.
+
+You have tools to read the user's library and to propose edits. You do NOT have the ability to change a card directly: propose_card_edit files a change that the user must approve in the conversation. Never claim to have edited, saved, or updated a card — say you have proposed the change and that it is waiting for approval.
+
+Guidelines:
+- Read the card before proposing a change to it. Never guess at what a field currently contains.
+- Propose only the fields that should change, and give a short rationale explaining why.
+- Prefer specific, substantive edits over cosmetic churn. Do not propose changes the user did not ask for unless they clearly serve the request.
+- When the user is just talking, talk back. Not every message needs a tool call.
+- Stay in character as the librarian of their card collection.`,
+};
+
+/**
+ * Reserved id for a user's Card Creator. Deterministic so the row is
+ * addressable before it has been fetched, and so tool calls can recognise it.
+ */
+export function cardCreatorId(userId: string): string {
+  return `__card_creator__:${userId}`;
+}
+
+/**
+ * The Card Creator is a real character — that is what lets the normal chat path
+ * resolve it — but it is not part of the library. Callers use this to branch,
+ * and the chat surface uses it to decide whether to attach card tools.
+ */
+export function isCardCreator(character: { kind?: CharacterKind } | null | undefined): boolean {
+  return character?.kind === "card_creator";
+}
+
+export function getCardCreator(userId: string): Character | null {
+  const character = getCharacter(userId, cardCreatorId(userId));
+  return character && character.kind === "card_creator" ? character : null;
+}
+
+/**
+ * Create the seeded creator if this user does not have one yet.
+ *
+ * Idempotent by construction: the id is deterministic and the partial unique
+ * index on (user_id) WHERE kind = 'card_creator' makes a second row impossible.
+ */
+export function ensureCardCreator(userId: string): Character {
+  const existing = getCardCreator(userId);
+  if (existing) return existing;
+
+  const id = cardCreatorId(userId);
+  const now = Math.floor(Date.now() / 1000);
+  getDb()
+    .query(
+      `INSERT INTO characters (id, user_id, name, library_scope, description, personality, scenario, first_mes, mes_example, creator, creator_notes, system_prompt, post_history_instructions, tags, alternate_greetings, extensions, created_at, updated_at, character_kind)
+       VALUES (?, ?, ?, 'mine', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'card_creator')
+       ON CONFLICT(id) DO NOTHING`
+    )
+    .run(
+      id,
+      userId,
+      CARD_CREATOR_NAME,
+      CARD_CREATOR_FIELDS.description,
+      CARD_CREATOR_FIELDS.personality,
+      CARD_CREATOR_FIELDS.scenario,
+      CARD_CREATOR_FIELDS.first_mes,
+      CARD_CREATOR_FIELDS.mes_example,
+      "Lumiverse",
+      CARD_CREATOR_FIELDS.creator_notes,
+      CARD_CREATOR_FIELDS.system_prompt,
+      "",
+      JSON.stringify(["card-creator", "meta"]),
+      JSON.stringify([]),
+      JSON.stringify({}),
+      now,
+      now,
+    );
+
+  const created = getCharacter(userId, id);
+  if (!created) throw new Error("Failed to create Card Creator");
+  return created;
 }
 
 export function createCharacter(
@@ -1404,8 +1502,11 @@ export function setCharacterSourceFilename(userId: string, id: string, sourceFil
 export function deleteCharacter(userId: string, id: string): boolean {
   const existing = getCharacter(userId, id);
   if (!existing) return false;
+  // The Card Creator is a built-in surface, not library content. Deleting it
+  // would strand the pinned entry, so it is not deletable in the first place.
+  if (isCardCreator(existing)) return false;
   const marked = getDb()
-    .query("UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0")
+    .query("UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0 AND character_kind = 'standard'")
     .run(id, userId);
   if (marked.changes > 0) eventBus.emit(EventType.CHARACTER_DELETED, { id }, userId);
   void scheduleCharacterDeletionCascade(userId, id).catch((err) =>
@@ -1432,10 +1533,11 @@ export async function batchDeleteCharacters(userId: string, ids: string[]): Prom
   const marked: string[] = [];
   getDb().transaction(() => {
     const statement = getDb().query(
-      "UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0",
+      "UPDATE characters SET deleting = 1 WHERE id = ? AND user_id = ? AND deleting = 0 AND character_kind = 'standard'",
     );
     for (const id of uniqueIds) {
       if (!existing.has(id)) continue;
+      // Skips the Card Creator along with anything that is not a standard card.
       if (statement.run(id, userId).changes > 0) marked.push(id);
     }
   })();

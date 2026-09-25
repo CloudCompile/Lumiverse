@@ -36,6 +36,7 @@ import { createWeaverSlice } from './slices/weaver'
 import { createContainersSlice } from './slices/containers'
 import { createLeaderboardSlice } from './slices/leaderboard'
 import { createCardAgentSlice } from './slices/card-agent'
+import { createCardCreatorSlice } from './slices/card-creator'
 import { registerUserScopedResetStore } from './user-scoped-reset'
 import { configurePresetSelectionCoordinator } from '@/lib/loom/preset-selection-coordinator'
 import { flushPresetForGeneration } from '@/lib/loom/preset-save-coordinator'
@@ -79,6 +80,7 @@ export const useStore = create<AppStore>()((...a) => ({
   ...createContainersSlice(...a),
   ...createLeaderboardSlice(...a),
   ...createCardAgentSlice(...a),
+  ...createCardCreatorSlice(...a),
 }))
 
 configurePresetSelectionCoordinator({

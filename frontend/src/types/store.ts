@@ -2075,6 +2075,14 @@ export interface CardAgentSlice {
   revertCardAgentRevision: (characterId: string, revisionId: number) => Promise<void>
 }
 
+export interface CardCreatorSlice {
+  /** Chat id → the proposals filed in that chat, keyed for inline review. */
+  cardCreatorProposals: Record<string, import('@/api/card-creator').CardCreatorProposal[]>
+  loadCardCreatorProposals: (chatId: string) => Promise<void>
+  applyCardCreatorProposal: (chatId: string, proposalId: number) => Promise<void>
+  rejectCardCreatorProposal: (chatId: string, proposalId: number) => Promise<void>
+}
+
 export type AppStore = ChatSlice &
   CharactersSlice &
   PersonasSlice &
@@ -2110,4 +2118,5 @@ export type AppStore = ChatSlice &
   ConnectionSlice &
   ContainersSlice &
   LeaderboardSlice &
-  CardAgentSlice
+  CardAgentSlice &
+  CardCreatorSlice

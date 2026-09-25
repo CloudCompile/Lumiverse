@@ -229,6 +229,10 @@ function isBaselineDriftAlreadyApplied(db: Database, file: string): boolean {
     const characterId = columns.find((column) => column.name === "character_id");
     return !!characterId && characterId.notnull === 0;
   }
+  if (file === "121_card_creator_character.sql") {
+    const columns = db.query("PRAGMA table_info('characters')").all() as Array<{ name: string }>;
+    return columns.some((column) => column.name === "character_kind");
+  }
   return false;
 }
 

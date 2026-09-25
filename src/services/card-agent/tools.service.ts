@@ -42,8 +42,24 @@ function assertInScope(scope: ScopeCharacterIds, characterId: string): void {
 
 export interface CardAgentToolContext {
   userId: string;
+  /** Sidecar session the turn belongs to. Empty in the Card Creator chat. */
   sessionId: string;
+  /** Chat the turn belongs to, when the tools run inside a conversation. */
+  chatId?: string;
   scope: ScopeCharacterIds;
+}
+
+/**
+ * Tool execution result.
+ *
+ * `proposalIds` lets a caller learn which proposals this call filed — the chat
+ * turn records them on the assistant message so the review UI can find them.
+ */
+export interface CardAgentToolResult {
+  content: string;
+  summary: string;
+  ok: boolean;
+  proposalIds?: number[];
 }
 
 export const CARD_AGENT_TOOL_DEFINITIONS: ToolDefinition[] = [
@@ -128,7 +144,7 @@ export async function executeCardAgentTool(
   ctx: CardAgentToolContext,
   name: string,
   args: Record<string, unknown>,
-): Promise<{ content: string; summary: string; ok: boolean }> {
+): Promise<CardAgentToolResult> {
   try {
     switch (name) {
       case "search_cards":
@@ -152,7 +168,7 @@ export async function executeCardAgentTool(
   }
 }
 
-function searchCards(ctx: CardAgentToolContext, args: Record<string, unknown>): { content: string; summary: string; ok: boolean } {
+function searchCards(ctx: CardAgentToolContext, args: Record<string, unknown>): CardAgentToolResult {
   const query = typeof args.query === "string" ? args.query.trim() : "";
   const folder = typeof args.folder === "string" ? args.folder.trim() : "";
   const tags = Array.isArray(args.tags)
@@ -197,7 +213,7 @@ function searchCards(ctx: CardAgentToolContext, args: Record<string, unknown>): 
   };
 }
 
-function readCard(ctx: CardAgentToolContext, args: Record<string, unknown>): { content: string; summary: string; ok: boolean } {
+function readCard(ctx: CardAgentToolContext, args: Record<string, unknown>): CardAgentToolResult {
   const characterId = typeof args.characterId === "string" ? args.characterId.trim() : "";
   if (!characterId) return { content: "characterId is required.", summary: "Missing id", ok: false };
   assertInScope(ctx.scope, characterId);
@@ -228,14 +244,14 @@ function readCard(ctx: CardAgentToolContext, args: Record<string, unknown>): { c
   };
 }
 
-function listTags(ctx: CardAgentToolContext): { content: string; summary: string; ok: boolean } {
+function listTags(ctx: CardAgentToolContext): CardAgentToolResult {
   const tags = charactersSvc.listCharacterTags(ctx.userId);
   if (tags.length === 0) return { content: "No tags in the library.", summary: "0 tags", ok: true };
   const lines = tags.map((t) => `- ${t.tag} (${t.count})`);
   return { content: `${tags.length} tag(s):\n${lines.join("\n")}`, summary: `${tags.length} tags`, ok: true };
 }
 
-function findSimilarCards(ctx: CardAgentToolContext, args: Record<string, unknown>): { content: string; summary: string; ok: boolean } {
+function findSimilarCards(ctx: CardAgentToolContext, args: Record<string, unknown>): CardAgentToolResult {
   const name = typeof args.name === "string" ? args.name.trim() : "";
   if (!name) return { content: "name is required.", summary: "Missing name", ok: false };
   const exclude = typeof args.excludeCharacterId === "string" ? args.excludeCharacterId : "";
@@ -250,7 +266,7 @@ function findSimilarCards(ctx: CardAgentToolContext, args: Record<string, unknow
   return { content: `${matches.length} same-name card(s):\n${lines.join("\n")}`, summary: `${matches.length} duplicate(s)`, ok: true };
 }
 
-function proposeCardEdit(ctx: CardAgentToolContext, args: Record<string, unknown>): { content: string; summary: string; ok: boolean } {
+function proposeCardEdit(ctx: CardAgentToolContext, args: Record<string, unknown>): CardAgentToolResult {
   const characterId = typeof args.characterId === "string" ? args.characterId.trim() : "";
   if (!characterId) return { content: "characterId is required.", summary: "Missing id", ok: false };
   assertInScope(ctx.scope, characterId);
@@ -265,7 +281,8 @@ function proposeCardEdit(ctx: CardAgentToolContext, args: Record<string, unknown
       characterId,
       changes: rawChanges as proposalSvc.ProposalChanges,
       rationale: typeof args.rationale === "string" ? args.rationale : null,
-      sessionId: ctx.sessionId,
+      sessionId: ctx.sessionId || null,
+      chatId: ctx.chatId ?? null,
     });
 
     const fields = Object.keys(proposal.changes);
@@ -273,6 +290,7 @@ function proposeCardEdit(ctx: CardAgentToolContext, args: Record<string, unknown
       content: `Proposal #${proposal.id} filed for "${proposal.character_name}" changing ${fields.length} field(s): ${fields.join(", ")}. It is pending user review — nothing has been modified yet.`,
       summary: `Proposed ${fields.length} field(s) on ${proposal.character_name}`,
       ok: true,
+      proposalIds: [proposal.id],
     };
   } catch (err) {
     return {

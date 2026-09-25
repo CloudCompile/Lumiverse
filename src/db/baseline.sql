@@ -60,7 +60,15 @@ CREATE TABLE characters (
   extensions TEXT NOT NULL DEFAULT '{}',
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-, image_id TEXT REFERENCES images(id) ON DELETE SET NULL, user_id TEXT REFERENCES "user"(id) ON DELETE CASCADE, deleting INTEGER NOT NULL DEFAULT 0, folder TEXT NOT NULL DEFAULT '', library_scope TEXT NOT NULL DEFAULT 'mine' CHECK(library_scope IN ('mine', 'shared')));
+, image_id TEXT REFERENCES images(id) ON DELETE SET NULL, user_id TEXT REFERENCES "user"(id) ON DELETE CASCADE, deleting INTEGER NOT NULL DEFAULT 0, folder TEXT NOT NULL DEFAULT '', library_scope TEXT NOT NULL DEFAULT 'mine' CHECK(library_scope IN ('mine', 'shared')), character_kind TEXT NOT NULL DEFAULT 'standard' CHECK(character_kind IN ('standard', 'card_creator')));
+
+CREATE UNIQUE INDEX idx_characters_card_creator
+  ON characters(user_id)
+  WHERE character_kind = 'card_creator';
+
+CREATE INDEX idx_characters_user_standard
+  ON characters(user_id, created_at DESC)
+  WHERE character_kind = 'standard';
 
 CREATE VIRTUAL TABLE characters_fts USING fts5(
   name, creator, tags,
@@ -1834,6 +1842,7 @@ CREATE TABLE IF NOT EXISTS character_edit_proposals (
   applied_revision_id INTEGER,
   created_at INTEGER NOT NULL DEFAULT (unixepoch()),
   resolved_at INTEGER,
+  chat_id TEXT,
   CHECK(status IN ('pending', 'applied', 'rejected', 'stale'))
 );
 
@@ -1841,6 +1850,9 @@ CREATE INDEX IF NOT EXISTS idx_character_edit_proposals_pending
   ON character_edit_proposals(user_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_character_edit_proposals_character
   ON character_edit_proposals(user_id, character_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_character_edit_proposals_chat
+  ON character_edit_proposals(user_id, chat_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS card_agent_sessions (
   id TEXT PRIMARY KEY,
