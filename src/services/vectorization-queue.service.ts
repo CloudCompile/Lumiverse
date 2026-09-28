@@ -5,6 +5,7 @@ import {
   canUseChatChunkVectorizationSubprocess,
   isChatChunkVectorizationSubprocessStartupError,
   processChatChunkVectorizationBatchInSubprocess,
+  shouldForceChatVectorizationSubprocess,
   shutdownChatChunkVectorizationSubprocess,
   warnChatChunkVectorizationFallback,
 } from "./chat-chunk-vectorization-client";
@@ -14,6 +15,8 @@ import {
   type ChatChunkVectorizationTask,
 } from "./chat-chunk-vectorization-runner";
 import { isLanceDbMaintenanceRunning } from "./lancedb-maintenance-supervisor";
+import { getResolvedVectorStoreConfig } from "./vector-store-config.service";
+import { markVectorizationActive } from "./vector-store/providers/lancedb";
 import type { WorldBookEntry, WorldBookVectorIndexStatus } from "../types/world-book";
 import {
   desiredWorldBookVectorIndexStatus,
@@ -202,6 +205,10 @@ class VectorizationQueue {
         } catch {}
         const batch = this.takeBatch(maxBatch);
 
+        // Tell the background optimize scheduler a vectorization write is in
+        // flight so it defers rather than competing for the write lock.
+        markVectorizationActive();
+
         if (batch[0].type === "chunk") {
           await this.processChunkBatch(batch);
         } else {
@@ -248,8 +255,20 @@ class VectorizationQueue {
         }));
       if (tasks.length === 0) return;
 
+      // The embedded LanceDB provider is a single on-disk store guarded by the
+      // cross-process write lock. Running the chat-chunk writer in a separate
+      // Bun subprocess means that lock sees TWO local writers (serving process +
+      // subprocess) plus the maintenance child, which is the contention the
+      // `/app/data/.lancedb-write-lock` timeouts come from — and an in-process
+      // child also cannot see the serving process's optimize/read gate. Keep the
+      // writer in the main process for LanceDB (vectorization still always runs).
+      // Only offload to the subprocess when an external provider (Qdrant/Milvus)
+      // is configured, where there is no local lock to contend on — or when the
+      // operator explicitly opts back into the subprocess for LanceDB.
+      const preferSubprocess = canUseChatChunkVectorizationSubprocess()
+        && (getResolvedVectorStoreConfig().provider !== "lancedb" || shouldForceChatVectorizationSubprocess());
       let result: ChatChunkVectorizationBatchResult;
-      if (canUseChatChunkVectorizationSubprocess()) {
+      if (preferSubprocess) {
         try {
           result = await processChatChunkVectorizationBatchInSubprocess(tasks);
         } catch (err) {
@@ -258,7 +277,7 @@ class VectorizationQueue {
           result = await processChatChunkVectorizationBatch(tasks);
         }
       } else {
-        warnChatChunkVectorizationFallback();
+        if (!canUseChatChunkVectorizationSubprocess()) warnChatChunkVectorizationFallback();
         result = await processChatChunkVectorizationBatch(tasks);
       }
 

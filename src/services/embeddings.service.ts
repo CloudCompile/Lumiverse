@@ -1280,28 +1280,58 @@ function buildVaultChunkEmbeddingRows(
   }));
 }
 
+/**
+ * Replace the vectors for a set of chat chunks. Each chat's delete + insert runs
+ * as ONE provider operation (`replaceByFilter`), so LanceDB holds its
+ * cross-process write lock once instead of twice — halving lock churn and
+ * removing the half-replaced window entirely. The filter is scoped by
+ * owner_id=chatId + source_id∈chunkIds, so other chats, world-book rows, and
+ * Cortex/databank vectors are never touched.
+ */
 async function replaceChatChunkEmbeddingRows(
   userId: string,
   targets: Array<{ chatId: string; chunkId: string }>,
   rows: EmbeddingRow[],
 ): Promise<void> {
-  if (targets.length > 0) {
-    const chunkIdsByChat = new Map<string, string[]>();
-    for (const target of targets) {
-      const bucket = chunkIdsByChat.get(target.chatId);
-      if (bucket) bucket.push(target.chunkId);
-      else chunkIdsByChat.set(target.chatId, [target.chunkId]);
-    }
-    for (const [chatId, chunkIds] of chunkIdsByChat) {
-      await deleteStoreRows("embeddings", andFilter([
-        ownerScope(userId, "chat_chunk", chatId),
-        inSet("source_id", Array.from(new Set(chunkIds))),
-      ]));
-    }
+  if (targets.length === 0) {
+    if (rows.length > 0) await upsertStoreRows("embeddings", rows);
+    return;
   }
-  if (rows.length > 0) {
-    await upsertStoreRows("embeddings", rows);
+
+  const chunkIdsByChat = new Map<string, Set<string>>();
+  for (const target of targets) {
+    let bucket = chunkIdsByChat.get(target.chatId);
+    if (!bucket) {
+      bucket = new Set<string>();
+      chunkIdsByChat.set(target.chatId, bucket);
+    }
+    bucket.add(target.chunkId);
   }
+
+  const rowsByChat = new Map<string, EmbeddingRow[]>();
+  for (const row of rows) {
+    let bucket = rowsByChat.get(row.owner_id);
+    if (!bucket) {
+      bucket = [];
+      rowsByChat.set(row.owner_id, bucket);
+    }
+    bucket.push(row);
+  }
+
+  const store = await getActiveVectorStore();
+  for (const [chatId, chunkIds] of chunkIdsByChat) {
+    const filter = andFilter([
+      ownerScope(userId, "chat_chunk", chatId),
+      inSet("source_id", Array.from(chunkIds)),
+    ]);
+    const chatRows = (rowsByChat.get(chatId) ?? []).filter((row) => chunkIds.has(row.source_id));
+    await store.replaceByFilter("embeddings", filter, chatRows);
+  }
+
+  // Rows for a chat absent from `targets` are not covered by any replace filter;
+  // upsert them so no caller can silently drop vectors.
+  const untargetedRows = rows.filter((row) => !chunkIdsByChat.has(row.owner_id));
+  if (untargetedRows.length > 0) await upsertStoreRows("embeddings", untargetedRows);
 }
 
 async function replaceVaultChunkEmbeddingRows(
@@ -1310,15 +1340,17 @@ async function replaceVaultChunkEmbeddingRows(
   vaultChunkIds: string[],
   rows: EmbeddingRow[],
 ): Promise<void> {
-  if (vaultChunkIds.length > 0) {
-    await deleteStoreRows("embeddings", andFilter([
-      ownerScope(userId, "vault_chunk", vaultId),
-      inSet("source_id", Array.from(new Set(vaultChunkIds))),
-    ]));
+  const uniqueChunkIds = Array.from(new Set(vaultChunkIds));
+  if (uniqueChunkIds.length === 0) {
+    if (rows.length > 0) await upsertStoreRows("embeddings", rows);
+    return;
   }
-  if (rows.length > 0) {
-    await upsertStoreRows("embeddings", rows);
-  }
+  const store = await getActiveVectorStore();
+  const filter = andFilter([
+    ownerScope(userId, "vault_chunk", vaultId),
+    inSet("source_id", uniqueChunkIds),
+  ]);
+  await store.replaceByFilter("embeddings", filter, rows);
 }
 
 function loadChatChunkMessageIds(chunkId: string): string[] {
