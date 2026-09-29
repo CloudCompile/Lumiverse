@@ -24,6 +24,13 @@ export interface EnvConfig {
   encryptionKey: string;
   dataDir: string;
   /**
+   * Explicit LanceDB directory override (`LUMIVERSE_LANCEDB_DIR`), or null when
+   * unset. When null, the store auto-selects `<dataDir>/lancedb` if that
+   * filesystem supports Lance commits, otherwise local ephemeral disk. See
+   * `utils/lancedb-storage.ts`.
+   */
+  lancedbDirOverride: string | null;
+  /**
    * Default disk warning usage threshold as a 0..1 ratio. The warning fires
    * only when this AND diskWarningMinFreeBytes are both crossed.
    */
@@ -154,6 +161,16 @@ export function loadEnv(): EnvConfig {
   // Resolve to absolute path at startup so file operations are immune to
   // CWD changes — critical on Termux where proot/grun wrappers can shift CWD.
   const dataDir = resolve(process.env.DATA_DIR || "./data");
+  // LanceDB is derived state: every vector is rebuildable from the durable
+  // SQLite rows in `dataDir`. It nonetheless needs real local-filesystem
+  // semantics (atomic rename) to commit safely, which object-storage mounts
+  // such as HF Storage Buckets / Mountpoint-for-S3 do not provide. When
+  // `DATA_DIR` lives on such a mount, point LanceDB at a genuinely local,
+  // ephemeral directory instead (default `/tmp/lumiverse-lancedb`) and let the
+  // startup rebuild re-create vectors from SQLite. Explicit overrides win so
+  // classic local-disk deployments keep their vectors under `dataDir`.
+  const lanceDbDirRaw = process.env.LUMIVERSE_LANCEDB_DIR?.trim();
+  const lancedbDirOverride = lanceDbDirRaw ? resolve(lanceDbDirRaw) : null;
   const diskWarningUsageThreshold = parseRatioOrPercentEnv(
     "LUMIVERSE_DISK_WARNING_USAGE_PERCENT",
     DEFAULT_DISK_WARNING_USAGE_THRESHOLD,
@@ -247,6 +264,7 @@ export function loadEnv(): EnvConfig {
     port,
     encryptionKey,
     dataDir,
+    lancedbDirOverride,
     diskWarningUsageThreshold,
     diskWarningMinFreeBytes,
     frontendDir,

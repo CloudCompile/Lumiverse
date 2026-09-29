@@ -287,6 +287,7 @@ If you'd rather throw away the cache entirely (slower, but belt-and-braces), pas
 | `LUMIVERSE_TLS_KEY_FILE` | — | PEM private key paired with `LUMIVERSE_TLS_CERT_FILE`. |
 | `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | — | Optional file containing the encrypted private key's passphrase. |
 | `LUMIVERSE_TLS_CONFIG_FILE` | — | JSON certificate manifest for multi-certificate SNI. |
+| `LUMIVERSE_LANCEDB_DIR` | auto | Override the LanceDB vector-store directory. Defaults to `<DATA_DIR>/lancedb` when that filesystem supports Lance commits, otherwise a local ephemeral directory (`$TMPDIR/lumiverse-lancedb`, rebuilt from SQLite at startup). Set this to real local disk when `DATA_DIR` is an object-storage mount. |
 | `AUTH_SECRET` | auto-derived | Explicit auth signing secret; usually leave unset |
 | `ENCRYPTION_KEY` | auto-generated | Legacy/manual encryption key override; usually leave unset |
 | `SPINDLE_EPHEMERAL_GLOBAL_MAX_BYTES` | `524288000` | Total extension storage limit in bytes |

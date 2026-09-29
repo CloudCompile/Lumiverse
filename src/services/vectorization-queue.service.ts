@@ -432,6 +432,9 @@ export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEU
       eligibleUsers.set(row.user_id, eligible);
     }
     if (!eligible) continue;
+    // Priority 0 means "do not schedule a new job"; existing jobs of the same
+    // chunk still get their priority raised by `add`. This lets the startup
+    // scan top up the queue without starving live writes of worker attention.
     queueChunkVectorization(row.user_id, row.chat_id, row.id, priority);
     queued++;
   }
@@ -539,6 +542,61 @@ export function startVectorizationQueueMaintenance(): void {
   // Kick off a passive startup scan so pre-existing pending entries don't have to
   // wait for the first interval tick before being picked up.
   sweepWorldBookVectorizationQueue();
+  startStartupChatChunkBackfill();
+}
+
+/** Chat chunks re-examined per startup-backfill pass. */
+const STARTUP_CHAT_CHUNK_BACKFILL_LIMIT = 500;
+/** How often the startup backfill re-scans while chunks remain unvectorized. */
+const STARTUP_CHAT_CHUNK_BACKFILL_INTERVAL_MS = 60_000;
+/** Consecutive no-new-work passes before the backfill timer stops itself. */
+const STARTUP_CHAT_CHUNK_BACKFILL_IDLE_PASSES = 3;
+
+function startupChatChunkBackfillEnabled(): boolean {
+  const raw = (process.env.LUMIVERSE_STARTUP_VECTOR_BACKFILL ?? "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+let _startupChatChunkBackfillTimer: ReturnType<typeof setInterval> | null = null;
+let _startupChatChunkBackfillIdlePasses = 0;
+
+/**
+ * Re-queue chat chunks that still need vectors after a restart (e.g. LanceDB on
+ * ephemeral disk, or a crash mid-batch). Jobs are added at priority 0 so live
+ * writes keep worker precedence; de-duplication means a repeated pass only tops
+ * up chunks that are not already scheduled. The scan drains even when the
+ * backlog exceeds one page: each pass re-reads the oldest still-unvectorized
+ * rows, and processed chunks drop out of the `vectorized_at IS NULL` set.
+ */
+function startStartupChatChunkBackfill(): void {
+  if (!startupChatChunkBackfillEnabled() || _startupChatChunkBackfillTimer) return;
+  _startupChatChunkBackfillTimer = setInterval(runStartupChatChunkBackfillPass, STARTUP_CHAT_CHUNK_BACKFILL_INTERVAL_MS);
+  void runStartupChatChunkBackfillPass();
+}
+
+async function runStartupChatChunkBackfillPass(): Promise<void> {
+  try {
+    const queued = await queueStaleChatChunkVectorization(STARTUP_CHAT_CHUNK_BACKFILL_LIMIT, 0);
+    if (queued > 0) {
+      _startupChatChunkBackfillIdlePasses = 0;
+      console.info(`[vectorization] Startup backfill queued ${queued} stale chat chunk(s)`);
+      return;
+    }
+    _startupChatChunkBackfillIdlePasses += 1;
+    if (_startupChatChunkBackfillIdlePasses >= STARTUP_CHAT_CHUNK_BACKFILL_IDLE_PASSES) {
+      stopStartupChatChunkBackfill();
+    }
+  } catch (err) {
+    console.warn("[vectorization] Startup chat-chunk backfill failed:", err);
+  }
+}
+
+export function stopStartupChatChunkBackfill(): void {
+  if (_startupChatChunkBackfillTimer) {
+    clearInterval(_startupChatChunkBackfillTimer);
+    _startupChatChunkBackfillTimer = null;
+  }
+  _startupChatChunkBackfillIdlePasses = 0;
 }
 
 export function stopQueryCacheCleanup(): void {

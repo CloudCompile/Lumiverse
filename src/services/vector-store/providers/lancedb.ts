@@ -19,14 +19,20 @@
  * embeddings.service.ts.
  */
 import { connect, Index, type Connection, type Table } from "@lancedb/lancedb";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export type { Table } from "@lancedb/lancedb";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync, type Dirent } from "fs";
 import { env } from "../../../env";
 import { getDb } from "../../../db/connection";
 import { embeddingCache } from "../../embedding-cache";
 import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../../../utils/lancedb-path";
+import {
+  isUnsupportedLanceCommitError,
+  resolveLanceDbStorageDir,
+  type LanceDbStorageResolution,
+} from "../../../utils/lancedb-storage";
 import { repairMixedLanceManifestPaths } from "../../../utils/lancedb-manifests";
 import type { WorldBookVectorIndexStatus } from "../../../types/world-book";
 import { LANCEDB_CAPABILITIES } from "../capabilities";
@@ -45,7 +51,22 @@ import type {
   VectorStoreProviderId,
 } from "../types";
 
-export const LANCEDB_PATH = join(env.dataDir, "lancedb");
+// LanceDB needs real local-filesystem semantics (atomic rename) to commit
+// safely. When DATA_DIR is an object-storage mount (e.g. an HF Storage Bucket
+// backed by Mountpoint-for-S3) the store is relocated to local ephemeral disk
+// and rebuilt from SQLite at startup — see utils/lancedb-storage.ts.
+const LANCEDB_STORAGE: LanceDbStorageResolution = resolveLanceDbStorageDir({
+  dataDir: env.dataDir,
+  configuredDir: env.lancedbDirOverride,
+});
+export const LANCEDB_PATH = LANCEDB_STORAGE.dir;
+export const LANCEDB_EPHEMERAL = LANCEDB_STORAGE.ephemeral;
+export const LANCEDB_EPHEMERAL_REASON = LANCEDB_STORAGE.reason ?? null;
+/** True while the backing directory cannot commit Lance transactions. Set once
+ *  a commit fails with the unsupported-filesystem error so recovery loops stop
+ *  deleting/recreating tables that can never commit. */
+let lanceCommitUnsupported = false;
+export function isLanceCommitUnsupported(): boolean { return lanceCommitUnsupported; }
 export const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 export const EMBEDDINGS_TABLE = "embeddings";
 export const WORLD_BOOK_EMBEDDINGS_TABLE = "embeddings_world_books";
@@ -242,10 +263,19 @@ const MAX_WRITE_LOCK_QUEUE = 50;           // reject if more than 50 waiters que
 // (or an embedded vs. cross-process stall). Warn once so the operator can see
 // which reason held it, without logging on the common fast path.
 const CROSS_PROCESS_WRITE_LOCK_LONG_HOLD_MS = 10_000;
-const CROSS_PROCESS_WRITE_LOCK_DIR = join(env.dataDir, ".lancedb-write-lock");
+// The lock protects a specific store directory, so it lives beside that store.
+// Naming it after the store's own directory keeps the historical
+// `<dataDir>/.lancedb-write-lock` path for the default `<dataDir>/lancedb`
+// layout while still being unambiguous when the store was relocated.
+const CROSS_PROCESS_WRITE_LOCK_DIR = join(dirname(LANCEDB_PATH), `.${basename(LANCEDB_PATH)}-write-lock`);
 const CROSS_PROCESS_WRITE_LOCK_INFO = join(CROSS_PROCESS_WRITE_LOCK_DIR, "owner.json");
 const CROSS_PROCESS_WRITE_LOCK_POLL_MS = 250;
 const CROSS_PROCESS_WRITE_LOCK_STALE_MS = 5 * 60_000;
+// A lock file left by this still-running process (no live owner) is reclaimed
+// after this short grace period, rather than waiting out the 120s acquisition
+// timeout. The grace exceeds the poll interval so a concurrent acquisition by
+// another task is never mistaken for an orphan.
+const OWN_PROCESS_LOCK_RECLAIM_GRACE_MS = 2_000;
 const CROSS_PROCESS_WRITE_LOCK_ENABLED = shouldUseCrossProcessWriteLock();
 const RETRYABLE_LANCE_WRITE_CONFLICT_MAX_ATTEMPTS = 4;
 const RETRYABLE_LANCE_WRITE_CONFLICT_BASE_BACKOFF_MS = 100;
@@ -255,6 +285,21 @@ const RETRYABLE_LANCE_WRITE_CONFLICT_BASE_BACKOFF_MS = 100;
 const PROCESS_STARTED_AT = Date.now() - Math.floor(process.uptime() * 1_000);
 const _writeLockQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 let _writeLockHeld = false;
+/**
+ * True only while THIS process actually owns the on-disk cross-process lock.
+ * Set on successful acquisition and cleared on release, so it distinguishes
+ * "another task in this process is mid-acquire" from "this process holds it".
+ */
+let _crossProcessLockHeld = false;
+/**
+ * Tracks whether the *current async call chain* is already inside a write-lock
+ * critical section. The in-process mutex (`_writeLockHeld`) serializes separate
+ * tasks, but a single task can legitimately nest lock-taking calls (a
+ * world-book commit that deletes rows, a replacement that reopens a table).
+ * Those nested calls must run inline under the caller's already-held lock
+ * rather than queueing behind it and dead-locking on the cross-process lock.
+ */
+const _writeLockAls = new AsyncLocalStorage<{ depth: number }>();
 /** Human label for the op currently inside the write critical section, for the
  *  long-hold diagnostic. Only ever read from the holder's own critical section. */
 let _activeWriteLockReason: string | null = null;
@@ -326,6 +371,21 @@ export function isCrossProcessLockFromPriorProcessInstance(
     && info.acquiredAt < processStartedAt;
 }
 
+/**
+ * A lock left on disk by THIS still-running process that no live critical
+ * section owns. Reclaimed only after the caller has already waited a short
+ * grace period, so a concurrent in-flight acquisition by another task (which
+ * holds the in-process mutex) is never mistaken for an orphan.
+ */
+function shouldReclaimOwnProcessCrossProcessLock(waitStartedAt: number): boolean {
+  if (Date.now() - waitStartedAt < OWN_PROCESS_LOCK_RECLAIM_GRACE_MS) return false;
+  const info = readCrossProcessLockInfo();
+  if (!info || info.pid !== process.pid) return false;
+  // Written by an earlier process instance reusing our PID? Then it is not ours.
+  if (isCrossProcessLockFromPriorProcessInstance(info)) return false;
+  return true;
+}
+
 function shouldBreakStaleCrossProcessLock(): boolean {
   if (!existsSync(CROSS_PROCESS_WRITE_LOCK_DIR)) return false;
 
@@ -375,17 +435,44 @@ async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | nu
   if (!CROSS_PROCESS_WRITE_LOCK_ENABLED) return null;
 
   const startedAt = Date.now();
+  let aliasWarned = false;
   while (true) {
     try {
       mkdirSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: false });
+      _crossProcessLockHeld = true;
       tryWriteCrossProcessLockInfo();
       return () => {
+        _crossProcessLockHeld = false;
         try {
           rmSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: true, force: true });
         } catch {}
       };
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
+
+      // A leftover lock can exist in two shapes:
+      //  (1) from an earlier process instance whose PID we now reuse (after a
+      //      container restart) — the existing stale check handles this; or
+      //  (2) from THIS still-running process, left behind when a critical
+      //      section did not clean up (a crash between mkdir and release, or a
+      //      rejected nested acquisition). Nobody legitimately owns it: a
+      //      reentrant caller never reaches this function, and any concurrent
+      //      task that does is itself queued on the in-process mutex. Reclaim it
+      //      after a short grace period instead of spinning for two minutes.
+      if (!_crossProcessLockHeld && shouldReclaimOwnProcessCrossProcessLock(startedAt)) {
+        if (!aliasWarned) {
+          aliasWarned = true;
+          console.warn(
+            `[embeddings] Reclaiming a LanceDB write lock left by this still-running process `
+            + `(pid=${process.pid}) at ${CROSS_PROCESS_WRITE_LOCK_DIR}. `
+            + `\n${describeCrossProcessLockOwner()}`,
+          );
+        }
+        try {
+          rmSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: true, force: true });
+          continue;
+        } catch {}
+      }
 
       if (shouldBreakStaleCrossProcessLock()) {
         try {
@@ -409,6 +496,28 @@ async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | nu
 }
 
 export async function withWriteLock<T>(fn: () => Promise<T>, reason?: string): Promise<T> {
+  // Reentrancy guard. A write-critical section can call back into another public
+  // method that also takes the write lock (e.g. world-book deletion inside an
+  // existing world-book commit). The in-process mutex serializes *tasks*, not
+  // call frames, so without this the nested call would queue behind its own
+  // caller — and the cross-process lock below would be re-acquired by a process
+  // that already owns it, which is the same-PID deadlock:
+  //
+  //   Cross-process LanceDB write lock acquisition timed out after 120000ms.
+  //   ownerPid=26 ... currentPid=26
+  //
+  // AsyncLocalStorage tracks the holder per async call chain, so a nested call
+  // on the holder's own chain runs inline and never touches the lock again.
+  const held = _writeLockAls.getStore();
+  if (held) {
+    held.depth += 1;
+    try {
+      return await fn();
+    } finally {
+      held.depth -= 1;
+    }
+  }
+
   // A child maintenance process asks the serving process to close this gate
   // before it starts mutating Lance files. Writers need to honor the same
   // gate as readers; the cross-process write lock alone cannot protect a
@@ -442,7 +551,10 @@ export async function withWriteLock<T>(fn: () => Promise<T>, reason?: string): P
     _activeWriteLockReason = reason ?? null;
     // Time only the mutation itself, not time spent waiting for the lock.
     criticalSectionStartedAt = Date.now();
-    return await fn();
+    // Scope the reentrancy context to this critical section. Every await inside
+    // `fn` inherits it, so any nested withWriteLock() runs inline instead of
+    // re-acquiring the cross-process lock the process already holds.
+    return await _writeLockAls.run({ depth: 1 }, fn);
   } finally {
     if (criticalSectionStartedAt > 0) {
       const heldMs = Date.now() - criticalSectionStartedAt;
@@ -750,8 +862,21 @@ function retryableLanceWriteConflictBackoffMs(attempt: number): number {
 }
 
 function logLanceDbPathDiagnostics(): void {
-  if (lancedbPathDiagnosticsLogged || !LANCEDB_TERMUX_LIKE) return;
+  if (lancedbPathDiagnosticsLogged) return;
   lancedbPathDiagnosticsLogged = true;
+  if (LANCEDB_EPHEMERAL) {
+    console.warn(
+      `[embeddings] LanceDB relocated to ephemeral local storage: path=${LANCEDB_PATH}; `
+      + `reason=${LANCEDB_EPHEMERAL_REASON ?? "(unspecified)"}. Vectors are rebuilt from SQLite and `
+      + `do NOT persist across restarts. Set LUMIVERSE_LANCEDB_DIR to override.`,
+    );
+  } else if (LANCEDB_EPHEMERAL_REASON) {
+    console.error(
+      `[embeddings] LanceDB storage problem: ${LANCEDB_EPHEMERAL_REASON}. Commits will fail until the `
+      + `path (LUMIVERSE_LANCEDB_DIR=${LANCEDB_PATH}) supports atomic rename.`,
+    );
+  }
+  if (!LANCEDB_TERMUX_LIKE) return;
   console.info(
     `[embeddings] LanceDB path config: path=${LANCEDB_PATH}; uri=${LANCEDB_URI}; cwd=${process.cwd()}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
   );
@@ -879,6 +1004,17 @@ function performBrokenEmbeddingsTableRecovery(reason: string, err: unknown): voi
 
 async function recoverBrokenEmbeddingsTable(tableName: string, reason: string, err: unknown, lockHeld = false): Promise<boolean> {
   if (!isIncompleteEmbeddingsTableError(err, tableName)) return false;
+  // When the filesystem cannot commit Lance transactions, the "incomplete
+  // dataset" is a symptom, not a fixable defect. Deleting the store here would
+  // destroy healthy sibling tables too, then recreate them only for the next
+  // commit to fail again — an endless create/delete loop. Stop instead.
+  if (lanceCommitUnsupported) {
+    console.error(
+      `[embeddings] Not recovering LanceDB table '${tableName}' (${reason}): the backing filesystem `
+      + `cannot commit Lance transactions, so recreate/delete would loop. Data at ${LANCEDB_PATH} left intact.`,
+    );
+    return false;
+  }
   if (lockHeld) {
     performBrokenEmbeddingsTableRecovery(reason, err);
     return true;
@@ -1222,6 +1358,21 @@ async function withRetryableLanceWriteConflictRetry<T>(
     try {
       return await fn();
     } catch (err) {
+      // An unsupported filesystem will never commit on retry — fail fast and
+      // remember it so table recovery stops deleting/recreating in a loop.
+      if (isUnsupportedLanceCommitError(err)) {
+        if (!lanceCommitUnsupported) {
+          lanceCommitUnsupported = true;
+          console.error(
+            `[embeddings] LanceDB cannot commit on ${LANCEDB_PATH}: the filesystem does not support an `
+            + "operation required for safe Lance commits (atomic rename). Object-storage mounts such as "
+            + "Hugging Face Storage Buckets / Mountpoint-for-S3 are not supported. Set "
+            + "LUMIVERSE_LANCEDB_DIR to a genuinely local directory (or remove the mount from DATA_DIR) "
+            + "so vectors can persist. Vector writes will keep failing until then.",
+          );
+        }
+        throw err;
+      }
       if (!isRetryableLanceWriteConflict(err) || attempt >= RETRYABLE_LANCE_WRITE_CONFLICT_MAX_ATTEMPTS) {
         throw err;
       }

@@ -4072,6 +4072,51 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
   return { deleted, path: location };
 }
 
+/**
+ * Bring the store to a consistent state for ephemeral LanceDB storage.
+ *
+ * When LanceDB lives on local ephemeral disk (see `utils/lancedb-storage.ts`),
+ * its tables are missing on every fresh process even though the SQLite rows
+ * that generated them are still present. This function:
+ *
+ *  - If a non-empty store is already present (same process, or a restarted
+ *    process that reused the temp dir), leaves it alone — no needless rebuild.
+ *  - Otherwise marks every vector-bearing SQLite row stale so the normal
+ *    reconciliation sweeps re-embed only what is actually missing, and clears
+ *    any orphaned on-disk fragments so recreation starts clean.
+ *
+ * It never deletes the vector state when a healthy store exists. Returns
+ * `{ rebuilt }` where `rebuilt` is true when a rebuild was armed.
+ */
+export async function prepareEphemeralVectorStore(): Promise<{ rebuilt: boolean }> {
+  const store = await getActiveVectorStore();
+  // Only the embedded LanceDB provider needs this: it is the one whose on-disk
+  // store lives on ephemeral disk. External providers (Qdrant/Milvus) persist
+  // independently, so leave their collections and SQLite state untouched.
+  if (store.id !== "lancedb") return { rebuilt: false };
+  let existingRows = 0;
+  try {
+    existingRows = await store.countRows("embeddings");
+  } catch (err) {
+    console.warn("[embeddings] Ephemeral LanceDB probe failed; arming rebuild:", err);
+    existingRows = 0;
+  }
+
+  if (existingRows > 0) {
+    return { rebuilt: false };
+  }
+
+  // No queryable vectors: the ephemeral store is empty/new. `reset()` clears any
+  // half-written fragments, marks every vector-bearing SQLite row stale, and
+  // re-queues stale chat chunks so the reconciliation sweeps rebuild from the
+  // durable rows. No extra marking/queueing needed here.
+  await store.reset().catch((err) => {
+    console.warn("[embeddings] Failed to clear empty ephemeral LanceDB store:", err);
+  });
+  console.info("[embeddings] Ephemeral LanceDB store was empty; armed vector rebuild from SQLite.");
+  return { rebuilt: true };
+}
+
 // --- Chat Vectorization ---
 
 export async function deleteChatChunkEmbeddings(
