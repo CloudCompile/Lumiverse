@@ -11,6 +11,7 @@ import MessageContent from './MessageContent'
 import MessageEditArea from './MessageEditArea'
 import MessageAttachments from './MessageAttachments'
 import MessageAudioSlot from './MessageAudioSlot'
+import MessageCardCreatorProposals from './MessageCardCreatorProposals'
 import SwipeControls from './SwipeControls'
 import VoteButtons from './VoteButtons'
 import GreetingNav from './GreetingNav'
@@ -500,6 +501,13 @@ export default function BubbleMessageDefault({
           <div className={styles.content}>
             <MessageAttachments attachments={message.extra.attachments} isUser={true} chatId={chatId} messageId={message.id} />
           </div>
+        )}
+
+        {!isUser && !isEditing && (message.extra?.card_creator_proposal_ids?.length ?? 0) > 0 && (
+          <MessageCardCreatorProposals
+            chatId={chatId}
+            proposalIds={message.extra.card_creator_proposal_ids}
+          />
         )}
 
         {renderAudioSlot && (

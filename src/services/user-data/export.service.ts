@@ -438,7 +438,8 @@ async function exportLancedbVectors(
   } catch {
     return { counts };
   }
-  const uri = join(env.dataDir, "lancedb");
+  const { LANCEDB_PATH } = await import("../vector-store/providers/lancedb");
+  const uri = LANCEDB_PATH;
   let conn: any;
   try {
     conn = await lance.connect(uri);

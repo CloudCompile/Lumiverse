@@ -292,6 +292,19 @@ export function canUseChatChunkVectorizationSubprocess(
   return true;
 }
 
+/**
+ * Opt back into running the chat-chunk writer in a subprocess even for the
+ * embedded LanceDB provider. Default is `false`: with LanceDB the writer runs
+ * in the serving process so the cross-process write lock sees one fewer local
+ * writer. Chat chunks are still chunked/embedded/persisted either way — this
+ * only chooses which process performs the LanceDB write.
+ */
+export function shouldForceChatVectorizationSubprocess(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return env.LUMIVERSE_CHAT_VECTORIZATION_SUBPROCESS_LANCEDB === "true";
+}
+
 export function warnChatChunkVectorizationFallback(): void {
   if (warnedDisabled || canUseChatChunkVectorizationSubprocess()) return;
   warnedDisabled = true;

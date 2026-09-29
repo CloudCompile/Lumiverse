@@ -259,6 +259,12 @@ export class MilvusStore implements VectorStore {
     await this.flush(name);
   }
 
+  async replaceByFilter(collection: CollectionName, filter: VectorFilter, rows: VectorRow[]): Promise<void> {
+    // Milvus serializes writes server-side; delete-then-upsert is equivalent.
+    await this.deleteByFilter(collection, filter);
+    if (rows.length > 0) await this.upsert(collection, rows);
+  }
+
   async vectorSearch(opts: SearchOptions): Promise<VectorHit[]> {
     if (opts.signal?.aborted) return [];
     const client = await this.getClient();

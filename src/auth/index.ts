@@ -6,6 +6,7 @@ import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
 import { seedDefaultPreset } from "./default-preset";
+import { ensureCardCreator } from "../services/characters.service";
 import { getAllowedHosts, getAllowedOrigins } from "../services/trusted-hosts.service";
 import { listEnabledSsoAuthConfigs } from "../services/sso-providers.service";
 import {
@@ -216,6 +217,14 @@ export const auth = betterAuth({
           } catch (err) {
             console.error(
               `[Auth] Failed to seed default preset for user ${user.id}:`,
+              err instanceof Error ? err.message : err,
+            );
+          }
+          try {
+            ensureCardCreator(user.id);
+          } catch (err) {
+            console.error(
+              `[Auth] Failed to seed Card Creator for user ${user.id}:`,
               err instanceof Error ? err.message : err,
             );
           }

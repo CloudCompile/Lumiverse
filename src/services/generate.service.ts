@@ -51,6 +51,8 @@ import {
   prepareInlineWebSearchMessagesForProvider,
 } from "./inline-web-search";
 import { getWebSearchSettings } from "./web-search-settings.service";
+import { getCardCreatorRuntimeTools, getCardCreatorToolDefinitions, executeCardCreatorTool, CARD_CREATOR_TOOL_NAMES } from "./card-creator/tools.service";
+import { runWithCardCreatorContext } from "./card-creator/context";
 import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import {
@@ -793,6 +795,20 @@ async function executeInlineCouncilToolCalls(
         } catch {
           // Pack/item may have been removed mid-generation.
         }
+      }
+
+      if (!isCouncilQualifiedCall && CARD_CREATOR_TOOL_NAMES.has(resolvedQualifiedName!)) {
+        const executed = await executeCardCreatorTool(resolvedQualifiedName!, toolCall.args ?? {});
+        results.push({
+          callId: toolCall.call_id,
+          qualifiedName: resolvedQualifiedName!,
+          toolName: tool.name,
+          toolDisplayName: tool.displayName,
+          result: executed.result,
+          isError: executed.isError,
+          proposalIds: executed.proposalIds,
+        });
+        continue;
       }
 
       try {
@@ -2454,6 +2470,37 @@ export async function startGeneration(
           }
         }
 
+        // ── Card Creator tools ───────────────────────────────────────────
+        // Attached only when the conversation's character is the Card Creator.
+        // Gated on enableFunctionCalling for the same reason council inline
+        // tools are: without native function calling there is no tool loop.
+        if (genType !== "impersonate") {
+          const convCharacterId = targetCharId || chat?.character_id || undefined;
+          const convCharacter = convCharacterId
+            ? charactersSvc.getCharacter(input.userId, convCharacterId)
+            : null;
+          if (charactersSvc.isCardCreator(convCharacter)) {
+            const presetId = input.preset_id || connection.preset_id;
+            const preset = presetId ? presetsSvc.getPreset(input.userId, presetId) : null;
+            const completionSettings = preset?.prompts?.completionSettings;
+            if (completionSettings?.enableFunctionCalling !== false) {
+              if (!inlineTools) inlineTools = [];
+              if (!inlineToolDefsByName) {
+                inlineToolDefsByName = new Map<string, RuntimeCouncilToolDefinition>();
+              }
+              for (const [name, runtimeDef] of getCardCreatorRuntimeTools()) {
+                inlineToolDefsByName.set(name, runtimeDef);
+              }
+              inlineTools.push(...getCardCreatorToolDefinitions());
+            } else {
+              console.warn(
+                "[card-creator] Inline tools skipped: enableFunctionCalling is disabled in preset '%s'",
+                preset?.name,
+              );
+            }
+          }
+        }
+
         // Wire staged message into lifecycle so GENERATION_STARTED includes it as
         // targetMessageId and runGeneration knows to update instead of create.
         if (stagedMessageId) {
@@ -3498,6 +3545,8 @@ async function runGeneration(
     const interleavedStructured =
       !!tools?.length && provider.capabilities.interleavedThinking === true;
     let inlineWebSearchUsed = false;
+    // Card Creator proposals filed across every tool round of this turn.
+    const inlineCouncilResultsAccumulator: InlineCouncilToolResult[] = [];
 
     for (let inlineRound = 0; inlineRound < INLINE_TOOL_MAX_ROUNDS; inlineRound++) {
       finishReason = undefined;
@@ -3697,20 +3746,26 @@ async function runGeneration(
 
       const inlineCouncilResults =
         pendingToolCalls?.length && inlineToolDefsByName
-          ? await executeInlineCouncilToolCalls(
-              userId,
-              pendingToolCalls,
-              inlineMcpTimeoutMs,
-              inlineToolDefsByName,
-              inlineMembersByPrefix,
-              inlineContextMessages,
-              inlineWebSearchEnabled && !inlineWebSearchUsed,
+          ? await runWithCardCreatorContext(
+              { userId, chatId },
+              () =>
+                executeInlineCouncilToolCalls(
+                  userId,
+                  pendingToolCalls,
+                  inlineMcpTimeoutMs,
+                  inlineToolDefsByName!,
+                  inlineMembersByPrefix,
+                  inlineContextMessages,
+                  inlineWebSearchEnabled && !inlineWebSearchUsed,
+                ),
             )
           : [];
 
       if (inlineCouncilResults.length === 0) {
         break;
       }
+
+      inlineCouncilResultsAccumulator.push(...inlineCouncilResults);
 
       const inlineWebSearchContexts = inlineCouncilResults
         .flatMap((result) => result.inlineWebSearchContext
@@ -3762,6 +3817,14 @@ async function runGeneration(
           : []),
       ];
     }
+
+    // Proposals filed by Card Creator tools during this turn, attached to the
+    // assistant message so the conversation can render their review cards.
+    const proposalIds = [
+      ...new Set(
+        (inlineCouncilResultsAccumulator ?? []).flatMap((result) => result.proposalIds ?? []),
+      ),
+    ];
 
     // Clean exit after abort — the stream may have returned done:true via
     // readWithAbort without ever re-entering the for-await body, so the
@@ -3882,6 +3945,7 @@ async function runGeneration(
         // Merge with existing extra to preserve character_id etc. set during staging
         const existingStagedExtra =
           chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
+        if (proposalIds.length > 0) existingStagedExtra.card_creator_proposal_ids = proposalIds;
         const stagedExtra = fullReasoning
           ? { ...existingStagedExtra, reasoning: fullReasoning }
           : Object.keys(existingStagedExtra).length > 0
@@ -3906,6 +3970,7 @@ async function runGeneration(
         if (!isImpersonate && lifecycle.targetCharacterId)
           extra.character_id = lifecycle.targetCharacterId;
         if (fullReasoning) extra.reasoning = fullReasoning;
+        if (proposalIds.length > 0) extra.card_creator_proposal_ids = proposalIds;
 
         const message = chatsSvc.createMessage(
           chatId,

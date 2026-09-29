@@ -122,11 +122,17 @@ try {
 }
 
 // Dynamic import: auth modules call getDb() at module level, so must load after initDatabase()
-const { seedOwner, backfillUserIds, backfillDefaultPresets, getFirstUserId } = await import("./auth/seed");
+const { seedOwner, backfillUserIds, backfillDefaultPresets, backfillCardCreators, getFirstUserId } = await import("./auth/seed");
 const { operatorService } = await import("./services/operator.service");
 await seedOwner();
 backfillUserIds();
 const presetBackfill = backfillDefaultPresets();
+const cardCreatorBackfill = backfillCardCreators();
+if (cardCreatorBackfill.created > 0) {
+  console.log(
+    `[Auth] Card Creator backfill: seeded ${cardCreatorBackfill.created} of ${cardCreatorBackfill.usersScanned} users`,
+  );
+}
 if (presetBackfill.seeded > 0 || presetBackfill.upgradedLegacy > 0 || presetBackfill.activated > 0) {
   console.log(
     `[Auth] Default preset backfill: seeded ${presetBackfill.seeded}, upgraded ${presetBackfill.upgradedLegacy}, activated ${presetBackfill.activated}`,
@@ -203,7 +209,20 @@ initDnsSettings();
 const { initDiskWarningSettings } = await import("./services/disk-warning-settings.service");
 initDiskWarningSettings();
 
-// Start background vectorization maintenance only after the database is ready.
+// When LanceDB sits on local ephemeral disk (object-storage DATA_DIR), every
+// fresh process starts with empty vector tables while the durable SQLite rows
+// remain. Re-arm vectorization from SQLite *before* the queue's sweeps run. A
+// no-op when a healthy store (or a persistent one) is already present.
+const { LANCEDB_EPHEMERAL, LANCEDB_PATH: LANCEDB_STORE_PATH } = await import("./services/vector-store/providers/lancedb");
+if (LANCEDB_EPHEMERAL) {
+  const { prepareEphemeralVectorStore } = await import("./services/embeddings.service");
+  await prepareEphemeralVectorStore().catch((err) => {
+    console.warn(`[startup] Failed to prepare ephemeral LanceDB store at ${LANCEDB_STORE_PATH}:`, err);
+  });
+}
+
+// Start background vectorization maintenance only after the database (and any
+// ephemeral vector-store rebuild) is ready.
 const { startVectorizationQueueMaintenance } = await import("./services/vectorization-queue.service");
 startVectorizationQueueMaintenance();
 

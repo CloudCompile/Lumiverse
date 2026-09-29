@@ -45,6 +45,7 @@ import MemoryCortexPanel from '@/components/panels/memory-cortex/MemoryCortexPan
 import DatabankPanel from '@/components/panels/databank/DatabankPanel'
 import MultiplayerPanel from '@/components/panels/multiplayer/MultiplayerPanel'
 import LeaderboardPanel from '@/components/panels/LeaderboardPanel'
+import CardAgentPanel from '@/components/panels/card-agent/CardAgentPanel'
 import StatusPanel from '@/components/panels/StatusPanel'
 
 import type { GuideDefinition } from '@/lib/guides/types'
@@ -494,6 +495,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabHeaderTitle: 'Extensions',
     keywords: ['extensions', 'spindle', 'plugins', 'addons', 'install', 'manage', 'enable', 'disable', 'uninstall', 'github'],
     mount: (root) => mountReactComponent(root, <SpindlePanel />),
+  },
+  {
+    id: 'card-agent',
+    shortName: 'Cards',
+    tabName: 'Card Agent',
+    tabDescription: 'Chat with an agent that reads your cards and proposes edits for your approval',
+    tabIcon: Wand2,
+    tabHeaderTitle: 'Card Agent',
+    keywords: ['card agent', 'cards', 'character', 'edit', 'propose', 'approval', 'revision', 'history', 'revert', 'agent', 'library', 'inspect', 'inspect all', 'rewrite', 'improve'],
+    mount: (root) => mountReactComponent(root, <CardAgentPanel />),
   },
 ]
 

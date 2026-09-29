@@ -239,6 +239,8 @@ export interface MessageExtra {
   _loom_inject?: import('@/lib/loom/types').LoomInjectTag;
   _loom_block_id?: string;
   attachments?: MessageAttachment[];
+  /** Ids of card edits a Card Creator turn proposed, rendered as inline review cards. */
+  card_creator_proposal_ids?: number[];
   associative_regex_action_usage?: Record<string, {
     script_id: string;
     action_id: string;

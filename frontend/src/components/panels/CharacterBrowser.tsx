@@ -15,6 +15,7 @@ import ChubExpressionBackfillBanner from './character-browser/ChubExpressionBack
 import TagFilter from './character-browser/TagFilter'
 import BatchBar from './character-browser/BatchBar'
 import FavoritesSlider from './character-browser/FavoritesSlider'
+import CardCreatorBanner from './character-browser/CardCreatorBanner'
 import CharacterGrid from './character-browser/CharacterGrid'
 import CharacterList from './character-browser/CharacterList'
 import ImportUrlModal from './character-browser/ImportUrlModal'
@@ -472,6 +473,10 @@ export default function CharacterBrowser() {
         <GroupChatsPanel viewMode={browser.viewMode} />
       ) : (
         <>
+          {!browser.batchMode && browser.filterTab === 'characters' && (
+            <CardCreatorBanner onOpen={browser.openChat} />
+          )}
+
           {!browser.batchMode && browser.favoriteCharacters.length > 0 && (
             <FavoritesSlider
               characters={browser.favoriteCharacters}

@@ -5,6 +5,7 @@ import {
   canUseChatChunkVectorizationSubprocess,
   isChatChunkVectorizationSubprocessStartupError,
   processChatChunkVectorizationBatchInSubprocess,
+  shouldForceChatVectorizationSubprocess,
   shutdownChatChunkVectorizationSubprocess,
   warnChatChunkVectorizationFallback,
 } from "./chat-chunk-vectorization-client";
@@ -14,6 +15,8 @@ import {
   type ChatChunkVectorizationTask,
 } from "./chat-chunk-vectorization-runner";
 import { isLanceDbMaintenanceRunning } from "./lancedb-maintenance-supervisor";
+import { getResolvedVectorStoreConfig } from "./vector-store-config.service";
+import { markVectorizationActive } from "./vector-store/providers/lancedb";
 import type { WorldBookEntry, WorldBookVectorIndexStatus } from "../types/world-book";
 import {
   desiredWorldBookVectorIndexStatus,
@@ -202,6 +205,10 @@ class VectorizationQueue {
         } catch {}
         const batch = this.takeBatch(maxBatch);
 
+        // Tell the background optimize scheduler a vectorization write is in
+        // flight so it defers rather than competing for the write lock.
+        markVectorizationActive();
+
         if (batch[0].type === "chunk") {
           await this.processChunkBatch(batch);
         } else {
@@ -248,8 +255,20 @@ class VectorizationQueue {
         }));
       if (tasks.length === 0) return;
 
+      // The embedded LanceDB provider is a single on-disk store guarded by the
+      // cross-process write lock. Running the chat-chunk writer in a separate
+      // Bun subprocess means that lock sees TWO local writers (serving process +
+      // subprocess) plus the maintenance child, which is the contention the
+      // `/app/data/.lancedb-write-lock` timeouts come from — and an in-process
+      // child also cannot see the serving process's optimize/read gate. Keep the
+      // writer in the main process for LanceDB (vectorization still always runs).
+      // Only offload to the subprocess when an external provider (Qdrant/Milvus)
+      // is configured, where there is no local lock to contend on — or when the
+      // operator explicitly opts back into the subprocess for LanceDB.
+      const preferSubprocess = canUseChatChunkVectorizationSubprocess()
+        && (getResolvedVectorStoreConfig().provider !== "lancedb" || shouldForceChatVectorizationSubprocess());
       let result: ChatChunkVectorizationBatchResult;
-      if (canUseChatChunkVectorizationSubprocess()) {
+      if (preferSubprocess) {
         try {
           result = await processChatChunkVectorizationBatchInSubprocess(tasks);
         } catch (err) {
@@ -258,7 +277,7 @@ class VectorizationQueue {
           result = await processChatChunkVectorizationBatch(tasks);
         }
       } else {
-        warnChatChunkVectorizationFallback();
+        if (!canUseChatChunkVectorizationSubprocess()) warnChatChunkVectorizationFallback();
         result = await processChatChunkVectorizationBatch(tasks);
       }
 
@@ -413,6 +432,9 @@ export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEU
       eligibleUsers.set(row.user_id, eligible);
     }
     if (!eligible) continue;
+    // Priority 0 means "do not schedule a new job"; existing jobs of the same
+    // chunk still get their priority raised by `add`. This lets the startup
+    // scan top up the queue without starving live writes of worker attention.
     queueChunkVectorization(row.user_id, row.chat_id, row.id, priority);
     queued++;
   }
@@ -520,6 +542,61 @@ export function startVectorizationQueueMaintenance(): void {
   // Kick off a passive startup scan so pre-existing pending entries don't have to
   // wait for the first interval tick before being picked up.
   sweepWorldBookVectorizationQueue();
+  startStartupChatChunkBackfill();
+}
+
+/** Chat chunks re-examined per startup-backfill pass. */
+const STARTUP_CHAT_CHUNK_BACKFILL_LIMIT = 500;
+/** How often the startup backfill re-scans while chunks remain unvectorized. */
+const STARTUP_CHAT_CHUNK_BACKFILL_INTERVAL_MS = 60_000;
+/** Consecutive no-new-work passes before the backfill timer stops itself. */
+const STARTUP_CHAT_CHUNK_BACKFILL_IDLE_PASSES = 3;
+
+function startupChatChunkBackfillEnabled(): boolean {
+  const raw = (process.env.LUMIVERSE_STARTUP_VECTOR_BACKFILL ?? "").trim().toLowerCase();
+  return !["0", "false", "no", "off"].includes(raw);
+}
+
+let _startupChatChunkBackfillTimer: ReturnType<typeof setInterval> | null = null;
+let _startupChatChunkBackfillIdlePasses = 0;
+
+/**
+ * Re-queue chat chunks that still need vectors after a restart (e.g. LanceDB on
+ * ephemeral disk, or a crash mid-batch). Jobs are added at priority 0 so live
+ * writes keep worker precedence; de-duplication means a repeated pass only tops
+ * up chunks that are not already scheduled. The scan drains even when the
+ * backlog exceeds one page: each pass re-reads the oldest still-unvectorized
+ * rows, and processed chunks drop out of the `vectorized_at IS NULL` set.
+ */
+function startStartupChatChunkBackfill(): void {
+  if (!startupChatChunkBackfillEnabled() || _startupChatChunkBackfillTimer) return;
+  _startupChatChunkBackfillTimer = setInterval(runStartupChatChunkBackfillPass, STARTUP_CHAT_CHUNK_BACKFILL_INTERVAL_MS);
+  void runStartupChatChunkBackfillPass();
+}
+
+async function runStartupChatChunkBackfillPass(): Promise<void> {
+  try {
+    const queued = await queueStaleChatChunkVectorization(STARTUP_CHAT_CHUNK_BACKFILL_LIMIT, 0);
+    if (queued > 0) {
+      _startupChatChunkBackfillIdlePasses = 0;
+      console.info(`[vectorization] Startup backfill queued ${queued} stale chat chunk(s)`);
+      return;
+    }
+    _startupChatChunkBackfillIdlePasses += 1;
+    if (_startupChatChunkBackfillIdlePasses >= STARTUP_CHAT_CHUNK_BACKFILL_IDLE_PASSES) {
+      stopStartupChatChunkBackfill();
+    }
+  } catch (err) {
+    console.warn("[vectorization] Startup chat-chunk backfill failed:", err);
+  }
+}
+
+export function stopStartupChatChunkBackfill(): void {
+  if (_startupChatChunkBackfillTimer) {
+    clearInterval(_startupChatChunkBackfillTimer);
+    _startupChatChunkBackfillTimer = null;
+  }
+  _startupChatChunkBackfillIdlePasses = 0;
 }
 
 export function stopQueryCacheCleanup(): void {
