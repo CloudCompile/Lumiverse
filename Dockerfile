@@ -98,10 +98,18 @@ COPY user-docs/ ./user-docs/
 # Create data directory with correct ownership
 RUN mkdir -p /app/data && chown -R bun:bun /app/data
 
+# Ephemeral runtime directory for derived state that needs real local-filesystem
+# semantics (LanceDB commits) and must never touch the persistent mount. Lives on
+# the container's local overlay, so it is intentionally NOT a VOLUME.
+RUN mkdir -p /app/runtime-data && chown -R bun:bun /app/runtime-data
+
 # Environment defaults — all overridable via docker-compose
 ENV NODE_ENV=production
 ENV PORT=7860
 ENV DATA_DIR=/app/data
+# Root for relocated ephemeral vectors. When DATA_DIR is an object-storage mount
+# (e.g. an HF Storage Bucket), LanceDB is placed under <RUNTIME_DIR>/lancedb.
+ENV LUMIVERSE_RUNTIME_DIR=/app/runtime-data
 ENV FRONTEND_DIR=/app/frontend/dist
 # Docker containers sit behind reverse proxies / port mappings, so LAN IP
 # auto-detection is meaningless. Default to accepting any origin; override

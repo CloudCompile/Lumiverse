@@ -277,7 +277,8 @@ Configuration is managed through `.env` (see `.env.example` for all options). Se
 | `LUMIVERSE_TLS_KEY_FILE` | No | — | PEM private-key file paired with `LUMIVERSE_TLS_CERT_FILE`. |
 | `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | No | — | Optional file containing the encrypted private key's passphrase. |
 | `LUMIVERSE_TLS_CONFIG_FILE` | No | — | JSON certificate manifest for multi-certificate SNI. Cannot be combined with the direct certificate/key variables. |
-| `LUMIVERSE_LANCEDB_DIR` | No | auto | Override the LanceDB vector-store directory. Defaults to `<DATA_DIR>/lancedb` when that filesystem supports Lance commits, otherwise a local ephemeral directory (`$TMPDIR/lumiverse-lancedb`). Point this at real local disk if `DATA_DIR` is an object-storage mount. |
+| `LUMIVERSE_LANCEDB_DIR` | No | auto | Force an exact LanceDB vector-store directory. By default it lives at `<DATA_DIR>/lancedb` when that filesystem supports Lance commits, otherwise it is relocated to `<LUMIVERSE_RUNTIME_DIR>/lancedb`. Point this at real local disk to pin the location. |
+| `LUMIVERSE_RUNTIME_DIR` | No | `/app/runtime-data` | Root for ephemeral, rebuildable state that needs local-filesystem semantics. Relocated LanceDB vectors live at `<LUMIVERSE_RUNTIME_DIR>/lancedb`. Falls back to the OS temp dir when the default is not writable. |
 | `FRONTEND_DIR` | No | — | Path to built frontend dist for static serving |
 | `TRUSTED_ORIGINS` | No | `localhost` | Comma-separated CORS origins |
 | `TRUSTED_PROXIES` | No | — | Proxy IPs/CIDRs allowed to supply external host/protocol headers for dynamic auth origins and client-IP headers. Host/protocol forwarding requires this explicit list. |

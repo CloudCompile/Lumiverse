@@ -58,10 +58,12 @@ import type {
 const LANCEDB_STORAGE: LanceDbStorageResolution = resolveLanceDbStorageDir({
   dataDir: env.dataDir,
   configuredDir: env.lancedbDirOverride,
+  runtimeDir: env.runtimeDir,
 });
 export const LANCEDB_PATH = LANCEDB_STORAGE.dir;
 export const LANCEDB_EPHEMERAL = LANCEDB_STORAGE.ephemeral;
 export const LANCEDB_EPHEMERAL_REASON = LANCEDB_STORAGE.reason ?? null;
+export const LANCEDB_STORAGE_DETAIL = LANCEDB_STORAGE.storageDetail;
 /** True while the backing directory cannot commit Lance transactions. Set once
  *  a commit fails with the unsupported-filesystem error so recovery loops stop
  *  deleting/recreating tables that can never commit. */
@@ -864,6 +866,14 @@ function retryableLanceWriteConflictBackoffMs(attempt: number): number {
 function logLanceDbPathDiagnostics(): void {
   if (lancedbPathDiagnosticsLogged) return;
   lancedbPathDiagnosticsLogged = true;
+  // Always report the resolved store + lock location once at startup. This is
+  // the single line that tells an operator (or a bug report) exactly where
+  // vectors and the cross-process lock live, so a misresolved path is visible
+  // without digging through stack traces.
+  console.info(
+    `[embeddings] LanceDB storage resolved: path=${LANCEDB_PATH}; lock=${CROSS_PROCESS_WRITE_LOCK_DIR}; `
+    + `ephemeral=${LANCEDB_EPHEMERAL}; fs=${LANCEDB_STORAGE_DETAIL}; dataDir=${env.dataDir}; cwd=${process.cwd()}`,
+  );
   if (LANCEDB_EPHEMERAL) {
     console.warn(
       `[embeddings] LanceDB relocated to ephemeral local storage: path=${LANCEDB_PATH}; `
@@ -878,7 +888,7 @@ function logLanceDbPathDiagnostics(): void {
   }
   if (!LANCEDB_TERMUX_LIKE) return;
   console.info(
-    `[embeddings] LanceDB path config: path=${LANCEDB_PATH}; uri=${LANCEDB_URI}; cwd=${process.cwd()}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
+    `[embeddings] LanceDB path config: uri=${LANCEDB_URI}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
   );
   if (process.cwd() === "/") {
     console.warn(

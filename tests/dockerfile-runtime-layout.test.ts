@@ -19,4 +19,14 @@ describe("Docker runtime image", () => {
     expect(runtimeStage).toMatch(/COPY --from=frontend-build \/app\/frontend\/dist \.\/frontend\/dist/);
     expect(runtimeStage).toMatch(/COPY --from=frontend-build \/app\/frontend\/package\.json \.\/frontend\/package\.json/);
   });
+
+  test("provisions a writable ephemeral runtime dir for relocated LanceDB", async () => {
+    const runtimeStage = await readRuntimeStage();
+
+    // LanceDB must be able to commit locally, so the runtime dir has to exist
+    // and be owned by the bun user, and must not be a persistent VOLUME.
+    expect(runtimeStage).toMatch(/mkdir -p \/app\/runtime-data && chown -R bun:bun \/app\/runtime-data/);
+    expect(runtimeStage).toMatch(/ENV LUMIVERSE_RUNTIME_DIR=\/app\/runtime-data/);
+    expect(runtimeStage).not.toMatch(/VOLUME[^\n]*\/app\/runtime-data/);
+  });
 });
