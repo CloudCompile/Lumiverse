@@ -218,6 +218,7 @@ export default function ChatView() {
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const chatBodyRef = useRef<HTMLDivElement>(null)
   const chatColumnInnerRef = useRef<HTMLDivElement>(null)
   const chatColumnTopRef = useRef<HTMLDivElement>(null)
   const chatTopDockRef = useRef<HTMLDivElement>(null)
@@ -1067,10 +1068,11 @@ export default function ChatView() {
   }, [bubbleDisableHover, bubbleHideAvatarBg, bubbleOpacity])
 
   useLayoutEffect(() => {
+    const chatBody = chatBodyRef.current
     const chatColumnInner = chatColumnInnerRef.current
     const chatColumnTop = chatColumnTopRef.current
     const chatTopDock = chatTopDockRef.current
-    if (!chatColumnInner || !chatColumnTop || !chatTopDock) return
+    if (!chatBody || !chatColumnInner || !chatColumnTop || !chatTopDock) return
 
     const syncComposerAnchor = () => {
       const composerAbove = chatColumnInner.querySelector<HTMLSpanElement>(
@@ -1095,9 +1097,14 @@ export default function ChatView() {
       if (child && childRequest !== null && child.getAttribute('data-dock-request') !== childRequest) child.setAttribute('data-dock-request', childRequest)
     }
 
+    // The fill dock is `position: fixed`, and the half-editor host is a sibling of
+    // `.chatColumn` under `.body`. Publishing the measured rail height on the shared
+    // body is what lets both the fill-only padding and the desktop half-editor
+    // z-index rung read the real strip height; on `.chatColumnInner` the sibling
+    // subtree cannot see the variable at all.
     const syncTopDockHeight = () => {
       const height = measureLayoutHeight(chatTopDock)
-      chatColumnInner.style.setProperty('--lcs-top-dock-height', `${height}px`)
+      chatBody.style.setProperty('--lcs-top-dock-height', `${height}px`)
     }
 
     const sync = () => {
@@ -1141,7 +1148,7 @@ export default function ChatView() {
       chatColumnTop.removeAttribute('data-dock-request')
       chatTopDock.removeAttribute('data-dock-request')
       chatComposerAboveRef.current?.removeAttribute('data-dock-request')
-      chatColumnInner.style.removeProperty('--lcs-top-dock-height')
+      chatBody.style.removeProperty('--lcs-top-dock-height')
       chatComposerAboveRef.current = null
     }
   }, [chatId, dockQuickToolbar, keepFloatingDockHost, quickToolbarSettings])
@@ -1185,7 +1192,7 @@ export default function ChatView() {
         }}
       />
       <div className={clsx(styles.wallpaperTransitionLayer, wallpaperTransitioning && !sceneBackground && styles.wallpaperTransitionLayerActive)} />
-      <div className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
+      <div ref={chatBodyRef} className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
         <div data-spindle-mount="chat_sidebar_left" data-spindle-scope={`chat:${chatId}:sidebar-left`} style={{ display: 'contents' }} />
         {!portraitSurfaceOccupied && portraitPanelSide !== 'none' && portraitPanelSide === 'left' && (
           <div className={clsx(styles.portraitSide, styles.portraitSideLeft, portraitPanelOpen && styles.portraitSideOpen)}>
