@@ -19,6 +19,7 @@ import { ApiError } from '@/api/client'
 import { worldBooksApi } from '@/api/world-books'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { useStore } from '@/store'
 import {
   backfillEntryMetadata,
   buildEntryGridTemplate,
@@ -30,9 +31,11 @@ import { filterBooks } from '@/lib/lorebookBookSearch'
 import { createEntrySearchIndex, searchEntriesByQuery } from '@/lib/lorebookEntrySearch'
 import { runLorebookReorderIfCurrent } from '@/lib/lorebookMutationGuard'
 import {
+  assertNever,
   buildBulkFieldPatch,
   EMPTY_BULK_FIELD_FORM,
   hasBulkFieldMutation,
+  isBulkApplyEnabled,
   type BulkEnabledSelection,
   type BulkFieldForm,
   type BulkPositionSelection,
@@ -70,6 +73,19 @@ interface EntryConflictState {
   draft: Partial<WorldBookEntry>
 }
 
+/** Stages of one bulk request: a failed re-read is not a failed write. */
+type BulkRunOutcome =
+  | { status: 'completed' }
+  | { status: 'conflict'; conflictCount: number }
+  | { status: 'refresh-failed' }
+
+/** Persistent notices the entries pane shows after a non-successful outcome. */
+type BulkNotice =
+  | { kind: 'conflict'; conflictCount: number }
+  | { kind: 'refresh-failed' }
+  /** A request whose outcome is unknown: it may or may not have been written. */
+  | { kind: 'unconfirmed' }
+
 type BulkMutationInput = WorldBookEntryBulkActionInput extends infer Input
   ? Input extends WorldBookEntryBulkActionInput
     ? Omit<Input, 'expected_revisions'>
@@ -89,6 +105,16 @@ function conflictPayload(error: unknown): WorldBookEntryConflictPayload | null {
   return error.body as WorldBookEntryConflictPayload
 }
 
+/** Server-supplied reason for a rejected bulk request, when its body carries one. */
+function apiErrorMessage(error: ApiError): string | null {
+  const body = error.body
+  if (body && typeof body === 'object' && 'error' in body) {
+    const message = body.error
+    if (typeof message === 'string' && message.length > 0) return message
+  }
+  return error.statusText || null
+}
+
 export default function LorebookEditorWorkspace({
   variant,
   initialBookId,
@@ -100,6 +126,7 @@ export default function LorebookEditorWorkspace({
   onToggleFullscreen,
 }: LorebookEditorWorkspaceProps) {
   const { settings, updateSettings } = useLorebookEditorLayoutSettings()
+  const addToast = useStore((state) => state.addToast)
   const [books, setBooks] = useState<WorldBook[]>([])
   const [entries, setEntries] = useState<WorldBookEntry[]>([])
   const entriesRef = useRef<WorldBookEntry[]>([])
@@ -113,11 +140,12 @@ export default function LorebookEditorWorkspace({
   const [reordering, setReordering] = useState(false)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [conflicts, setConflicts] = useState<Record<string, EntryConflictState>>({})
-  // Every bulk control starts in the same "leave as is" state `enabled` already
-  // had. A literal here (the old '10' / '4' / '0' / 'keyword') is impossible to
-  // tell apart from a deliberate choice, which is how a State-only Apply used to
-  // overwrite priority, depth and position on every selected entry and demote
-  // every semantic entry to a keyword entry. See `lib/lorebookBulkPatch.ts`.
+  const [bulkNotice, setBulkNotice] = useState<BulkNotice | null>(null)
+  // While a bulk request is in flight its write may already be on the server, so
+  // Apply stays shut until the reload has reconciled.
+  const [bulkPending, setBulkPending] = useState(false)
+  // Every bulk control starts in an explicit "leave as is" state, so only the
+  // controls the user sets reach the wire. See `lib/lorebookBulkPatch.ts`.
   const [bulkPriority, setBulkPriority] = useState(EMPTY_BULK_FIELD_FORM.priority)
   const [bulkDepth, setBulkDepth] = useState(EMPTY_BULK_FIELD_FORM.depth)
   const [bulkPosition, setBulkPosition] = useState<BulkPositionSelection>(EMPTY_BULK_FIELD_FORM.position)
@@ -542,25 +570,39 @@ export default function LorebookEditorWorkspace({
     await saveEntry(entryId, conflict.draft)
   }, [commitEntries, conflicts, saveEntry, selectedBookId])
 
-  const runBulk = useCallback(async (input: BulkMutationInput) => {
-    if (!selectedBookId) return
+  /**
+   * Shared by Apply (`set_fields`), Duplicate (`copy`) and Delete (`delete`).
+   * A rejected POST still throws, and copy/delete keep rejecting when the list
+   * cannot be re-read, so only `set_fields` reports the refresh stage back.
+   */
+  const runBulk = useCallback(async (input: BulkMutationInput): Promise<BulkRunOutcome | null> => {
+    if (!selectedBookId) return null
+    const bookId = selectedBookId
     const ids = input.entry_ids
     const drafts = Object.fromEntries(ids.map((id) => [id, pendingDrafts.current[id] ?? {}]))
     try {
-      await worldBooksApi.bulkEntryAction(selectedBookId, {
+      await worldBooksApi.bulkEntryAction(bookId, {
         ...input,
         expected_revisions: expectedRevisionMap(entriesRef.current, ids),
       } as WorldBookEntryBulkActionInput)
-      await loadEntries(selectedBookId)
-      setSavedAt(Date.now())
     } catch (error) {
       const payload = conflictPayload(error)
       if (payload) {
         applyConflict(payload, drafts)
-        return
+        return { status: 'conflict', conflictCount: payload.conflicts.length }
       }
       throw error
     }
+    try {
+      await loadEntries(bookId)
+    } catch (error) {
+      // Only the field bar needs the write and the reload told apart; Delete
+      // must still clear the selection only after a successful refresh.
+      if (input.action !== 'set_fields') throw error
+      return { status: 'refresh-failed' }
+    }
+    setSavedAt(Date.now())
+    return { status: 'completed' }
   }, [applyConflict, loadEntries, selectedBookId])
 
   const bulkForm = useMemo<BulkFieldForm>(() => ({
@@ -573,16 +615,106 @@ export default function LorebookEditorWorkspace({
 
   const bulkHasMutation = useMemo(() => hasBulkFieldMutation(bulkForm), [bulkForm])
 
+  // One rule gates every entry point into Apply, and both readers of the toolbar
+  // prop below share it: `applyBulk` refuses for the same reasons, so the button
+  // cannot be live while the handler would no-op. A non-null notice means the
+  // previous write was not confirmed, so this stays shut until the reload that
+  // reconciles it runs — the toolbar prop carries that shut state to the button.
+  const bulkApplyEnabled = isBulkApplyEnabled({
+    bookId: selectedBookId,
+    selectedCount: selectedIds.length,
+    hasMutation: bulkHasMutation,
+    noticesReconciliation: bulkNotice !== null,
+    pending: bulkPending,
+  })
+
   const applyBulk = useCallback(async () => {
-    if (selectedIds.length === 0) return
+    if (!bulkApplyEnabled || bulkPending) return
     // Sparse by construction: a key the user never set is never sent, and the
     // server only writes columns it receives.
     const patch = buildBulkFieldPatch(bulkForm)
     // Nothing touched. The server answers an empty set_fields with a 400, so this
     // must not reach the wire.
     if (Object.keys(patch).length === 0) return
-    await runBulk({ action: 'set_fields', entry_ids: selectedIds, fields: patch })
-  }, [bulkForm, runBulk, selectedIds])
+    // This attempt owns its outcome; the retained form is the retry.
+    setSavedAt(null)
+    setBulkNotice(null)
+    setBulkPending(true)
+    let outcome: BulkRunOutcome | null = null
+    try {
+      outcome = await runBulk({ action: 'set_fields', entry_ids: selectedIds, fields: patch })
+    } catch (error) {
+      // The write was not acknowledged. A 4xx rejection proved the request never
+      // landed, so the retained form may be retried once the entries are re-read;
+      // anything else (5xx, a lost connection, or a rejection with no reason
+      // attached) may already have written. Both report the same way, and neither
+      // may claim the write succeeded.
+      const rejected = error instanceof ApiError && error.status < 500
+      const reason = rejected ? apiErrorMessage(error) : null
+      addToast({
+        type: 'error',
+        message: reason
+          ? `Bulk update rejected: ${reason}`
+          : 'Bulk update could not be confirmed. Reload the entries before applying again.',
+      })
+      setBulkNotice({ kind: 'unconfirmed' })
+      return
+    } finally {
+      setBulkPending(false)
+    }
+    if (!outcome) return
+    // Every member of `BulkRunOutcome` is handled; the remaining `unconfirmed`
+    // notice is raised on the throw path above, not here.
+    switch (outcome.status) {
+      case 'completed':
+        break
+      case 'conflict':
+        setBulkNotice({ kind: 'conflict', conflictCount: outcome.conflictCount })
+        break
+      case 'refresh-failed':
+        setBulkNotice({ kind: 'refresh-failed' })
+        addToast({
+          type: 'warning',
+          message: 'Bulk update was saved, but the entries list could not be refreshed. Reload before applying again.',
+        })
+        break
+      default:
+        // Exhaustiveness guard: a new outcome must be handled here rather than
+        // silently ignored.
+        outcome satisfies never
+    }
+  }, [addToast, bulkApplyEnabled, bulkForm, bulkPending, runBulk, selectedIds])
+
+  /**
+   * Manual reconcile from the notice: re-read current revisions, then clear the
+   * notice. Only an acknowledged POST may claim "Saved"; a conflict never wrote
+   * anything, so it leaves "Saved" alone.
+   */
+  const reloadBulkEntries = useCallback(async (notice: BulkNotice) => {
+    if (!selectedBookId) return
+    try {
+      await loadEntries(selectedBookId)
+    } catch {
+      addToast({ type: 'error', message: 'Entries could not be reloaded. Use Reload entries to retry.' })
+      return
+    }
+    setBulkNotice(null)
+    if (notice.kind === 'refresh-failed' || notice.kind === 'unconfirmed') setSavedAt(Date.now())
+  }, [addToast, loadEntries, selectedBookId])
+
+  /**
+   * The toolbar Refresh is the same reconcile the notice prescribes, so it
+   * closes the notice too — otherwise the gate would stay shut after the user
+   * had already done the thing the notice asked for.
+   */
+  const refreshEntries = useCallback(async () => {
+    if (!selectedBookId) return
+    if (bulkNotice) {
+      await reloadBulkEntries(bulkNotice)
+      return
+    }
+    await loadEntries(selectedBookId)
+  }, [bulkNotice, loadEntries, reloadBulkEntries, selectedBookId])
 
   const createBook = useCallback(async () => {
     const book = await worldBooksApi.create({ name: 'New Lorebook' })
@@ -611,6 +743,16 @@ export default function LorebookEditorWorkspace({
     await runBulk({ action: 'delete', entry_ids: selectedIds })
     setSelectedIds([])
   }, [runBulk, selectedIds])
+
+  /**
+   * Duplicate/Delete report their rejection here instead of leaving it
+   * unhandled: the shared runner rethrows so a failed reload keeps the
+   * selection, and the retry is always the user's next click.
+   */
+  const reportBulkActionFailure = useCallback((action: 'duplicate' | 'delete') => {
+    const label = action === 'delete' ? 'Delete' : 'Duplicate'
+    addToast({ type: 'error', message: `${label} failed. Reload the entries before trying again.` })
+  }, [addToast])
 
   const toggleEntrySelection = (entryId: string) => {
     setSelectedIds((current) => current.includes(entryId)
@@ -797,9 +939,31 @@ export default function LorebookEditorWorkspace({
             setBulkTrigger={setBulkTrigger}
             bulkEnabled={bulkEnabled}
             setBulkEnabled={setBulkEnabled}
-            bulkHasMutation={bulkHasMutation}
+            // The toolbar's `bulkHasMutation` prop is the button's `disabled`
+            // contract, so the reconciliation gate is folded into it here rather
+            // than by adding a prop. False also hides the "Set at least one field"
+            // title, which is only accurate while the notice is absent.
+            bulkHasMutation={bulkApplyEnabled}
             applyBulk={applyBulk}
           />
+
+          {bulkNotice && (
+            <div className={styles.conflictBanner} role="alert" data-bulk-notice={bulkNotice.kind}>
+              <strong>
+                {bulkNotice.kind === 'conflict'
+                  ? 'Bulk update conflicted.'
+                  : 'Bulk update could not be confirmed.'}
+              </strong>
+              <span>
+                {bulkNotice.kind === 'conflict'
+                  ? `${bulkNotice.conflictCount} selected ${bulkNotice.conflictCount === 1 ? 'entry has' : 'entries have'} a newer server revision, so nothing from this Apply was written. Reload the entries, keep the bulk fields, then Apply again.`
+                  : bulkNotice.kind === 'refresh-failed'
+                    ? 'Your changes are on the server. Reload the entries before the next Apply so it is not built from stale revisions.'
+                    : 'The request may or may not have been written. Reload the entries before applying again so nothing is applied against stale revisions.'}
+              </span>
+              <button type="button" onClick={() => void reloadBulkEntries(bulkNotice)}>Reload entries</button>
+            </div>
+          )}
 
           <EntryTable
             bookId={selectedBookId}
@@ -828,9 +992,9 @@ export default function LorebookEditorWorkspace({
             resolveTokenCount={resolveTokenCount}
           />
           <div className={styles.listActions}>
-            <button type="button" onClick={() => void duplicateSelected()} disabled={selectedIds.length === 0}><Copy size={13} /> Duplicate</button>
-            <button type="button" onClick={() => void deleteSelected()} disabled={selectedIds.length === 0}><Trash2 size={13} /> Delete</button>
-            <button type="button" onClick={() => selectedBookId && void loadEntries(selectedBookId)}><RefreshCw size={13} /> Refresh</button>
+            <button type="button" onClick={() => void duplicateSelected().catch(() => reportBulkActionFailure('duplicate'))} disabled={selectedIds.length === 0}><Copy size={13} /> Duplicate</button>
+            <button type="button" onClick={() => void deleteSelected().catch(() => reportBulkActionFailure('delete'))} disabled={selectedIds.length === 0}><Trash2 size={13} /> Delete</button>
+            <button type="button" onClick={() => selectedBookId && void refreshEntries()}><RefreshCw size={13} /> Refresh</button>
           </div>
         </div>
 
