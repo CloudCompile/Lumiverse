@@ -754,6 +754,220 @@ describe("prompt-local world-info selection content", () => {
     expect(result.cache.before[0]?.content).toBe(first.content);
     expect(result.estimatedTokens).toBe(1);
     expect(result.deduplicated).toBe(1);
+    expect(result.activatedWorldInfo).toEqual([
+      expect.objectContaining({ id: first.id, estimatedTokens: 1 }),
+    ]);
+  });
+
+  test("derives per-entry estimates from selected content without leaking raw content", () => {
+    const first = makeEntry({
+      id: "estimate-first",
+      content: `RAW-A ${"a".repeat(512)}`,
+      order_value: 1,
+      vectorized: false,
+    });
+    const second = makeEntry({
+      id: "estimate-second",
+      content: `RAW-B ${"b".repeat(512)}`,
+      order_value: 2,
+      vectorized: false,
+    });
+    // Selected lengths 5 and 9 estimate to 2 and 3; the aggregate is 2 + 3 = 5,
+    // not ceil((5 + 9) / 4) = 4.
+    const selectionContentByEntryId = new Map([
+      [first.id, "abcde"],
+      [second.id, "abcdefghi"],
+    ]);
+
+    const result = mergeActivatedWorldInfoEntries(
+      [first, second],
+      [],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      selectionContentByEntryId,
+    );
+
+    expect(
+      result.activatedWorldInfo.map((entry) => [entry.id, entry.estimatedTokens]),
+    ).toEqual([
+      ["estimate-first", 2],
+      ["estimate-second", 3],
+    ]);
+    expect(result.estimatedTokens).toBe(5);
+    for (const dto of result.activatedWorldInfo) {
+      expect(dto).not.toHaveProperty("content");
+    }
+    expect(JSON.stringify(result.activatedWorldInfo)).not.toContain("RAW-");
+  });
+
+  test("falls back to raw content when the selection map is absent or lacks the entry key", () => {
+    const missingKey = makeEntry({ id: "missing-key", content: "12345678", order_value: 1, vectorized: false });
+    const overridden = makeEntry({ id: "overridden", content: "z".repeat(64), order_value: 2, vectorized: false });
+    const selectionContentByEntryId = new Map([[overridden.id, "123456789012"]]);
+
+    const result = mergeActivatedWorldInfoEntries(
+      [missingKey, overridden],
+      [],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      selectionContentByEntryId,
+    );
+
+    expect(
+      result.activatedWorldInfo.map((entry) => [entry.id, entry.estimatedTokens]),
+    ).toEqual([
+      ["missing-key", 2],
+      ["overridden", 3],
+    ]);
+    expect(result.estimatedTokens).toBe(5);
+
+    const absentMap = makeEntry({ id: "absent-map", content: "abcdefgh", vectorized: false });
+    const absentMapResult = mergeActivatedWorldInfoEntries([absentMap], [], {});
+    expect(absentMapResult.activatedWorldInfo[0]?.estimatedTokens).toBe(2);
+    expect(absentMapResult.estimatedTokens).toBe(2);
+  });
+
+  test("excludes entries whose selection view is empty or whitespace-only", () => {
+    const emptyOverride = makeEntry({
+      id: "empty-override",
+      content: "raw fallback content",
+      order_value: 1,
+      vectorized: false,
+    });
+    const whitespaceOverride = makeEntry({
+      id: "whitespace-override",
+      content: "raw fallback content",
+      order_value: 2,
+      vectorized: false,
+    });
+    const kept = makeEntry({
+      id: "kept",
+      content: "unused raw content",
+      order_value: 3,
+      vectorized: false,
+    });
+    const selectionContentByEntryId = new Map([
+      [emptyOverride.id, ""],
+      [whitespaceOverride.id, "   \n\t "],
+      [kept.id, "12345678"],
+    ]);
+
+    const result = mergeActivatedWorldInfoEntries(
+      [emptyOverride, whitespaceOverride, kept],
+      [],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      selectionContentByEntryId,
+    );
+
+    expect(result.activatedWorldInfo.map((entry) => entry.id)).toEqual(["kept"]);
+    expect(result.activatedWorldInfo[0]?.estimatedTokens).toBe(2);
+    expect(result.totalActivated).toBe(1);
+    expect(result.estimatedTokens).toBe(2);
+    expect(result.deduplicated).toBe(0);
+  });
+
+  test("counts surrounding whitespace in meaningful selected content instead of trimming it", () => {
+    // "  x  " is 5 characters: a trimmed estimate would be 1 and the raw
+    // 28-character content would estimate 7. The counting contract keeps the
+    // leading and trailing spaces, so the per-entry estimate is 2.
+    const entry = makeEntry({
+      id: "padded-selection",
+      content: "raw payload not counted here",
+      vectorized: false,
+    });
+    expect(entry.content).toHaveLength(28);
+    const selectionContentByEntryId = new Map([[entry.id, "  x  "]]);
+
+    const result = mergeActivatedWorldInfoEntries(
+      [entry],
+      [],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      selectionContentByEntryId,
+    );
+
+    expect(result.activatedWorldInfo.map((dto) => [dto.id, dto.estimatedTokens])).toEqual([
+      ["padded-selection", 2],
+    ]);
+    expect(result.activatedEntries.map((survivor) => survivor.id)).toEqual(["padded-selection"]);
+    expect(result.totalActivated).toBe(1);
+    expect(result.estimatedTokens).toBe(2);
+  });
+
+  test("an all-excluded merge returns no DTOs and a zero aggregate", () => {
+    const entry = makeEntry({
+      id: "only-excluded",
+      content: "raw fallback content",
+      vectorized: false,
+    });
+
+    const result = mergeActivatedWorldInfoEntries(
+      [entry],
+      [],
+      {},
+      undefined,
+      undefined,
+      undefined,
+      new Map([[entry.id, ""]]),
+    );
+
+    expect(result.activatedWorldInfo).toEqual([]);
+    expect(result.totalActivated).toBe(0);
+    expect(result.activatedBeforeBudget).toBe(0);
+    expect(result.evictedByBudget).toBe(0);
+    expect(result.estimatedTokens).toBe(0);
+  });
+
+  test("stored token metadata does not affect produced estimates or leak into DTOs", () => {
+    // Mirrors frontend/src/lib/storedTokenCount.ts: persisted editor/tokenizer
+    // metadata lives in entry.extensions. The producer must derive its estimate
+    // from selected content only.
+    const metadataVariants: Array<Record<string, unknown>> = [
+      {},
+      { _lumiverse_token_count: 0, _lumiverse_token_count_approximate: true },
+      {
+        _lumiverse_token_count: 999,
+        _lumiverse_token_count_model: "stale-foreign-model",
+        _lumiverse_token_count_len: 26,
+        _lumiverse_token_count_hash: "deadbeef",
+      },
+      { _lumiverse_token_count: 999, _lumiverse_token_count_approximate: true },
+    ];
+    const selectionContent = "abcdefghijklmnopqrstuvwxyz"; // 26 characters -> 7
+
+    for (const [index, extensions] of metadataVariants.entries()) {
+      const entry = makeEntry({
+        id: `metadata-${index}`,
+        content: `raw payload ${index}`,
+        extensions,
+        vectorized: false,
+      });
+
+      const result = mergeActivatedWorldInfoEntries(
+        [entry],
+        [],
+        {},
+        undefined,
+        undefined,
+        undefined,
+        new Map([[entry.id, selectionContent]]),
+      );
+
+      expect(result.activatedWorldInfo).toHaveLength(1);
+      expect(result.activatedWorldInfo[0]?.estimatedTokens).toBe(7);
+      expect(result.estimatedTokens).toBe(7);
+      expect(result.activatedWorldInfo[0]).not.toHaveProperty("extensions");
+      expect(result.activatedWorldInfo[0]).not.toHaveProperty("content");
+    }
   });
 });
 
@@ -859,5 +1073,74 @@ describe("mergeActivatedWorldInfoEntries — unified finalization", () => {
     } finally {
       Math.random = originalRandom;
     }
+  });
+
+  test("preserves merged DTO fields and budget accounting while adding estimates", () => {
+    const keyword = makeEntry({
+      id: "preserve-keyword",
+      comment: "Keyword lore",
+      key: ["alpha"],
+      content: "k".repeat(160),
+      priority: 10,
+      order_value: 1,
+      vectorized: false,
+    });
+    const vector = makeEntry({
+      id: "preserve-vector",
+      comment: "Vector lore",
+      content: "v".repeat(160),
+      priority: 10,
+      order_value: 2,
+    });
+    // Selected lengths 5 and 9 estimate to 2 and 3.
+    const selectionContentByEntryId = new Map([
+      [keyword.id, "12345"],
+      [vector.id, "123456789"],
+    ]);
+
+    const result = mergeActivatedWorldInfoEntries(
+      [keyword],
+      [asVectorCandidate(vector, 0.75)],
+      { maxTokenBudget: 40 },
+      new Map([["book-a", "global"]]),
+      new Map([["book-a", "Book A"]]),
+      () => 0.5,
+      selectionContentByEntryId,
+    );
+
+    expect(result.activatedWorldInfo.map((entry) => entry.id)).toEqual(
+      result.activatedEntries.map((entry) => entry.id),
+    );
+    expect(result.keywordActivated).toBe(1);
+    expect(result.vectorActivated).toBe(1);
+    expect(result.activatedBeforeBudget).toBe(2);
+    expect(result.activatedAfterBudget).toBe(2);
+    expect(result.evictedByBudget).toBe(0);
+    expect(result.deduplicated).toBe(0);
+    expect(result.estimatedTokens).toBe(5);
+
+    expect(result.activatedWorldInfo.find((entry) => entry.id === keyword.id)).toEqual({
+      id: keyword.id,
+      comment: "Keyword lore",
+      keys: ["alpha"],
+      source: "keyword",
+      score: undefined,
+      bookId: "book-a",
+      bookSource: "global",
+      bookName: "Book A",
+      estimatedTokens: 2,
+    });
+
+    expect(result.activatedWorldInfo.find((entry) => entry.id === vector.id)).toEqual({
+      id: vector.id,
+      comment: "Vector lore",
+      keys: [],
+      source: "vector",
+      score: 0.75,
+      bookId: "book-a",
+      bookSource: "global",
+      bookName: "Book A",
+      estimatedTokens: 3,
+    });
   });
 });
