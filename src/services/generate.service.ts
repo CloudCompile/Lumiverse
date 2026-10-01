@@ -34,6 +34,9 @@ import {
   type ToolDefinition,
   type ToolCallResult,
   type LlmThinkingBlock,
+  EditAndSendContextError,
+  EDIT_AND_SEND_CONTEXT_ERROR_NAME,
+  type EditAndSendContext,
 } from "../llm/types";
 import { trimIncompleteTrailingWord } from "../utils/trim-incomplete-word";
 import { healFormattingArtifacts } from "../utils/format-healing";
@@ -1035,6 +1038,12 @@ async function runPromptPipeline(opts: {
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
+  /**
+   * Edit-and-Send committed edit identity. Forwarded verbatim into
+   * `AssemblyContext` so assembly performs the revision check and history
+   * cutoff. Absent on ordinary interactive paths.
+   */
+  editAndSendContext?: import("../llm/types").EditAndSendContext;
   rejectedSwipe?: string;
   continueMessageId?: string;
   continuePostfix?: string;
@@ -1122,6 +1131,7 @@ async function runPromptPipeline(opts: {
       impersonateInput: opts.impersonateInput,
       userInput: opts.userInput,
       excludeMessageId: opts.excludeMessageId,
+      editAndSendContext: opts.editAndSendContext,
       rejectedSwipe: opts.rejectedSwipe,
       continueMessageId: opts.continueMessageId,
       continuePostfix: opts.continuePostfix,
@@ -1144,6 +1154,12 @@ async function runPromptPipeline(opts: {
         assemblyResult = await assemblePromptInWorker(assemblyCtx);
       } catch (err: any) {
         if (opts.signal?.aborted || err?.name === "AbortError") throw err;
+        // An Edit-and-Send context rejection is a DOMAIN decision, not a worker
+        // failure. The shared error name survives the worker boundary, so rethrow
+        // it here: falling back to in-process assembly would re-run the same
+        // validation (and, worse, imply the request was retryable with newer
+        // text). Ordinary worker infrastructure errors keep the fallback.
+        if (err?.name === EDIT_AND_SEND_CONTEXT_ERROR_NAME) throw err;
         console.warn(
           "[generate] Prompt assembly worker failed; falling back to in-process assembly:",
           err?.message || err,
@@ -1482,6 +1498,72 @@ export interface StartGenerationOptions {
    * request body by `chatRoute` and therefore forgeable by any client.
    */
   connectionId?: string;
+  /**
+   * The committed Edit-and-Send edit identity, forwarded by the dispatcher from
+   * the request cursor. Present only when the start came from the Edit-and-Send
+   * outbox. Guides the assembly history cutoff (see
+   * `AssemblyContext.editAndSendContext`); absent on every ordinary interactive
+   * path, where behavior is unchanged. Out of band for the same security reason
+   * as `connectionId`.
+   */
+  editAndSendContext?: import("../llm/types").EditAndSendContext;
+}
+
+/**
+ * Verified precondition for an Edit-and-Send generation: the committed edit is
+ * still the live text, and the separate assistant write target still belongs to
+ * this chat. Split out so it can run at BOTH edges (before the first write and
+ * again after the async preflight) with one implementation.
+ *
+ * Revision is read strictly from an optional-unknown property: typeof number +
+ * Number.isInteger + > 0, with NO `?? 1` fallback and no cast. A row that can no
+ * longer supply its exact revision is treated as changed, because accepting it
+ * would assemble a reply for text the user may have replaced.
+ *
+ * Throws `EditAndSendContextError`, whose NAME survives the prompt-assembly
+ * worker boundary unmodified, so `startGeneration`'s catch can rethrow it
+ * terminally instead of taking the generic worker-infrastructure fallback.
+ */
+function readMessageRevision(row: object | null | undefined): number | null {
+  if (!row || !("revision" in row)) return null;
+  const value = row.revision;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return null;
+  return value;
+}
+
+function assertEditAndSendContextTarget(
+  input: GenerateInput,
+  context: EditAndSendContext,
+): void {
+  const edited = chatsSvc.getMessage(input.userId, context.editedUserMessageId);
+  if (!edited || edited.chat_id !== input.chat_id || !edited.is_user) {
+    throw new EditAndSendContextError(
+      "Edit-and-Send target message is not part of this chat",
+    );
+  }
+  const revision = readMessageRevision(edited);
+  if (
+    typeof revision !== "number" ||
+    !Number.isInteger(revision) ||
+    revision < 1 ||
+    revision !== context.committedRevision
+  ) {
+    throw new EditAndSendContextError(
+      "Edit-and-Send message revision has changed since it was committed",
+    );
+  }
+  // The separate assistant write target (swipe mode) must belong to the same
+  // chat we are about to stage a swipe on. `input.message_id` is the only
+  // editor-supplied id on this path; rejecting a mismatch prevents a stale or
+  // foreign id from steering the write before addSwipe runs.
+  if (input.message_id) {
+    const target = chatsSvc.getMessage(input.userId, input.message_id);
+    if (!target || target.chat_id !== input.chat_id) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send assistant target is not part of this chat",
+      );
+    }
+  }
 }
 
 export async function startGeneration(
@@ -1493,6 +1575,11 @@ export async function startGeneration(
     typeof input.generationId === "string" ? input.generationId.trim() : "";
   const generationId = resolveStartGenerationId(input);
   let genType = input.generation_type || "normal";
+
+  const editAndSendContext = options?.editAndSendContext;
+  if (editAndSendContext) {
+    assertEditAndSendContextTarget(input, editAndSendContext);
+  }
 
   if (requestedGenerationId) {
     const existing = getActiveGeneration(generationId);
@@ -1596,6 +1683,11 @@ export async function startGeneration(
   let stagedSwipeId: number | undefined;
 
   try {
+    // Recheck after waiting for a previous generation; failures here must
+    // release this generation's tracking and completion through the catch.
+    if (editAndSendContext) {
+      assertEditAndSendContextTarget(input, editAndSendContext);
+    }
     // Stage a swipe before cancelling background work, resolving secrets, or
     // validating the preset. This is the user-visible part of the action, and
     // it must not wait behind cache-warming HTTP teardown (which is bounded at
@@ -1823,6 +1915,15 @@ export async function startGeneration(
     // live tokens onto them. Distinct from lifecycle.targetSwipeIdx (which also
     // routes the completion write) so we don't perturb normal/continue saving.
     let targetSwipeId: number | undefined;
+
+    // Edit-and-Send: recheck ownership AFTER the async preflight (secret
+    // resolution, connection load) and immediately BEFORE any write in this
+    // phase, so a message edited during that await cannot slip through on the
+    // snapshot taken before it. The pre-write phase guard already ran before the
+    // first addSwipe; this is the second, post-await edge.
+    if (editAndSendContext) {
+      assertEditAndSendContextTarget(input, editAndSendContext);
+    }
 
     if (genType === "regenerate" || genType === "swipe") {
       const targetMsg = targetAssistantMessage;
@@ -2069,8 +2170,44 @@ export async function startGeneration(
               .filter(
                 (m) => m.id !== excludeMessageId && m.id !== stagedMessageId,
               );
+            // Edit-and-Send runs in a chat whose committed edit is a specific
+            // user turn. Cut the council's view off INCLUSIVELY at that turn so
+            // it never fingerprints or enriches on messages that post-date the
+            // edit. The slice is by stored chat order (getMessages returns
+            // index_in_chat ascending).
+            //
+            // A missing anchor is a HARD failure, not a reason to hand the
+            // council the full history: falling back to the uncut list would run
+            // council/WI/tools over turns the committed edit excluded. The
+            // domain error is rethrown terminally (never retried with newer
+            // text).
+            const councilEditAndSendContext = options?.editAndSendContext;
+            const councilCappedMessages = councilEditAndSendContext
+              ? (() => {
+                  const at = councilMessages.findIndex(
+                    (m) => m.id === councilEditAndSendContext.editedUserMessageId,
+                  );
+                  if (at < 0) {
+                    throw new EditAndSendContextError(
+                      "Edit-and-Send target message is no longer part of this chat",
+                    );
+                  }
+                  const selected = councilMessages[at];
+                  if (
+                    !selected.is_user ||
+                    selected.chat_id !== input.chat_id ||
+                    readMessageRevision(selected) !== councilEditAndSendContext.committedRevision
+                  ) {
+                    throw new EditAndSendContextError(
+                      "Edit-and-Send message revision has changed since it was committed",
+                    );
+                  }
+                  assertEditAndSendContextTarget(input, councilEditAndSendContext);
+                  return councilMessages.slice(0, at + 1);
+                })()
+              : councilMessages;
             councilContextHash = hashCouncilContextMessages(
-              councilMessages,
+              councilCappedMessages,
               councilSettings.toolsSettings.sidecarContextWindow,
               excludesLatestUserMessage(councilSettings.toolsSettings),
             );
@@ -2179,8 +2316,8 @@ export async function startGeneration(
                 wiEntries.length > 0
                   ? activateWorldInfo({
                       entries: wiEntries,
-                      messages: councilMessages,
-                      chatTurn: councilMessages.length,
+                      messages: councilCappedMessages,
+                      chatTurn: councilCappedMessages.length,
                       wiState: {},
                       settings: councilWorldInfoSettings,
                     }).activatedEntries
@@ -2193,7 +2330,7 @@ export async function startGeneration(
                 input.chat_id,
                 wiBookIds,
                 wiEntries,
-                councilMessages,
+                councilCappedMessages,
                 abortController.signal,
                 councilWorldInfoSettings,
               );
@@ -2210,7 +2347,7 @@ export async function startGeneration(
                 "[generate] Council enrichment: char=%s, persona=%s, messages=%d, wi=%d/%d, vector=%d",
                 fullCharacter?.name ?? "none",
                 resolvedPersona?.name ?? "none",
-                councilMessages.length,
+                councilCappedMessages.length,
                 councilWiActivated.length,
                 wiEntries.length,
                 vectorActivated.length,
@@ -2219,7 +2356,7 @@ export async function startGeneration(
               const councilEnrichment: CouncilEnrichment = {
                 character: fullCharacter,
                 persona: resolvedPersona,
-                messages: councilMessages,
+                messages: councilCappedMessages,
                 activatedWorldInfoEntries: councilWiActivated,
               };
 
@@ -2605,6 +2742,7 @@ export async function startGeneration(
             inputMessages: input.messages,
             inputParameters: input.parameters,
             excludeMessageId,
+            editAndSendContext,
             rejectedSwipe,
             continueMessageId: lifecycle.continueMessageId,
             continuePostfix: lifecycle.continuePostfix,
@@ -2760,6 +2898,9 @@ export async function startGeneration(
         // bail out here instead of emitting GENERATION_STARTED (with breakdown)
         // and then tearing the stream down on the first iter.next() race.
         checkAborted();
+        if (editAndSendContext) {
+          assertEditAndSendContextTarget(input, editAndSendContext);
+        }
 
         await runGeneration(
           generationId,

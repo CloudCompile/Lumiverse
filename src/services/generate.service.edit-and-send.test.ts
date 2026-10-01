@@ -3,6 +3,10 @@ import type { Message } from "../types/message";
 import type { Chat } from "../types/chat";
 import type { ConnectionProfile } from "../types/connection-profile";
 import type { LlmProvider } from "../llm/provider";
+import { closeDatabase, getDb, initDatabase } from "../db/connection";
+import { EventType } from "../ws/events";
+import { contextHandlerChain } from "../spindle/context-handler";
+import { interceptorPipeline } from "../spindle/interceptor-pipeline";
 import * as chatsSvc from "./chats.service";
 import * as connectionsSvc from "./connections.service";
 import * as secretsSvc from "./secrets.service";
@@ -13,7 +17,9 @@ import * as chatBackground from "./chat-background.service";
 import * as llmRegistry from "../llm/registry";
 import * as pool from "./generation-pool.service";
 import { eventBus } from "../ws/bus";
+import { getActiveGeneration } from "./generation/active-generation-registry";
 import {
+  getActiveChatGeneration,
   startGeneration,
   stopAllGenerations,
   stopGenerationSweep,
@@ -89,8 +95,10 @@ function baseMessage(overrides: Partial<Message> = {}): Message {
 describe("startGeneration edit-and-send", () => {
   const spies: Array<{ mockRestore: () => void }> = [];
   let assistant: Message;
+  let editedUserMessage: Message & { revision?: number };
   let addSwipe: ReturnType<typeof spyOn>;
   let createMessage: ReturnType<typeof spyOn>;
+  let getMessageSpy: ReturnType<typeof spyOn>;
 
   function track<T extends { mockRestore: () => void }>(spy: T): T {
     spies.push(spy);
@@ -107,6 +115,10 @@ describe("startGeneration edit-and-send", () => {
       swipes: ["reply"],
       swipe_dates: [1],
     });
+    // The Edit-and-Send edited user message: commit revision 5, owned by CHAT.
+    // Tests may reconfigure it (advance revision, move chat) to exercise the
+    // stale/foreign-target guards.
+    editedUserMessage = { ...baseMessage(), revision: 5 };
 
     track(spyOn(chatBackground, "abortChatBackground").mockResolvedValue(undefined));
     track(spyOn(connectionsSvc, "resolveConnection").mockReturnValue(connection));
@@ -126,9 +138,9 @@ describe("startGeneration edit-and-send", () => {
       assistant.swipes.length > 1 ? assistant : baseMessage(),
     ));
     track(spyOn(chatsSvc, "getLastAssistantMessage").mockImplementation(() => assistant));
-    track(spyOn(chatsSvc, "getMessage").mockImplementation((_userId, messageId) => {
+    getMessageSpy = track(spyOn(chatsSvc, "getMessage").mockImplementation((_userId, messageId) => {
       if (messageId === ASSISTANT_ID) return assistant;
-      if (messageId === USER_MSG_ID) return baseMessage();
+      if (messageId === USER_MSG_ID) return editedUserMessage;
       return null;
     }));
     track(spyOn(chatsSvc, "deleteMessage").mockImplementation(() => true));
@@ -243,5 +255,439 @@ describe("startGeneration edit-and-send", () => {
     expect(assistant.swipes).toEqual(["reply", ""]);
     expect(pool.getPoolEntry(GENERATION_ID)?.targetMessageId).toBe(ASSISTANT_ID);
     expect(pool.getPoolEntry(GENERATION_ID)?.targetSwipeId).toBe(1);
+  });
+
+  test("edit-and-send context matching the live revision proceeds and stages the swipe", async () => {
+    const started = await startGeneration(
+      {
+        userId: USER,
+        chat_id: CHAT,
+        generationId: GENERATION_ID,
+        generation_type: "swipe",
+        message_id: ASSISTANT_ID,
+      },
+      {
+        origin: "edit_and_send",
+        editAndSendContext: { editedUserMessageId: USER_MSG_ID, committedRevision: 5 },
+      },
+    );
+
+    expect(started).toEqual({ generationId: GENERATION_ID, status: "streaming" });
+    expect(addSwipe).toHaveBeenCalledTimes(1);
+    expect(addSwipe.mock.calls[0]?.[1]).toBe(ASSISTANT_ID);
+  });
+
+  test("rejects a stale edit-and-send revision before staging any swipe", async () => {
+    // The user edited the message again after this request was queued: the live
+    // revision (6) no longer matches the committed one (5).
+    editedUserMessage = { ...baseMessage(), revision: 6 };
+
+    await expect(
+      startGeneration(
+        {
+          userId: USER,
+          chat_id: CHAT,
+          generationId: GENERATION_ID,
+          generation_type: "swipe",
+          message_id: ASSISTANT_ID,
+        },
+        {
+          origin: "edit_and_send",
+          editAndSendContext: { editedUserMessageId: USER_MSG_ID, committedRevision: 5 },
+        },
+      ),
+    ).rejects.toThrow("Edit-and-Send message revision has changed since it was committed");
+
+    expect(addSwipe).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+    expect(assistant.swipes).toEqual(["reply"]);
+  });
+
+  test("rejects an edit-and-send target that is not part of this chat before staging", async () => {
+    editedUserMessage = { ...baseMessage(), chat_id: "some-other-chat", revision: 5 };
+
+    await expect(
+      startGeneration(
+        {
+          userId: USER,
+          chat_id: CHAT,
+          generationId: GENERATION_ID,
+          generation_type: "normal",
+        },
+        {
+          origin: "edit_and_send",
+          editAndSendContext: { editedUserMessageId: USER_MSG_ID, committedRevision: 5 },
+        },
+      ),
+    ).rejects.toThrow("Edit-and-Send target message is not part of this chat");
+
+    expect(addSwipe).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects a missing edit-and-send target before staging", async () => {
+    editedUserMessage = { ...baseMessage(), revision: 5 };
+
+    await expect(
+      startGeneration(
+        {
+          userId: USER,
+          chat_id: CHAT,
+          generationId: GENERATION_ID,
+          generation_type: "normal",
+        },
+        {
+          origin: "edit_and_send",
+          editAndSendContext: { editedUserMessageId: "gone-message", committedRevision: 5 },
+        },
+      ),
+    ).rejects.toThrow("Edit-and-Send target message is not part of this chat");
+
+    expect(addSwipe).not.toHaveBeenCalled();
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+
+  test("rejects an assistant target from another chat before addSwipe", async () => {
+    // The edited user message is valid, but the swipe target id belongs to a
+    // different chat; the guard must reject before addSwipe runs.
+    const foreignAssistant = { ...assistant, chat_id: "another-chat" };
+    getMessageSpy.mockImplementation((_userId: string, messageId: string) => {
+      if (messageId === ASSISTANT_ID) return foreignAssistant as Message;
+      if (messageId === USER_MSG_ID) return editedUserMessage;
+      return null;
+    });
+
+    await expect(
+      startGeneration(
+        {
+          userId: USER,
+          chat_id: CHAT,
+          generationId: GENERATION_ID,
+          generation_type: "swipe",
+          message_id: ASSISTANT_ID,
+        },
+        {
+          origin: "edit_and_send",
+          editAndSendContext: { editedUserMessageId: USER_MSG_ID, committedRevision: 5 },
+        },
+      ),
+    ).rejects.toThrow("Edit-and-Send assistant target is not part of this chat");
+
+    expect(addSwipe).not.toHaveBeenCalled();
+  });
+
+  test("ordinary generation without edit-and-send context is unchanged", async () => {
+    const started = await startGeneration({
+      userId: USER,
+      chat_id: CHAT,
+      generationId: GENERATION_ID,
+      generation_type: "swipe",
+      message_id: ASSISTANT_ID,
+    });
+
+    expect(started).toEqual({ generationId: GENERATION_ID, status: "streaming" });
+    expect(addSwipe).toHaveBeenCalledTimes(1);
+    expect(createMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ── Async guard regressions (real service, real DB, deferred gates) ───────
+//
+// These drive the REAL `startGeneration` against an in-memory baseline DB and
+// hold the async gaps open with a deferred interceptor, so the assertions
+// observe registry/provider side effects rather than a helper return value.
+
+describe("startGeneration edit-and-send async guards", () => {
+  const spies: Array<{ mockRestore: () => void }> = [];
+  let fetchSpy: ReturnType<typeof spyOn> | undefined;
+  const unregisters: Array<() => void> = [];
+  const endedEvents: any[] = [];
+
+  const committedRevision = 3;
+
+  function track<T extends { mockRestore: () => void }>(spy: T): T {
+    spies.push(spy);
+    return spy;
+  }
+
+  async function seed(): Promise<{ chatId: string; userMessageId: string; connectionId: string }> {
+    const connection = await connectionsSvc.createConnection(USER, {
+      name: "Mock",
+      provider: "openai",
+      model: "test-model",
+      api_url: "https://example.test",
+    });
+    const chat = chatsSvc.createChat(USER, {
+      character_id: null,
+      name: "Async guard chat",
+      metadata: { temporary: true, no_preset: true },
+    });
+    const userMessage = chatsSvc.createMessage(
+      chat.id,
+      { is_user: true, name: "User", content: "original" },
+      USER,
+    );
+    getDb().query("UPDATE messages SET revision = ? WHERE id = ?").run(committedRevision, userMessage.id);
+    return { chatId: chat.id, userMessageId: userMessage.id, connectionId: connection.id };
+  }
+
+  function rejectFetch(): void {
+    fetchSpy = track(
+      spyOn(globalThis, "fetch").mockImplementation((async () => {
+        throw new Error("provider call reached while context was stale");
+      }) as unknown as typeof fetch),
+    );
+  }
+
+  beforeEach(async () => {
+    closeDatabase();
+    initDatabase(":memory:");
+    getDb().run("PRAGMA foreign_keys = OFF");
+    getDb().run(await Bun.file(new URL("../db/baseline.sql", import.meta.url)).text());
+    track(spyOn(secretsSvc, "getSecret").mockResolvedValue("test-key"));
+    track(
+      spyOn(eventBus, "emit").mockImplementation((type, payload) => {
+        if (type === EventType.GENERATION_ENDED) endedEvents.push(payload);
+      }),
+    );
+    unregisters.length = 0;
+    endedEvents.length = 0;
+  });
+
+  afterEach(() => {
+    // Release any parked deferred gates first so a still-running continuation can
+    // unblock and be torn down before the DB closes (no orphaned async work).
+    for (const un of unregisters.splice(0)) un();
+    fetchSpy?.mockRestore();
+    fetchSpy = undefined;
+    for (const spy of spies.splice(0)) spy.mockRestore();
+    stopAllGenerations();
+    stopGenerationSweep();
+    pool.clearAllPoolEntries();
+    closeDatabase();
+  });
+
+  test("stale context at entry rejects before aborting an existing ordinary generation and leaves no registration", async () => {
+    const { chatId, userMessageId, connectionId } = await seed();
+    rejectFetch();
+
+    // An ORDINARY generation is already live on the same chat.
+    const ordinary = await startGeneration({
+      userId: USER,
+      chat_id: chatId,
+      connection_id: connectionId,
+      generation_type: "normal",
+    });
+    const ordinaryEntry = getActiveGeneration(ordinary.generationId);
+    expect(ordinaryEntry).toBeDefined();
+    expect(getActiveChatGeneration(USER, chatId)).toBe(ordinary.generationId);
+    const abortSpy = track(spyOn(ordinaryEntry!.controller, "abort"));
+
+    // The user edited again after this request was queued: revision now 4.
+    getDb().query("UPDATE messages SET revision = ? WHERE id = ?").run(committedRevision + 1, userMessageId);
+
+    await expect(
+      startGeneration(
+        {
+          userId: USER,
+          chat_id: chatId,
+          generationId: "gen-stale-entry",
+          generation_type: "normal",
+        },
+        {
+          origin: "edit_and_send",
+          editAndSendContext: { editedUserMessageId: userMessageId, committedRevision },
+        },
+      ),
+    ).rejects.toThrow("Edit-and-Send message revision has changed since it was committed");
+
+    // The existing ordinary generation was NOT aborted, still owns the chat,
+    // and the rejected request never registered its own generation.
+    expect(abortSpy).not.toHaveBeenCalled();
+    expect(getActiveChatGeneration(USER, chatId)).toBe(ordinary.generationId);
+    expect(getActiveGeneration("gen-stale-entry")).toBeUndefined();
+  });
+
+  test("an edit committed while the context handler is parked rejects and clears the new registration", async () => {
+    const { chatId, userMessageId, connectionId } = await seed();
+    rejectFetch();
+
+    // Hold the entry-gap open with a deferred context handler. The handler runs
+    // inside the generation continuation (well after the pre-register guard),
+    // so the window it creates is exactly where a competing edit can land
+    // between registration and the final pre-runGeneration checkpoint.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    unregisters.push(
+      contextHandlerChain.register({
+        extensionId: "eas-async-guard",
+        priority: 100,
+        handler: async (context: any) => {
+          enter();
+          await gate;
+          return context;
+        },
+      }),
+    );
+
+    const started = await startGeneration(
+      {
+        userId: USER,
+        chat_id: chatId,
+        generationId: "gen-late-stale",
+        generation_type: "normal",
+      },
+      {
+        origin: "edit_and_send",
+        editAndSendContext: { editedUserMessageId: userMessageId, committedRevision },
+      },
+    );
+    // startGeneration returns the streaming handle BEFORE the detached
+    // continuation runs; the failure surfaces through the tracked completion.
+    expect(started).toEqual({ generationId: "gen-late-stale", status: "streaming" });
+    const entry = getActiveGeneration("gen-late-stale");
+    expect(entry).toBeDefined();
+
+    // The competing edit lands while the handler is parked.
+    await entered;
+    getDb().query("UPDATE messages SET revision = ? WHERE id = ?").run(committedRevision + 1, userMessageId);
+    release();
+    await entry!.completion;
+
+    // The failed request cleaned up its own tracking, never reached the
+    // provider, and reported through the correlated terminal event.
+    expect(getActiveGeneration("gen-late-stale")).toBeUndefined();
+    expect(getActiveChatGeneration(USER, chatId)).toBeUndefined();
+    expect(fetchSpy!.mock.calls).toHaveLength(0);
+    expect(endedEvents).toEqual([
+      expect.objectContaining({
+        generationId: "gen-late-stale",
+        chatId,
+        error: "Edit-and-Send message revision has changed since it was committed",
+      }),
+    ]);
+  });
+
+  test("an edit committed during a deferred interceptor rejects before any provider request", async () => {
+    const { chatId, userMessageId, connectionId } = await seed();
+    rejectFetch();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    unregisters.push(
+      interceptorPipeline.register({
+        extensionId: "eas-async-guard",
+        priority: 100,
+        handler: async (messages: any, context: any) => {
+          enter();
+          await gate;
+          return { messages };
+        },
+      }),
+    );
+
+    const started = await startGeneration(
+      {
+        userId: USER,
+        chat_id: chatId,
+        connection_id: connectionId,
+        generationId: "gen-interceptor-stale",
+        generation_type: "normal",
+      },
+      {
+        origin: "edit_and_send",
+        editAndSendContext: { editedUserMessageId: userMessageId, committedRevision },
+      },
+    );
+    expect(started).toEqual({ generationId: "gen-interceptor-stale", status: "streaming" });
+    const entry = getActiveGeneration("gen-interceptor-stale");
+    expect(entry).toBeDefined();
+
+    // Let the continuation reach the deferred interceptor, then edit the
+    // message while it is parked; the final pre-runGeneration checkpoint sees
+    // the new revision.
+    await entered;
+    getDb().query("UPDATE messages SET revision = ? WHERE id = ?").run(committedRevision + 1, userMessageId);
+    release();
+    await entry!.completion;
+
+    // No provider request was issued because the final checkpoint rejected
+    // before runGeneration.
+    expect(fetchSpy!.mock.calls).toHaveLength(0);
+    expect(getActiveGeneration("gen-interceptor-stale")).toBeUndefined();
+    expect(getActiveChatGeneration(USER, chatId)).toBeUndefined();
+    // The detached continuation surfaces the domain rejection through its one
+    // terminal channel, correlated to this generation id.
+    expect(endedEvents).toEqual([
+      expect.objectContaining({
+        generationId: "gen-interceptor-stale",
+        chatId,
+        error: "Edit-and-Send message revision has changed since it was committed",
+        errorCode: "generation_failed",
+      }),
+    ]);
+  });
+
+  test("a deleted edited target after the detached yield rejects before council/provider side effects", async () => {
+    const { chatId, userMessageId, connectionId } = await seed();
+    rejectFetch();
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    unregisters.push(
+      interceptorPipeline.register({
+        extensionId: "eas-async-guard-deleted",
+        priority: 100,
+        handler: async (messages: any, context: any) => {
+          enter();
+          await gate;
+          return { messages };
+        },
+      }),
+    );
+
+    const started = await startGeneration(
+      {
+        userId: USER,
+        chat_id: chatId,
+        connection_id: connectionId,
+        generationId: "gen-deleted-stale",
+        generation_type: "normal",
+      },
+      {
+        origin: "edit_and_send",
+        editAndSendContext: { editedUserMessageId: userMessageId, committedRevision },
+      },
+    );
+    expect(started).toEqual({ generationId: "gen-deleted-stale", status: "streaming" });
+    const entry = getActiveGeneration("gen-deleted-stale");
+    expect(entry).toBeDefined();
+
+    await entered;
+    getDb().query("DELETE FROM messages WHERE id = ?").run(userMessageId);
+    release();
+    await entry!.completion;
+
+    expect(fetchSpy!.mock.calls).toHaveLength(0);
+    expect(getActiveGeneration("gen-deleted-stale")).toBeUndefined();
+    expect(getActiveChatGeneration(USER, chatId)).toBeUndefined();
+    expect(endedEvents).toEqual([
+      {
+        generationId: "gen-deleted-stale",
+        chatId,
+        error: "Edit-and-Send target message is not part of this chat",
+        errorCode: "generation_failed",
+        errorMessage: "Edit-and-Send target message is not part of this chat",
+        generationType: "normal",
+        connectionName: "Mock",
+        frontendSessionId: undefined,
+      },
+    ]);
   });
 });

@@ -1,5 +1,6 @@
 import { getDb } from "../db/connection";
 import type { SQLQueryBindings } from "bun:sqlite";
+import type { EditAndSendContext } from "../llm/types";
 import { clampErrorMessage, ConnectionCredentialError } from "../utils/provider-errors";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -83,6 +84,14 @@ export interface StartGenerationOptions {
    * unchanged legacy ladder.
    */
   connectionId?: string;
+  /**
+   * The committed edit identity read from the stored
+   * `edit_and_send_requests.cursor` snapshot for this request. Travels out of
+   * band for the same security reason as `connectionId`: an in-band field would
+   * be forgeable by any client on `POST /generate`. Present only on the
+   * Edit-and-Send path; ordinary interactive sends never set it.
+   */
+  editAndSendContext?: EditAndSendContext;
 }
 
 export type StartEditAndSendGenerationFn = (
@@ -196,6 +205,66 @@ export function getGenerationOutboxByGenerationId(generationId: string): Generat
     .query("SELECT * FROM generation_outbox WHERE generation_id = ?")
     .get(generationId) as any;
   return row ? rowToOutbox(row) : null;
+}
+
+/**
+ * Read the committed Edit-and-Send identity from the request's stored cursor.
+ *
+ * The cursor is written once, inside the commit transaction, and never
+ * rewritten (the replay short-circuit in `chats.service.editAndSend` returns the
+ * original response), so this snapshot is the same value the commit observed.
+ *
+ * Strictly validated against the outbox row it is being dispatched for, because
+ * a cursor shaped for a different request, chat, or generation must never be
+ * able to steer this generation's history cutoff:
+ * - the cursor must be the one stored for THIS user/chat/requestId, and its
+ *   embedded generationId must match the row's committed generation id;
+ * - the embedded chatId must match the branch chat the generation runs in;
+ * - `editedUserMessageId` must be the row's own `edited_message_id`;
+ * - `committedRevision` must be a positive integer.
+ *
+ * Returns `null` when anything above fails. Callers treat `null` as a terminal
+ * dispatch failure WITHOUT retry: a missing or stale cursor cannot become valid
+ * on a later tick, and retrying would generate a reply that ignores the
+ * committed edit rather than surfacing the problem.
+ */
+function readCommittedEditAndSendContext(
+  row: GenerationOutboxRow,
+): EditAndSendContext | null {
+  const stored = getDb()
+    .query(
+      `SELECT cursor FROM edit_and_send_requests
+       WHERE user_id = ? AND chat_id = ? AND request_id = ?`,
+    )
+    .get(row.user_id, row.chat_id, row.request_id) as { cursor?: string } | undefined;
+  if (!stored || typeof stored.cursor !== "string") return null;
+
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(stored.cursor);
+  } catch {
+    return null;
+  }
+  if (!cursor || typeof cursor !== "object") return null;
+  const record = cursor as Record<string, unknown>;
+
+  if (record.generationId !== row.generation_id) return null;
+  if (record.chatId !== row.branch_chat_id) return null;
+
+  const context = record.editAndSendContext;
+  if (!context || typeof context !== "object") return null;
+  const { editedUserMessageId, committedRevision } = context as Record<string, unknown>;
+
+  if (editedUserMessageId !== row.edited_message_id) return null;
+  if (
+    typeof committedRevision !== "number" ||
+    !Number.isInteger(committedRevision) ||
+    committedRevision < 1
+  ) {
+    return null;
+  }
+
+  return { editedUserMessageId, committedRevision };
 }
 
 function isClaimable(row: GenerationOutboxRow, now: number): boolean {
@@ -354,6 +423,30 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   }
   if (row.dispatched_at) return row;
 
+  // Fail closed BEFORE any generation work when the committed edit identity is
+  // missing or stale. A cursor that does not validate can never become valid on
+  // a later tick, so this is terminal and deliberately does NOT go through the
+  // retry/backoff path (which is reserved for transient provider/connection
+  // failures). The outbox row is closed without a fallback generation so no
+  // reply is produced for an edit we can no longer prove we are serving.
+  const editAndSendContext = readCommittedEditAndSendContext(row);
+  if (!editAndSendContext) {
+    markDispatchFailure(row, "edit_and_send_context_invalid", "edit_and_send_context_invalid");
+    eventBus.emit(
+      EventType.GENERATION_ENDED,
+      {
+        generationId: row.generation_id,
+        chatId: row.branch_chat_id,
+        error: "Edit-and-Send context is no longer valid",
+        errorCode: "edit_and_send_context_invalid",
+        errorMessage: "Edit-and-Send context is no longer valid",
+        generationType: row.mode,
+      },
+      row.user_id,
+    );
+    return getGenerationOutboxById(row.id);
+  }
+
   const input: StartEditAndSendGenerationInput = {
     userId: row.user_id,
     chat_id: row.branch_chat_id,
@@ -376,6 +469,7 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   const options: StartGenerationOptions = {
     origin: "edit_and_send",
     connectionId: row.connection_id ?? undefined,
+    editAndSendContext,
   };
 
   try {

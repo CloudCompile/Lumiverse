@@ -16,6 +16,8 @@ import type {
 } from "../types/message";
 import type { BulkMessageInput } from "../types/migrate";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
+import type { EditAndSendContext } from "../llm/types";
+import { EditAndSendContextError } from "../llm/types";
 import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as audioSvc from "./audio.service";
@@ -3450,6 +3452,12 @@ export interface EditAndSendGenerationCursor {
   chatId: string;
   requestId: string;
   mode: EditAndSendMode;
+  /**
+   * Committed edit identity for this request, recorded in the SAME cursor JSON
+   * as the generation cursor so a replay returns the identical snapshot and the
+   * dispatcher can forward it without re-deriving anything from live rows.
+   */
+  editAndSendContext?: EditAndSendContext;
 }
 
 export interface EditAndSendSuccess {
@@ -3505,6 +3513,20 @@ function withImmediateTransaction<T>(fn: () => T): T {
 
 function messageRevision(row: { revision?: unknown }): number {
   return typeof row.revision === "number" && Number.isInteger(row.revision) ? row.revision : 1;
+}
+
+/**
+ * Strict revision read for rows whose revision is authoritative. Returns the
+ * exact positive integer, or `null` when the row is missing or its revision is
+ * not a positive integer. Unlike `messageRevision` this NEVER substitutes a
+ * default: a caller that needs the real committed value must fail rather than
+ * invent `1`.
+ */
+function readStrictRevision(row: object | null | undefined): number | null {
+  if (!row || !("revision" in row)) return null;
+  const value = row.revision;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return null;
+  return value;
 }
 
 class EditAndSendBranchMappingError extends Error {}
@@ -3634,6 +3656,25 @@ export function editAndSend(
 
     editedCopy = getMessage(userId, editedMessageId);
     const generationId = crypto.randomUUID();
+    // `editedCopy` is read back AFTER the revision-bumping UPDATE above, so its
+    // revision is the committed post-edit value. Read it strictly: an optional
+    // unknown property, narrowed by typeof + Number.isInteger + > 0. There is NO
+    // `?? 1` fallback and no cast — a message whose revision cannot be read
+    // exactly cannot be committed, because the cursor is the ONLY record of the
+    // edit identity and a fabricated 1 would make assembly accept a stale edit.
+    // Recording the value actually written (rather than inferring
+    // `input.expectedVersion + 1`) stays correct when the two disagree, and lets
+    // a replay return the exact snapshot the first commit stored.
+    const committedRevision = readStrictRevision(editedCopy);
+    if (committedRevision == null) {
+      throw new EditAndSendContextError(
+        "edited message revision is unreadable at commit",
+      );
+    }
+    const editAndSendContext: EditAndSendContext = {
+      editedUserMessageId: editedMessageId,
+      committedRevision,
+    };
     const payload: EditAndSendSuccess = {
       branchChatId: targetChatId,
       editedMessageId,
@@ -3643,6 +3684,7 @@ export function editAndSend(
         chatId: targetChatId,
         requestId: input.requestId,
         mode,
+        editAndSendContext,
       },
     };
     const requestRowId = crypto.randomUUID();

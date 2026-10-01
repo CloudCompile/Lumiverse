@@ -697,6 +697,63 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
   return id;
 }
 
+/**
+ * Seed the durable request cursor the dispatcher validates before dispatch, so
+ * a manually-inserted outbox row reaches `startGeneration` instead of failing
+ * closed on a missing context. The cursor is shaped exactly like the production
+ * write (generation cursor + committed edit identity) and is keyed to the row
+ * it belongs to: same user, source chat, request id, branch chat, edited user
+ * id and generation id, so `readCommittedEditAndSendContext` accepts it.
+ */
+function insertRequestCursor(overrides: {
+  user_id?: string;
+  chat_id?: string;
+  branch_chat_id?: string;
+  request_id: string;
+  edited_message_id?: string;
+  generation_id?: string;
+  committed_revision?: number;
+}): void {
+  const userId = overrides.user_id ?? USER;
+  const chatId = overrides.chat_id ?? "retry-chat";
+  const branchChatId = overrides.branch_chat_id ?? "retry-chat";
+  const editedMessageId = overrides.edited_message_id ?? "retry-user";
+  const generationId = overrides.generation_id ?? `gen-${overrides.request_id}`;
+  const cursor = {
+    generationId,
+    chatId: branchChatId,
+    requestId: overrides.request_id,
+    mode: "normal",
+    editAndSendContext: {
+      editedUserMessageId: editedMessageId,
+      committedRevision: overrides.committed_revision ?? 1,
+    },
+  };
+  const now = Date.now();
+  getDb().query(
+    `INSERT INTO edit_and_send_requests (
+      id, user_id, chat_id, request_id, request_fingerprint, branch_chat_id,
+      edited_message_id, target_message_id, target_swipe_index, generation_id,
+      response, cursor, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    crypto.randomUUID(),
+    userId,
+    chatId,
+    overrides.request_id,
+    "fp",
+    branchChatId,
+    editedMessageId,
+    null,
+    null,
+    generationId,
+    "{}",
+    JSON.stringify(cursor),
+    now,
+    now,
+  );
+}
+
 describe("Case 5 — dispatch failures never replay a generation", () => {
   test("generic failures are terminal after one attempt", async () => {
     let calls = 0;
@@ -705,6 +762,7 @@ describe("Case 5 — dispatch failures never replay a generation", () => {
       throw new Error("provider_down");
     });
     const id = insertOutbox({ id: "failure" });
+    insertRequestCursor({ request_id: "req-failure", generation_id: "gen-failure" });
     const claimed = dispatcher.claimNextEditAndSendOutbox();
     const row = await dispatcher.dispatchClaimedEditAndSendOutbox(claimed!);
     expect(row).toMatchObject({
