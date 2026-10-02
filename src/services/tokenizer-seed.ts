@@ -164,6 +164,25 @@ const BUILT_IN_CONFIGS = [
       configUrl: "https://huggingface.co/XiaomiMiMo/MiMo-V2.5-Pro/resolve/main/tokenizer_config.json",
     }),
   },
+  // Xiaomi publishes the V2.6 tokenizers in the official RL checkpoints.
+  {
+    id: "mimo-v2-6-pro",
+    name: "Xiaomi MiMo-V2.6-Pro",
+    type: "huggingface",
+    config: JSON.stringify({
+      url: "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL/resolve/main/tokenizer.json",
+      configUrl: "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Pro-RL/resolve/main/tokenizer_config.json",
+    }),
+  },
+  {
+    id: "mimo-v2-6-flash",
+    name: "Xiaomi MiMo-V2.6-Flash",
+    type: "huggingface",
+    config: JSON.stringify({
+      url: "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL/resolve/main/tokenizer.json",
+      configUrl: "https://huggingface.co/XiaomiMiMo/MiMo-V2.6-Flash-RL/resolve/main/tokenizer_config.json",
+    }),
+  },
   {
     id: "gemma-4",
     name: "Google Gemma 4",
@@ -266,6 +285,8 @@ const BUILT_IN_PATTERNS = [
   // through to the base V2.5 pattern.
   { id: "pat-mimo-v2-5-pro", tokenizer_id: "mimo-v2-5-pro", pattern: "(?:^|[/:.])mimo-?v2[-.]5[-.]?pro", priority: 85 },
   { id: "pat-mimo-v2-5", tokenizer_id: "mimo-v2-5", pattern: "(?:^|[/:.])mimo-?v2[-.]5", priority: 80 },
+  { id: "pat-mimo-v2-6-pro", tokenizer_id: "mimo-v2-6-pro", pattern: "(?:^|[/:.])mimo-?v2[-.]6[-.]?pro", priority: 85 },
+  { id: "pat-mimo-v2-6-flash", tokenizer_id: "mimo-v2-6-flash", pattern: "(?:^|[/:.])mimo-?v2[-.]6[-.]?flash", priority: 85 },
   // Google Gemma 4 before the looser gemma-3 / gemini pattern.
   { id: "pat-gemma-4", tokenizer_id: "gemma-4", pattern: "(?:^|[/:.])gemma-4", priority: 85 },
   // Moonshot Kimi K2.7 Code before the general kimi- pattern.
