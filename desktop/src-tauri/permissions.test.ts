@@ -160,6 +160,16 @@ describe("capability origins", () => {
 });
 
 describe("native capture boundary", () => {
+  test("macOS explicitly links the configured compiler's availability runtime", () => {
+    const build = readFileSync(join(HERE, "build.rs"), "utf8");
+    expect(build).toContain(".get_compiler()");
+    expect(build).toContain(".to_command()");
+    expect(build).toContain('.arg("--print-file-name=libclang_rt.osx.a")');
+    expect(build).toContain("runtime_path.is_file()");
+    expect(build).toContain('cargo:rustc-link-search=native={}');
+    expect(build).toContain('cargo:rustc-link-lib=static=clang_rt.osx');
+  });
+
   test("macOS development builds retain the configured application identity", () => {
     const config = JSON.parse(readFileSync(join(HERE, "tauri.conf.json"), "utf8"));
     const plist = readFileSync(join(HERE, "Info.plist"), "utf8");
