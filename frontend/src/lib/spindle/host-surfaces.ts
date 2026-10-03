@@ -1,4 +1,5 @@
 import { router } from '@/router'
+import { resolveCouncilTabId } from '@/lib/council-navigation'
 import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
 import {
@@ -315,7 +316,7 @@ export function createHostSurfaceAPI(options: HostSurfaceAPIFactoryOptions): Hos
   let storeUnsubscribe: (() => void) | undefined
 
   const snapshot = () => buildHostSurfaceCatalog(getInputs())
-  const find = (ref: HostSurfaceRef) => snapshot().find((surface) => surface.kind === ref.kind && surface.id === ref.id)
+  const find = (ref: HostSurfaceRef) => snapshot().find((surface) => surface.kind === ref.kind && surface.id === (ref.kind === 'drawer_tab' ? resolveCouncilTabId(ref.id) : ref.id))
   const commandById = (id: string) => collectCommands(getInputs()).find((command) => command.id === id)
   const inputById = (id: string) => getInputs().inputBarActions?.find((action) => action.id === id)
   const extCommandById = (id: string) => {
