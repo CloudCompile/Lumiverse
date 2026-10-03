@@ -279,6 +279,7 @@ function QuickToolbarNative() {
   // `getState()` snapshot at click time inside `useQuickToolbarActions`.
   const drawerOpen = useStore((state) => state.drawerOpen)
   const drawerTab = useStore((state) => state.drawerTab)
+  const councilView = useStore((state) => state.councilView)
   const settingsModalOpen = useStore((state) => state.settingsModalOpen)
   const settingsActiveView = useStore((state) => state.settingsActiveView)
   const characterEditorOpen = useStore((state) => Boolean(state.editingCharacterId))
@@ -310,8 +311,8 @@ function QuickToolbarNative() {
    */
   const [restoredOverModal, setRestoredOverModal] = useState(false)
   const uiState = useMemo<ToolbarUiState>(
-    () => ({ drawerOpen, drawerTab, settingsModalOpen, settingsActiveView }),
-    [drawerOpen, drawerTab, settingsModalOpen, settingsActiveView],
+    () => ({ drawerOpen, drawerTab, councilView, settingsModalOpen, settingsActiveView }),
+    [drawerOpen, drawerTab, councilView, settingsModalOpen, settingsActiveView],
   )
 
   // Visual variant is independent of dock placement. Absent/legacy/invalid

@@ -31,6 +31,12 @@ export default function OOCPanel() {
         label={t('oocPanel.enable')}
       />
 
+      {!oocEnabled && (
+        <p className={styles.description}>
+          {t('oocPanel.disabledDescription', { defaultValue: 'OOC comments are out-of-character asides from Lumia or Council members, shown alongside the story. Enable them to choose their display style and how often they appear.' })}
+        </p>
+      )}
+
       {oocEnabled && (
         <>
           {/* Style selector */}

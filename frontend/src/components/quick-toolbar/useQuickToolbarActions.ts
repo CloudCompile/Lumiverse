@@ -8,6 +8,7 @@ import {
   subscribeChatDockerActionOwners,
 } from '@/components/chat/chatDockerActionCatalog'
 import { COMMANDS } from '@/lib/commands'
+import { COUNCIL_TAB_ALIASES } from '@/lib/council-navigation'
 import { adaptExtensionTabs, DRAWER_TABS, extensionCommandsToCommands } from '@/lib/drawer-tab-registry'
 import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import { resolveToolbarIntent, type ToolbarSurface, type ToolbarUiState } from '@/lib/quickToolbarToggle'
@@ -87,6 +88,7 @@ function readUi(): ToolbarUiState {
   return {
     drawerOpen: state.drawerOpen,
     drawerTab: state.drawerTab,
+    councilView: state.councilView,
     settingsModalOpen: state.settingsModalOpen,
     settingsActiveView: state.settingsActiveView,
   }
@@ -243,7 +245,9 @@ export function useQuickToolbarActions() {
     const enabledDrawerTabs = filterEnabledFrontendContributions(extensionDrawerTabs, extensions)
     const enabledExtensionCommands = filterEnabledFrontendContributions(extensionCommands, extensions)
     const enabledInputBarActions = filterEnabledFrontendContributions(inputBarActions, extensions)
-    const drawerActions: ToolbarAction[] = [...DRAWER_TABS, ...adaptExtensionTabs(enabledDrawerTabs)].map((tab) => {
+    const councilTab = DRAWER_TABS.find((tab) => tab.id === 'council')
+    const legacyCouncilTabs = councilTab ? Object.entries(COUNCIL_TAB_ALIASES).map(([id, view]) => ({ ...councilTab, id, tabName: `Council · ${view === 'ooc' ? 'OOC' : view[0].toUpperCase() + view.slice(1)}` })) : []
+    const drawerActions: ToolbarAction[] = [...DRAWER_TABS, ...legacyCouncilTabs, ...adaptExtensionTabs(enabledDrawerTabs)].map((tab) => {
       const surface: ToolbarSurface = { kind: 'drawer', tabId: tab.id }
       return {
         id: tab.id,
