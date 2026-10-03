@@ -142,6 +142,18 @@ describe("capability origins", () => {
     expect(grants.flatMap((capability) => capability.json.windows as string[])).not.toContain("frontend");
   });
 
+  test("desktop installer handoff is callable only from the hidden local tray host", () => {
+    const grants = capabilities().filter((capability) =>
+      ((capability.json.permissions as Array<string | { identifier?: string }>) ?? [])
+        .some((permission) => permission === "desktop-update-install"
+          || (typeof permission === "object" && permission.identifier === "desktop-update-install")),
+    );
+    expect(grants.length).toBe(1);
+    expect(grants[0].json.remote).toBeUndefined();
+    expect(grants[0].json.local).not.toBe(false);
+    expect(grants[0].json.windows).toEqual(["main"]);
+  });
+
   test("capture control permissions never reach remote or extension windows", () => {
     const grants = capabilities().filter((capability) =>
       ((capability.json.permissions as string[]) ?? []).some((permission) =>

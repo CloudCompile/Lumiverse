@@ -41,6 +41,7 @@ const POLL_INTERVAL_MS = 15_000;
 // so the request client can never become the earlier cutoff.
 const DESKTOP_REBUILD_TIMEOUT_MS = 2 * 60 * 60_000 + 5 * 60_000;
 const isMac = navigator.userAgent.includes("Mac");
+const isWindows = navigator.userAgent.includes("Windows");
 
 /**
  * Alerts and pickers go through Rust commands so they never parent to —
@@ -455,9 +456,9 @@ async function applyUpdate(): Promise<void> {
 /**
  * Compile the desktop shell from the configured checkout.
  *
- * This produces a bundle; it cannot replace the running app, because a process
- * cannot overwrite its own bundle. The build therefore ends by pointing the
- * user at what it made.
+ * Windows can hand the fresh NSIS bundle to a detached native helper, then
+ * gracefully exit so that helper can install it and relaunch the application.
+ * Other platforms retain the existing manual bundle handoff for now.
  */
 async function rebuildDesktop(): Promise<void> {
   await ensureRunner();
@@ -478,15 +479,57 @@ async function rebuildDesktop(): Promise<void> {
       await alert("Lumiverse", "The desktop app was rebuilt.");
       return;
     }
-    await alert(
-      "Desktop app rebuilt",
-      "The new build is ready. Quit Lumiverse Desktop and replace the " +
-        "installed app with it to finish updating.\n\n" +
-        result.bundlePath,
-    );
-    // Best-effort: a file manager that refuses to open must not turn a
-    // successful build into a reported failure.
-    await revealItemInDir(result.bundlePath).catch(() => {});
+
+    if (!isWindows) {
+      await alert(
+        "Desktop app rebuilt",
+        "The new build is ready. Quit Lumiverse Desktop and replace the " +
+          "installed app with it to finish updating.\n\n" +
+          result.bundlePath,
+      );
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    if (!repoDir) {
+      throw new Error("No Lumiverse checkout is configured for the desktop update.");
+    }
+
+    const restartNow = await invoke<boolean>("confirm", {
+      title: "Desktop app rebuilt",
+      message:
+        "The new desktop build is ready. Restart Lumiverse Desktop now to install it?\n\n" +
+        "The app will close, the NSIS installer will run silently, and Lumiverse Desktop " +
+        "will reopen automatically. Your checkout is not modified by this step.",
+      okLabel: "Install and restart",
+      cancelLabel: "Later",
+    });
+
+    if (!restartNow) {
+      // Keep the old escape hatch: the bundle remains usable for a manual
+      // install, and revealing it makes choosing Later non-destructive.
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    try {
+      await invoke("stage_desktop_update", {
+        artifactPath: result.bundlePath,
+        repoDir,
+      });
+    } catch (error) {
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `The desktop build succeeded, but the automatic installer handoff failed: ${reason}\n\n` +
+          `The bundle is still available at:\n${result.bundlePath}`,
+      );
+    }
+
+    // The native helper is now independent of this process and waits for our
+    // PID to disappear before running NSIS. Use the normal graceful shutdown
+    // so the runner/server are not abandoned during the handoff.
+    await quit();
   } catch (err) {
     busyMessage = null;
     await updateMenu();

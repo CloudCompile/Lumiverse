@@ -236,6 +236,7 @@ pub fn run() {
             runner::discover_repo,
             runner::resolve_bun,
             runner::desktop_shell_sha,
+            runner::stage_desktop_update,
             frontend::desktop_startup_ready,
             frontend::close_current_sso_popup,
             runner::quit_app,
