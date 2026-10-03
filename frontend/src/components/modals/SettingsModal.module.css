@@ -420,13 +420,12 @@
 }
 
 .sectionTitle {
-  font-size: calc(15px * var(--lumiverse-font-scale, 1));
-  font-weight: 600;
-  color: var(--lumiverse-text);
-  margin-bottom: 4px;
-  /* Leave breathing room when scrolled to via the settings search. */
-  scroll-margin-top: 14px;
-  border-radius: 6px;
+  composes: title from '../settings/SettingsSection.module.css';
+}
+
+.settingsSection > .sectionTitle:not(:first-child) {
+  padding-top: 14px;
+  border-top: 1px solid var(--lumiverse-border);
 }
 
 /* Brief highlight pulse applied when the settings search jumps to a section. */

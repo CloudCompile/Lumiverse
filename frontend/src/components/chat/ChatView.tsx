@@ -216,6 +216,7 @@ export default function ChatView() {
   const wallpaper = useStore((s) => s.wallpaper)
   const useCharacterBackground = useStore((s) => s.useCharacterBackground)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
+  const centerChatWithSidebar = useStore((s) => s.centerChatWithSidebar)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
   const chatBodyRef = useRef<HTMLDivElement>(null)
@@ -1208,7 +1209,7 @@ export default function ChatView() {
           </div>
         )}
 
-        <div className={styles.chatColumn} data-lumiverse-surface="chat-column">
+        <div className={clsx(styles.chatColumn, centerChatWithSidebar && styles.chatColumnCentered)} data-lumiverse-surface="chat-column">
           {(spindleNotice || visibleCortexNotice) && (
             <div className={styles.noticeDock} aria-live="polite" aria-atomic="true">
               {spindleNotice && (

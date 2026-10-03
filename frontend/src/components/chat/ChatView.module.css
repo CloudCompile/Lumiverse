@@ -812,3 +812,7 @@
     pointer-events: auto;
   }
 }
+.chatColumnCentered {
+  margin-left: max(0px, calc(var(--chat-drawer-left, 0px) - var(--spindle-dock-left, 0px)));
+  margin-right: max(0px, calc(var(--chat-drawer-right, 0px) - var(--spindle-dock-right, 0px)));
+}

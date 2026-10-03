@@ -583,43 +583,7 @@ function DisplaySettings() {
         hint={t('display.drawer.showTabLabelsHint')}
       />
 
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>{t('display.drawer.panelWidth')}</label>
-        <div className={styles.segmented}>
-          <button
-            type="button"
-            className={clsx(styles.segmentedBtn, drawerSettings.panelWidthMode !== 'custom' && styles.segmentedBtnActive)}
-            onClick={() => updateDrawer({ panelWidthMode: 'default' })}
-          >
-            {t('display.drawer.panelDefault')}
-          </button>
-          <button
-            type="button"
-            className={clsx(styles.segmentedBtn, drawerSettings.panelWidthMode === 'custom' && styles.segmentedBtnActive)}
-            onClick={() => updateDrawer({ panelWidthMode: 'custom' })}
-          >
-            {t('display.drawer.panelCustom')}
-          </button>
-        </div>
-      </div>
-
-      {drawerSettings.panelWidthMode === 'custom' && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>{t('display.drawer.customWidthVw')}</label>
-          <div className={styles.rangeRow}>
-            <input
-              type="range"
-              className={styles.rangeSlider}
-              min={20}
-              max={80}
-              step={1}
-              value={drawerSettings.customPanelWidth}
-              onChange={(e) => updateDrawer({ customPanelWidth: parseInt(e.target.value, 10) })}
-            />
-            <span className={styles.rangeValue}>{drawerSettings.customPanelWidth}vw</span>
-          </div>
-        </div>
-      )}
+      <p className={styles.helperText}>{t('display.drawer.resizeHint')}</p>
 
       <h3 id={sectionAnchorId('display', 'toast')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.toast.title')}</h3>
 
@@ -949,6 +913,7 @@ function ChatSettings() {
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
+  const centerChatWithSidebar = useStore((s) => s.centerChatWithSidebar)
   const messagesPerPage = useStore((s) => s.messagesPerPage)
   const regenFeedback = useStore((s) => s.regenFeedback)
   const suppressContextDropWarnings = useStore((s) => s.suppressContextDropWarnings)
@@ -1153,6 +1118,12 @@ function ChatSettings() {
         </div>
       )}
 
+      <Toggle.Checkbox
+        checked={centerChatWithSidebar}
+        onChange={(checked) => setSetting('centerChatWithSidebar', checked)}
+        label={t('chat.centerWithSidebar')}
+        hint={t('chat.centerWithSidebarHint')}
+      />
       <h3 id={sectionAnchorId('chat', 'messagesPerPage')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.messagesPerPageTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.messagesPerPageHelper')}

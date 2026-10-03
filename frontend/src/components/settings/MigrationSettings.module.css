@@ -11,9 +11,7 @@
 }
 
 .title {
-  font-size: calc(15px * var(--lumiverse-font-scale, 1));
-  font-weight: 600;
-  color: var(--lumiverse-text);
+  composes: title from './SettingsSection.module.css';
   margin: 0;
 }
 

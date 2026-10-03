@@ -772,6 +772,7 @@ export interface SettingsSlice {
   saveDraftInput: boolean
   defaultImpersonationMode: ImpersonationPreference
   chatWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
+  centerChatWithSidebar: boolean
   chatContentMaxWidth: number
   modalWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
   modalMaxWidth: number
@@ -922,6 +923,8 @@ export interface DrawerSettings {
   tabSize: 'large' | 'compact'
   panelWidthMode: 'default' | 'custom'
   customPanelWidth: number
+  /** Drag-resized width in layout pixels. Legacy vw widths are used until the first resize. */
+  panelWidthPx?: number
   showTabLabels: boolean
   hiddenTabIds: string[]
   /** Legacy flat tab order retained for downgrade compatibility and migration. */
