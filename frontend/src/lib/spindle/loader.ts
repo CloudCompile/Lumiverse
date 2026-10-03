@@ -80,6 +80,7 @@ import {
 import { generateUUID } from '@/lib/uuid'
 import { installSpindleNavigationGuards } from './navigation-guards'
 import { DRAWER_TABS, ensureRegistryRoot } from '@/lib/drawer-tab-registry'
+import { resolveCouncilTabId } from '@/lib/council-navigation'
 import {
   createUIEventsHelper,
   destroyAllUIEventBindingsForExtension,
@@ -1556,7 +1557,7 @@ async function doLoadFrontendExtension(
         },
         getBuiltInTabTitle(tabId: string): string | undefined {
           assertFrontendActive()
-          const tab = DRAWER_TABS.find((t) => t.id === tabId)
+          const tab = DRAWER_TABS.find((t) => t.id === resolveCouncilTabId(tabId))
           return tab ? (tab.tabHeaderTitle ?? tab.tabName) : undefined
         },
         getTabLocation(tabId: string): TabLocation {
