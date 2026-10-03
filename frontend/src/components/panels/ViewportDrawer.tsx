@@ -492,7 +492,7 @@ export default function ViewportDrawer() {
             <div
               className={clsx(
                 styles.panelContent,
-                !activeFolder && (activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser' || activeTab === 'lorebook') && styles.panelContentFull,
+                !activeFolder && (activeTab === 'council' || activeTab === 'loom' || activeTab === 'lumi' || activeTab === 'browser' || activeTab === 'lorebook') && styles.panelContentFull,
               )}
               ref={panelContentRef}
             >

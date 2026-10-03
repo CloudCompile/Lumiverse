@@ -12,6 +12,7 @@ import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import ModelCombobox from './connection-manager/ModelCombobox'
 import LoadoutSelector from './LoadoutSelector'
 import CouncilMemberItem from './council/CouncilMemberItem'
+import CreateToolButton from './council/CreateToolButton'
 import AddMemberDropdown from './council/AddMemberDropdown'
 import QuickAddPackDropdown from './council/QuickAddPackDropdown'
 import LumiaSelector from '@/components/modals/LumiaSelector'
@@ -561,6 +562,12 @@ export default function CouncilManager() {
         </EditorSection>
 
         <EditorSection Icon={Link2} title={t('sections.tools')}>
+          <div className={styles.toolsSectionHeader}>
+            <CreateToolButton />
+            <button type="button" className={styles.assignToolsBtn} onClick={() => useStore.getState().openDrawer('create')}>
+              {t('councilWorkspace.workshop', { defaultValue: 'Open Workshop' })}
+            </button>
+          </div>
           <FormField label={t('tools.mode')}>
             <div className={styles.modeToggle}>
               <button

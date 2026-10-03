@@ -294,6 +294,8 @@ export interface UISlice {
   error: string | null
   drawerOpen: boolean
   drawerTab: string | null
+  councilView: import('@/lib/council-navigation').CouncilView
+  setCouncilView: (view: import('@/lib/council-navigation').CouncilView) => void
   settingsModalOpen: boolean
   settingsActiveView: string
   settingsScrollTarget: { extensionId?: string; anchorId?: string; nonce: number } | null

@@ -16,6 +16,12 @@ const openDrawerUi: ToolbarUiState = {
 }
 
 describe('isToolbarActionActive', () => {
+  test('legacy Council buttons are active only in their corresponding view', () => {
+    const ui: ToolbarUiState = { ...idleUi, drawerOpen: true, drawerTab: 'council', councilView: 'ooc' }
+    expect(isSurfaceActive({ kind: 'drawer', tabId: 'ooc' }, ui)).toBe(true)
+    expect(isSurfaceActive({ kind: 'drawer', tabId: 'feedback' }, ui)).toBe(false)
+    expect(isSurfaceActive({ kind: 'drawer', tabId: 'council' }, ui)).toBe(true)
+  })
   test('uses explicit active even for command surfaces', () => {
     expect(isToolbarActionActive(
       { surface: { kind: 'command' }, active: true },
