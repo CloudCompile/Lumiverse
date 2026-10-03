@@ -4,7 +4,7 @@ title: Scene, Output & Timeouts
 
 # Scene, Output & Timeouts
 
-How Lumiverse decides _when_ to generate, _where_ the result goes, and how long it's allowed to take.
+How Lumiverse decides _when_ to generate, _where_ the result goes, and how long it's allowed to take. **Mode**, **Output**, and the four **Quick Behavior** toggles stay in the Image Gen drawer. Open **Configure Generation… → Automation** for scene sensitivity, context limits, gallery and recycling behavior; open **Advanced** for timeouts.
 
 ---
 
@@ -14,10 +14,10 @@ When **Prompt Mode** is set to **Scene tool**, every new assistant message trigg
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
-| **Auto-Generate On Reply** | On | When on, every reply triggers a scene parse + (possibly) a generation. When off, Scene mode is manual-only — useful when you want to choose when to refresh the background. |
+| **Auto-Generate On Reply** | On | Triggers the selected mode after replies. In Scene mode, this parses the scene and may generate an image. When off, use the manual generation buttons. |
 | **Scene Change Sensitivity** | 2 | Minimum number of scene fields that must change before a new image is generated. Lower = more frequent regenerations. |
 | **Ignore Scene Change Detection** | Off | Bypass the cache entirely. Every reply generates a new image. |
-| **Include Characters and Persona** | Off | When on, the parser additionally extracts visible characters, appearances, and composition tags. Required to get NovelAI character tags or character-aware Gemini / NanoGPT / Pollinations prompts. |
+| **Include Characters / Include Persona** | Off | These separate Quick Behavior toggles control whether the parser additionally extracts visible characters, appearances, and composition tags. Required to get NovelAI character tags or character-aware Gemini / NanoGPT / Pollinations prompts. |
 
 The compared fields are: `environment`, `time_of_day`, `weather`, `mood`, and `focal_detail`. Character and composition fields don't currently affect the change check — they're extracted for richer prompts but won't trigger a regeneration on their own.
 
@@ -25,7 +25,7 @@ The compared fields are: `environment`, `time_of_day`, `weather`, `mood`, and `f
 
 ## Output Targets
 
-Pick where the result goes under **Prompt Mode → Output**.
+Pick where the result goes using **Output** in the drawer.
 
 | Target | What happens |
 |--------|--------------|
@@ -36,7 +36,7 @@ Pick where the result goes under **Prompt Mode → Output**.
 
 ### Background display
 
-Two settings control how a background image is shown:
+Choose **Set as background**, then open **Configure Generation… → Automation → Background Display**. Two settings control how the background is shown:
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
@@ -63,7 +63,7 @@ Right-click (or long-press on touch) an attached image inside a message to bring
 
 ## Timeouts
 
-Image generation has **two independent timeouts** so a slow parser doesn't block a fast provider (and vice versa).
+Under **Configure Generation… → Advanced**, image generation has **two independent timeouts** so a slow parser doesn't block a fast provider (and vice versa).
 
 | Setting | Default | What it covers |
 |---------|---------|----------------|
