@@ -53,7 +53,7 @@ export default function StreamDeckSettings() {
   }
 
   return <div className={styles.container}>
-    <h2>Stream Deck</h2>
+    <h2 className={styles.title}>Stream Deck</h2>
     <p className={styles.description}>Create a restricted token for the Lumiverse Stream Deck plugin. Tokens can only read character and recent-chat information.</p>
 
     <div className={styles.createRow}>

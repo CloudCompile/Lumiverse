@@ -123,6 +123,7 @@
 /* ── Drawer ── */
 
 .drawer {
+  position: relative;
   width: var(--drawer-panel-w);
   height: 100%;
   display: flex;
@@ -131,6 +132,26 @@
   pointer-events: auto;
   overflow: hidden;
   isolation: isolate;
+}
+
+.resizeHandle {
+  position: absolute;
+  inset-block: 0;
+  width: 8px;
+  z-index: 10;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.wrapperRight .resizeHandle { left: 0; }
+.wrapperLeft .resizeHandle { right: 0; }
+
+.resizeHandle:hover,
+.resizeHandle:focus-visible {
+  background: var(--lumiverse-primary-020);
+  outline: none;
+  box-shadow: inset 2px 0 var(--lumiverse-primary);
 }
 
 .wrapperRight .drawer {

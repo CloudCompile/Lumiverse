@@ -28,6 +28,8 @@ import styles from './ViewportDrawer.module.css'
 import clsx from 'clsx'
 import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 import { useDrawerTabDrag } from '@/hooks/useDrawerTabDrag'
+import { useDrawerResize } from '@/hooks/useDrawerResize'
+import { getUiScale } from '@/lib/uiScale'
 
 export default function ViewportDrawer() {
   const { t } = useTranslation('panels')
@@ -49,12 +51,38 @@ export default function ViewportDrawer() {
 
   const isMobile = useIsMobile()
   const sidebarRef = useRef<HTMLDivElement>(null)
+  const drawerRef = useRef<HTMLDivElement>(null)
+  const resize = useDrawerResize(drawerRef, drawerSettings.side, (width) => {
+    const state = useStore.getState()
+    state.setSetting('drawerSettings', { ...state.drawerSettings, panelWidthPx: width }, 'user-interaction')
+  })
   const tabListRef = useRef<HTMLDivElement>(null)
   const panelContentRef = useRef<HTMLDivElement>(null)
   const [tabListScroll, setTabListScroll] = useState({ up: false, down: false })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
   const [guideOpen, setGuideOpen] = useState(false)
   const [activeFolderId, setActiveFolderId] = useState<string | null>(null)
+
+  // Publish actual drawer geometry so chat reflow also follows live resizing and UI zoom.
+  useEffect(() => {
+    const drawer = drawerRef.current
+    const app = document.querySelector<HTMLElement>('[data-app-root]')
+    if (!drawer || !app) return
+    const sync = () => {
+      const width = drawerOpen && !isMobile ? drawer.getBoundingClientRect().width / getUiScale() : 0
+      app.style.setProperty('--chat-drawer-left', drawerSettings.side === 'left' ? `${width}px` : '0px')
+      app.style.setProperty('--chat-drawer-right', drawerSettings.side === 'right' ? `${width}px` : '0px')
+    }
+    const observer = new ResizeObserver(sync)
+    observer.observe(drawer)
+    observer.observe(app)
+    sync()
+    return () => {
+      observer.disconnect()
+      app.style.removeProperty('--chat-drawer-left')
+      app.style.removeProperty('--chat-drawer-right')
+    }
+  }, [drawerOpen, drawerSettings.side, isMobile, settingsLoaded])
 
   const updateTabListScroll = useCallback(() => {
     const el = tabListRef.current
@@ -260,9 +288,14 @@ export default function ViewportDrawer() {
   const isCompact = drawerSettings.tabSize === 'compact'
 
   const panelWidthCSS = (() => {
+    if (isMobile) return 'min(420px, calc(100vw / var(--lumiverse-ui-scale, 1) - 64px))'
+    const width = resize.draftWidth ?? drawerSettings.panelWidthPx
+    if (typeof width === 'number' && Number.isFinite(width)) {
+      return `clamp(min(280px, calc(100vw / var(--lumiverse-ui-scale, 1) - 64px)), ${width}px, min(calc(80vw / var(--lumiverse-ui-scale, 1)), calc(100vw / var(--lumiverse-ui-scale, 1) - 64px)))`
+    }
     switch (drawerSettings.panelWidthMode) {
-      case 'custom': return `${Math.max(20, Math.min(80, drawerSettings.customPanelWidth))}vw`
-      default: return 'min(420px, calc(100vw - 64px))'
+      case 'custom': return `calc(${Math.max(20, Math.min(80, drawerSettings.customPanelWidth))}vw / var(--lumiverse-ui-scale, 1))`
+      default: return 'min(420px, calc(100vw / var(--lumiverse-ui-scale, 1) - 64px))'
     }
   })()
 
@@ -351,7 +384,18 @@ export default function ViewportDrawer() {
           </div>
         </button>
 
-        <div className={styles.drawer}>
+        <div className={styles.drawer} ref={drawerRef} data-lumiverse-surface="viewport-drawer">
+          {!isMobile && drawerOpen && (
+            <div
+              className={styles.resizeHandle}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label={ts('display.drawer.resizeLabel')}
+              title={ts('display.drawer.resizeHint')}
+              tabIndex={0}
+              {...resize.handlers}
+            />
+          )}
           <div className={styles.sidebar} ref={sidebarRef} data-spindle-mount="sidebar">
             <span data-spindle-mount="sidebar_top" data-spindle-scope="drawer:sidebar-top" style={{ display: 'contents' }} />
             <div className={clsx(
