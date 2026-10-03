@@ -692,14 +692,21 @@ export default function LorebookEditorWorkspace({
    */
   const reloadBulkEntries = useCallback(async (notice: BulkNotice) => {
     if (!selectedBookId) return
+    const bookId = selectedBookId
+    let requestSeq: number
     try {
-      await loadEntries(selectedBookId)
+      const reload = loadEntries(bookId)
+      requestSeq = entriesRequestSeq.current
+      await reload
     } catch {
       addToast({ type: 'error', message: 'Entries could not be reloaded. Use Reload entries to retry.' })
       return
     }
+    // Cancelled and superseded loads resolve without committing entries. Only
+    // the current request for the selected book may release the Apply gate.
+    if (requestSeq !== entriesRequestSeq.current || selectedBookIdRef.current !== bookId) return
     setBulkNotice(null)
-    if (notice.kind === 'refresh-failed' || notice.kind === 'unconfirmed') setSavedAt(Date.now())
+    if (notice.kind === 'refresh-failed') setSavedAt(Date.now())
   }, [addToast, loadEntries, selectedBookId])
 
   /**

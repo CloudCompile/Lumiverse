@@ -169,6 +169,7 @@ const state = {
   lastEntryListBookId: null as string | null,
   bulkError: null as Error | null,
   failNextEntryList: false,
+  entryListHandler: null as null | ((bookId: string, options?: { signal?: AbortSignal }) => Promise<WorldBookEntry[]>),
 }
 
 mock.module('@/store', () => ({ useStore }))
@@ -190,13 +191,14 @@ mock.module('@/api/world-books', () => ({
     // The real `listAllEntries` walks pages through the shared `get` helper, so a
     // mock that returns a bare array never terminates its loop. This mirrors the
     // same page-walking contract the API module implements.
-    listAllEntries: async (bookId: string) => {
+    listAllEntries: async (bookId: string, options?: { signal?: AbortSignal }) => {
       state.entryListCalls += 1
       state.lastEntryListBookId = bookId
       if (state.failNextEntryList) {
         state.failNextEntryList = false
         throw new Error('entries unavailable')
       }
+      if (state.entryListHandler) return state.entryListHandler(bookId, options)
       return state.entries.map((item) => ({ ...item }))
     },
     bulkEntryAction: async (bookId: string, input: WorldBookEntryBulkActionInput) => {
@@ -337,6 +339,7 @@ afterEach(() => {
   state.entryListCalls = 0
   state.bulkError = null
   state.failNextEntryList = false
+  state.entryListHandler = null
 })
 
 afterAll(() => {
@@ -381,6 +384,11 @@ describe('LorebookEditorWorkspace bulk Apply', () => {
     // The rejection still owes a re-read, so it raises the same gate.
     expect(host!.querySelector('[data-bulk-notice="unconfirmed"]')).not.toBeNull()
     expect((buttonWithText('Apply') as HTMLButtonElement).disabled).toBe(true)
+
+    await act(async () => { buttonWithText('Reload entries').click() })
+    await waitFor(() => host!.querySelector('[data-bulk-notice]') === null, 'the rejection notice to clear')
+    expect(inspectorTitle()).not.toContain('Saved')
+    expect(state.bulkCalls).toHaveLength(2)
   })
 
   test('reports a definite rejection with no details without claiming the write landed', async () => {
@@ -485,13 +493,73 @@ describe('LorebookEditorWorkspace bulk Apply', () => {
     await act(async () => { buttonWithText('Refresh').click() })
     await waitFor(() => host!.querySelector('[data-bulk-notice]') === null, 'the notice to clear after toolbar Refresh')
 
-    // Confirmation was the whole reason the notice existed: the write landed, so
-    // it is now truthful to say so. The toolbar Refresh may therefore restore
-    // "Saved", unlike the unconfirmed path's own reload.
+    // A successful GET supplies current revisions but cannot confirm the POST.
+    expect(inspectorTitle()).not.toContain('Saved')
     expect((buttonWithText('Apply') as HTMLButtonElement).disabled).toBe(false)
     expect(control<HTMLSelectElement>('Bulk trigger').value).toBe('vector')
     expect(state.bulkCalls).toHaveLength(1)
   })
+
+  for (const honorsAbort of [true, false]) {
+    test(`keeps Apply blocked after an ${honorsAbort ? 'aborted' : 'superseded'} reload until current entries are committed`, async () => {
+      state.entries = [entry('entry-1')]
+      await renderWorkspace()
+      await selectEntry('entry-1')
+      await setSelectValue(control<HTMLSelectElement>('Bulk enabled'), 'disabled')
+      state.failNextEntryList = true
+      await act(async () => { buttonWithText('Apply').click() })
+      await waitFor(() => host!.querySelector('[data-bulk-notice="refresh-failed"]') !== null, 'the refresh-failed notice')
+
+      const staleEntries = state.entries
+      state.entries = [entry('entry-1', { revision: 2, disabled: true })]
+      const reloads: Array<{
+        signal?: AbortSignal
+        resolve: (entries: WorldBookEntry[]) => void
+        reject: (error: Error) => void
+      }> = []
+      state.entryListHandler = (_bookId, options) => new Promise((resolve, reject) => {
+        reloads.push({ signal: options?.signal, resolve, reject })
+        if (honorsAbort) {
+          options?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true })
+        }
+      })
+
+      await act(async () => { buttonWithText('Reload entries').click() })
+      await waitFor(() => reloads.length === 1, 'the first reload')
+      await act(async () => { buttonWithText('Refresh').click() })
+      await waitFor(() => reloads.length === 2, 'the replacement reload')
+      expect(reloads[0]!.signal?.aborted).toBe(true)
+      if (!honorsAbort) {
+        // A transport may finish despite cancellation; its payload is stale too.
+        await act(async () => { reloads[0]!.resolve(staleEntries) })
+      }
+      expect(host!.querySelector('[data-bulk-notice="refresh-failed"]')).not.toBeNull()
+      expect((buttonWithText('Apply') as HTMLButtonElement).disabled).toBe(true)
+      expect(inspectorTitle()).not.toContain('Saved')
+      await act(async () => { buttonWithText('Apply').click() })
+      expect(state.bulkCalls).toHaveLength(1)
+
+      // Failure of the current request must leave the notice and gate intact.
+      await act(async () => { reloads[1]!.reject(new Error('entries unavailable')) })
+      await waitFor(() => toasts.length === 2, 'the replacement reload failure')
+      expect(host!.querySelector('[data-bulk-notice="refresh-failed"]')).not.toBeNull()
+      expect((buttonWithText('Apply') as HTMLButtonElement).disabled).toBe(true)
+      expect(inspectorTitle()).not.toContain('Saved')
+
+      await act(async () => { buttonWithText('Reload entries').click() })
+      await waitFor(() => reloads.length === 3, 'the retry reload')
+      await act(async () => { reloads[2]!.resolve(state.entries) })
+      await waitFor(() => host!.querySelector('[data-bulk-notice]') === null, 'the successful reconciliation')
+      expect(inspectorTitle()).toContain('Saved')
+      expect((buttonWithText('Apply') as HTMLButtonElement).disabled).toBe(false)
+      expect(control<HTMLSelectElement>('Bulk enabled').value).toBe('disabled')
+
+      state.entryListHandler = null
+      await act(async () => { buttonWithText('Apply').click() })
+      await waitFor(() => state.bulkCalls.length === 2, 'the next Apply')
+      expect(state.bulkCalls[1]!.input.expected_revisions).toEqual({ 'entry-1': 2 })
+    })
+  }
 
   test('leaves Apply disabled while nothing would be sent', async () => {
     state.entries = [entry('entry-1')]
