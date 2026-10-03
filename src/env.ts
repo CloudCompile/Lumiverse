@@ -1,5 +1,6 @@
 import { networkInterfaces } from "os";
 import { resolve } from "path";
+import { parseStrictInteger } from "./utils/strict-integer";
 
 /** Returns all non-internal IPv4 addresses on the machine's LAN interfaces. */
 function getLanIPs(): string[] {
@@ -142,8 +143,8 @@ export function loadEnv(): EnvConfig {
   // Validate PORT — out-of-range values used to be silently passed to Bun.serve,
   // which then failed at bind time with a confusing native error.
   const portRaw = process.env.PORT || "7860";
-  const port = parseInt(portRaw, 10);
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+  const port = parseStrictInteger(portRaw);
+  if (port === undefined || port < 1 || port > 65535) {
     throw new Error(`Invalid PORT "${portRaw}": must be an integer in 1..65535`);
   }
 
