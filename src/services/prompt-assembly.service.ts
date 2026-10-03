@@ -63,6 +63,7 @@ import {
   activateWorldInfo,
   applyWorldInfoGroupLogic,
   createWorldInfoActivationScanCache,
+  estimateWorldInfoEntryTokens,
   finalizeActivatedWorldInfoEntries,
   materializeWorldInfoCache,
   primeWorldInfoActivationScanCache,
@@ -5013,6 +5014,9 @@ export function mergeActivatedWorldInfoEntries(
         bookId: entry.world_book_id,
         bookSource: bookSourceMap?.get(entry.world_book_id),
         bookName: bookNameMap?.get(entry.world_book_id),
+        estimatedTokens: estimateWorldInfoEntryTokens(
+          selectionContentByEntryId?.get(entry.id) ?? entry.content,
+        ),
       };
     });
 
