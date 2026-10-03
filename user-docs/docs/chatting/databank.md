@@ -152,7 +152,7 @@ Databank content is available in your presets through dedicated macros:
 Aliases for `{{databank}}`: `{{databankMemory}}`, `{{documents}}`, `{{knowledgeBank}}`.
 
 !!! note "The macro controls *placement*, not *whether* databank content injects"
-    Like [long-term memory](memory.md), databank retrieval injects automatically whenever active banks return chunks. The `{{databank}}` macro only controls **where** that content appears — without it, retrieved chunks are inserted as a system message just before the chat history. To stop injection entirely, deactivate the bank for this chat/character or disable embeddings, rather than removing the macro.
+    Databank retrieval injects automatically whenever active banks return chunks. The `{{databank}}` macro controls **where** that content appears — without it, retrieved chunks are inserted as a system message just before the chat history. To stop injection entirely, deactivate the bank for this chat/character or disable embeddings, rather than removing the macro. [Chat Memory](memory.md#injection-strategy) has its own Injection Strategy and defaults to Macro only.
 
 Use `{{databankActive}}` to wrap databank content in a conditional so the section disappears cleanly when nothing retrieves:
 
