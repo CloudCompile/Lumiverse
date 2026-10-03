@@ -39,6 +39,7 @@ import {
   type EditAndSendContext,
 } from "../llm/types";
 import { trimIncompleteTrailingWord } from "../utils/trim-incomplete-word";
+import { readMessageRevision } from "../utils/message-revision";
 import { healFormattingArtifacts } from "../utils/format-healing";
 import {
   buildInlineToolContinuation,
@@ -1038,12 +1039,8 @@ async function runPromptPipeline(opts: {
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
-  /**
-   * Edit-and-Send committed edit identity. Forwarded verbatim into
-   * `AssemblyContext` so assembly performs the revision check and history
-   * cutoff. Absent on ordinary interactive paths.
-   */
-  editAndSendContext?: import("../llm/types").EditAndSendContext;
+  /** Committed edit identity for assembly validation and history cutoff. */
+  editAndSendContext?: EditAndSendContext;
   rejectedSwipe?: string;
   continueMessageId?: string;
   continuePostfix?: string;
@@ -1154,11 +1151,7 @@ async function runPromptPipeline(opts: {
         assemblyResult = await assemblePromptInWorker(assemblyCtx);
       } catch (err: any) {
         if (opts.signal?.aborted || err?.name === "AbortError") throw err;
-        // An Edit-and-Send context rejection is a DOMAIN decision, not a worker
-        // failure. The shared error name survives the worker boundary, so rethrow
-        // it here: falling back to in-process assembly would re-run the same
-        // validation (and, worse, imply the request was retryable with newer
-        // text). Ordinary worker infrastructure errors keep the fallback.
+        // The worker preserves this error name; a rejected edit is terminal.
         if (err?.name === EDIT_AND_SEND_CONTEXT_ERROR_NAME) throw err;
         console.warn(
           "[generate] Prompt assembly worker failed; falling back to in-process assembly:",
@@ -1498,39 +1491,11 @@ export interface StartGenerationOptions {
    * request body by `chatRoute` and therefore forgeable by any client.
    */
   connectionId?: string;
-  /**
-   * The committed Edit-and-Send edit identity, forwarded by the dispatcher from
-   * the request cursor. Present only when the start came from the Edit-and-Send
-   * outbox. Guides the assembly history cutoff (see
-   * `AssemblyContext.editAndSendContext`); absent on every ordinary interactive
-   * path, where behavior is unchanged. Out of band for the same security reason
-   * as `connectionId`.
-   */
-  editAndSendContext?: import("../llm/types").EditAndSendContext;
+  /** Trusted cursor identity, kept out of the client-controlled request body. */
+  editAndSendContext?: EditAndSendContext;
 }
 
-/**
- * Verified precondition for an Edit-and-Send generation: the committed edit is
- * still the live text, and the separate assistant write target still belongs to
- * this chat. Split out so it can run at BOTH edges (before the first write and
- * again after the async preflight) with one implementation.
- *
- * Revision is read strictly from an optional-unknown property: typeof number +
- * Number.isInteger + > 0, with NO `?? 1` fallback and no cast. A row that can no
- * longer supply its exact revision is treated as changed, because accepting it
- * would assemble a reply for text the user may have replaced.
- *
- * Throws `EditAndSendContextError`, whose NAME survives the prompt-assembly
- * worker boundary unmodified, so `startGeneration`'s catch can rethrow it
- * terminally instead of taking the generic worker-infrastructure fallback.
- */
-function readMessageRevision(row: object | null | undefined): number | null {
-  if (!row || !("revision" in row)) return null;
-  const value = row.revision;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return null;
-  return value;
-}
-
+/** Recheck the committed user turn and assistant target around async setup. */
 function assertEditAndSendContextTarget(
   input: GenerateInput,
   context: EditAndSendContext,
@@ -1541,21 +1506,12 @@ function assertEditAndSendContextTarget(
       "Edit-and-Send target message is not part of this chat",
     );
   }
-  const revision = readMessageRevision(edited);
-  if (
-    typeof revision !== "number" ||
-    !Number.isInteger(revision) ||
-    revision < 1 ||
-    revision !== context.committedRevision
-  ) {
+  if (readMessageRevision(edited) !== context.committedRevision) {
     throw new EditAndSendContextError(
       "Edit-and-Send message revision has changed since it was committed",
     );
   }
-  // The separate assistant write target (swipe mode) must belong to the same
-  // chat we are about to stage a swipe on. `input.message_id` is the only
-  // editor-supplied id on this path; rejecting a mismatch prevents a stale or
-  // foreign id from steering the write before addSwipe runs.
+  // Validate the separate swipe target before staging a write.
   if (input.message_id) {
     const target = chatsSvc.getMessage(input.userId, input.message_id);
     if (!target || target.chat_id !== input.chat_id) {
@@ -1681,6 +1637,20 @@ export async function startGeneration(
   let stagedSwipeOriginal: Message | null = null;
   let stagedSwipe: Message | null = null;
   let stagedSwipeId: number | undefined;
+
+  const removeEmptyStagedSwipe = () => {
+    if (!stagedSwipeOriginal || stagedSwipeId == null) return;
+    try {
+      const current = chatsSvc.getMessage(input.userId, stagedSwipeOriginal.id);
+      if (current?.swipes[stagedSwipeId] === "") {
+        chatsSvc.deleteSwipe(input.userId, stagedSwipeOriginal.id, stagedSwipeId, {
+          restoreSwipeId: stagedSwipeOriginal.swipe_id,
+        });
+      }
+    } catch {
+      /* best-effort cleanup */
+    }
+  };
 
   try {
     // Recheck after waiting for a previous generation; failures here must
@@ -1916,11 +1886,7 @@ export async function startGeneration(
     // routes the completion write) so we don't perturb normal/continue saving.
     let targetSwipeId: number | undefined;
 
-    // Edit-and-Send: recheck ownership AFTER the async preflight (secret
-    // resolution, connection load) and immediately BEFORE any write in this
-    // phase, so a message edited during that await cannot slip through on the
-    // snapshot taken before it. The pre-write phase guard already ran before the
-    // first addSwipe; this is the second, post-await edge.
+    // Recheck after credential resolution, before further writes.
     if (editAndSendContext) {
       assertEditAndSendContextTarget(input, editAndSendContext);
     }
@@ -2170,18 +2136,8 @@ export async function startGeneration(
               .filter(
                 (m) => m.id !== excludeMessageId && m.id !== stagedMessageId,
               );
-            // Edit-and-Send runs in a chat whose committed edit is a specific
-            // user turn. Cut the council's view off INCLUSIVELY at that turn so
-            // it never fingerprints or enriches on messages that post-date the
-            // edit. The slice is by stored chat order (getMessages returns
-            // index_in_chat ascending).
-            //
-            // A missing anchor is a HARD failure, not a reason to hand the
-            // council the full history: falling back to the uncut list would run
-            // council/WI/tools over turns the committed edit excluded. The
-            // domain error is rethrown terminally (never retried with newer
-            // text).
-            const councilEditAndSendContext = options?.editAndSendContext;
+            // Cap council input at the committed turn before hashing or retrieval.
+            const councilEditAndSendContext = editAndSendContext;
             const councilCappedMessages = councilEditAndSendContext
               ? (() => {
                   const at = councilMessages.findIndex(
@@ -2925,6 +2881,9 @@ export async function startGeneration(
           pipeline.macroEnvSeed,
         );
       } catch (err: any) {
+        if (err?.name === EDIT_AND_SEND_CONTEXT_ERROR_NAME) {
+          removeEmptyStagedSwipe();
+        }
         // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted.
         // Only clear the per-chat mapping if it still points at THIS generation —
         // a newer startGeneration on the same chat may have already taken over the
@@ -2999,19 +2958,8 @@ export async function startGeneration(
         /* best-effort cleanup */
       }
     }
-    // A failure before GENERATION_STARTED has no terminal event for the
-    // frontend to reconcile. Remove the early blank swipe ourselves, but only
-    // when its slot is still the empty value we staged.
-    if (stagedSwipeOriginal && stagedSwipeId != null) {
-      try {
-        const current = chatsSvc.getMessage(input.userId, stagedSwipeOriginal.id);
-        if (current?.swipes[stagedSwipeId] === "") {
-          chatsSvc.deleteSwipe(input.userId, stagedSwipeOriginal.id, stagedSwipeId);
-        }
-      } catch {
-        /* best-effort cleanup */
-      }
-    }
+    // No terminal event is emitted for early setup failures.
+    removeEmptyStagedSwipe();
     removeActiveGeneration(generationId);
     clearActiveChatGeneration(input.userId, input.chat_id, generationId);
     resolveCompletion();

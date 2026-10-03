@@ -16,8 +16,11 @@ import * as councilProfilesSvc from "./council/council-profiles.service";
 import * as chatBackground from "./chat-background.service";
 import * as llmRegistry from "../llm/registry";
 import * as pool from "./generation-pool.service";
+import * as embeddingsSvc from "./embeddings.service";
+import * as assemblyWorker from "./prompt-assembly-worker-client";
 import { eventBus } from "../ws/bus";
 import { getActiveGeneration } from "./generation/active-generation-registry";
+import { readMessageRevision } from "../utils/message-revision";
 import {
   getActiveChatGeneration,
   startGeneration,
@@ -444,6 +447,8 @@ describe("startGeneration edit-and-send async guards", () => {
     initDatabase(":memory:");
     getDb().run("PRAGMA foreign_keys = OFF");
     getDb().run(await Bun.file(new URL("../db/baseline.sql", import.meta.url)).text());
+    track(spyOn(assemblyWorker, "canUsePromptAssemblyWorker").mockReturnValue(false));
+    track(spyOn(embeddingsSvc, "deleteChatChunkEmbeddings").mockResolvedValue(undefined));
     track(spyOn(secretsSvc, "getSecret").mockResolvedValue("test-key"));
     track(
       spyOn(eventBus, "emit").mockImplementation((type, payload) => {
@@ -630,6 +635,80 @@ describe("startGeneration edit-and-send async guards", () => {
         errorCode: "generation_failed",
       }),
     ]);
+  });
+
+  test.each([
+    ["context", "restore"],
+    ["interceptor", "restore"],
+    ["interceptor", "navigate"],
+    ["interceptor", "fill"],
+  ] as const)("late rejection during %s handles the staged swipe after %s", async (phase, action) => {
+    const { chatId, userMessageId, connectionId } = await seed();
+    rejectFetch();
+    const assistant = chatsSvc.createMessage(chatId, {
+      is_user: false, name: "Assistant", content: "Original reply",
+    }, USER);
+    chatsSvc.addSwipe(USER, assistant.id, "Alternative reply");
+    const original = chatsSvc.cycleSwipe(USER, assistant.id, "left")!;
+    const committed = chatsSvc.editAndSend(USER, chatId, {
+      messageId: userMessageId,
+      content: "Committed user text",
+      expectedVersion: committedRevision,
+      requestId: crypto.randomUUID(),
+      branchChatOnEditAndSend: false,
+    });
+    if (committed.status !== "ok") throw new Error(committed.error);
+
+    let release!: () => void;
+    let enter!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { enter = resolve; });
+    unregisters.push(release);
+    if (phase === "context") {
+      unregisters.push(contextHandlerChain.register({
+        extensionId: "eas-stale-swipe", priority: 100,
+        handler: async context => { enter(); await gate; return context; },
+      }));
+    } else {
+      unregisters.push(interceptorPipeline.register({
+        extensionId: "eas-stale-swipe", priority: 100,
+        handler: async messages => { enter(); await gate; return { messages }; },
+      }));
+    }
+
+    const started = await startGeneration({
+      userId: USER, chat_id: chatId, connection_id: connectionId,
+      generationId: committed.payload.generationCursor.generationId,
+      generation_type: "swipe", message_id: assistant.id,
+    }, {
+      origin: "edit_and_send",
+      editAndSendContext: committed.payload.generationCursor.editAndSendContext,
+    });
+    const entry = getActiveGeneration(started.generationId)!;
+    await entered;
+    const staged = chatsSvc.getMessage(USER, assistant.id)!;
+    expect(readMessageRevision(staged)).toBe(readMessageRevision(original));
+    if (action === "navigate") chatsSvc.cycleSwipe(USER, assistant.id, "left");
+    if (action === "fill") chatsSvc.updateSwipe(USER, assistant.id, staged.swipe_id, "User-saved reply");
+    chatsSvc.updateSwipe(USER, userMessageId, 0, "Replacement after commit");
+    release();
+    await entry.completion;
+
+    expect(fetchSpy!.mock.calls).toHaveLength(0);
+    expect(getActiveGeneration(started.generationId)).toBeUndefined();
+    expect(getActiveChatGeneration(USER, chatId)).toBeUndefined();
+    expect(endedEvents).toEqual([expect.objectContaining({
+      generationId: started.generationId,
+      error: "Edit-and-Send message revision has changed since it was committed",
+    })]);
+    const saved = chatsSvc.getMessage(USER, assistant.id)!;
+    expect(saved.swipes).toEqual(action === "fill"
+      ? ["Original reply", "Alternative reply", "User-saved reply"]
+      : ["Original reply", "Alternative reply"]);
+    expect(saved.content).toBe(action === "fill" ? "User-saved reply"
+      : action === "navigate" ? "Alternative reply" : "Original reply");
+    expect(saved.swipe_id).toBe(action === "fill" ? 2 : action === "navigate" ? 1 : 0);
+    expect(readMessageRevision(saved)).toBe(readMessageRevision(original));
   });
 
   test("a deleted edited target after the detached yield rejects before council/provider side effects", async () => {

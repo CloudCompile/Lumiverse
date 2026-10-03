@@ -84,13 +84,7 @@ export interface StartGenerationOptions {
    * unchanged legacy ladder.
    */
   connectionId?: string;
-  /**
-   * The committed edit identity read from the stored
-   * `edit_and_send_requests.cursor` snapshot for this request. Travels out of
-   * band for the same security reason as `connectionId`: an in-band field would
-   * be forgeable by any client on `POST /generate`. Present only on the
-   * Edit-and-Send path; ordinary interactive sends never set it.
-   */
+  /** Trusted cursor identity, kept out of the client-controlled request body. */
   editAndSendContext?: EditAndSendContext;
 }
 
@@ -207,27 +201,7 @@ export function getGenerationOutboxByGenerationId(generationId: string): Generat
   return row ? rowToOutbox(row) : null;
 }
 
-/**
- * Read the committed Edit-and-Send identity from the request's stored cursor.
- *
- * The cursor is written once, inside the commit transaction, and never
- * rewritten (the replay short-circuit in `chats.service.editAndSend` returns the
- * original response), so this snapshot is the same value the commit observed.
- *
- * Strictly validated against the outbox row it is being dispatched for, because
- * a cursor shaped for a different request, chat, or generation must never be
- * able to steer this generation's history cutoff:
- * - the cursor must be the one stored for THIS user/chat/requestId, and its
- *   embedded generationId must match the row's committed generation id;
- * - the embedded chatId must match the branch chat the generation runs in;
- * - `editedUserMessageId` must be the row's own `edited_message_id`;
- * - `committedRevision` must be a positive integer.
- *
- * Returns `null` when anything above fails. Callers treat `null` as a terminal
- * dispatch failure WITHOUT retry: a missing or stale cursor cannot become valid
- * on a later tick, and retrying would generate a reply that ignores the
- * committed edit rather than surfacing the problem.
- */
+/** Validate the stored cursor against the tenant, request, generation, and targets. */
 function readCommittedEditAndSendContext(
   row: GenerationOutboxRow,
 ): EditAndSendContext | null {
@@ -423,12 +397,7 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   }
   if (row.dispatched_at) return row;
 
-  // Fail closed BEFORE any generation work when the committed edit identity is
-  // missing or stale. A cursor that does not validate can never become valid on
-  // a later tick, so this is terminal and deliberately does NOT go through the
-  // retry/backoff path (which is reserved for transient provider/connection
-  // failures). The outbox row is closed without a fallback generation so no
-  // reply is produced for an edit we can no longer prove we are serving.
+  // An invalid immutable cursor is terminal; retry cannot repair it.
   const editAndSendContext = readCommittedEditAndSendContext(row);
   if (!editAndSendContext) {
     markDispatchFailure(row, "edit_and_send_context_invalid", "edit_and_send_context_invalid");

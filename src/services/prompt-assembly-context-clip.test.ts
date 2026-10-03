@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { join } from "path";
 
 import type { LlmMessage } from "../llm/types";
@@ -6,6 +6,7 @@ import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import * as charactersSvc from "./characters.service";
 import * as chatsSvc from "./chats.service";
 import * as presetsSvc from "./presets.service";
+import * as embeddingsSvc from "./embeddings.service";
 import {
   assemblePrompt,
   clipToContextBudget,
@@ -13,6 +14,7 @@ import {
 } from "./prompt-assembly.service";
 import { prefetchAssemblyData } from "./prompt-assembly-prefetch";
 import type { PromptBlock } from "../types/preset";
+import { readMessageRevision } from "../utils/message-revision";
 
 describe("clipToContextBudget", () => {
   test("surfaces when fixed prompt overhead leaves no room for chat history", async () => {
@@ -207,13 +209,81 @@ function historyContents(result: { messages: LlmMessage[] }): string[] {
 }
 
 describe("assemblePrompt edit-and-send history cutoff", () => {
+  let deleteEmbeddingsSpy: ReturnType<typeof spyOn>;
+
   beforeEach(async () => {
     closeDatabase();
     initDatabase(":memory:");
     await applyBaseline();
+    deleteEmbeddingsSpy = spyOn(embeddingsSvc, "deleteChatChunkEmbeddings").mockResolvedValue(undefined);
   });
 
-  afterEach(() => closeDatabase());
+  afterEach(() => {
+    deleteEmbeddingsSpy.mockRestore();
+    closeDatabase();
+  });
+
+  function commitFixture(swipes: string[]) {
+    const fixture = seedBranchFalseChat();
+    const message = chatsSvc.updateMessage(EA_USER, fixture.editedUserMessageId, {
+      swipes,
+      swipe_id: 0,
+    });
+    const committed = chatsSvc.editAndSend(EA_USER, fixture.chatId, {
+      messageId: fixture.editedUserMessageId,
+      content: "Committed user text",
+      expectedVersion: readMessageRevision(message)!,
+      requestId: crypto.randomUUID(),
+      branchChatOnEditAndSend: false,
+    });
+    if (committed.status !== "ok") throw new Error(committed.error);
+    return {
+      userId: EA_USER,
+      chatId: fixture.chatId,
+      generationType: "swipe" as const,
+      presetId: fixture.presetId,
+      excludeMessageId: committed.payload.immediateAssistantId!,
+      editAndSendContext: committed.payload.generationCursor.editAndSendContext!,
+    };
+  }
+
+  test.each(["add", "update", "cycle", "delete"] as const)(
+    "rejects committed context after active user text changes via swipe %s",
+    async (operation) => {
+      const ctx = commitFixture(["Original user text", "Alternative user text"]);
+      const id = ctx.editAndSendContext.editedUserMessageId;
+      switch (operation) {
+        case "add": chatsSvc.addSwipe(EA_USER, id, "Replacement after commit"); break;
+        case "update": chatsSvc.updateSwipe(EA_USER, id, 0, "Replacement after commit"); break;
+        case "cycle": chatsSvc.cycleSwipe(EA_USER, id, "right"); break;
+        case "delete": chatsSvc.deleteSwipe(EA_USER, id, 0); break;
+      }
+      expect(readMessageRevision(chatsSvc.getMessage(EA_USER, id)))
+        .toBe(ctx.editAndSendContext.committedRevision + 1);
+      await expect(assemblePrompt(ctx)).rejects.toThrow(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    },
+  );
+
+  test.each(["add identical", "update identical", "update inactive", "cycle identical", "delete identical", "delete inactive"] as const)(
+    "keeps committed context valid when active user text is unchanged: %s",
+    async (operation) => {
+      const ctx = commitFixture(["Original user text", "Committed user text"]);
+      const id = ctx.editAndSendContext.editedUserMessageId;
+      switch (operation) {
+        case "add identical": chatsSvc.addSwipe(EA_USER, id, "Committed user text"); break;
+        case "update identical": chatsSvc.updateSwipe(EA_USER, id, 0, "Committed user text"); break;
+        case "update inactive": chatsSvc.updateSwipe(EA_USER, id, 1, "Inactive replacement"); break;
+        case "cycle identical": chatsSvc.cycleSwipe(EA_USER, id, "right"); break;
+        case "delete identical": chatsSvc.deleteSwipe(EA_USER, id, 0); break;
+        case "delete inactive": chatsSvc.deleteSwipe(EA_USER, id, 1); break;
+      }
+      expect(readMessageRevision(chatsSvc.getMessage(EA_USER, id)))
+        .toBe(ctx.editAndSendContext.committedRevision);
+      expect(historyContents(await assemblePrompt(ctx))).toEqual(["Committed user text"]);
+    },
+  );
 
   test("cuts history inclusively at the edited user turn (U1) and drops later turns", async () => {
     const fixture = seedBranchFalseChat();

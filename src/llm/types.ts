@@ -281,37 +281,14 @@ export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'i
 
 export type ImpersonateMode = 'prompts' | 'preset' | 'oneliner' | 'sovereign_hand';
 
-/**
- * Committed identity of an Edit-and-Send edit, carried from the request that
- * committed it (`chats.service.editAndSend`) through the durable outbox row and
- * the dispatcher to prompt assembly.
- *
- * `committedRevision` is the edited message's revision AS WRITTEN by the commit
- * (read back after the `revision = revision + 1` update), never inferred by
- * adding 1 at dispatch time: the pre-edit `expectedVersion` guards the request
- * at commit, and the post-edit revision is what assembly must still observe for
- * the edit to be the one it staged. A later edit to the same message advances
- * the revision, so assembly rejects the stale request instead of generating a
- * reply for text the user has already replaced.
- */
+/** Committed user turn, carried through the durable cursor to prompt assembly. */
 export interface EditAndSendContext {
   editedUserMessageId: string;
+  /** Actual post-edit revision, read back from the written message. */
   committedRevision: number;
 }
 
-/**
- * Stable error NAME for every Edit-and-Send context rejection. The name is a
- * shared constant so producer (generate.service preflight) and consumer
- * (assemblePrompt) throw the same domain identity, and it is what the
- * generation catch keys on to rethrow terminally instead of taking the generic
- * worker-infrastructure fallback.
- *
- * The name survives the prompt-assembly worker boundary without any protocol
- * change: `AssemblyWorkerResponse.error` carries `name`, the worker sends
- * `err.name`, and the client restores it (`err.name = msg.name ||
- * PromptAssemblyWorkerError`). A plain class whose `name` is this constant is
- * therefore sufficient; no worker/client edit is needed.
- */
+/** Preserved by the assembly worker protocol to distinguish terminal rejection. */
 export const EDIT_AND_SEND_CONTEXT_ERROR_NAME = "EditAndSendContextError";
 
 export class EditAndSendContextError extends Error {
@@ -346,13 +323,7 @@ export interface AssemblyContext {
   userInput?: string;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
-  /**
-   * Edit-and-Send only. When present, assembly validates that the edited user
-   * message still belongs to `chatId` and still carries `committedRevision`,
-   * then cuts the assembled history off INCLUSIVELY at that message before
-   * council/WI/macro/MessageLimit work, so a branch edit never assembles text
-   * from turns that were not part of the committed edit.
-   */
+  /** Validate the committed user turn and cap history inclusively at it. */
   editAndSendContext?: EditAndSendContext;
   /** For regenerate/swipe: content of the active target swipe before it was replaced. */
   rejectedSwipe?: string;

@@ -54,6 +54,7 @@ import {
 } from "../macros";
 import type { MacroEnv } from "../macros";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
+import { readMessageRevision } from "../utils/message-revision";
 import {
   isClaudeOpusAtLeast,
   supportsClaudeOpusXhigh,
@@ -201,19 +202,6 @@ const CONTEXT_ANCHOR_PROTECTED_KEY = "__contextAnchorProtected";
 const PRESERVE_DISPLAY_REASONING_DELIMS_KEY =
   "__preserveDisplayReasoningDelimiters";
 const CONTINUE_NUDGE_KEY = "__continueNudge";
-
-/**
- * Strict revision read for Edit-and-Send validation. Returns the exact positive
- * integer, or `null` when the row is missing or its revision is not a positive
- * integer. No `?? 1` fallback: assembly must compare against the real committed
- * value, and an unreadable revision is a mismatch, not a match.
- */
-function readStrictMessageRevision(row: object | null | undefined): number | null {
-  if (!row || !("revision" in row)) return null;
-  const value = row.revision;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return null;
-  return value;
-}
 
 function markAsChatHistory(
   msg: LlmMessage,
@@ -1782,23 +1770,8 @@ export async function assemblePrompt(
   const allMessages =
     pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
 
-  // Edit-and-Send: the generation must be assembled from exactly the history
-  // the committed edit implies. Three things can make a dispatched request stale,
-  // and ALL are rejected here rather than papered over with a fallback/replay:
-  //  - the edited message is gone, or no longer belongs to this chat (a branch
-  //    was pruned, or the id came from a different chat);
-  //  - the edited message's revision has advanced past the committed one, i.e.
-  //    the user edited it again after this request was queued;
-  //  - the LIVE row disagrees with the prefetched snapshot (the snapshot can be
-  //    seconds old by the time assembly runs, and it is not allowed to be the
-  //    only thing we trust).
-  // On success the history is cut off INCLUSIVELY at the selected user turn, so
-  // later turns of the source chat never reach council/WI/macros/MessageLimit.
-  // `excludeMessageId` (the separate assistant write target) is still applied
-  // afterwards — the edit is the anchor, the swipe target is excluded on top.
-  //
-  // Rejections throw `EditAndSendContextError`; its name survives the worker
-  // boundary, so the caller rethrows it terminally instead of falling back.
+  // Validate the snapshot and live row, then cap history at the committed turn
+  // before WI, macros, and MessageLimit. Context errors survive the worker boundary.
   let editedContextMessages = allMessages;
   const editAndSendContext = ctx.editAndSendContext;
   if (editAndSendContext) {
@@ -1816,24 +1789,20 @@ export async function assemblePrompt(
         "Edit-and-Send target message is not a user message",
       );
     }
-    // Snapshot revision (prefetched history).
-    const snapshotRevision = readStrictMessageRevision(selected);
+    const snapshotRevision = readMessageRevision(selected);
     if (snapshotRevision !== editAndSendContext.committedRevision) {
       throw new EditAndSendContextError(
         "Edit-and-Send message revision has changed since it was committed",
       );
     }
-    // LIVE revision: re-read the row straight from the DB (never only the
-    // snapshot) because prefetch may predate a concurrent edit. The live row
-    // must still exist, still belong to this chat, stay a user message, and
-    // carry the same exact revision.
+    // Prefetch may predate a concurrent edit, so also check the live row.
     const live = chatsSvc.getMessage(ctx.userId, editAndSendContext.editedUserMessageId);
     if (!live || live.chat_id !== ctx.chatId || live.is_user !== true) {
       throw new EditAndSendContextError(
         "Edit-and-Send target message is no longer part of this chat",
       );
     }
-    const liveRevision = readStrictMessageRevision(live);
+    const liveRevision = readMessageRevision(live);
     if (liveRevision !== editAndSendContext.committedRevision) {
       throw new EditAndSendContextError(
         "Edit-and-Send message revision has changed since it was committed",

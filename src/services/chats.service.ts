@@ -18,6 +18,7 @@ import type { BulkMessageInput } from "../types/migrate";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import type { EditAndSendContext } from "../llm/types";
 import { EditAndSendContextError } from "../llm/types";
+import { readMessageRevision } from "../utils/message-revision";
 import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as audioSvc from "./audio.service";
@@ -3124,6 +3125,13 @@ function scheduleMemoryRebuildForActiveMessageChange(userId: string, chatId: str
 
 // --- Swipes ---
 
+function userContentRevisionSql(message: Message, content: string): string {
+  // Assistant swipe staging is not persisted generation output.
+  return message.is_user && content !== message.content && messagesHaveRevisionColumn()
+    ? ", revision = revision + 1"
+    : "";
+}
+
 export function addSwipe(userId: string, messageId: string, content: string): Message | null {
   const msg = getMessage(userId, messageId);
   if (!msg) return null;
@@ -3139,7 +3147,7 @@ export function addSwipe(userId: string, messageId: string, content: string): Me
   );
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, content)} WHERE id = ? AND chat_id = ?`)
     .run(
       JSON.stringify(swipes),
       JSON.stringify(swipeDates),
@@ -3186,7 +3194,8 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
     ? [JSON.stringify(swipes), content, JSON.stringify(normalizedExtra), messageId, msg.chat_id]
     : [JSON.stringify(swipes), JSON.stringify(normalizedExtra), messageId, msg.chat_id];
 
-  getDb().query(`UPDATE messages SET ${updates} WHERE id = ? AND chat_id = ?`).run(...values);
+  const revisionSql = userContentRevisionSql(msg, swipes[msg.swipe_id]);
+  getDb().query(`UPDATE messages SET ${updates}${revisionSql} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
     EventType.MESSAGE_SWIPED,
@@ -3206,7 +3215,12 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
   return updated;
 }
 
-export function deleteSwipe(userId: string, messageId: string, swipeIdx: number): Message | null {
+export function deleteSwipe(
+  userId: string,
+  messageId: string,
+  swipeIdx: number,
+  options?: { restoreSwipeId: number },
+): Message | null {
   const msg = getMessage(userId, messageId);
   if (!msg || msg.swipes.length <= 1) return null; // can't delete last swipe
   if (swipeIdx < 0 || swipeIdx >= msg.swipes.length) return null;
@@ -3224,7 +3238,11 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   if (swipeIdx < msg.swipe_id) {
     newSwipeId = msg.swipe_id - 1;
   } else if (swipeIdx === msg.swipe_id) {
-    newSwipeId = Math.min(msg.swipe_id, swipes.length - 1);
+    const restoreSwipeId = options?.restoreSwipeId;
+    newSwipeId = restoreSwipeId != null && Number.isInteger(restoreSwipeId)
+      && restoreSwipeId >= 0 && restoreSwipeId < swipes.length
+      ? restoreSwipeId
+      : Math.min(msg.swipe_id, swipes.length - 1);
   }
 
   const newContent = swipes[newSwipeId] ?? swipes[0];
@@ -3236,7 +3254,7 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   );
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, newContent)} WHERE id = ? AND chat_id = ?`)
     .run(
       JSON.stringify(swipes),
       JSON.stringify(swipeDates),
@@ -3281,7 +3299,7 @@ export function cycleSwipe(userId: string, messageId: string, direction: "left" 
   );
 
   getDb()
-    .query("UPDATE messages SET swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, nextContent)} WHERE id = ? AND chat_id = ?`)
     .run(nextIdx, nextContent, JSON.stringify(normalizedExtra), messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
@@ -3452,11 +3470,7 @@ export interface EditAndSendGenerationCursor {
   chatId: string;
   requestId: string;
   mode: EditAndSendMode;
-  /**
-   * Committed edit identity for this request, recorded in the SAME cursor JSON
-   * as the generation cursor so a replay returns the identical snapshot and the
-   * dispatcher can forward it without re-deriving anything from live rows.
-   */
+  /** Committed edit identity, preserved by replay and forwarded by the dispatcher. */
   editAndSendContext?: EditAndSendContext;
 }
 
@@ -3513,20 +3527,6 @@ function withImmediateTransaction<T>(fn: () => T): T {
 
 function messageRevision(row: { revision?: unknown }): number {
   return typeof row.revision === "number" && Number.isInteger(row.revision) ? row.revision : 1;
-}
-
-/**
- * Strict revision read for rows whose revision is authoritative. Returns the
- * exact positive integer, or `null` when the row is missing or its revision is
- * not a positive integer. Unlike `messageRevision` this NEVER substitutes a
- * default: a caller that needs the real committed value must fail rather than
- * invent `1`.
- */
-function readStrictRevision(row: object | null | undefined): number | null {
-  if (!row || !("revision" in row)) return null;
-  const value = row.revision;
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) return null;
-  return value;
 }
 
 class EditAndSendBranchMappingError extends Error {}
@@ -3656,16 +3656,9 @@ export function editAndSend(
 
     editedCopy = getMessage(userId, editedMessageId);
     const generationId = crypto.randomUUID();
-    // `editedCopy` is read back AFTER the revision-bumping UPDATE above, so its
-    // revision is the committed post-edit value. Read it strictly: an optional
-    // unknown property, narrowed by typeof + Number.isInteger + > 0. There is NO
-    // `?? 1` fallback and no cast — a message whose revision cannot be read
-    // exactly cannot be committed, because the cursor is the ONLY record of the
-    // edit identity and a fabricated 1 would make assembly accept a stale edit.
-    // Recording the value actually written (rather than inferring
-    // `input.expectedVersion + 1`) stays correct when the two disagree, and lets
-    // a replay return the exact snapshot the first commit stored.
-    const committedRevision = readStrictRevision(editedCopy);
+    // Branch copies start at revision 1; read the written revision instead of
+    // deriving it from the source message's expectedVersion.
+    const committedRevision = readMessageRevision(editedCopy);
     if (committedRevision == null) {
       throw new EditAndSendContextError(
         "edited message revision is unreadable at commit",
