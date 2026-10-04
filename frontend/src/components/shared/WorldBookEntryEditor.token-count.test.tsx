@@ -5,6 +5,7 @@ import type { Root } from 'react-dom/client'
 import type { WorldBookEntry } from '@/types/api'
 
 const countResult = jest.fn()
+mock.module('@/api/world-books', () => ({ worldBooksApi: { getEntryOrganization: async () => ({ total: 0, unfiled: 0, folders: [], tags: [] }) } }))
 
 mock.module('@/hooks/useTokenCounts', () => ({
   useTokenCounts: ({ content, enabled = true }: { content: string; enabled?: boolean }) => {
@@ -121,6 +122,7 @@ let container: HTMLDivElement | null = null
 
 function entry(content = 'before', overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   return {
+    folder: '', tags: [],
     id: 'entry-1',
     world_book_id: 'book-1',
     uid: '1',

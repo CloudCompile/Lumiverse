@@ -3,10 +3,11 @@ import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import type { WorldBookEntry } from "../types/world-book";
 import type { VectorRow } from "./vector-store/types";
 import { worldBookVectorTrackingFingerprint } from "./world-book-vector-state";
-import { __test__ } from "./embeddings.service";
+import { __test__, buildWorldBookEntrySearchText } from "./embeddings.service";
 
 function makeEntry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: "entry-1",
     world_book_id: "book-1",
     uid: "uid-1",
@@ -290,4 +291,11 @@ describe("world-book vector commit races", () => {
     expect(readTrackedEntry().vector_index_status).toBe("indexed");
     expect(vectors.get("entry-1")?.[0]).toMatchObject({ content: "new lore", vector: [0, 1] });
   });
+});
+
+test("vector query text ignores folders and tags", () => {
+  const entry = makeEntry();
+  const organized = { ...entry, folder: "Secret metadata folder", tags: ["Secret metadata tag"] };
+  expect(buildWorldBookEntrySearchText(organized)).toBe(buildWorldBookEntrySearchText(entry));
+  expect(buildWorldBookEntrySearchText(organized)).not.toContain("Secret metadata");
 });

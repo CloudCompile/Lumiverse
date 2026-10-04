@@ -107,6 +107,7 @@ const useStore = Object.assign(
 )
 
 const entry = (id: string, overrides: Partial<WorldBookEntry> = {}): WorldBookEntry => ({
+  folder: '', tags: [],
   id,
   world_book_id: 'book-1',
   uid: id,

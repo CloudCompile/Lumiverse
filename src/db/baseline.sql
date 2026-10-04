@@ -1734,3 +1734,7 @@ INSERT INTO "oauthClient" (
   responseTypes = excluded.responseTypes,
   requirePKCE = 1,
   updatedAt = unixepoch();
+
+-- 122: UI-only entry organization.
+ALTER TABLE world_book_entries ADD COLUMN folder TEXT NOT NULL DEFAULT '';
+ALTER TABLE world_book_entries ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';

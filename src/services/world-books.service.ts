@@ -10,6 +10,8 @@ import type {
   WorldBookEntryBulkActionInput,
   WorldBookEntryBulkActionResult,
   WorldBookEntryConflictPayload,
+  WorldBookEntryFolderActionInput,
+  WorldBookEntryOrganizationSummary,
 } from "../types/world-book";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
@@ -294,11 +296,55 @@ function normalizeVectorIndexStatus(row: any): WorldBookVectorIndexStatus {
   });
 }
 
+/** Invalid organization mutations are rejected before any writes. Imports stay tolerant. */
+export class WorldBookEntryOrganizationError extends Error {
+  constructor(message: string, readonly status: 400 | 404 = 400) {
+    super(message);
+    this.name = "WorldBookEntryOrganizationError";
+  }
+}
+
+function validateOrganizationInput(input: Partial<CreateWorldBookEntryInput>): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new WorldBookEntryOrganizationError("Entry input must be an object");
+  }
+  if (input.folder !== undefined && typeof input.folder !== "string") {
+    throw new WorldBookEntryOrganizationError("folder must be a string");
+  }
+  if (input.tags !== undefined && (!Array.isArray(input.tags) || input.tags.some(tag => typeof tag !== "string"))) {
+    throw new WorldBookEntryOrganizationError("tags must be an array of strings");
+  }
+}
+
+function normalizeEntryFolder(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeEntryTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((tag): tag is string => typeof tag === "string")
+    .map((tag) => tag.trim()).filter(Boolean))];
+}
+
+function parseEntryTags(value: unknown): string[] {
+  try { return normalizeEntryTags(typeof value === "string" ? JSON.parse(value) : value); }
+  catch { return []; }
+}
+
+function appendOrganizationMutation(
+  input: Partial<CreateWorldBookEntryInput>, fields: string[], values: SQLQueryBindings[],
+): void {
+  if (input.folder !== undefined) { fields.push("folder = ?"); values.push(normalizeEntryFolder(input.folder)); }
+  if (input.tags !== undefined) { fields.push("tags = ?"); values.push(JSON.stringify(normalizeEntryTags(input.tags))); }
+}
+
 function rowToEntry(row: any): WorldBookEntry {
   const vectorIndexStatus = normalizeVectorIndexStatus(row);
   const { extensions, outletName, wiMarker, wiMarkerSide } = splitManagedEntryExtensions(row.extensions);
   return {
     ...row,
+    folder: normalizeEntryFolder(row.folder),
+    tags: parseEntryTags(row.tags),
     outlet_name: outletName,
     wi_marker: wiMarker,
     wi_marker_side: wiMarkerSide,
@@ -340,6 +386,10 @@ function getPendingVectorIndexState(entry: { vectorized: boolean; disabled?: boo
     vector_indexed_at: null,
     vector_index_error: null,
   };
+}
+
+function isOrganizationOnlyMutation(input: Partial<CreateWorldBookEntryInput>): boolean {
+  return Object.keys(input).every(key => key === "folder" || key === "tags" || key === "expected_revision");
 }
 
 function shouldResetVectorIndex(input: UpdateWorldBookEntryInput): boolean {
@@ -565,6 +615,8 @@ function buildSparseEntryMutation(
 ): { fields: string[]; values: SQLQueryBindings[]; resetsVectorIndex: boolean } {
   const fields: string[] = [];
   const values: SQLQueryBindings[] = [];
+  validateOrganizationInput(input);
+  appendOrganizationMutation(input, fields, values);
   const jsonArrayFields = ["key", "keysecondary"] as const;
   for (const field of jsonArrayFields) {
     if (input[field] !== undefined) {
@@ -683,7 +735,7 @@ function normalizeImportedPosition(position: unknown): number {
   return 0;
 }
 
-export function normalizeImportedEntryInput(raw: any, index: number): CreateWorldBookEntryInput {
+export function normalizeImportedEntryInput(raw: any, index: number, options: { format: "standard" | "lumiverse" } = { format: "standard" }): CreateWorldBookEntryInput {
   const ext = importExtensionRecord(raw);
   const keys: string[] = Array.isArray(raw.keys) ? raw.keys
     : Array.isArray(raw.key) ? raw.key
@@ -716,12 +768,23 @@ export function normalizeImportedEntryInput(raw: any, index: number): CreateWorl
     "id", "entry", "uid", "vectorized", "extensions",
     "outlet_name", "outletName", "wi_marker", "wiMarker", "wi_marker_side", "wiMarkerSide",
   ]);
+  if (options.format === "lumiverse") { knownFields.add("folder"); knownFields.add("tags"); }
   const extras: Record<string, any> = {};
   for (const [k, v] of Object.entries(raw)) {
     if (!knownFields.has(k)) extras[k] = v;
   }
 
+  const importedExtensions = { ...raw.extensions, ...extras };
+  if (options.format === "lumiverse") {
+    // Recover older native exports that preserved future fields as unknown extensions.
+    // Foreign standard payloads retain those names and meanings without reinterpretation.
+    delete importedExtensions.folder;
+    delete importedExtensions.tags;
+  }
+
   return {
+    folder: options.format === "lumiverse" ? normalizeEntryFolder(raw.folder !== undefined ? raw.folder : ext.folder) : "",
+    tags: options.format === "lumiverse" ? normalizeEntryTags(raw.tags !== undefined ? raw.tags : ext.tags) : [],
     outlet_name: importValue(raw, ext, "outlet_name", "outletName"),
     wi_marker: importValue(raw, ext, "wi_marker", "wiMarker"),
     wi_marker_side: importValue(raw, ext, "wi_marker_side", "wiMarkerSide"),
@@ -755,7 +818,7 @@ export function normalizeImportedEntryInput(raw: any, index: number): CreateWorl
     cooldown: importValue(raw, ext, "cooldown") ?? 0,
     delay: importValue(raw, ext, "delay") ?? 0,
     vectorized: importValue(raw, ext, "vectorized") ?? false,
-    extensions: { ...raw.extensions, ...extras },
+    extensions: importedExtensions,
   };
 }
 
@@ -772,6 +835,8 @@ export function materializeCharacterBookEntriesForRuntime(
     return {
       id: typeof raw.id === "string" && raw.id ? raw.id : crypto.randomUUID(),
       world_book_id: worldBookId,
+      folder: "",
+      tags: [],
       uid: typeof raw.uid === "string" && raw.uid ? raw.uid : crypto.randomUUID(),
       outlet_name: outletName,
       wi_marker: wiMarker,
@@ -954,16 +1019,17 @@ export function getWorldBookListSignature(userId: string): { count: number; maxU
 }
 
 /**
- * Cheap signature of a book's entries for ETag generation: count +
- * max(updated_at) over world_book_entries (index-backed by world_book_id).
+ * Cheap signature of a book's entries for ETag generation: count,
+ * max(updated_at), and revision sum scoped by world_book_id.
  * Caller must have already verified ownership of the book. Combined with the
- * book's own updated_at this covers entry CRUD, content edits, and reorders.
+ * book's own updated_at this covers entry CRUD, content edits, and reorders,
+ * including organization edits within the same timestamp second.
  */
-export function getWorldBookEntriesSignature(worldBookId: string): { count: number; maxUpdatedAt: number } {
+export function getWorldBookEntriesSignature(worldBookId: string): { count: number; maxUpdatedAt: number; revisionSum: number } {
   const row = getDb()
-    .query("SELECT COUNT(*) as count, COALESCE(MAX(updated_at), 0) as maxUpdatedAt FROM world_book_entries WHERE world_book_id = ?")
-    .get(worldBookId) as { count: number; maxUpdatedAt: number };
-  return { count: row.count, maxUpdatedAt: row.maxUpdatedAt };
+    .query("SELECT COUNT(*) as count, COALESCE(MAX(updated_at), 0) as maxUpdatedAt, COALESCE(SUM(revision), 0) as revisionSum FROM world_book_entries WHERE world_book_id = ?")
+    .get(worldBookId) as { count: number; maxUpdatedAt: number; revisionSum: number };
+  return { count: row.count, maxUpdatedAt: row.maxUpdatedAt, revisionSum: row.revisionSum };
 }
 
 export interface CreateWorldBookOptions {
@@ -1424,7 +1490,7 @@ export function listEntriesPaginated(
   userId: string,
   worldBookId: string,
   pagination: PaginationParams,
-  options?: { sortBy?: EntrySortKey; sortDir?: "asc" | "desc"; search?: string }
+  options?: { sortBy?: EntrySortKey; sortDir?: "asc" | "desc"; search?: string; folder?: string; tags?: string[]; type?: "trigger" | "constant" | "vector" }
 ): PaginatedResult<WorldBookEntry> {
   const book = getWorldBook(userId, worldBookId);
   if (!book) return { data: [], total: 0, limit: pagination.limit, offset: pagination.offset };
@@ -1436,38 +1502,41 @@ export function listEntriesPaginated(
   const direction = options?.sortDir === "desc" ? "DESC" : "ASC";
   const collate = sortKey === "name" ? " COLLATE NOCASE" : "";
 
-  const rawSearch = options?.search?.trim() ?? "";
-  if (!rawSearch) {
-    // Fast path: no search — use cached paginated query
+  if (!options?.search?.trim() && options?.folder === undefined && !options?.tags?.length && !options?.type) {
     return paginatedQuery(
       `SELECT * FROM world_book_entries WHERE world_book_id = ? ORDER BY ${column}${collate} ${direction}, id ASC`,
       "SELECT COUNT(*) as count FROM world_book_entries WHERE world_book_id = ?",
-      [worldBookId],
-      pagination,
-      rowToEntry
+      [worldBookId], pagination, rowToEntry,
     );
   }
-
+  const rawSearch = options?.search?.trim() ?? "";
   const ftsQuery = sanitizeEntryFtsQuery(rawSearch);
   const db = getDb();
-
-  let fromClause: string;
-  let whereStr: string;
-  let params: any[];
-
-  if (ftsQuery) {
-    // FTS path (trigram): JOIN world_book_entries_fts, scoped by world_book_id.
-    fromClause = "world_book_entries e JOIN world_book_entries_fts fts ON fts.rowid = e.rowid";
-    whereStr = "e.world_book_id = ? AND world_book_entries_fts MATCH ?";
-    params = [worldBookId, ftsQuery];
-  } else {
-    // LIKE fallback — trigram can't match 1–2 char queries (e.g. 2-char CJK).
+  const conditions = ["e.world_book_id = ?"];
+  const params: SQLQueryBindings[] = [worldBookId];
+  let fromClause = "world_book_entries e";
+  if (rawSearch && ftsQuery) {
+    fromClause += " JOIN world_book_entries_fts fts ON fts.rowid = e.rowid";
+    conditions.push("world_book_entries_fts MATCH ?");
+    params.push(ftsQuery);
+  } else if (rawSearch) {
     const like = `%${escapeLike(rawSearch)}%`;
-    fromClause = "world_book_entries e";
-    whereStr =
-      "e.world_book_id = ? AND (e.comment LIKE ? ESCAPE '\\' OR e.content LIKE ? ESCAPE '\\' OR e.key LIKE ? ESCAPE '\\' OR e.keysecondary LIKE ? ESCAPE '\\')";
-    params = [worldBookId, like, like, like, like];
+    conditions.push("(e.comment LIKE ? ESCAPE '\\' OR e.content LIKE ? ESCAPE '\\' OR e.key LIKE ? ESCAPE '\\' OR e.keysecondary LIKE ? ESCAPE '\\')");
+    params.push(like, like, like, like);
   }
+  // Omitted folder means all entries; empty folder means Unfiled.
+  if (options?.folder !== undefined) {
+    conditions.push("e.folder = ?");
+    params.push(normalizeEntryFolder(options.folder));
+  }
+  for (const tag of normalizeEntryTags(options?.tags)) {
+    conditions.push("EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(e.tags) THEN CASE WHEN json_type(e.tags) = 'array' THEN e.tags ELSE '[]' END ELSE '[]' END) t WHERE t.value = ?)");
+    params.push(tag);
+  }
+  if (options?.type === "constant") conditions.push("e.constant = 1");
+  if (options?.type === "vector") conditions.push("e.constant = 0 AND e.vectorized = 1");
+  if (options?.type === "trigger") conditions.push("e.constant = 0 AND e.vectorized = 0");
+  const whereStr = conditions.join(" AND ");
 
   const countRow = db
     .query(`SELECT COUNT(*) as count FROM ${fromClause} WHERE ${whereStr}`)
@@ -1486,6 +1555,86 @@ export function listEntriesPaginated(
     limit: pagination.limit,
     offset: pagination.offset,
   };
+}
+
+export function getEntryOrganizationSummary(userId: string, worldBookId: string): WorldBookEntryOrganizationSummary | null {
+  if (!getWorldBook(userId, worldBookId)) return null;
+  const db = getDb();
+  const counts = db.query("SELECT COUNT(*) AS total, COALESCE(SUM(folder = ''), 0) AS unfiled FROM world_book_entries WHERE world_book_id = ?")
+    .get(worldBookId) as { total: number; unfiled: number };
+  const folders = db.query("SELECT folder AS name, COUNT(*) AS count FROM world_book_entries WHERE world_book_id = ? AND folder != '' GROUP BY folder ORDER BY folder COLLATE NOCASE, folder")
+    .all(worldBookId) as Array<{ name: string; count: number }>;
+  const tags = db.query(`SELECT t.value AS name, COUNT(DISTINCT e.id) AS count FROM world_book_entries e,
+    json_each(CASE WHEN json_valid(e.tags) THEN CASE WHEN json_type(e.tags) = 'array' THEN e.tags ELSE '[]' END ELSE '[]' END) t
+    WHERE e.world_book_id = ? AND t.type = 'text' AND t.value != '' GROUP BY t.value ORDER BY t.value COLLATE NOCASE, t.value`)
+    .all(worldBookId) as Array<{ name: string; count: number }>;
+  return { ...counts, folders, tags };
+}
+
+/** Folder names are grouping values. Every matching entry is changed in one transaction. */
+export function operateEntryFolder(
+  userId: string, worldBookId: string, input: WorldBookEntryFolderActionInput,
+): { affected: number; target_book_id: string } | null {
+  const db = getDb();
+  const now = Math.floor(Date.now() / 1000);
+  const queued: string[] = [];
+  const result = db.transaction(() => {
+    if (!getWorldBook(userId, worldBookId)) return null;
+    if (!input || !["rename", "remove", "move"].includes(input.action)) {
+      throw new WorldBookEntryOrganizationError("Invalid folder action");
+    }
+    validateOrganizationInput({ folder: input.folder });
+    const sourceFolder = normalizeEntryFolder(input.folder);
+    if (!sourceFolder) throw new WorldBookEntryOrganizationError("A named source folder is required");
+    if (input.action === "rename" && typeof input.target_folder !== "string") {
+      throw new WorldBookEntryOrganizationError("target_folder is required");
+    }
+    validateOrganizationInput({ folder: input.target_folder });
+    const targetFolder = input.action === "remove" ? ""
+      : normalizeEntryFolder(input.target_folder ?? sourceFolder);
+    if (input.action === "rename" && !targetFolder) {
+      throw new WorldBookEntryOrganizationError("Use remove to unfile a folder");
+    }
+    if (input.action === "move" && (typeof input.target_book_id !== "string" || !input.target_book_id)) {
+      throw new WorldBookEntryOrganizationError("target_book_id is required");
+    }
+    const targetBookId = input.action === "move" ? input.target_book_id! : worldBookId;
+    if (!getWorldBook(userId, targetBookId)) {
+      throw new WorldBookEntryOrganizationError("Target world book not found", 404);
+    }
+    if (targetBookId === worldBookId && targetFolder === sourceFolder) {
+      return { affected: 0, target_book_id: targetBookId };
+    }
+    const crossBook = targetBookId !== worldBookId;
+    // Only cross-book moves need vector bookkeeping. Avoid fetching lore content for same-book operations.
+    const entries = crossBook ? db.query(
+      "SELECT id, vectorized, disabled, content FROM world_book_entries WHERE world_book_id = ? AND folder = ?",
+    ).all(worldBookId, sourceFolder) as Array<{ id: string; vectorized: number; disabled: number; content: string }> : [];
+    // Bun's run().changes includes FTS trigger writes; count source entries directly.
+    const { affected } = db.query(
+      "SELECT COUNT(*) AS affected FROM world_book_entries WHERE world_book_id = ? AND folder = ?",
+    ).get(worldBookId, sourceFolder) as { affected: number };
+    db.query(
+      "UPDATE world_book_entries SET world_book_id = ?, folder = ?, updated_at = ?, revision = revision + 1 WHERE world_book_id = ? AND folder = ?",
+    ).run(targetBookId, targetFolder, now, worldBookId, sourceFolder);
+    for (const entry of entries) {
+      const state = { vectorized: !!entry.vectorized, disabled: !!entry.disabled, content: entry.content };
+      db.query("UPDATE world_book_entries SET vector_index_status = ?, vector_indexed_at = NULL, vector_index_error = NULL WHERE id = ? AND world_book_id = ?")
+        .run(desiredWorldBookVectorIndexStatus(state), entry.id, targetBookId);
+      if (isWorldBookEntryVectorEligible(state)) queued.push(entry.id);
+    }
+    if (affected) {
+      touchWorldBook(worldBookId, now);
+      if (crossBook) touchWorldBook(targetBookId, now);
+    }
+    return { affected, target_book_id: targetBookId };
+  })();
+  if (result?.affected) {
+    for (const id of queued) vectorizationQueue.queueWorldBookEntryVectorization(userId, id, 4, true);
+    emitWorldBookChanged(userId, worldBookId);
+    if (result.target_book_id !== worldBookId) emitWorldBookChanged(userId, result.target_book_id);
+  }
+  return result;
 }
 
 export function listEntries(userId: string, worldBookId: string): WorldBookEntry[] {
@@ -1542,6 +1691,7 @@ export function createEntry(
   const book = getWorldBook(userId, worldBookId);
   if (!book) return null;
 
+  validateOrganizationInput(input);
   const id = crypto.randomUUID();
   const uid = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
@@ -1568,8 +1718,8 @@ export function createEntry(
         use_regex, prevent_recursion, exclude_recursion, delay_until_recursion,
         priority, sticky, cooldown, delay, selective_logic, use_probability,
         vectorized, vector_index_status, vector_indexed_at, vector_index_error,
-        extensions, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        extensions, created_at, updated_at, folder, tags
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id, worldBookId, uid,
@@ -1607,7 +1757,7 @@ export function createEntry(
       vectorIndexState.vector_indexed_at,
       vectorIndexState.vector_index_error,
       storedExtensions,
-      now, now
+      now, now, normalizeEntryFolder(input.folder), JSON.stringify(normalizeEntryTags(input.tags))
     );
 
   touchWorldBook(worldBookId, now);
@@ -1626,6 +1776,8 @@ export function updateEntry(userId: string, id: string, input: UpdateWorldBookEn
 
   const fields: string[] = [];
   const values: SQLQueryBindings[] = [];
+  validateOrganizationInput(input);
+  appendOrganizationMutation(input, fields, values);
 
   const jsonArrayFields = ["key", "keysecondary"] as const;
   for (const f of jsonArrayFields) {
@@ -1707,7 +1859,9 @@ export function updateEntry(userId: string, id: string, input: UpdateWorldBookEn
 
   touchWorldBook(existing.world_book_id, now);
   const updated = getEntry(userId, id)!;
-  if (!updated.vectorized) {
+  if (isOrganizationOnlyMutation(input)) {
+    // Organization edits never enqueue, delete or invalidate vectors, in any index state.
+  } else if (!updated.vectorized) {
     deleteWorldBookVectorsAndMaybeRequeue(userId, updated, false);
   } else if (shouldResetVectorIndex(input)) {
     deleteWorldBookVectorsAndMaybeRequeue(userId, updated, true);
@@ -1778,6 +1932,8 @@ export function duplicateEntry(userId: string, entryId: string, input?: Duplicat
     : "Copy";
 
   return createEntry(userId, targetBook.id, {
+    folder: existing.folder,
+    tags: [...existing.tags],
     outlet_name: existing.outlet_name,
     wi_marker: existing.wi_marker,
     wi_marker_side: existing.wi_marker_side,
@@ -1948,10 +2104,45 @@ export async function bulkOperateEntries(
     return { action: input.action, affected: uniqueIds.length };
   }
 
+  if (input.action === "add_tags" || input.action === "remove_tags") {
+    validateOrganizationInput({ tags: input.tags });
+    const tags = normalizeEntryTags(input.tags);
+    if (!tags.length) throw new WorldBookEntryOrganizationError("At least one non-empty tag is required");
+    const removing = new Set(tags);
+    db.transaction(() => {
+      for (const entry of orderedEntries) {
+        const next = input.action === "add_tags"
+          ? normalizeEntryTags([...entry.tags, ...tags])
+          : entry.tags.filter(tag => !removing.has(tag));
+        runConditionalMutation(entry.id,
+          "UPDATE world_book_entries SET tags = ?, updated_at = ?, revision = revision + 1",
+          [JSON.stringify(next), now]);
+      }
+      touchWorldBook(worldBookId, now);
+    })();
+    emitWorldBookChanged(userId, worldBookId);
+    return { action: input.action, affected: orderedEntries.length };
+  }
+
   if (input.action === "move") {
+    validateOrganizationInput({ folder: input.target_folder });
     const targetBook = getWorldBook(userId, input.target_book_id);
     if (!targetBook) {
-      throw new Error("Target world book not found");
+      throw new WorldBookEntryOrganizationError("Target world book not found", 404);
+    }
+
+    if (targetBook.id === worldBookId) {
+      if (input.target_folder === undefined) return { action: input.action, affected: 0, target_book_id: targetBook.id };
+      db.transaction(() => {
+        for (const entry of orderedEntries) {
+          runConditionalMutation(entry.id,
+            "UPDATE world_book_entries SET folder = ?, updated_at = ?, revision = revision + 1",
+            [normalizeEntryFolder(input.target_folder), now]);
+        }
+        touchWorldBook(worldBookId, now);
+      })();
+      emitWorldBookChanged(userId, worldBookId);
+      return { action: input.action, affected: orderedEntries.length, target_book_id: targetBook.id };
     }
 
     db.transaction(() => {
@@ -1959,9 +2150,9 @@ export async function bulkOperateEntries(
         runConditionalMutation(
           entry.id,
           `UPDATE world_book_entries
-           SET world_book_id = ?, updated_at = ?, revision = revision + 1,
+           SET world_book_id = ?, folder = ?, updated_at = ?, revision = revision + 1,
                vector_index_status = ?, vector_indexed_at = NULL, vector_index_error = NULL`,
-          [targetBook.id, now, desiredWorldBookVectorIndexStatus(entry)],
+          [targetBook.id, input.target_folder === undefined ? entry.folder : normalizeEntryFolder(input.target_folder), now, desiredWorldBookVectorIndexStatus(entry)],
         );
       });
       touchWorldBook(worldBookId, now);
@@ -2094,6 +2285,7 @@ export async function bulkOperateEntries(
     for (const mutation of mutations) {
       const updated = getEntry(userId, mutation.entry.id);
       if (!updated) continue;
+      if (isOrganizationOnlyMutation(input.fields)) continue;
       if (!updated.vectorized) {
         deleteWorldBookVectorsAndMaybeRequeue(userId, updated, false);
       } else if (mutation.resetsVectorIndex) {
@@ -2113,6 +2305,8 @@ export async function bulkOperateEntries(
     db.transaction(() => {
       for (const entry of orderedEntries) {
         const next = createEntry(userId, targetBook.id, {
+          folder: entry.folder,
+          tags: [...entry.tags],
           outlet_name: entry.outlet_name,
           wi_marker: entry.wi_marker,
           wi_marker_side: entry.wi_marker_side,
@@ -2302,8 +2496,8 @@ function bulkInsertEntries(
       use_regex, prevent_recursion, exclude_recursion, delay_until_recursion,
       priority, sticky, cooldown, delay, selective_logic, use_probability,
       vectorized, vector_index_status, vector_indexed_at, vector_index_error,
-      extensions, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      extensions, created_at, updated_at, folder, tags
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   let aborted = false;
@@ -2369,7 +2563,7 @@ function bulkInsertEntries(
           vectorIndexState.vector_indexed_at,
           vectorIndexState.vector_index_error,
           extensionsJson,
-          now, now,
+          now, now, normalizeEntryFolder(input.folder), JSON.stringify(normalizeEntryTags(input.tags)),
         );
 
         insertedIds.push(id);
@@ -2412,7 +2606,7 @@ export function importWorldBook(
   });
 
   const rawEntries = normalizeImportedEntries(payload.entries);
-  const inputs = rawEntries.map((raw, i) => normalizeImportedEntryInput(raw, i));
+  const inputs = rawEntries.map((raw, i) => normalizeImportedEntryInput(raw, i, { format: payload.type === "lumiverse_world_book" ? "lumiverse" : "standard" }));
 
   const result = bulkInsertEntries(worldBook.id, inputs, { signal: options.signal });
   queueVectorizationsBatch(userId, result.vectorizedIds);
@@ -2455,7 +2649,7 @@ export async function importWorldBookBulk(
     const end = Math.min(start + IMPORT_DEFAULT_CHUNK_SIZE, rawEntries.length);
     const inputs = new Array<CreateWorldBookEntryInput>(end - start);
     for (let index = start; index < end; index++) {
-      inputs[index - start] = normalizeImportedEntryInput(rawEntries[index], index);
+      inputs[index - start] = normalizeImportedEntryInput(rawEntries[index], index, { format: payload.type === "lumiverse_world_book" ? "lumiverse" : "standard" });
     }
     const result = bulkInsertEntries(worldBook.id, inputs, {
       forceVectorizedOff: true,
@@ -2532,7 +2726,7 @@ export function importLumiverseWorldBook(
   });
 
   const rawEntries = normalizeImportedEntries(data.entries);
-  const inputs = rawEntries.map((raw, i) => normalizeImportedEntryInput(raw, i));
+  const inputs = rawEntries.map((raw, i) => normalizeImportedEntryInput(raw, i, { format: "lumiverse" }));
 
   const result = bulkInsertEntries(worldBook.id, inputs, { signal: options.signal });
   queueVectorizationsBatch(userId, result.vectorizedIds);

@@ -24,6 +24,8 @@ bun run diagnose
 
 ## Scripts
 
+- `node check-entry-organization.mjs`
+  Exercises native folder/tag controls inside the real modal shell using controlled in-memory data. Covers mouse/keyboard, focus, Escape, close/reopen, additive tags, folder removal, desktop/mobile widths and UI scales in Chromium, Firefox and WebKit. No backend, login or personal lorebooks are used. Set `ENTRY_ORGANIZATION_BROWSERS=chromium` for one engine; `PLAYWRIGHT_MODULE` can point to an existing Playwright installation.
 - `node check-ui-scale.mjs`
   Runs a local React 19 scaling regression suite in Chromium, Firefox, and WebKit,
   with no server or login required. Install the frontend dependencies and run

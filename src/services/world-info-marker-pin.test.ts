@@ -27,6 +27,7 @@ import type { WorldBookEntry } from "../types/world-book";
  */
 function makeEntry(partial: Partial<WorldBookEntry>): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: "entry-1",
     world_book_id: "wb-1",
     uid: "uid-1",

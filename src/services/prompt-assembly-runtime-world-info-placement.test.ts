@@ -37,6 +37,7 @@ function placement(
 
 function entry(id: string, orderValue: number): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id,
     world_book_id: "book",
     uid: id,

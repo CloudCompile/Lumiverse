@@ -10,6 +10,7 @@ import { getVectorIndexStatusDescription, getVectorIndexStatusLabel } from '@/li
 import { useWorldBookEntryLabels } from '@/lib/i18n/worldBookEntryLabels'
 import { useLoomOptionLabels } from '@/lib/i18n/loomOptionLabels'
 import NumberStepper from './NumberStepper'
+import EntryOrganizationFields from './EntryOrganizationFields'
 import styles from './WorldBookEntryEditor.module.css'
 
 export interface EntryEditorConflictState {
@@ -295,6 +296,7 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
           )}
         </div>
       )}
+      <EntryOrganizationFields key={entry.id} bookId={entry.world_book_id} folder={entry.folder ?? ''} tags={entry.tags ?? []} onChange={updates => onImmediateUpdate(entry.id, updates)} />
       {/* Identity & Content */}
       <section className={styles.identityContentSection} data-world-book-identity-content="true">
         <span className={styles.sectionHeading}>{t('sections.identity')}</span>

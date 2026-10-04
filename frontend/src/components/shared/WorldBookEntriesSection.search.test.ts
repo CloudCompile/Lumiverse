@@ -3,21 +3,23 @@ import { describe, expect, test } from 'bun:test'
 const source = await Bun.file(new URL('./WorldBookEntriesSection.tsx', import.meta.url)).text()
 
 describe('regular lorebook panel smart-search contract', () => {
-  test('keeps ordinary navigation paginated and loads the complete corpus only on demand', () => {
-    expect(source).toContain('shouldLoadFullWorldBookEntryCorpus(')
+  test('composes organization, text and type filters before server pagination', () => {
     expect(source).toContain('worldBooksApi.listEntries(bookId')
-    expect(source).toContain('worldBooksApi.listAllEntries(bookId, { signal: controller.signal })')
+    expect(source).not.toContain('worldBooksApi.listAllEntries(bookId')
+    expect(source).toContain('folder: entryFolder')
+    expect(source).toContain('tag: entryTags')
+    expect(source).toContain('search: entrySearchFilter')
+    expect(source).toContain("type: entryTypeFilter === 'all' ? undefined : entryTypeFilter")
     expect(source).toContain('entriesAbortRef.current?.abort()')
-    expect(source).toContain("value === 'all' || fullCorpusMode ? count : '—'")
-    expect(source).toContain('searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex)')
-    expect(source).toContain('entrySearchResults?.map((result) => result.entry) ?? orderedEntries')
-    expect(source).not.toContain('search: search || undefined')
+    expect(source).toContain('controller.signal.aborted || entriesAbortRef.current !== controller')
   })
 
-  test('counts query results before applying the selected type', () => {
-    expect(source).toContain('for (const entry of queryEntries) counts[getEntryType(entry)] += 1')
-    expect(source).toMatch(/entryTypeFilter === 'all'[\s\S]*\? queryEntries[\s\S]*queryEntries\.filter/)
-    expect(source).toContain('fullCorpusMode ? filteredEntries.length : sourceEntryTotal')
+  test('never applies fuzzy matches or type filters to a partial server page', () => {
+    expect(source).toContain('searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex)')
+    expect(source).not.toContain('entrySearchResults?.map((result) => result.entry) ?? orderedEntries')
+    expect(source).toContain('const queryEntries = orderedEntries')
+    expect(source).not.toContain('queryEntries.filter((entry) => getEntryType(entry) === entryTypeFilter)')
+    expect(source).toContain('setSourceEntryTotal(res.total)')
   })
 
   test('keeps search clearable, scoped, and independent from the open entry', () => {
