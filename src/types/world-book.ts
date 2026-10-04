@@ -11,6 +11,8 @@ export interface WorldBook {
 export type WorldBookVectorIndexStatus = "not_enabled" | "pending" | "indexed" | "error";
 
 export interface WorldBookEntry {
+  folder: string;
+  tags: string[];
   id: string;
   world_book_id: string;
   uid: string;
@@ -256,6 +258,8 @@ export interface CreateWorldBookInput {
 export type UpdateWorldBookInput = Partial<CreateWorldBookInput>;
 
 export interface CreateWorldBookEntryInput {
+  folder?: string;
+  tags?: string[];
   outlet_name?: string | null;
   wi_marker?: string | null;
   wi_marker_side?: "before" | "after" | null;
@@ -320,6 +324,7 @@ export interface WorldBookEntryBulkDeleteInput extends WorldBookEntryBulkBaseInp
 export interface WorldBookEntryBulkMoveInput extends WorldBookEntryBulkBaseInput {
   action: "move";
   target_book_id: string;
+  target_folder?: string;
 }
 
 export interface WorldBookEntryBulkRenumberInput extends WorldBookEntryBulkBaseInput {
@@ -375,7 +380,29 @@ export interface WorldBookEntryBulkCopyInput extends WorldBookEntryBulkBaseInput
   target_book_id: string;
 }
 
+export interface WorldBookEntryBulkTagsInput {
+  action: "add_tags" | "remove_tags";
+  entry_ids: string[];
+  tags: string[];
+  expected_revisions?: Record<string, number>;
+}
+
+export interface WorldBookEntryFolderActionInput {
+  action: "rename" | "remove" | "move";
+  folder: string;
+  target_folder?: string;
+  target_book_id?: string;
+}
+
+export interface WorldBookEntryOrganizationSummary {
+  total: number;
+  unfiled: number;
+  folders: Array<{ name: string; count: number }>;
+  tags: Array<{ name: string; count: number }>;
+}
+
 export type WorldBookEntryBulkActionInput =
+  | WorldBookEntryBulkTagsInput
   | WorldBookEntryBulkDeleteInput
   | WorldBookEntryBulkMoveInput
   | WorldBookEntryBulkRenumberInput

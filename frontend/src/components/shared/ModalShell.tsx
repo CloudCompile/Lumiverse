@@ -15,6 +15,8 @@ interface ModalShellProps {
   children: ReactNode
   className?: string
   style?: CSSProperties
+  /** Use the available viewport without desktop size caps. */
+  fullscreen?: boolean
   /** Allow a modal body with form controls to scroll when the viewport is short. */
   scrollable?: boolean
   modalId?: string
@@ -31,6 +33,7 @@ export function ModalShell({
   children,
   className,
   style,
+  fullscreen = false,
   scrollable = false,
   modalId = 'shell',
 }: ModalShellProps) {
@@ -70,7 +73,7 @@ export function ModalShell({
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          className={styles.backdrop}
+          className={clsx(styles.backdrop, fullscreen && styles.fullscreenBackdrop)}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -80,7 +83,7 @@ export function ModalShell({
           style={{ zIndex }}
         >
           <motion.div
-            className={clsx(styles.modal, scrollable && styles.scrollable, className)}
+            className={clsx(styles.modal, fullscreen && styles.fullscreenModal, scrollable && styles.scrollable, className)}
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
@@ -88,8 +91,8 @@ export function ModalShell({
             // A caller's viewport-unit limit also needs to fit the available
             // backdrop at larger UI scales and while a keyboard is open.
             style={{
-              maxWidth,
-              maxHeight: `min(${typeof maxHeight === 'number' ? `${maxHeight}px` : maxHeight}, 100%)`,
+              maxWidth: fullscreen ? undefined : maxWidth,
+              maxHeight: fullscreen ? undefined : `min(${typeof maxHeight === 'number' ? `${maxHeight}px` : maxHeight}, 100%)`,
               ...style,
             }}
           >
