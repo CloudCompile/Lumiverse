@@ -59,3 +59,14 @@ The compact sidebar diagnostics additionally check Injection row alignment, Acti
 
 
 Final compact-row verification: all 18 sidebar cases pass across Chromium, Firefox and WebKit. The initial unconstrained wrapping implementation failed the narrowest Activation row assertion and was replaced with explicit narrow grids before completion. A later Firefox fixture navigation timeout occurred during severe memory pressure; the final sequential retry passes all engines. The first lint run was stopped deliberately to free RAM; the final lint retry and checked TypeScript/production build pass. Live read-only mobile review confirmed three Injection columns, paired Activation controls and paired Probability/Scan Depth, with hover scrolling still working. Screenshot: `lorebook-sidebar-compact-rows.png`; viewport override reset. No personal data edits or PR/commit.
+
+
+## Navigator hierarchy follow-up
+
+Folder controls, tag filtering and entry rows now share the same horizontal edges. The breadcrumb has a divider, labels/counts use a smaller hierarchy, and selection uses a subtle theme-aware fill and left marker. Move/Add tags/Remove tags are consolidated into the existing selected-entry action menu; revision snapshots and focus restoration remain intact.
+
+Verification: 27 targeted frontend tests pass with 105 assertions. All 30 controlled workspace/sidebar viewport and scale cases pass across Chromium, Firefox and WebKit, including aligned edges, the consolidated tag action, dialog cancellation/focus return and existing inline scrolling checks. Lint and checked TypeScript/production build pass. Source whitespace checks are clean. The full browser run required execution outside the sandbox because esbuild spawning was denied there.
+
+Live controlled-fixture review exercised desktop sidebar selection and tag dialog cancellation, desktop modal selection and mobile modal selection. Screenshots: lorebook-selection-hierarchy-sidebar.png, lorebook-selection-hierarchy-modal.png and lorebook-selection-hierarchy-mobile.png in the thread visualization directory. Viewport override reset; no personal entries changed. User approved the visuals and confirmed a fresh ST export works after restarting the previously stale backend.
+
+Generated frontend/dist stays served for live review and is excluded from the source commit. No dependencies or lockfiles changed. Historical full-suite failures and previously documented unverified platform cases still apply.

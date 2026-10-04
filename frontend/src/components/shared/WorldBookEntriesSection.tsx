@@ -781,6 +781,7 @@ export default function WorldBookEntriesSection({
   const [bulkActionsMenu, setBulkActionsMenu] = useState<ContextMenuPos | null>(null)
   const [moveTargetBookId, setMoveTargetBookId] = useState('')
   const organizationControlsRef = useRef<EntryOrganizationHandle>(null)
+  const bulkActionsTriggerRef = useRef<HTMLButtonElement>(null)
   const [renumberStart, setRenumberStart] = useState('')
   const [renumberStep, setRenumberStep] = useState('1')
   const [renumberDirection, setRenumberDirection] = useState<'asc' | 'desc'>('asc')
@@ -1891,7 +1892,7 @@ export default function WorldBookEntriesSection({
       {presentation === 'workspace' && isMobile && openSwitcher && <nav className={styles.openSwitcher} aria-label="Open entry switcher">{tabs.map(entry => <div key={entry.id}><button type="button" onClick={() => activateTab(entry.id)}>{entry.comment || '(unnamed)'}</button><button type="button" aria-label={`Close tab ${entry.comment || '(unnamed)'}`} onClick={() => closeTab(entry.id)}>×</button></div>)}</nav>}
       <div className={presentation === 'workspace' ? styles.workspaceBody : undefined}>
       <div ref={listViewportRef} className={presentation === 'workspace' ? styles.workspaceList : undefined} style={presentation === 'workspace' && !isMobile ? { flexBasis: navigatorWidth } : undefined} hidden={presentation === 'workspace' && (isMobile ? !!detailEntry && !mobileBrowsing : navigatorCollapsed)}>
-      {selectedBookId && <EntryOrganizationControls ref={organizationControlsRef} key={selectedBookId} bookId={selectedBookId} books={books} summary={organization} folder={entryFolder} root={folderRoot} tags={entryTags} entries={allKnownEntries} selectedIds={selectedIds} busy={pendingAction || loadingEntries} hideFilters={isMobile && !mobileListOptionsOpen}
+      {selectedBookId && <EntryOrganizationControls ref={organizationControlsRef} key={selectedBookId} bookId={selectedBookId} books={books} summary={organization} folder={entryFolder} root={folderRoot} tags={entryTags} entries={allKnownEntries} selectedIds={selectedIds} busy={pendingAction || loadingEntries} hideFilters={isMobile && !mobileListOptionsOpen} hideSelectionActions
         onRoot={() => { setFolderRoot(true); setSelectedIds([]) }}
         onTags={tags => { setEntryTags(tags); setEntryPage(1); setSelectedIds([]) }}
         onFolderChanged={value => { setEntryFolder(value); setFolderRoot(value === undefined); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }}
@@ -2060,7 +2061,7 @@ export default function WorldBookEntriesSection({
       {selectMode && (
         <div className={styles.bulkBar}>
           <div className={styles.bulkLeft}>
-            <button type="button" className={styles.bulkToggle} onClick={handleSelectAllVisible}>
+            <button type="button" className={styles.bulkToggle} aria-label={allSelected ? 'Deselect visible entries' : 'Select visible entries'} onClick={handleSelectAllVisible}>
               {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
             </button>
             <span className={styles.bulkCount}>{te('bulkSelected', { selected: selectedCount, total: filteredEntries.length })}</span>
@@ -2068,6 +2069,8 @@ export default function WorldBookEntriesSection({
           <div className={styles.bulkActions}>
             <button
               type="button"
+              ref={bulkActionsTriggerRef}
+              aria-label="Selected entry actions"
               className={styles.bulkActionBtn}
               disabled={selectedCount === 0}
               onClick={(event) => {
@@ -2238,6 +2241,9 @@ export default function WorldBookEntriesSection({
       <ContextMenu
         position={bulkActionsMenu}
         items={[
+          { key: 'organization-move', label: 'Move selected…', icon: <MapPin size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openMove(selectedIds, entryFolder ?? '', bulkActionsTriggerRef.current ?? undefined) } },
+          { key: 'organization-add-tags', label: 'Add tags…', icon: <Tag size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openTags?.('add_tags', selectedIds, bulkActionsTriggerRef.current ?? undefined) } },
+          { key: 'organization-remove-tags', label: 'Remove tags…', icon: <Tag size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openTags?.('remove_tags', selectedIds, bulkActionsTriggerRef.current ?? undefined) } },
           {
             key: 'renumber',
             label: te('renumber'),

@@ -79,6 +79,16 @@ describe('native entry organization interactions', () => {
     expect(calls[0]!.input.entry_ids).toEqual(['e1'])
     expect(calls[0]!.input.expected_revisions).toEqual({ e1: 7 })
   })
+  test('consolidated selection actions retain revision snapshots and restore focus to the toolbar', async () => {
+    const ref = createRef<import('./EntryOrganizationControls').EntryOrganizationHandle>()
+    await render(controls({ ref, hideSelectionActions: true }))
+    expect([...document.querySelectorAll('button')].some(node => node.textContent === 'Add tags…')).toBe(false)
+    const source = document.createElement('button'); document.body.append(source)
+    await act(async () => { ref.current!.openTags!('add_tags', ['e1'], source) })
+    await input('Bulk tag', ' a,b '); await click('Apply tags')
+    expect(calls[0]!.input).toEqual({ action: 'add_tags', entry_ids: ['e1'], tags: ['a,b'], expected_revisions: { e1: 7 } })
+    expect(document.activeElement).toBe(source)
+  })
   test('row context move uses the same dialog with only the requested entry', async () => {
     const ref = createRef<{ openMove(ids: string[], folder: string): void }>()
     await render(controls({ ref, selectedIds: [] }))
