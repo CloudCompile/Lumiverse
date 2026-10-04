@@ -16,6 +16,7 @@ const t = (key: string) => key
 const cssClasses = ['modal', 'closeBtnPos', 'header', 'headerCopy', 'title', 'subtitle', 'count', 'error', 'scrollArea', 'state', 'grid', 'card', 'cardCurrent', 'thumb', 'thumbImage', 'thumbPlaceholder', 'placeholderLabel', 'badge', 'currentBadge', 'meta', 'filename', 'metaRow', 'metaLabel', 'metaValue', 'cardActions', 'applyBtn', 'deleteBtn', 'footer', 'loadMoreBtn']
 mock.module('./WallpaperLibraryModal.module.css', () => ({ default: Object.fromEntries(cssClasses.map((name) => [name, `fixture_${name}`])) }))
 mock.module('../shared/CloseButton.module.css', () => ({ default: { base: 'fixture_close' } }))
+mock.module('../shared/ModalShell.module.css', () => ({ default: { backdrop: 'fixture_backdrop', fullscreenBackdrop: 'fixture_fullscreenBackdrop', modal: 'fixture_modal', fullscreenModal: 'fixture_fullscreenModal', scrollable: 'fixture_scrollable' } }))
 mock.module('react-i18next', () => ({ useTranslation: () => ({ t, i18n: { language: 'en' } }) }))
 mock.module('motion/react', () => ({
   AnimatePresence: ({ children }: { children: ReactNode }) => children,
@@ -98,4 +99,16 @@ test('keeps loading, empty and error states addressable across reopening', async
 test('does not assign Wallpaper Library hooks to other modal callers', async () => {
   await render(<ModalShell isOpen onClose={() => {}}>Another modal</ModalShell>)
   expect(document.querySelector('[data-component], [data-modal]')).toBeNull()
+})
+
+
+test('preserves fullscreen sizing and classes alongside optional portal theme hooks', async () => {
+  await render(<ModalShell isOpen fullscreen scrollable data-component="FullscreenFixture" onClose={() => {}}>Fullscreen content</ModalShell>)
+  const modal = document.querySelector('[data-component="FullscreenFixture"]') as HTMLElement
+  expect(modal.classList.contains('fixture_fullscreenModal')).toBe(true)
+  expect(modal.classList.contains('fixture_scrollable')).toBe(true)
+  expect(modal.style.maxWidth).toBe('')
+  expect(modal.style.maxHeight).toBe('')
+  expect(modal.parentElement?.classList.contains('fixture_fullscreenBackdrop')).toBe(true)
+  expect(modal.parentElement?.getAttribute('data-modal')).toBe('FullscreenFixture')
 })

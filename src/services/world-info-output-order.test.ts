@@ -13,6 +13,7 @@ const context = {
 const none = new Set<string>();
 function entry(id: string, order: number): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id, world_book_id: "book", uid: id, key: ["match"], keysecondary: [], content: id,
     comment: id, position: 0, depth: 0, role: null, order_value: order, priority: order,
     selective: false, constant: false, disabled: false, group_name: "", group_override: false,
@@ -84,4 +85,23 @@ describe("world info output ordering", () => {
     }])));
     expect(placed.map(row => row.id)).toEqual(["A", "B"]);
   });
+});
+
+
+test("folder and tag metadata leaves activation, budget, groups and prompt materialization unchanged without Suite", () => {
+  const entries = [entry("A", 100), entry("B", 200), entry("C", 300)];
+  entries[0].group_name = "characters";
+  entries[1].group_name = "characters";
+  const run = (rows: WorldBookEntry[]) => activateWorldInfo({
+    entries: rows,
+    messages: [{ id: "message", content: "match", is_user: true, extra: {}, index_in_chat: 1 }] as never,
+    chatTurn: 1, wiState: {},
+    settings: { maxTokenBudget: 2, maxActivatedEntries: 0, minPriority: 0, maxRecursionPasses: 2 },
+  });
+  const before = run(entries);
+  const organized = entries.map(row => ({ ...row, folder: "match", tags: ["match", "villain"] }));
+  const after = run(organized);
+  expect(after.activatedEntries.map(row => row.id)).toEqual(before.activatedEntries.map(row => row.id));
+  expect(after.stats).toEqual(before.stats);
+  expect(materializeWorldInfoCache(after.activatedEntries)).toEqual(materializeWorldInfoCache(before.activatedEntries));
 });

@@ -31,6 +31,7 @@ function makeEntry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   // observe.
   const filler = `entry-${__counter} — ${"abcdefghij".repeat(__counter % 7 + 3)} ${__counter * 7919}`;
   return {
+    folder: "", tags: [],
     id: overrides.id ?? crypto.randomUUID(),
     world_book_id: "book-a",
     uid: overrides.uid ?? crypto.randomUUID(),

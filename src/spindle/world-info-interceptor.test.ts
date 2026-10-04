@@ -8,6 +8,7 @@ import {
 
 function makeEntry(id: string): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id,
     world_book_id: "book",
     uid: id,

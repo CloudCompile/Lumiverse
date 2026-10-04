@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import WorldBookColumnHandle from './WorldBookColumnHandle'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { createPortal } from 'react-dom'
 import { useWorldBookEntryLabels } from '@/lib/i18n/worldBookEntryLabels'
@@ -53,6 +54,7 @@ import {
 import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { useScrollGate } from '@/hooks/useScrollGate'
 import useIsMobile from '@/hooks/useIsMobile'
+import { useEntryWorkspace } from './useEntryWorkspace'
 import { invalidateTokenCountsForEntry, useTokenCounts, useTokenCountSweep } from '@/hooks/useTokenCounts'
 import clsx from 'clsx'
 import { worldBooksApi } from '@/api/world-books'
@@ -71,11 +73,13 @@ import { ModalPresentation } from '@/components/shared/ModalPresentation'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import { FormField, Select, TextInput, Button } from '@/components/shared/FormComponents'
 import Pagination from '@/components/shared/Pagination'
+import EntryOrganizationControls, { EntryFolderList, type EntryOrganizationHandle } from './EntryOrganizationControls'
 import { useStore } from '@/store'
 import type {
   WorldBook,
   WorldBookEntry,
   WorldBookEntryBulkActionInput,
+  WorldBookEntryOrganizationSummary,
 } from '@/types/api'
 import type {
   WorldBookEntrySortBy,
@@ -392,6 +396,11 @@ function EntryTokenCell({ bookId, entry, selected }: { bookId: string; entry: Wo
 interface EntryRowProps {
   bookId: string
   editorDensity?: 'default' | 'compact'
+  inlineEditor?: boolean
+  workspaceMode?: boolean
+  workspaceOpen?: boolean
+  mobile?: boolean
+  showTokens?: boolean
   entry: WorldBookEntry
   expanded: boolean
   dragEnabled: boolean
@@ -421,6 +430,11 @@ function EntryRowContent({
   entry,
   bookId,
   editorDensity,
+  inlineEditor = true,
+  workspaceMode = false,
+  workspaceOpen = false,
+  mobile = false,
+  showTokens = true,
   expanded,
   dragEnabled,
   selectMode,
@@ -487,9 +501,9 @@ function EntryRowContent({
                 aria-label={entry.disabled ? t('enableEntry') : t('disableEntry')}
               />
             )}
-            <button
+            {dragEnabled && <button
               type="button"
-              className={clsx(styles.dragHandle, !dragEnabled && styles.dragHandleDisabled)}
+              className={styles.dragHandle}
               title={dragEnabled ? t('dragReorder') : t('dragUnavailable')}
               aria-label={t('dragHandle')}
               tabIndex={-1}
@@ -497,7 +511,7 @@ function EntryRowContent({
               {...dragHandleListeners}
             >
               <GripVertical size={13} />
-            </button>
+            </button>}
           </div>
 
           <div className={styles.entryIdentity}>
@@ -507,8 +521,11 @@ function EntryRowContent({
                   text={entry.comment || '(unnamed)'}
                   ranges={entry.comment ? searchRangesFor(searchResult, 'comment') : []}
                 />
+                {workspaceOpen && <small aria-label="Open in workspace" title="Open in workspace"> · ◦</small>}
+                {(entry.folder || entry.tags?.length > 0) && <small title={[entry.folder, ...(entry.tags ?? [])].filter(Boolean).join(' · ')}> · {[entry.folder, ...(entry.tags ?? [])].filter(Boolean).join(' · ')}</small>}
               </span>
               <div className={styles.entryMeta}>
+                {mobile ? <span className={styles.entryMetaItem}>{labels.entryTypeLabel(entry)} · {labels.positionLabel(entry.position)}</span> : <>
                 <button
                   type="button"
                   className={clsx(
@@ -543,6 +560,7 @@ function EntryRowContent({
                   <span>{entry.position === 7 && entry.wi_marker ? `${labels.positionLabel(entry.position)} · ${markerLabel(entry.wi_marker)}` : labels.positionLabel(entry.position)}</span>
                   <ChevronDown size={11} />
                 </button>
+                </>}
                 <span
                   className={clsx(styles.entryMetaItem, styles.orderBadge)}
                   title={`${tEntryFields('order')}: ${entry.order_value.toLocaleString()}`}
@@ -551,7 +569,7 @@ function EntryRowContent({
                   <Hash size={10} aria-hidden="true" />
                   <span>{entry.order_value.toLocaleString()}</span>
                 </span>
-                <EntryTokenCell bookId={bookId} entry={entry} selected={selected || expanded} />
+                {showTokens && <EntryTokenCell bookId={bookId} entry={entry} selected={selected || expanded} />}
               </div>
               {matchedPrimaryKeys.length > 0 && (
                 <div className={styles.entrySearchContext}>
@@ -583,11 +601,11 @@ function EntryRowContent({
               type="button"
               className={styles.expandBtn}
               onClick={onToggleExpand}
-              title={expanded ? t('collapseEditor') : t('expandEditor')}
-              aria-label={expanded ? t('collapseEditor') : t('expandEditor')}
+              title={workspaceMode ? 'Open entry editor' : expanded ? t('collapseEditor') : t('expandEditor')}
+              aria-label={workspaceMode ? 'Open entry editor' : expanded ? t('collapseEditor') : t('expandEditor')}
             >
               {expanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-              <span>{expanded ? t('collapse') : t('expand')}</span>
+              <span>{workspaceMode ? expanded ? 'Active' : 'Open' : expanded ? t('collapse') : t('expand')}</span>
             </button>
             <button
               type="button"
@@ -605,9 +623,10 @@ function EntryRowContent({
 
       </div>
 
-      {expanded && (
+      {expanded && inlineEditor && (
         <WorldBookEntryEditor
           density={editorDensity}
+          scrollMode="parent"
           entry={entry}
           onUpdate={onDebouncedUpdate}
           onImmediateUpdate={onUpdate}
@@ -683,6 +702,11 @@ interface EntryIntent {
 }
 
 interface WorldBookEntriesSectionProps {
+  active?: boolean
+  onEntryCount?: (count: number) => void
+  onDetailViewChange?: (editing: boolean) => void
+  presentation?: 'workspace' | 'navigation'
+  onOpenEntry?: (entryId: string) => void
   books: WorldBook[]
   selectedBookId: string
   editorDensity?: 'default' | 'compact'
@@ -692,6 +716,11 @@ interface WorldBookEntriesSectionProps {
 }
 
 export default function WorldBookEntriesSection({
+  presentation,
+  active = true,
+  onEntryCount,
+  onDetailViewChange,
+  onOpenEntry,
   books,
   selectedBookId,
   editorDensity,
@@ -709,9 +738,27 @@ export default function WorldBookEntriesSection({
   const setPendingWorldBookEditEntryId = useStore((s) => s.setPendingWorldBookEditEntryId)
   const setSetting = useStore((s) => s.setSetting)
   const isMobile = useIsMobile()
+  const [showTokens, setShowTokens] = useState(true)
+  const listViewportRef = useRef<HTMLDivElement>(null)
+  const savedListScroll = useRef(0)
+  const detailViewportRef = useRef<HTMLElement>(null)
+  const detailBackRef = useRef<HTMLButtonElement>(null)
+  const navigatorToggleRef = useRef<HTMLButtonElement>(null)
+  const workspaceSwitcherRef = useRef<HTMLButtonElement>(null)
 
-  const [entries, setEntries] = useState<WorldBookEntry[]>([])
+  const { entries, cached: workspaceEntries, openIds, setEntries, open: openWorkspaceEntry, close: closeWorkspaceEntry } = useEntryWorkspace()
+  const allKnownEntries = useMemo(() => [...entries, ...workspaceEntries.filter(entry => !entries.some(value => value.id === entry.id))], [entries, workspaceEntries])
+  const [navigatorCollapsed, setNavigatorCollapsed] = useState(false)
+  const [navigatorWidth, setNavigatorWidth] = useState(300)
+  const [mobileBrowsing, setMobileBrowsing] = useState(false)
+  const [openSwitcher, setOpenSwitcher] = useState(false)
+  const [splitEntryId, setSplitEntryId] = useState<string | null>(null)
   const [sourceEntryTotal, setSourceEntryTotal] = useState(0)
+  const [entryFolder, setEntryFolder] = useState<string | undefined>()
+  const [entryTags, setEntryTags] = useState<string[]>([])
+  const [folderRoot, setFolderRoot] = useState(!pendingWorldBookEditEntryId)
+  const [organization, setOrganization] = useState<WorldBookEntryOrganizationSummary | null>(null)
+  const [entriesError, setEntriesError] = useState('')
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryPage, setEntryPage] = useState(1)
   const [loadingEntries, setLoadingEntries] = useState(false)
@@ -733,6 +780,8 @@ export default function WorldBookEntriesSection({
   const [activationState, setActivationState] = useState<ActivationState | null>(null)
   const [bulkActionsMenu, setBulkActionsMenu] = useState<ContextMenuPos | null>(null)
   const [moveTargetBookId, setMoveTargetBookId] = useState('')
+  const organizationControlsRef = useRef<EntryOrganizationHandle>(null)
+  const bulkActionsTriggerRef = useRef<HTMLButtonElement>(null)
   const [renumberStart, setRenumberStart] = useState('')
   const [renumberStep, setRenumberStep] = useState('1')
   const [renumberDirection, setRenumberDirection] = useState<'asc' | 'desc'>('asc')
@@ -751,7 +800,6 @@ export default function WorldBookEntriesSection({
   const selectedBookIdRef = useRef(selectedBookId)
   const requestGenerationRef = useRef(0)
   const entriesAbortRef = useRef<AbortController | null>(null)
-  const fullCorpusBookIdRef = useRef<string | null>(null)
   const entryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const sectionRef = useRef<HTMLDivElement>(null)
   const entrySearchInputRef = useRef<HTMLInputElement>(null)
@@ -762,7 +810,7 @@ export default function WorldBookEntriesSection({
   const focusRevealFrameRef = useRef(0)
   const focusRevealTimersRef = useRef<number[]>([])
   const [activeDragId, setActiveDragId] = useState<string | null>(null)
-  const activeScrollRef = scrollContainerRef ?? localScrollRef
+  const activeScrollRef = presentation === 'workspace' ? selectedEntryId && isMobile && !mobileBrowsing ? detailViewportRef : listViewportRef : scrollContainerRef ?? localScrollRef
   const usesSharedScroll = scrollContainerRef != null
   useScrollGate(activeScrollRef)
 
@@ -790,7 +838,6 @@ export default function WorldBookEntriesSection({
     selectedBookIdRef.current = selectedBookId
     requestGenerationRef.current += 1
     entriesAbortRef.current?.abort()
-    fullCorpusBookIdRef.current = null
     clearEntryTimers()
     retryOperationsRef.current.clear()
     entryIntentsRef.current.clear()
@@ -896,63 +943,42 @@ export default function WorldBookEntriesSection({
   // ── Live-sync (WORLD_BOOK_ENTRY_* / WORLD_BOOK_CHANGED) ──
   // Mirror of `entries` for use inside WS handlers without re-subscribing.
   const entriesRef = useRef<WorldBookEntry[]>(entries)
-  useEffect(() => { entriesRef.current = entries }, [entries])
+  useEffect(() => { entriesRef.current = allKnownEntries }, [allKnownEntries])
   // entryId → timestamp of the last local write; used to ignore our own echoes.
   const recentLocalWrites = useRef<Map<string, number>>(new Map())
   // Always-current silent refetch of the visible page, called from WS handlers.
   const liveRefetchRef = useRef<() => void>(() => {})
   const liveRefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
-  const pageSize = entryPageSize === 'all' ? null : entryPageSize
-  // Ordinary navigation stays server-paginated. Features that genuinely need
-  // book-wide knowledge opt into a cancellable full-corpus load only while in use.
-  const fullCorpusMode = shouldLoadFullWorldBookEntryCorpus(
-    entrySearchFilter,
-    entryTypeFilter,
-    entryPageSize,
-  )
-  const orderedEntries = useMemo(
-    () => fullCorpusMode ? sortWorldBookEntriesForView(entries, entrySortBy, entrySortDir) : entries,
-    [entries, entrySortBy, entrySortDir, fullCorpusMode],
-  )
+  const pageSize = entryPageSize === 'all' ? DEFAULT_PAGE_SIZE : entryPageSize
+  // Folder, tag, text and activation filters are applied on the server before paging.
+  // Client-side matches are used only to decorate the returned rows.
+  const orderedEntries = entries
   const entrySearchResults = useMemo(
     () => searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex),
     [entries, entrySearchFilter, entrySearchIndex],
   )
   const searchActive = entrySearchResults !== null
-  const queryEntries = useMemo(
-    () => entrySearchResults?.map((result) => result.entry) ?? orderedEntries,
-    [entrySearchResults, orderedEntries],
-  )
+  const queryEntries = orderedEntries
   const typeCounts = useMemo(() => {
     const counts = { trigger: 0, constant: 0, vector: 0 }
     for (const entry of queryEntries) counts[getEntryType(entry)] += 1
     return counts
   }, [queryEntries])
-  const filteredEntries = useMemo(
-    () => entryTypeFilter === 'all'
-      ? queryEntries
-      : queryEntries.filter((entry) => getEntryType(entry) === entryTypeFilter),
-    [entryTypeFilter, queryEntries],
-  )
-  const entryTotal = fullCorpusMode ? filteredEntries.length : sourceEntryTotal
+  const filteredEntries = queryEntries
+  const entryTotal = sourceEntryTotal
   const entryTotalPages = pageSize ? Math.max(1, Math.ceil(entryTotal / pageSize)) : 1
-  const visibleEntries = useMemo(
-    () => !fullCorpusMode || pageSize == null
-      ? filteredEntries
-      : filteredEntries.slice((entryPage - 1) * pageSize, entryPage * pageSize),
-    [entryPage, filteredEntries, fullCorpusMode, pageSize],
-  )
-  useTokenCountSweep(visibleEntries)
+  const visibleEntries = filteredEntries
+  useTokenCountSweep(showTokens ? visibleEntries : [])
   const entrySearchResultsById = useMemo(
     () => new Map(entrySearchResults?.map((result) => [result.entry.id, result]) ?? []),
     [entrySearchResults],
   )
   const retainedSelectedEntry = useMemo(() => {
-    if ((!searchActive && entryTypeFilter === 'all') || !selectedEntryId) return null
+    if (presentation === 'workspace' || (!searchActive && entryTypeFilter === 'all') || !selectedEntryId) return null
     if (visibleEntries.some((entry) => entry.id === selectedEntryId)) return null
     return entries.find((entry) => entry.id === selectedEntryId) ?? null
-  }, [entries, entryTypeFilter, searchActive, selectedEntryId, visibleEntries])
+  }, [entries, entryTypeFilter, searchActive, selectedEntryId, visibleEntries, presentation])
   const renderedEntries = useMemo(
     () => retainedSelectedEntry ? [...visibleEntries, retainedSelectedEntry] : visibleEntries,
     [retainedSelectedEntry, visibleEntries],
@@ -1024,7 +1050,7 @@ export default function WorldBookEntriesSection({
     })
     setSelectedEntryId((current) => current ?? affectedIds[0] ?? null)
     return true
-  }, [])
+  }, [setEntries])
 
   const retryConflict = useCallback((entryId: string) => {
     const retry = retryOperationsRef.current.get(entryId)
@@ -1064,14 +1090,15 @@ export default function WorldBookEntriesSection({
       delete next[entryId]
       return next
     })
-  }, [entryConflicts])
+  }, [entryConflicts, setEntries])
   const dragUnavailableReason = useMemo(() => {
     if (entrySortBy !== 'custom') return null
     if (entrySearchFilter.trim()) return te('clearSearchDrag')
     if (entryTypeFilter !== 'all') return 'Show all entry types to drag-reorder entries.'
-    if (entryPageSize !== 'all') return te('switchAllDrag')
+    if (entryFolder !== undefined || entryTags.length) return 'Show all entries without folder or tag filters to drag-reorder entries.'
+    if (sourceEntryTotal !== entries.length) return 'Choose a page size that shows the entire lorebook to drag-reorder entries.'
     return null
-  }, [entrySortBy, entrySearchFilter, entryTypeFilter, entryPageSize, te])
+  }, [entrySortBy, entrySearchFilter, entryTypeFilter, entryFolder, entryTags, sourceEntryTotal, entries.length, te])
   const dragEnabled = entrySortBy === 'custom' && !dragUnavailableReason
 
   const sensors = useSensors(
@@ -1100,7 +1127,6 @@ export default function WorldBookEntriesSection({
     bookId: string,
     opts?: { silent?: boolean; force?: boolean },
   ) => {
-    if (fullCorpusMode && !opts?.force && fullCorpusBookIdRef.current === bookId) return
 
     const requestGeneration = requestGenerationRef.current
     const isCurrent = () => mountedRef.current && selectedBookIdRef.current === bookId && requestGenerationRef.current === requestGeneration
@@ -1111,19 +1137,18 @@ export default function WorldBookEntriesSection({
     if (!silent && isCurrent()) setLoadingEntries(true)
     try {
       const paginatedPageSize = entryPageSize === 'all' ? DEFAULT_PAGE_SIZE : entryPageSize
-      const res = fullCorpusMode
-        ? await worldBooksApi.listAllEntries(bookId, { signal: controller.signal }).then((data) => ({
-            data,
-            total: data.length,
-          }))
-        : await worldBooksApi.listEntries(bookId, {
+      const [res, summary] = await Promise.all([worldBooksApi.listEntries(bookId, {
             limit: paginatedPageSize,
             offset: (entryPage - 1) * paginatedPageSize,
             sort_by: mapSortForApi(entrySortBy),
             sort_dir: entrySortBy === 'custom' ? 'asc' : entrySortDir,
-          }, { signal: controller.signal })
+            folder: entryFolder,
+            tag: entryTags,
+            search: entrySearchFilter,
+            type: entryTypeFilter === 'all' ? undefined : entryTypeFilter,
+          }, { signal: controller.signal }), worldBooksApi.getEntryOrganization(bookId)])
       let nextEntries = res.data
-      const pendingEntryId = useStore.getState().pendingWorldBookEditEntryId
+      const pendingEntryId = active ? useStore.getState().pendingWorldBookEditEntryId : null
       if (pendingEntryId && !nextEntries.some((entry) => entry.id === pendingEntryId)) {
         try {
           const pendingEntry = await worldBooksApi.getEntry(bookId, pendingEntryId)
@@ -1132,18 +1157,21 @@ export default function WorldBookEntriesSection({
           if (isCurrent()) useStore.getState().setPendingWorldBookEditEntryId(null)
         }
       }
-      if (!isCurrent()) return
+      if (!isCurrent() || controller.signal.aborted || entriesAbortRef.current !== controller) { if (opts?.force) throw new Error('Reload superseded'); return }
       setEntries(nextEntries)
       setSourceEntryTotal(res.total)
-      fullCorpusBookIdRef.current = fullCorpusMode ? bookId : null
+      setOrganization(summary)
+      setEntriesError('')
+      if ((entryPage - 1) * paginatedPageSize >= res.total) setEntryPage(Math.max(1, Math.ceil(res.total / paginatedPageSize)))
     } catch (error) {
-      if (!controller.signal.aborted) throw error
+      if (!controller.signal.aborted) { if (isCurrent() && entriesAbortRef.current === controller) setEntriesError('Could not load entries. Retry Refresh.'); throw error }
+      if (opts?.force) throw error
     } finally {
       const ownsRequest = entriesAbortRef.current === controller
       if (ownsRequest) entriesAbortRef.current = null
       if (!silent && ownsRequest && isCurrent()) setLoadingEntries(false)
     }
-  }, [entryPage, entryPageSize, entrySortBy, entrySortDir, fullCorpusMode])
+  }, [entryFolder, entryTags, entrySearchFilter, entryTypeFilter, entryPage, entryPageSize, entrySortBy, entrySortDir, active, setEntries])
 
   const selectedBookViewPreference = worldBookEntryViewPrefs[selectedBookId]
   const resolvedSelectedBookViewPreference = useMemo(
@@ -1155,11 +1183,13 @@ export default function WorldBookEntriesSection({
     const pref = resolvedSelectedBookViewPreference
     setEntrySortBy(pref.sortBy)
     setEntrySortDir(pref.sortDir)
-    setEntryPageSize(pref.pageSize || DEFAULT_PAGE_SIZE)
+    setEntryPageSize(pref.pageSize === 'all' ? DEFAULT_PAGE_SIZE : pref.pageSize || DEFAULT_PAGE_SIZE)
   }, [selectedBookId, resolvedSelectedBookViewPreference])
 
   useEffect(() => {
     const reset = getWorldBookEntriesSectionBookResetState()
+    setEntryFolder(undefined); setEntryTags(current => current.length ? [] : current); setOrganization(null)
+    setFolderRoot(!useStore.getState().pendingWorldBookEditEntryId)
     setEntryPage(reset.entryPage)
     setEntrySearchFilter(reset.entrySearchFilter)
     setEntryTypeFilter(reset.entryTypeFilter)
@@ -1177,7 +1207,7 @@ export default function WorldBookEntriesSection({
 
   useEffect(() => {
     if (!selectedBookId) return
-    void loadEntries(selectedBookId)
+    void loadEntries(selectedBookId).catch(() => {})
   }, [selectedBookId, loadEntries])
 
   // Keep the silent-refetch closure current so the WS subscription (bound once
@@ -1219,6 +1249,7 @@ export default function WorldBookEntriesSection({
         return
       }
       setEntries((cur) => cur.map((e) => (e.id === p.id ? p.entry : e)))
+      scheduleLiveRefetch()
     })
     const offEntryDeleted = wsClient.on(EventType.WORLD_BOOK_ENTRY_DELETED, (p: WorldBookEntryDeletedPayload) => {
       if (!p?.id || p.worldBookId !== selectedBookId) return
@@ -1242,7 +1273,7 @@ export default function WorldBookEntriesSection({
       offBookChanged()
       clearTimeout(liveRefetchTimer.current)
     }
-  }, [selectedBookId, scheduleLiveRefetch])
+  }, [selectedBookId, scheduleLiveRefetch, setEntries])
 
   useEffect(() => {
     const visibleIds = new Set(filteredEntries.map((entry) => entry.id))
@@ -1254,19 +1285,27 @@ export default function WorldBookEntriesSection({
   }, [entryPage, entryTotalPages])
 
   useEffect(() => {
-    if (!pendingWorldBookEditEntryId) return
+    if (!active || !pendingWorldBookEditEntryId) return
     const targetIndex = filteredEntries.findIndex((entry) => entry.id === pendingWorldBookEditEntryId)
     if (targetIndex < 0) return
-    if (fullCorpusMode && pageSize != null) setEntryPage(Math.floor(targetIndex / pageSize) + 1)
     setSelectedEntryId(pendingWorldBookEditEntryId)
     setPendingWorldBookEditEntryId(null)
-  }, [filteredEntries, fullCorpusMode, pageSize, pendingWorldBookEditEntryId, setPendingWorldBookEditEntryId])
+  }, [filteredEntries, pendingWorldBookEditEntryId, setPendingWorldBookEditEntryId, active])
 
   useEffect(() => {
     if (!selectedEntryId) return
+    if (presentation === 'workspace') { if (isMobile && !mobileBrowsing) detailBackRef.current?.focus(); return }
     const element = entryListRef.current?.querySelector<HTMLElement>(`[data-entry-id="${CSS.escape(selectedEntryId)}"]`)
     element?.scrollIntoView({ block: 'nearest' })
-  }, [entryPage, selectedEntryId])
+  }, [entryPage, selectedEntryId, presentation, isMobile, mobileBrowsing])
+
+  useEffect(() => {
+    if (presentation === 'workspace' && selectedEntryId) openWorkspaceEntry(selectedEntryId)
+  }, [selectedEntryId, entries, presentation, openWorkspaceEntry])
+  useEffect(() => { setMobileBrowsing(false) }, [selectedEntryId])
+  useEffect(() => { if (splitEntryId && !openIds.includes(splitEntryId)) setSplitEntryId(null) }, [openIds, splitEntryId])
+
+  useEffect(() => { if (organization) onEntryCount?.(organization.total) }, [organization, onEntryCount])
 
   const refetchCurrentPage = useCallback(async () => {
     await loadEntries(selectedBookId, { force: true })
@@ -1295,14 +1334,15 @@ export default function WorldBookEntriesSection({
       })
       if (Object.prototype.hasOwnProperty.call(intent.updates, 'content')) invalidateTokenCountsForEntry(entryId)
       setEntries((current) => current.map((entry) => (entry.id === entryId ? updated : entry)))
-      await refreshVectorSummary()
+      if (intent.updates.folder !== undefined || intent.updates.tags !== undefined) await refetchCurrentPage()
+      else await refreshVectorSummary()
     } catch (error) {
       if (!mountedRef.current || selectedBookIdRef.current !== selectedBookId || requestGenerationRef.current !== generation) return
       if (entryIntentsRef.current.get(entryId) !== intent) return
       const classified = recordMutationIssue([entryId], error, () => persistEntryUpdate(entryId, intent), selectedBookId, generation)
       if (!classified) void refetchCurrentPage()
     }
-  }, [recordMutationIssue, refetchCurrentPage, refreshVectorSummary, selectedBookId])
+  }, [recordMutationIssue, refetchCurrentPage, refreshVectorSummary, selectedBookId, setEntries])
 
   const updateEntry = useCallback((entryId: string, updates: Record<string, any>) => {
     if (Object.prototype.hasOwnProperty.call(updates, 'content')) invalidateTokenCountsForEntry(entryId)
@@ -1315,7 +1355,7 @@ export default function WorldBookEntriesSection({
     setEntries((current) => current.map((entry) => (entry.id === entryId ? { ...entry, ...updates } : entry)))
     recentLocalWrites.current.set(entryId, Date.now())
     void persistEntryUpdate(entryId, intent)
-  }, [persistEntryUpdate])
+  }, [persistEntryUpdate, setEntries])
 
   const debouncedUpdateEntry = useCallback((entryId: string, updates: Record<string, any>) => {
     if (Object.prototype.hasOwnProperty.call(updates, 'content')) invalidateTokenCountsForEntry(entryId)
@@ -1335,20 +1375,23 @@ export default function WorldBookEntriesSection({
         void persistEntryUpdate(entryId, intent)
       }
     }, 400)
-  }, [persistEntryUpdate, selectedBookId])
+  }, [persistEntryUpdate, selectedBookId, setEntries])
 
   const handleCreateEntry = useCallback(async () => {
     const entry = await worldBooksApi.createEntry(selectedBookId, {
       comment: t('defaultEntryComment'),
+      folder: entryFolder ?? '',
+      tags: entryTags,
       key: [],
       content: '',
     })
     recentLocalWrites.current.set(entry.id, Date.now())
+    if (presentation === 'workspace') openWorkspaceEntry(entry.id, entry)
     setSelectedEntryId(entry.id)
     setEntryPage(1)
     await loadEntries(selectedBookId, { force: true })
     await refreshVectorSummary()
-  }, [selectedBookId, loadEntries, refreshVectorSummary, t])
+  }, [entryFolder, entryTags, selectedBookId, loadEntries, refreshVectorSummary, t, presentation, openWorkspaceEntry])
 
   const handleDeleteEntries = useCallback(async (entryIds: string[]) => {
     entryIds.forEach(invalidateTokenCountsForEntry)
@@ -1359,6 +1402,7 @@ export default function WorldBookEntriesSection({
       } else {
         await worldBooksApi.bulkEntryAction(selectedBookId, { action: 'delete', entry_ids: entryIds, expected_revisions: expectedRevisionsFor(entryIds) })
       }
+      setEntries(current => current.filter(entry => !entryIds.includes(entry.id)))
       setSelectedEntryId((current) => (current && entryIds.includes(current) ? null : current))
       setSelectedIds((current) => current.filter((id) => !entryIds.includes(id)))
       await refetchCurrentPage()
@@ -1372,7 +1416,7 @@ export default function WorldBookEntriesSection({
       }, selectedBookId, generation)
       if (!classified) void refetchCurrentPage()
     }
-  }, [expectedRevisionsFor, recordMutationIssue, refetchCurrentPage, refreshVectorSummary, selectedBookId])
+  }, [expectedRevisionsFor, recordMutationIssue, refetchCurrentPage, refreshVectorSummary, selectedBookId, setEntries])
 
   const handleDuplicateHere = useCallback(async (entryId: string) => {
     const generation = requestGenerationRef.current
@@ -1584,7 +1628,7 @@ export default function WorldBookEntriesSection({
     const next = {
       sortBy: value,
       sortDir: value === 'custom' ? 'asc' as const : entrySortDir,
-      pageSize: value === 'custom' ? 'all' as const : entryPageSize,
+      pageSize: entryPageSize,
     }
     setEntrySortBy(next.sortBy)
     setEntrySortDir(next.sortDir)
@@ -1643,9 +1687,39 @@ export default function WorldBookEntriesSection({
       }, selectedBookId, generation)
       if (!classified) await refetchCurrentPage()
     }
-  }, [dragEnabled, entries, expectedRevisionsFor, recordMutationIssue, selectedBookId, refetchCurrentPage])
+  }, [dragEnabled, entries, expectedRevisionsFor, recordMutationIssue, selectedBookId, refetchCurrentPage, setEntries])
 
-  const selectedEntry = contextMenu ? entries.find((entry) => entry.id === contextMenu.entryId) ?? null : null
+  const detailEntry = (presentation === 'workspace' ? workspaceEntries : entries).find(entry => entry.id === selectedEntryId) ?? null
+  const editingDetail = presentation === 'workspace' && !!detailEntry && !mobileBrowsing
+  useLayoutEffect(() => { if (active) onDetailViewChange?.(editingDetail) }, [active, editingDetail, onDetailViewChange])
+  const tabs = openIds.map(id => workspaceEntries.find(entry => entry.id === id)).filter((entry): entry is WorldBookEntry => !!entry)
+  const activateTab = (id: string) => {
+    if (id === splitEntryId) setSplitEntryId(selectedEntryId)
+    setSelectedEntryId(id); setMobileBrowsing(false); setOpenSwitcher(false)
+  }
+  const closeTab = (id: string) => {
+    closeWorkspaceEntry(id)
+    if (selectedEntryId === id) { const index = openIds.indexOf(id); const remaining = openIds.filter(value => value !== id); setSelectedEntryId(remaining[Math.min(index, remaining.length - 1)] ?? null) }
+    if (splitEntryId === id || selectedEntryId === id) setSplitEntryId(null)
+    const remaining = openIds.filter(value => value !== id)
+    const next = selectedEntryId === id ? remaining[Math.min(openIds.indexOf(id), remaining.length - 1)] : selectedEntryId
+    queueMicrotask(() => {
+      if (isMobile) workspaceSwitcherRef.current?.focus()
+      else if (next) document.getElementById(`entry-tab-${next}`)?.focus()
+      else navigatorToggleRef.current?.focus()
+    })
+  }
+  const openEntry = (entryId: string) => {
+    if (onOpenEntry) { onOpenEntry(entryId); return }
+    savedListScroll.current = listViewportRef.current?.scrollTop ?? 0
+    setSelectedEntryId(current => presentation === 'workspace' ? entryId : current === entryId ? null : entryId)
+    setMobileBrowsing(false)
+  }
+  const backToEntries = () => {
+    if (presentation === 'workspace') { setMobileBrowsing(true); setNavigatorCollapsed(false) } else setSelectedEntryId(null)
+    window.requestAnimationFrame(() => { if (listViewportRef.current) { listViewportRef.current.scrollTop = savedListScroll.current; listViewportRef.current.querySelector<HTMLButtonElement>(`[data-entry-id="${CSS.escape(selectedEntryId ?? '')}"] button[aria-label]`)?.focus({ preventScroll: true }) } })
+  }
+  const selectedEntry = contextMenu ? entriesRef.current.find((entry) => entry.id === contextMenu.entryId) ?? null : null
   const selectedTypeEntry = typeMenu ? entries.find((entry) => entry.id === typeMenu.entryId) ?? null : null
   const selectedPositionEntry = positionMenu ? entries.find((entry) => entry.id === positionMenu.entryId) ?? null : null
   const activeDragEntry = activeDragId ? entries.find((entry) => entry.id === activeDragId) ?? null : null
@@ -1655,7 +1729,7 @@ export default function WorldBookEntriesSection({
           key: 'expand',
           label: selectedEntryId === selectedEntry.id ? te('contextCollapseEditor') : te('contextExpandEditor'),
           onClick: () => {
-            setSelectedEntryId((current) => (current === selectedEntry.id ? null : selectedEntry.id))
+            openEntry(selectedEntry.id)
             setContextMenu(null)
           },
         },
@@ -1690,15 +1764,8 @@ export default function WorldBookEntriesSection({
           icon: <MoveRight size={14} />,
           onClick: () => {
             setContextMenu(null)
-            setMoveTargetBookId('')
-            setMoveCopyState({
-              mode: 'move',
-              entryIds: [selectedEntry.id],
-              title: te('moveEntryTitle'),
-              confirmText: te('move'),
-            })
+            organizationControlsRef.current?.openMove([selectedEntry.id], selectedEntry.folder ?? '')
           },
-          disabled: availableTargetBooks.length === 0,
         },
         { key: 'divider', type: 'divider' },
         {
@@ -1760,14 +1827,14 @@ export default function WorldBookEntriesSection({
         },
       }))
     : []
-  const paginationControls = entryPageSize !== 'all' && entryTotalPages > 1 ? (
+  const paginationControls = entryTotalPages > 1 ? (
     <Pagination
       className={styles.entryPaginationControls}
       currentPage={entryPage}
       totalPages={entryTotalPages}
       onPageChange={(page) => {
         setEntryPage(page)
-        setSelectedEntryId(null)
+        if (presentation !== 'workspace') setSelectedEntryId(null)
         setSelectedIds([])
       }}
       totalItems={entryTotal}
@@ -1794,6 +1861,8 @@ export default function WorldBookEntriesSection({
         styles.section,
         usesSharedScroll ? styles.sectionSharedScroll : styles.sectionStandaloneScroll,
         isMobile && styles.sectionMobile,
+        presentation === 'workspace' && styles.workspace,
+        presentation === 'workspace' && detailEntry && !mobileBrowsing && styles.detailOpen,
       )}
       data-world-book-entries-book-id={selectedBookId ?? undefined}
       onKeyDownCapture={(event) => {
@@ -1801,10 +1870,36 @@ export default function WorldBookEntriesSection({
         if ((!event.ctrlKey && !event.metaKey) || event.key.toLowerCase() !== 'f') return
         event.preventDefault()
         event.stopPropagation()
-        entrySearchInputRef.current?.focus()
+        setNavigatorCollapsed(false); setMobileBrowsing(true)
+        window.requestAnimationFrame(() => entrySearchInputRef.current?.focus())
         entrySearchInputRef.current?.select()
       }}
     >
+      {presentation === 'workspace' && <header className={styles.workspaceBar}>
+        <button type="button" ref={isMobile ? detailBackRef : navigatorToggleRef} className={styles.toolbarBtn} aria-expanded={!navigatorCollapsed && (!isMobile || mobileBrowsing || !detailEntry)} onClick={() => { if (isMobile) { if (detailEntry && !mobileBrowsing) backToEntries(); else setMobileBrowsing(false) } else setNavigatorCollapsed(value => !value) }}>{isMobile ? detailEntry && !mobileBrowsing ? '‹ Entries' : detailEntry ? 'Editor' : 'Entries' : navigatorCollapsed ? 'Show entries' : 'Hide entries'}</button>
+        {isMobile && detailEntry && !mobileBrowsing && <strong className={styles.mobileEntryTitle}>{detailEntry.comment || '(unnamed)'}</strong>}
+        {isMobile ? <button type="button" ref={workspaceSwitcherRef} className={styles.toolbarBtn} aria-expanded={openSwitcher} onClick={() => setOpenSwitcher(value => !value)}>{tabs.length} open</button> : <div role="tablist" aria-label="Open entries" className={styles.tabStrip}>{tabs.map(entry => <div key={entry.id} className={styles.workspaceTab}>
+          <button type="button" role="tab" aria-selected={entry.id === selectedEntryId} aria-controls={`entry-panel-${entry.id}`} id={`entry-tab-${entry.id}`} tabIndex={entry.id === selectedEntryId || (!detailEntry && entry.id === openIds[0]) ? 0 : -1} onClick={() => activateTab(entry.id)} onKeyDown={event => {
+            const index = openIds.indexOf(entry.id)
+            const next = event.key === 'ArrowRight' ? openIds[(index + 1) % openIds.length] : event.key === 'ArrowLeft' ? openIds[(index + openIds.length - 1) % openIds.length] : event.key === 'Home' ? openIds[0] : event.key === 'End' ? openIds.at(-1) : null
+            if (next) { event.preventDefault(); activateTab(next); document.getElementById(`entry-tab-${next}`)?.focus() }
+          }}>{entry.comment || '(unnamed)'}</button>
+          <button type="button" aria-label={`Close tab ${entry.comment || '(unnamed)'}`} onClick={() => closeTab(entry.id)}>×</button>
+        </div>)}</div>}
+        {isMobile && detailEntry && !mobileBrowsing && <button type="button" className={styles.moreBtn} aria-label="Entry detail actions" onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); setContextMenu({ entryId: detailEntry.id, position: { x: rect.right, y: rect.bottom } }) }}><MoreVertical size={14} /></button>}
+        {!isMobile && tabs.length > 1 && <><button type="button" className={styles.toolbarBtn} aria-pressed={!!splitEntryId} onClick={() => setSplitEntryId(current => current ? null : openIds.find(id => id !== selectedEntryId) ?? null)}>{splitEntryId ? 'Close split' : 'Split'}</button>{splitEntryId && <><select aria-label="Split entry" value={splitEntryId} onChange={event => setSplitEntryId(event.target.value)}>{tabs.filter(entry => entry.id !== selectedEntryId).map(entry => <option key={entry.id} value={entry.id}>{entry.comment || '(unnamed)'}</option>)}</select><button type="button" className={styles.toolbarBtn} onClick={() => activateTab(splitEntryId)}>Swap panes</button></>}</>}
+      </header>}
+      {presentation === 'workspace' && isMobile && openSwitcher && <nav className={styles.openSwitcher} aria-label="Open entry switcher">{tabs.map(entry => <div key={entry.id}><button type="button" onClick={() => activateTab(entry.id)}>{entry.comment || '(unnamed)'}</button><button type="button" aria-label={`Close tab ${entry.comment || '(unnamed)'}`} onClick={() => closeTab(entry.id)}>×</button></div>)}</nav>}
+      <div className={presentation === 'workspace' ? styles.workspaceBody : undefined}>
+      <div ref={listViewportRef} className={presentation === 'workspace' ? styles.workspaceList : undefined} style={presentation === 'workspace' && !isMobile ? { flexBasis: navigatorWidth } : undefined} hidden={presentation === 'workspace' && (isMobile ? !!detailEntry && !mobileBrowsing : navigatorCollapsed)}>
+      {selectedBookId && <EntryOrganizationControls ref={organizationControlsRef} key={selectedBookId} bookId={selectedBookId} books={books} summary={organization} folder={entryFolder} root={folderRoot} tags={entryTags} entries={allKnownEntries} selectedIds={selectedIds} busy={pendingAction || loadingEntries} hideFilters={isMobile && !mobileListOptionsOpen} hideSelectionActions
+        onRoot={() => { setFolderRoot(true); setSelectedIds([]) }}
+        onTags={tags => { setEntryTags(tags); setEntryPage(1); setSelectedIds([]) }}
+        onFolderChanged={value => { setEntryFolder(value); setFolderRoot(value === undefined); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }}
+        onReload={() => loadEntries(selectedBookId, { force: true })} />}
+      {entriesError && <div role="alert">{entriesError}<button type="button" onClick={() => void loadEntries(selectedBookId, { force: true }).catch(() => {})}>Retry Refresh</button></div>}
+      {folderRoot ? <div className={clsx(styles.entryScroll, usesSharedScroll && styles.entryScrollShared)}><EntryFolderList summary={organization} onOpen={value => { setEntryFolder(value); setFolderRoot(false); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }} /></div> : <>
+      <label className={styles.displayOption} hidden={isMobile && !mobileListOptionsOpen}><input type="checkbox" checked={showTokens} onChange={event => setShowTokens(event.target.checked)} /> Show token counts</label>
       <div className={clsx(styles.entryListHeader, isMobile && styles.entryListHeaderMobile)}>
         <span className={styles.entryListTitle}>{te('entriesTitle', { count: entryTotal })}</span>
         <div className={clsx(styles.toolbarActions, isMobile && styles.toolbarActionsMobile)}>
@@ -1888,6 +1983,7 @@ export default function WorldBookEntriesSection({
             onClick={() => setMobileListOptionsOpen((current) => !current)}
             aria-expanded={mobileListOptionsOpen}
             title={te('sortBy')}
+            aria-label="Entry filters and options"
           >
             <ArrowUpDown size={13} />
             <span className={styles.listOptionsSummary}>{mobileListOptionsSummary}</span>
@@ -1901,7 +1997,7 @@ export default function WorldBookEntriesSection({
 
       <div className={styles.entryTypeFilters} role="group" aria-label="Filter entries by trigger type">
         {([
-          ['all', 'All', fullCorpusMode ? queryEntries.length : sourceEntryTotal],
+          ['all', 'All', sourceEntryTotal],
           ['trigger', labels.typeOptions.find((option) => option.value === 'trigger')?.label ?? 'Trigger', typeCounts.trigger],
           ['constant', labels.typeOptions.find((option) => option.value === 'constant')?.label ?? 'Constant', typeCounts.constant],
           ['vector', labels.typeOptions.find((option) => option.value === 'vector')?.label ?? 'Vector', typeCounts.vector],
@@ -1920,7 +2016,7 @@ export default function WorldBookEntriesSection({
               setEntryPage(1)
             }}
           >
-            <span>{label}</span><b>{value === 'all' || fullCorpusMode ? count : '—'}</b>
+            <span>{label}</span><b>{value === 'all' ? count : '—'}</b>
           </button>
         ))}
       </div>
@@ -1943,7 +2039,7 @@ export default function WorldBookEntriesSection({
             onChange={(e) => handlePageSizeChange(e.target.value)}
             title={te('perPage')}
           >
-            {labels.pageSizeOptions.map((option) => (
+            {labels.pageSizeOptions.filter(option => option.value !== 'all').map((option) => (
               <option key={String(option.value)} value={String(option.value)}>{option.label}</option>
             ))}
           </select>
@@ -1961,17 +2057,11 @@ export default function WorldBookEntriesSection({
         </div>
       )}
 
-      {dragUnavailableReason && (!isMobile || mobileListOptionsOpen) && (
-        <div className={styles.customSortHint}>
-          <Hash size={12} />
-          <span>{dragUnavailableReason}</span>
-        </div>
-      )}
 
       {selectMode && (
         <div className={styles.bulkBar}>
           <div className={styles.bulkLeft}>
-            <button type="button" className={styles.bulkToggle} onClick={handleSelectAllVisible}>
+            <button type="button" className={styles.bulkToggle} aria-label={allSelected ? 'Deselect visible entries' : 'Select visible entries'} onClick={handleSelectAllVisible}>
               {allSelected ? <CheckSquare size={14} /> : <Square size={14} />}
             </button>
             <span className={styles.bulkCount}>{te('bulkSelected', { selected: selectedCount, total: filteredEntries.length })}</span>
@@ -1979,23 +2069,8 @@ export default function WorldBookEntriesSection({
           <div className={styles.bulkActions}>
             <button
               type="button"
-              className={styles.bulkActionBtn}
-              disabled={selectedCount === 0 || availableTargetBooks.length === 0}
-              onClick={() => {
-                setMoveTargetBookId('')
-                setMoveCopyState({
-                  mode: 'move',
-                  entryIds: selectedIds,
-                  title: te('moveCount', { count: selectedCount }),
-                  confirmText: te('move'),
-                })
-              }}
-            >
-              <MoveRight size={13} />
-              <span>{te('move')}</span>
-            </button>
-            <button
-              type="button"
+              ref={bulkActionsTriggerRef}
+              aria-label="Selected entry actions"
               className={styles.bulkActionBtn}
               disabled={selectedCount === 0}
               onClick={(event) => {
@@ -2093,7 +2168,12 @@ export default function WorldBookEntriesSection({
                           selected={!retainedByFilter && selectedIds.includes(entry.id)}
                           searchResult={entrySearchResultsById.get(entry.id)}
                           retainedByFilter={retainedByFilter}
-                          onToggleExpand={() => setSelectedEntryId((current) => (current === entry.id ? null : entry.id))}
+                          onToggleExpand={() => openEntry(entry.id)}
+                          inlineEditor={!presentation}
+                          workspaceMode={presentation === 'workspace'}
+                          workspaceOpen={openIds.includes(entry.id)}
+                          mobile={isMobile || presentation === 'workspace'}
+                          showTokens={showTokens}
                           onToggleSelect={() => handleToggleSelect(entry.id)}
                           onUpdate={updateEntry}
                           onDebouncedUpdate={debouncedUpdateEntry}
@@ -2161,6 +2241,9 @@ export default function WorldBookEntriesSection({
       <ContextMenu
         position={bulkActionsMenu}
         items={[
+          { key: 'organization-move', label: 'Move selected…', icon: <MapPin size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openMove(selectedIds, entryFolder ?? '', bulkActionsTriggerRef.current ?? undefined) } },
+          { key: 'organization-add-tags', label: 'Add tags…', icon: <Tag size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openTags?.('add_tags', selectedIds, bulkActionsTriggerRef.current ?? undefined) } },
+          { key: 'organization-remove-tags', label: 'Remove tags…', icon: <Tag size={14} />, onClick: () => { setBulkActionsMenu(null); organizationControlsRef.current?.openTags?.('remove_tags', selectedIds, bulkActionsTriggerRef.current ?? undefined) } },
           {
             key: 'renumber',
             label: te('renumber'),
@@ -2410,6 +2493,24 @@ export default function WorldBookEntriesSection({
           </FormField>
         </ModalPresentation>
       )}
+      </>}
+      </div>
+      {presentation === 'workspace' && !isMobile && !navigatorCollapsed && <WorldBookColumnHandle label="Resize entries column" width={navigatorWidth} defaultWidth={300} min={200} max={420} collapseBelow={140} onResize={setNavigatorWidth} onCollapse={() => { setNavigatorCollapsed(true); queueMicrotask(() => navigatorToggleRef.current?.focus()) }} />}
+      {presentation === 'workspace' && <div className={styles.editorWorkspace} hidden={isMobile && (mobileBrowsing || !detailEntry)}>
+        {!detailEntry && <p className={styles.workspaceEmpty}>Open an entry to start editing.</p>}
+        {tabs.map(entry => {
+          const visible = entry.id === selectedEntryId || (!isMobile && entry.id === splitEntryId)
+          return <section key={entry.id} ref={entry.id === selectedEntryId ? detailViewportRef : undefined} className={styles.workspaceDetail} style={{ order: entry.id === selectedEntryId ? 0 : 1 }} hidden={!visible} role="tabpanel" id={`entry-panel-${entry.id}`} aria-labelledby={!isMobile ? `entry-tab-${entry.id}` : undefined} aria-label="Entry detail">
+            <header className={styles.detailHeader} hidden={isMobile}>
+              {!isMobile && entry.id === selectedEntryId && <button ref={detailBackRef} type="button" className={styles.toolbarBtn} onClick={backToEntries}>‹ Entries</button>}
+              <strong>{entry.comment || '(unnamed)'}</strong>
+              <button type="button" className={styles.moreBtn} aria-label="Entry detail actions" onClick={event => { const rect = event.currentTarget.getBoundingClientRect(); setContextMenu({ entryId: entry.id, position: { x: rect.right, y: rect.bottom } }) }}><MoreVertical size={14} /></button>
+            </header>
+            <WorldBookEntryEditor entry={entry} density={editorDensity} onUpdate={debouncedUpdateEntry} onImmediateUpdate={updateEntry} conflict={entryConflicts[entry.id]} onRetryConflict={() => retryConflict(entry.id)} onUseServerConflict={() => acceptServerConflict(entry.id)} />
+          </section>
+        })}
+      </div>}
+      </div>
     </div>
   )
 }
