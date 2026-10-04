@@ -1,5 +1,40 @@
 # Image Generation
 
+## Per-run ComfyUI controls (QuickGen host additions)
+
+Hosts with the QuickGen patch expose `spindle.imageGen.getPromptPresets(userId?)` and
+`spindle.imageGen.cancelNative(jobId, userId?)`, both gated by `image_gen` and account
+scope. Preset discovery returns `{ activeId, activeConnectionId, presets }`, where
+`presets` contains ImgGen Main Presets. Cancellation only affects the calling
+extension's jobs. These APIs and their request/result DTOs are declared in
+`lumiverse-spindle-types` 0.6.38. Feature-detect the methods when supporting older
+hosts; installing the types package does not add runtime support.
+
+The new methods are optional in `SpindleAPI` to represent older hosts. Native
+`parameters` remains `Record<string, unknown>`; use
+`satisfies ImageGenNativeParametersDTO` when you want ComfyUI-specific checks.
+Hosts handling the new control messages should accept
+`WorkerToHost | ImageGenNativeControlWorkerMessage`; the existing `WorkerToHost`
+union remains unchanged for exhaustive handlers.
+
+`generateNative()` additionally accepts `connection_id`, `source_image_id`,
+`output_media_type: 'image' | 'video'`, and `output_node_id`. These are request-local:
+they do not activate a connection, workflow, or preset. Select a saved workflow with
+`parameters.workflow_id`; set mapped custom fields through
+`parameters.comfyui_field_values.custom['<nodeId>:<fieldName>']`. An explicitly selected
+workflow control can also use `comfyui_field_values.node_fields['<nodeId>:<fieldName>']`
+to preserve different values on nodes sharing a semantic such as `steps`. Only mapped
+primitive fields are overridden; prompt and source-image injection remain authoritative.
+Mapped seed values of `-1` are randomized per run. An explicitly selected
+`promptPresetId` uses that preset's mode/parser configuration. A source asset must
+belong to the user and be an image. Map `init_image` in the receiving workflow.
+
+The result includes `mediaType`, `mimeType`, and an authenticated `mediaUrl`, while
+retaining `imageId`/`imageUrl` for compatibility. Request `includeDataUrl: false` to
+avoid returning video bytes through worker RPC. Video output selection currently
+supports ComfyUI native SaveVideo and VideoHelperSuite file descriptors. Existing
+callers keep their previous image-output selection unless they opt into a kind or node.
+
 !!! warning "Permission required: `image_gen`"
 
 Generate images programmatically via the user's configured image gen connection profiles. Supports listing providers, connections, available models, ordinary request/response generations, and WebSocket-backed preview streams where the provider supports them.

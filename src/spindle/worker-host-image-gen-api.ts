@@ -5,7 +5,7 @@ import type { ImageGenRequest, ImageGenResponse } from "../image-gen/types";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
 import { applyActiveComfyUIWorkflowConfig } from "../services/image-gen.service";
 import * as nativeImageGenSvc from "../services/image-gen.service";
-import { PERMISSION_DENIED_PREFIX, type SpindlePermission } from "lumiverse-spindle-types";
+import { PERMISSION_DENIED_PREFIX, type SpindlePermission, type ImageGenNativeResultDTO } from "lumiverse-spindle-types";
 
 type ImageGenStreamEvent =
   | {
@@ -276,6 +276,10 @@ export class WorkerHostImageGenApi {
         : undefined;
 
       const result = await nativeImageGenSvc.generateSceneBackground(userId, chatId, {
+        connectionId: typeof input?.connection_id === "string" ? input.connection_id : undefined,
+        sourceImageId: typeof input?.source_image_id === "string" ? input.source_image_id : undefined,
+        outputMediaType: input?.output_media_type === "image" || input?.output_media_type === "video" ? input.output_media_type : undefined,
+        outputNodeId: typeof input?.output_node_id === "string" ? input.output_node_id : undefined,
         forceGeneration: input?.forceGeneration !== false,
         promptMode,
         prompt: typeof input?.prompt === "string" ? input.prompt : undefined,
@@ -310,7 +314,7 @@ export class WorkerHostImageGenApi {
         addToGallery: false,
       });
 
-      const exposed: Record<string, unknown> = {
+      const exposed = {
         generated: result.generated,
         reason: result.reason,
         prompt: result.prompt,
@@ -319,12 +323,39 @@ export class WorkerHostImageGenApi {
         imageDataUrl: result.imageDataUrl,
         imageId: result.imageId,
         imageUrl: result.imageUrl,
+        mediaType: result.mediaType,
+        mimeType: result.mimeType,
+        mediaUrl: result.mediaUrl,
         jobId: result.jobId,
-      };
+      } satisfies ImageGenNativeResultDTO;
       this.postResponse(
         requestId,
         applyDataUrlInclusion(exposed, input?.includeDataUrl !== false),
       );
+    } catch (err: any) {
+      this.postResponse(requestId, undefined, err?.message ?? String(err));
+    }
+  }
+
+  handlePromptPresets(requestId: string, requestedUserId?: string): void {
+    try {
+      this.requirePermission();
+      const userId = this.context.resolveEffectiveUserId(requestedUserId);
+      if (!userId) throw new Error("userId is required for operator-scoped extensions");
+      this.context.enforceScopedUser(userId);
+      this.postResponse(requestId, nativeImageGenSvc.getMainImagePromptPresets(userId));
+    } catch (err: any) {
+      this.postResponse(requestId, undefined, err?.message ?? String(err));
+    }
+  }
+
+  handleCancelNative(requestId: string, jobId: string, requestedUserId?: string): void {
+    try {
+      this.requirePermission();
+      const userId = this.context.resolveEffectiveUserId(requestedUserId);
+      if (!userId) throw new Error("userId is required for operator-scoped extensions");
+      this.context.enforceScopedUser(userId);
+      this.postResponse(requestId, nativeImageGenSvc.cancelExtensionImageGeneration(userId, this.context.extensionIdentifier, jobId));
     } catch (err: any) {
       this.postResponse(requestId, undefined, err?.message ?? String(err));
     }
