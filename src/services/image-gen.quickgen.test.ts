@@ -11,6 +11,7 @@ import { getProvider, registerProvider } from "../llm/registry";
 import type { GenerationRequest } from "../llm/types";
 import { cancelExtensionImageGeneration, generateSceneBackground, getMainImagePromptPresets } from "./image-gen.service";
 import { WorkerHostImageGenApi } from "../spindle/worker-host-image-gen-api";
+import type { ImageGenNativeRequestDTO, ImageGenPromptPresetsResultDTO } from "lumiverse-spindle-types";
 
 const userId = "quick-gen-test";
 let chatId: string;
@@ -78,6 +79,58 @@ test("preset discovery returns only Main Presets and requires permission", () =>
   const messages: any[] = [];
   const api = new WorkerHostImageGenApi({ extensionIdentifier: "quick_gen", hasPermission: () => false, resolveEffectiveUserId: () => userId, enforceScopedUser: () => {}, post: (message) => messages.push(message) });
   api.handlePromptPresets("request", userId);
+  expect(messages[0].error).toContain("image_gen");
+});
+test("host preset discovery returns the public catalog and enforces account scope", () => {
+  const messages: any[] = [];
+  const api = new WorkerHostImageGenApi({
+    extensionIdentifier: "quick_gen", hasPermission: () => true,
+    resolveEffectiveUserId: (requested) => requested ?? userId,
+    enforceScopedUser: (requested) => { if (requested !== userId) throw new Error("Account scope denied"); },
+    post: (message) => messages.push(message),
+  });
+  api.handlePromptPresets("catalog", userId);
+  const result: ImageGenPromptPresetsResultDTO = messages[0].result;
+  expect(result.activeId).toBe("active");
+  expect(result.activeConnectionId).toBe(settings.getSetting(userId, "imageGeneration")!.value.activeImageGenConnectionId);
+  expect(result.presets.map((preset) => preset.id)).toEqual(["active", "selected"]);
+  api.handlePromptPresets("foreign-catalog", "other");
+  expect(messages[1].error).toBe("Account scope denied");
+  api.handleCancelNative("foreign-cancel", "test-job", "other");
+  expect(messages[2].error).toBe("Account scope denied");
+});
+test("host forwards the public native request controls without changing saved settings", async () => {
+  const before = settings.getSetting(userId, "imageGeneration");
+  const messages: any[] = [];
+  const api = new WorkerHostImageGenApi({
+    extensionIdentifier: "quick_gen", hasPermission: () => true,
+    resolveEffectiveUserId: () => userId, enforceScopedUser: () => {},
+    post: (message) => messages.push(message),
+  });
+  const input: ImageGenNativeRequestDTO = {
+    chat_id: chatId, connection_id: selectedConnection, promptPresetId: "selected",
+    output_media_type: "video", output_node_id: "9", clientJobId: "public-job",
+    parameters: options().parameters, includeDataUrl: false,
+  };
+  await api.handleGenerateNative("generate", input);
+  expect(messages[0].error).toBeUndefined();
+  expect(messages[0].result.generated).toBe(true);
+  expect(messages[0].result.jobId).toBe("public-job");
+  expect(messages[0].result).not.toHaveProperty("imageDataUrl");
+  expect(captured?.prompt).toBe("selected prompt");
+  expect(captured?.parameters.workflow["2"].inputs.length).toBe(121);
+  expect(captured?.parameters.comfy_output_kind).toBe("video");
+  expect(captured?.parameters.comfy_output_node).toBe("9");
+  expect(settings.getSetting(userId, "imageGeneration")).toEqual(before);
+});
+test("host cancellation requires image_gen permission", () => {
+  const messages: any[] = [];
+  const api = new WorkerHostImageGenApi({
+    extensionIdentifier: "quick_gen", hasPermission: () => false,
+    resolveEffectiveUserId: () => userId, enforceScopedUser: () => {},
+    post: (message) => messages.push(message),
+  });
+  api.handleCancelNative("cancel", "test-job", userId);
   expect(messages[0].error).toContain("image_gen");
 });
 test("discovery and explicit connection runs never repair ImgGen's active connection", async () => {

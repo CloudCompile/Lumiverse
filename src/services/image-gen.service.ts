@@ -35,6 +35,7 @@ import type { Message } from "../types/message";
 import type { ImageGenConnectionProfile } from "../types/image-gen-connection";
 import { scheduleLowPriorityTask } from "../utils/low-priority-task";
 import { clampErrorMessage, describeProviderError } from "../utils/provider-errors";
+import type { ImageGenPromptPresetsResultDTO } from "lumiverse-spindle-types";
 
 // Ensure image gen providers are registered
 import "../image-gen/index";
@@ -339,7 +340,7 @@ export function cancelExtensionImageGeneration(userId: string, extensionIdentifi
   return false;
 }
 
-export function getMainImagePromptPresets(userId: string) {
+export function getMainImagePromptPresets(userId: string): ImageGenPromptPresetsResultDTO {
   const settings = getImageGenSettings(userId, false);
   return {
     activeId: settings.activePromptPresetId ?? null,

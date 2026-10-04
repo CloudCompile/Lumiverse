@@ -6,7 +6,16 @@ Hosts with the QuickGen patch expose `spindle.imageGen.getPromptPresets(userId?)
 `spindle.imageGen.cancelNative(jobId, userId?)`, both gated by `image_gen` and account
 scope. Preset discovery returns `{ activeId, activeConnectionId, presets }`, where
 `presets` contains ImgGen Main Presets. Cancellation only affects the calling
-extension's jobs. Feature-detect these methods until the public type package is updated.
+extension's jobs. These APIs and their request/result DTOs are declared in
+`lumiverse-spindle-types` 0.6.38. Feature-detect the methods when supporting older
+hosts; installing the types package does not add runtime support.
+
+The new methods are optional in `SpindleAPI` to represent older hosts. Native
+`parameters` remains `Record<string, unknown>`; use
+`satisfies ImageGenNativeParametersDTO` when you want ComfyUI-specific checks.
+Hosts handling the new control messages should accept
+`WorkerToHost | ImageGenNativeControlWorkerMessage`; the existing `WorkerToHost`
+union remains unchanged for exhaustive handlers.
 
 `generateNative()` additionally accepts `connection_id`, `source_image_id`,
 `output_media_type: 'image' | 'video'`, and `output_node_id`. These are request-local:

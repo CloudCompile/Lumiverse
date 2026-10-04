@@ -5,7 +5,7 @@ import type { ImageGenRequest, ImageGenResponse } from "../image-gen/types";
 import * as imageGenConnSvc from "../services/image-gen-connections.service";
 import { applyActiveComfyUIWorkflowConfig } from "../services/image-gen.service";
 import * as nativeImageGenSvc from "../services/image-gen.service";
-import { PERMISSION_DENIED_PREFIX, type SpindlePermission } from "lumiverse-spindle-types";
+import { PERMISSION_DENIED_PREFIX, type SpindlePermission, type ImageGenNativeResultDTO } from "lumiverse-spindle-types";
 
 type ImageGenStreamEvent =
   | {
@@ -314,7 +314,7 @@ export class WorkerHostImageGenApi {
         addToGallery: false,
       });
 
-      const exposed: Record<string, unknown> = {
+      const exposed = {
         generated: result.generated,
         reason: result.reason,
         prompt: result.prompt,
@@ -327,7 +327,7 @@ export class WorkerHostImageGenApi {
         mimeType: result.mimeType,
         mediaUrl: result.mediaUrl,
         jobId: result.jobId,
-      };
+      } satisfies ImageGenNativeResultDTO;
       this.postResponse(
         requestId,
         applyDataUrlInclusion(exposed, input?.includeDataUrl !== false),

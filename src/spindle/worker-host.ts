@@ -1,6 +1,7 @@
 import type {
   SpindleManifest,
   WorkerToHost,
+  ImageGenNativeControlWorkerMessage,
   HostToWorker,
   LlmMessageDTO,
   InterceptorBreakdownEntryDTO,
@@ -303,6 +304,7 @@ type RuntimeWorkerToHost =
   | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorMatchDTO; required?: boolean }
   | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string; parameters?: Record<string, unknown>; breakdown?: InterceptorBreakdownEntryDTO[] }
   | WorkerToHost
+  | ImageGenNativeControlWorkerMessage
   | { type: "register_frontend_runtime_capability"; capability: string }
   | { type: "unregister_frontend_runtime_capability"; capability: string }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -326,9 +328,6 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
-  | { type: "image_gen_generate_native"; requestId: string; input: any }
-  | { type: "image_gen_prompt_presets"; requestId: string; userId?: string }
-  | { type: "image_gen_cancel_native"; requestId: string; jobId: string; userId?: string }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | { type: "user_get_role"; requestId: string; userId?: string }
   | {
