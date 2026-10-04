@@ -20,6 +20,8 @@ interface ModalShellProps {
   /** Allow a modal body with form controls to scroll when the viewport is short. */
   scrollable?: boolean
   modalId?: string
+  /** Stable theme scope for a caller whose content is portalled. */
+  'data-component'?: string
 }
 
 export function ModalShell({
@@ -36,6 +38,7 @@ export function ModalShell({
   fullscreen = false,
   scrollable = false,
   modalId = 'shell',
+  'data-component': dataComponent,
 }: ModalShellProps) {
   const backdropPointerDownRef = useRef<EventTarget | null>(null)
 
@@ -74,6 +77,7 @@ export function ModalShell({
       {isOpen && (
         <motion.div
           className={clsx(styles.backdrop, fullscreen && styles.fullscreenBackdrop)}
+          data-modal={dataComponent}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -84,6 +88,7 @@ export function ModalShell({
         >
           <motion.div
             className={clsx(styles.modal, fullscreen && styles.fullscreenModal, scrollable && styles.scrollable, className)}
+            data-component={dataComponent}
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
