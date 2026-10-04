@@ -53,6 +53,7 @@ import { worldBooksApi } from '@/api/world-books'
 import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
+import CharacterTagInput from './CharacterTagInput'
 import { uuidv7 } from '@/lib/uuid'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
@@ -491,7 +492,6 @@ export default function CharacterEditorPage() {
   const [folder, setFolder] = useState('')
   const [fields, setFields] = useState<Record<string, string>>({})
   const [tags, setTags] = useState<string[]>([])
-  const [newTag, setNewTag] = useState('')
   const [guideOpen, setGuideOpen] = useState(false)
   const [alternateGreetings, setAlternateGreetings] = useState<string[]>([])
   const [alternateGreetingIds, setAlternateGreetingIds] = useState<string[]>([])
@@ -1193,16 +1193,15 @@ export default function CharacterEditorPage() {
     [activeChatId, character, flushExtensionsSave]
   )
 
-  const handleAddTag = useCallback(() => {
+  const handleAddTag = useCallback((raw: string) => {
     if (!editingCharacterId) return
-    const tag = newTag.trim()
+    const tag = raw.trim()
     if (!tag || tags.includes(tag)) return
     const updated = [...tags, tag]
     setTags(updated)
-    setNewTag('')
     showSaving()
     browser.updateCharacter(editingCharacterId, { tags: updated })
-  }, [newTag, tags, editingCharacterId, browser, showSaving])
+  }, [tags, editingCharacterId, browser, showSaving])
 
   const handleRemoveTag = useCallback(
     (tag: string) => {
@@ -2484,24 +2483,13 @@ export default function CharacterEditorPage() {
                               </button>
                             </span>
                           ))}
-                          <div className={styles.tagAdd}>
-                            <input
-                              type="text"
-                              className={styles.tagInput}
-                              value={newTag}
-                              onChange={(e) => setNewTag(e.target.value)}
-                              onKeyDown={(e) => e.key === 'Enter' && handleAddTag()}
-                              placeholder={t('characterEditor.addTag')}
-                            />
-                            <button
-                              type="button"
-                              className={styles.tagAddBtn}
-                              onClick={handleAddTag}
-                              disabled={!newTag.trim()}
-                            >
-                              <Plus size={12} />
-                            </button>
-                          </div>
+                          <CharacterTagInput
+                            key={editingCharacterId}
+                            allTags={browser.allTags}
+                            tags={tags}
+                            onAdd={handleAddTag}
+                            placeholder={t('characterEditor.addTag')}
+                          />
                         </div>
                       </div>
                       <AlternateAvatarManager
