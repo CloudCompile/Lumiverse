@@ -4,9 +4,8 @@
   gap: 4px;
 }
 
-.label {
-  composes: title from '../settings/SettingsSection.module.css';
-}
+/* Keep the local class available for component styling alongside the shared title. */
+.label {}
 
 .helper {
   margin: 0;

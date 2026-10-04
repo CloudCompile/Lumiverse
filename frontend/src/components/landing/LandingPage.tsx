@@ -64,7 +64,7 @@ import {
   type LandingPageTab,
 } from '@/lib/landingPageTabs'
 import { readDeviceLandingPageStartTab } from '@/lib/landingPageStartTab'
-import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
+import { hasAvailableFrontendSurface, hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import { resolveLandingChatPageSize } from '@/lib/landingChatPagination'
 import {
   consumeLandingPageChatReturn,
@@ -1091,6 +1091,7 @@ function LandingPageNative() {
   const logout = useStore((s) => s.logout)
   const authUser = useStore((s) => s.user)
   const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
+  const extensions = useStore((s) => s.extensions)
   const [restoredSnapshot] = useState(() => readLandingPageSnapshot(authUser?.id))
   const [isChatReturn] = useState(() => consumeLandingPageChatReturn() || Boolean(restoredSnapshot))
   const hasRestoredChatReturn = Boolean(restoredSnapshot)
@@ -1125,23 +1126,30 @@ function LandingPageNative() {
   const [requestedLandingTab, setRequestedLandingTab] = useState<LandingPageTab>(
     restoredSnapshot?.requestedTab ?? 'characters',
   )
-  const [homepageSurfaceReady, setHomepageSurfaceReady] = useState(() => (
-    typeof document !== 'undefined' && Boolean(document.querySelector(
+  const [homepageSurfaceMounted, setHomepageSurfaceReady] = useState(() => (
+    typeof document !== 'undefined' && hasAvailableFrontendSurface(document,
       `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`,
-    ))
+      extensions,
+    )
   ))
   const [suiteHomepageSurfaceReady, setSuiteHomepageSurfaceReady] = useState(() => (
     typeof document !== 'undefined' && Boolean(document.querySelector(
       `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"][data-spindle-ext-id="lumiverse_suite"]`,
     ))
   ))
+  const homepageSurfaceReady = useMemo(
+    () => homepageSurfaceMounted && hasAvailableFrontendSurface(document,
+      `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`, extensions),
+    [homepageSurfaceMounted, extensions],
+  )
   const selectedCharactersForReady = useRef(false)
   const initializedStartTabForUser = useRef<string | null>(null)
   useEffect(() => {
     const readReady = () => {
-      const ready = Boolean(document.querySelector(
+      const ready = hasAvailableFrontendSurface(document,
         `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`,
-      ))
+        extensions,
+      )
       const suiteReady = Boolean(document.querySelector(
         `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"][data-spindle-ext-id="lumiverse_suite"]`,
       ))
@@ -1159,22 +1167,29 @@ function LandingPageNative() {
     const observer = new Observer(readReady)
     observer.observe(document.body, { childList: true, subtree: true })
     return () => observer.disconnect()
-  }, [])
+  }, [extensions])
   // Symmetric seam for the Chats tab: an extension-owned chats surface
   // (e.g. a Recent Chats browser) marks its root ready and takes over the
   // tab, suppressing the native chat browser exactly like the character
   // library does for Characters. Unlike Characters it never auto-switches
   // tabs — the native list stays usable until the user picks Chats.
-  const [chatsSurfaceReady, setChatsSurfaceReady] = useState(() => (
-    typeof document !== 'undefined' && Boolean(document.querySelector(
+  const [chatsSurfaceMounted, setChatsSurfaceReady] = useState(() => (
+    typeof document !== 'undefined' && hasAvailableFrontendSurface(document,
       `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`,
-    ))
+      extensions,
+    )
   ))
+  const chatsSurfaceReady = useMemo(
+    () => chatsSurfaceMounted && hasAvailableFrontendSurface(document,
+      `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`, extensions),
+    [chatsSurfaceMounted, extensions],
+  )
   useEffect(() => {
     const readReady = () => {
-      setChatsSurfaceReady(Boolean(document.querySelector(
+      setChatsSurfaceReady(hasAvailableFrontendSurface(document,
         `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`,
-      )))
+        extensions,
+      ))
     }
     readReady()
     const Observer = document.defaultView?.MutationObserver
@@ -1182,7 +1197,7 @@ function LandingPageNative() {
     const observer = new Observer(readReady)
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-recent-chats-ready'] })
     return () => observer.disconnect()
-  }, [])
+  }, [extensions])
   const availableLandingTabs = useMemo(
     () => getAvailableLandingPageTabs({ characterLibraryEnabled: homepageSurfaceReady }),
     [homepageSurfaceReady],
@@ -2238,7 +2253,7 @@ function LandingPageNative() {
           <div id={landingPageTabPanelId('chats')} role={suiteLandingTabsReady ? 'tabpanel' : undefined}
             aria-labelledby={suiteLandingTabsReady ? landingPageTabId('chats') : undefined}
             data-component="LandingPageChatsPanel" data-spindle-mount="landing_chats"
-            hidden={activeLandingTab !== 'chats'} />
+            hidden={activeLandingTab !== 'chats' || !chatsSurfaceReady} />
           <AnimatePresence mode="wait">
             {activeLandingTab === 'characters' || chatsSurfaceReady ? null : !settingsLoaded || (loading && items.length === 0) ? (
               <motion.div

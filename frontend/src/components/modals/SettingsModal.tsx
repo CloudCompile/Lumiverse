@@ -31,6 +31,7 @@ import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { useStore } from '@/store'
 import { isDesktopViewportZoomAvailable } from '@/lib/desktopViewportZoom'
 import { readProductivityFeature } from '@/lib/spindle/productivity-feature-toggles'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 import { spindleApi } from '@/api/spindle'
 import { connectionsApi } from '@/api/connections'
 import { chatsApi } from '@/api/chats'
@@ -82,9 +83,12 @@ import {
 } from '@/lib/authorizationPopup'
 import type { SettingsTabState } from '@/store/slices/spindle-placement'
 import SettingsSearch from './SettingsSearch'
+import sectionStyles from '@/components/settings/SettingsSection.module.css'
 import styles from './SettingsModal.module.css'
 import formStyles from '@/components/shared/FormComponents.module.css'
 import clsx from 'clsx'
+
+const sectionTitleClass = clsx(sectionStyles.title, styles.sectionTitle)
 
 interface SettingsModalProps {
   onClose: () => void
@@ -97,13 +101,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const settingsScrollTarget = useStore((s) => s.settingsScrollTarget)
   const user = useStore((s) => s.user)
   const settingsTabs = useStore((s) => s.settingsTabs)
+  const extensions = useStore((s) => s.extensions)
   const productivityTabPosition = useStore((s) => (s as any).productivityTabPosition ?? 'after-display')
   const [activeView, setActiveView] = useState(settingsActiveView || 'display')
 
   const VIEWS = useMemo(() => {
+    // The registry reads external state; these subscriptions invalidate its snapshot.
     void settingsTabs
+    void extensions
     return getVisibleSettingsTabs(user?.role, productivityTabPosition)
-  }, [settingsTabs, user?.role, productivityTabPosition])
+  }, [settingsTabs, extensions, user?.role, productivityTabPosition])
 
   const contentRef = useRef<HTMLDivElement>(null)
   const navNonce = useRef(0)
@@ -265,11 +272,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 function SettingsView({ view }: { view: string }) {
   const { t } = useTranslation('shared')
   const settingsTabs = useStore((s) => s.settingsTabs)
+  const extensions = useStore((s) => s.extensions)
   const extensionTabs = useMemo(
-    () => settingsTabs
+    () => filterEnabledFrontendContributions(settingsTabs, extensions)
       .filter((tab) => tab.tabId === view)
       .sort((left, right) => left.order - right.order || left.sequence - right.sequence),
-    [settingsTabs, view],
+    [settingsTabs, extensions, view],
   )
   const hasCoreTab = SETTINGS_TABS.some((tab) => tab.id === view)
 
@@ -403,7 +411,7 @@ function DisplaySettings() {
 
       {isDesktopViewportZoomAvailable() && (
         <>
-          <h3 id={sectionAnchorId('display', 'zoom')} className={styles.sectionTitle} style={{ marginTop: 16 }}>{t('display.zoom.title')}</h3>
+          <h3 id={sectionAnchorId('display', 'zoom')} className={sectionTitleClass} style={{ marginTop: 16 }}>{t('display.zoom.title')}</h3>
           <Toggle.Checkbox
             checked={desktopPinchZoomEnabled}
             onChange={(checked) => setSetting('desktopPinchZoomEnabled', checked)}
@@ -412,7 +420,7 @@ function DisplaySettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('display', 'longMessages')} className={styles.sectionTitle} style={{ marginTop: 16 }}>{t('display.longMessages.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'longMessages')} className={sectionTitleClass} style={{ marginTop: 16 }}>{t('display.longMessages.title')}</h3>
       <p className={styles.helperText}>
         {t('display.longMessages.helper')}
       </p>
@@ -478,7 +486,7 @@ function DisplaySettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('display', 'modalWidth')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.modalWidth.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'modalWidth')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.modalWidth.title')}</h3>
       <p className={styles.helperText}>
         {t('display.modalWidth.helper')}
       </p>
@@ -517,7 +525,7 @@ function DisplaySettings() {
         </div>
       )}
 
-      <h3 id={sectionAnchorId('display', 'drawer')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.drawer.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'drawer')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.drawer.title')}</h3>
 
       <div className={styles.drawerRow}>
         <div className={styles.field}>
@@ -585,7 +593,7 @@ function DisplaySettings() {
 
       <p className={styles.helperText}>{t('display.drawer.resizeHint')}</p>
 
-      <h3 id={sectionAnchorId('display', 'toast')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.toast.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'toast')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.toast.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('display.toast.position')}</label>
@@ -610,7 +618,7 @@ function DisplaySettings() {
         </div>
       </div>
 
-      <h3 id={sectionAnchorId('display', 'chatHeads')} className={styles.sectionTitle} style={{ marginTop: 8 }}>{t('display.chatHeads.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'chatHeads')} className={sectionTitleClass} style={{ marginTop: 8 }}>{t('display.chatHeads.title')}</h3>
 
       <Toggle.Checkbox
         checked={chatHeadsEnabled}
@@ -685,7 +693,7 @@ function DisplaySettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('display', 'landing')} className={styles.sectionTitle} style={{ marginTop: 8 }}>{t('display.landing.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'landing')} className={sectionTitleClass} style={{ marginTop: 8 }}>{t('display.landing.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('display.landing.layout')}</label>
@@ -922,7 +930,7 @@ function ChatSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('chat', 'general')} className={styles.sectionTitle}>{t('chat.title')}</h3>
+      <h3 id={sectionAnchorId('chat', 'general')} className={sectionTitleClass}>{t('chat.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('chat.displayMode')}</label>
@@ -1079,7 +1087,7 @@ function ChatSettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'width')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.widthTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'width')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.widthTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.widthHelper')}
       </p>
@@ -1124,7 +1132,7 @@ function ChatSettings() {
         label={t('chat.centerWithSidebar')}
         hint={t('chat.centerWithSidebarHint')}
       />
-      <h3 id={sectionAnchorId('chat', 'messagesPerPage')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.messagesPerPageTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'messagesPerPage')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.messagesPerPageTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.messagesPerPageHelper')}
       </p>
@@ -1170,7 +1178,7 @@ function ChatSettings() {
         </div>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'input')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.inputTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'input')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.inputTitle')}</h3>
 
       <Toggle.Checkbox
         checked={enterToSend.desktop}
@@ -1218,7 +1226,7 @@ function ChatSettings() {
         </select>
       </div>
 
-      <h3 id={sectionAnchorId('chat', 'regen')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.regenTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'regen')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.regenTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.regenHelper')}
       </p>
@@ -1276,7 +1284,7 @@ function ChatSettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'messageInfo')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.messageInfoTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'messageInfo')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.messageInfoTitle')}</h3>
 
       <Toggle.Checkbox
         checked={useStore((s) => s.showMessageTokenCount ?? true)}
@@ -1299,7 +1307,7 @@ function ChatSettings() {
         hint={t('chat.preventDroppedMessageWarningHint')}
       />
 
-      <h3 id={sectionAnchorId('chat', 'swipe')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.swipeTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'swipe')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.swipeTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.swipeHelper')}
       </p>
@@ -1320,7 +1328,7 @@ function ExtensionSettingsView() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('extensions', 'general')} className={styles.sectionTitle}>{t('extensions.title')}</h3>
+      <h3 id={sectionAnchorId('extensions', 'general')} className={sectionTitleClass}>{t('extensions.title')}</h3>
       <p className={styles.placeholder}>
         {t('extensions.placeholder')}
         {frontendCount > 0
@@ -1694,7 +1702,7 @@ function GuidedGenerationSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('guided', 'general')} className={styles.sectionTitle}>{t('guided.title')}</h3>
+        <h3 id={sectionAnchorId('guided', 'general')} className={sectionTitleClass}>{t('guided.title')}</h3>
         <Button size="sm" onClick={addGuide}>{t('guided.newGuide')}</Button>
       </div>
       <p className={styles.placeholder}>{t('guided.helper')}</p>
@@ -1809,7 +1817,7 @@ function QuickRepliesSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('quickReplies', 'general')} className={styles.sectionTitle}>{t('quickReplies.title')}</h3>
+        <h3 id={sectionAnchorId('quickReplies', 'general')} className={sectionTitleClass}>{t('quickReplies.title')}</h3>
         <Button size="sm" onClick={addSet}>{t('quickReplies.newSet')}</Button>
       </div>
       <p className={styles.placeholder}>{t('quickReplies.helper')}</p>
@@ -2121,7 +2129,7 @@ function ExtensionPoolSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('extensionPools', 'general')} className={styles.sectionTitle}>{t('extensionPools.title')}</h3>
+        <h3 id={sectionAnchorId('extensionPools', 'general')} className={sectionTitleClass}>{t('extensionPools.title')}</h3>
         <Button
           size="icon"
           onClick={() => load(true)}
@@ -2709,7 +2717,7 @@ function EmbeddingsSettings() {
   if (loading || !cfg) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('embeddings', 'general')} className={styles.sectionTitle}>{t('embeddings.title')}</h3>
+        <h3 id={sectionAnchorId('embeddings', 'general')} className={sectionTitleClass}>{t('embeddings.title')}</h3>
         <p className={styles.placeholder}>{t('embeddings.loading')}</p>
       </div>
     )
@@ -2771,7 +2779,7 @@ function EmbeddingsSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('embeddings', 'general')} className={styles.sectionTitle}>{t('embeddings.title')}</h3>
+      <h3 id={sectionAnchorId('embeddings', 'general')} className={sectionTitleClass}>{t('embeddings.title')}</h3>
       <p className={styles.placeholder}>{t('embeddings.helper')}</p>
 
       {inherited && (
@@ -3433,7 +3441,7 @@ function WebSearchSettings() {
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('webSearch', 'general')} className={styles.sectionTitle}>{t('webSearch.title')}</h3>
+        <h3 id={sectionAnchorId('webSearch', 'general')} className={sectionTitleClass}>{t('webSearch.title')}</h3>
         <p className={styles.placeholder}>{t('webSearch.loading')}</p>
       </div>
     )
@@ -3441,7 +3449,7 @@ function WebSearchSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('webSearch', 'general')} className={styles.sectionTitle}>{t('webSearch.title')}</h3>
+      <h3 id={sectionAnchorId('webSearch', 'general')} className={sectionTitleClass}>{t('webSearch.title')}</h3>
       <p className={styles.placeholder}>{t('webSearch.helper')}</p>
 
       {error && <p className={styles.errorText}>{error}</p>}
@@ -3656,7 +3664,7 @@ function AdvancedSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('advanced', 'general')} className={styles.sectionTitle}>{t('advanced.title')}</h3>
+      <h3 id={sectionAnchorId('advanced', 'general')} className={sectionTitleClass}>{t('advanced.title')}</h3>
 
       <CollapsibleSection title={t('advanced.spindleLogging')} defaultExpanded={false}>
         <Toggle.Checkbox
@@ -4049,7 +4057,7 @@ function LumiHubSettings() {
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('lumihub', 'general')} className={styles.sectionTitle}>{t('lumihub.title')}</h3>
+        <h3 id={sectionAnchorId('lumihub', 'general')} className={sectionTitleClass}>{t('lumihub.title')}</h3>
         <span className={styles.helperText}>{t('lumihub.loading')}</span>
       </div>
     )
@@ -4057,7 +4065,7 @@ function LumiHubSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('lumihub', 'general')} className={styles.sectionTitle}>{t('lumihub.title')}</h3>
+      <h3 id={sectionAnchorId('lumihub', 'general')} className={sectionTitleClass}>{t('lumihub.title')}</h3>
       <span className={styles.helperText}>
         {t('lumihub.helper')}
       </span>
@@ -4410,7 +4418,7 @@ function IllarinSettings() {
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('illarin', 'general')} className={styles.sectionTitle}>{t('illarin.title')}</h3>
+        <h3 id={sectionAnchorId('illarin', 'general')} className={sectionTitleClass}>{t('illarin.title')}</h3>
         <span className={styles.helperText}>{t('illarin.loading')}</span>
       </div>
     )
@@ -4418,7 +4426,7 @@ function IllarinSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('illarin', 'general')} className={styles.sectionTitle}>{t('illarin.title')}</h3>
+      <h3 id={sectionAnchorId('illarin', 'general')} className={sectionTitleClass}>{t('illarin.title')}</h3>
       <span className={styles.helperText}>{t('illarin.helper')}</span>
 
       {status?.linked ? (

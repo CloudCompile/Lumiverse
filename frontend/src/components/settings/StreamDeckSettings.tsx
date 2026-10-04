@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Check, Copy, Plus, Trash2 } from 'lucide-react'
+import clsx from 'clsx'
 import { streamDeckApi, type StreamDeckToken } from '@/api/stream-deck'
+import sectionStyles from './SettingsSection.module.css'
 import styles from './StreamDeckSettings.module.css'
 
 export default function StreamDeckSettings() {
@@ -53,7 +55,7 @@ export default function StreamDeckSettings() {
   }
 
   return <div className={styles.container}>
-    <h2 className={styles.title}>Stream Deck</h2>
+    <h2 className={clsx(sectionStyles.title, styles.title)}>Stream Deck</h2>
     <p className={styles.description}>Create a restricted token for the Lumiverse Stream Deck plugin. Tokens can only read character and recent-chat information.</p>
 
     <div className={styles.createRow}>

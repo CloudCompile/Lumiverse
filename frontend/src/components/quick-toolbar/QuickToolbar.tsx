@@ -79,6 +79,7 @@ import {
 import { useQuickToolbarActions, type ToolbarAction } from './useQuickToolbarActions'
 import { useQuickToolbarContext } from './useQuickToolbarContext'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
+import { LumiverseSuiteGate } from '@/lib/spindle/LumiverseSuiteGate'
 
 const RESIZE_HANDLES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const
 
@@ -1667,6 +1668,10 @@ function QuickToolbarNative() {
   return createPortal(tree, document.body)
 }
 
-export function QuickToolbar() {
+function QuickToolbarSurface() {
   return useSpindleComponentOverride('QuickToolbar', QuickToolbarNative, {})
+}
+
+export function QuickToolbar() {
+  return <LumiverseSuiteGate><QuickToolbarSurface /></LumiverseSuiteGate>
 }

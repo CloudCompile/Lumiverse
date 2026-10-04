@@ -419,10 +419,6 @@
   display: none;
 }
 
-.sectionTitle {
-  composes: title from '../settings/SettingsSection.module.css';
-}
-
 .settingsSection > .sectionTitle:not(:first-child) {
   padding-top: 14px;
   border-top: 1px solid var(--lumiverse-border);

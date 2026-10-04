@@ -6,6 +6,8 @@ title: Productivity & Quick Toolbar
 
 The **Lumiverse Suite** extension adds a Productivity settings workspace for arranging common actions and tailoring several interface surfaces. When the suite is enabled, open **Settings → Productivity**. By default, this tab appears immediately after **Display & Layout**.
 
+Suite features require the extension to be installed and enabled. Disabling or removing it hides its surfaces and actions and stops its saved active-connection override from applying. Saved preferences remain available when you enable it again. Composer icon organization is a standard Lumiverse feature and remains available without Suite.
+
 ---
 
 ## Optional Surfaces & Navigation
@@ -115,4 +117,3 @@ Changing a picker layout does not change the active connection by itself. Your s
 | An action is missing from the toolbar | Search **Visible icons and order**, make sure it is enabled, and confirm that its contributing extension is running. |
 | The toolbar covers chat text | Enable an opaque backdrop, use the chat-top dock, or turn on **Hide when overlaid**. |
 | Embedding or Cortex fallback controls are missing | Re-enable the corresponding option under **Optional surfaces & navigation**. |
-

@@ -183,6 +183,7 @@ export function useQuickToolbarActions() {
   const extensionCommands = useStore((s) => s.extensionCommands)
   const inputBarActions = useStore((s) => s.inputBarActions)
   const extensions = useStore((s) => s.extensions)
+  const settingsTabs = useStore((s) => s.settingsTabs)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
   const isGroupChat = useStore((s) => s.isGroupChat)
@@ -219,6 +220,8 @@ export function useQuickToolbarActions() {
    * close it. `ViewportDrawer.tsx` shows the same caller-decides idiom.
    */
   const runSurface = useCallback((surface: ToolbarSurface, command?: () => void) => {
+    if (surface.kind === 'settings'
+      && !getVisibleSettingsTabs(useStore.getState().user?.role).some((tab) => tab.id === surface.view)) return
     const intent = resolveToolbarIntent(surface, readUi())
     switch (intent.type) {
       case 'open-drawer':
@@ -242,6 +245,7 @@ export function useQuickToolbarActions() {
   }, [closeDrawer, closeSettings, openDrawer, openSettings, setDrawerTab])
 
   const actionCatalog = useMemo(() => {
+    void settingsTabs
     const enabledDrawerTabs = filterEnabledFrontendContributions(extensionDrawerTabs, extensions)
     const enabledExtensionCommands = filterEnabledFrontendContributions(extensionCommands, extensions)
     const enabledInputBarActions = filterEnabledFrontendContributions(inputBarActions, extensions)
@@ -368,6 +372,14 @@ export function useQuickToolbarActions() {
       ? catalog
       : catalog.filter((action) => !isExtensionComposerActionId(action.id))
     return [...new Map(availableCatalog.map((action) => [action.id, action])).values()]
+      .map((action) => ({
+        ...action,
+        run: () => {
+          if (isExtensionComposerActionId(action.id)
+            && !hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
+          action.run()
+        },
+      }))
   }, [
     activeCharacterId,
     activeChatId,
@@ -377,6 +389,7 @@ export function useQuickToolbarActions() {
     extensionDrawerTabs,
     extensions,
     inputBarActions,
+    settingsTabs,
     isGroupChat,
     messageSelectMode,
     openModal,

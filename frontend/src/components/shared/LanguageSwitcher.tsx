@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next'
 import clsx from 'clsx'
 import { changeUiLanguage } from '@/i18n'
+import sectionStyles from '@/components/settings/SettingsSection.module.css'
 import styles from './LanguageSwitcher.module.css'
 
 const LANGUAGES = [
@@ -35,7 +36,7 @@ export default function LanguageSwitcher({ className }: LanguageSwitcherProps) {
 
   return (
     <div className={clsx(styles.root, className)}>
-      <h3 className={styles.label} id="setsec-display-language">
+      <h3 className={clsx(sectionStyles.title, styles.label)} id="setsec-display-language">
         {t('language.label')}
       </h3>
       <p className={styles.helper}>{t('language.helper')}</p>

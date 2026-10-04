@@ -13,7 +13,7 @@ let container: HTMLDivElement
 let previousGlobals: Record<string, unknown>
 
 const storeState = {
-  extensions: [{ id: 'suite', enabled: true, has_frontend: true }],
+  extensions: [{ id: 'suite', identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   activatedWorldInfo: [{
     id: 'legacy-entry',
     comment: 'Legacy lore',

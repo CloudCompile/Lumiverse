@@ -20,6 +20,7 @@ import {
 import { layoutElementSize, layoutViewportSize, toLayoutDelta } from '@/lib/zoomLayerGeometry'
 import type { LoreIndicatorSettings } from '@/types/store'
 import LoreIndicatorPanel, { openLoreEntry } from './LoreIndicatorPanel'
+import { LumiverseSuiteGate } from '@/lib/spindle/LumiverseSuiteGate'
 import {
   clampLoreFloatingPosition,
   clampLoreRect,
@@ -113,7 +114,11 @@ interface LoreIndicatorProps {
   onOpenChange?: (open: boolean) => void
 }
 
-export default function LoreIndicator({ open: controlledOpen, onOpenChange }: LoreIndicatorProps = {}) {
+export default function LoreIndicator(props: LoreIndicatorProps = {}) {
+  return <LumiverseSuiteGate><LoreIndicatorSurface {...props} /></LumiverseSuiteGate>
+}
+
+function LoreIndicatorSurface({ open: controlledOpen, onOpenChange }: LoreIndicatorProps) {
   const entries = useStore((state) => state.activatedWorldInfo)
   const storedSettings = useStore((state) => state.loreIndicatorSettings)
   const settings = useMemo(() => ({

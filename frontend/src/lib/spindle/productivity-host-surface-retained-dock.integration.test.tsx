@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterAll, afterEach, describe, expect, mock, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { act, createElement } from 'react'
 import { JSDOM } from 'jsdom'
 
@@ -81,6 +81,8 @@ Object.assign(globalThis, {
 
 const { useStore } = await import('@/store')
 const { createComponentsHelper, destroyAllComponentsForExtension } = await import('./components-helper')
+const { PRODUCTIVITY_HOST_SURFACES } = await import('./productivity-host-contracts')
+const { getLorebookWorkspaceOverlayOpen } = await import('@/lib/lorebookWorkspaceVisibility')
 await import('./productivity-host-surface-renderers')
 
 const EXTENSION_ID = 'retained-dock-integration'
@@ -92,6 +94,9 @@ async function flush(): Promise<void> {
 }
 
 describe('Quick Toolbar retained dock host lifecycle', () => {
+  beforeEach(() => {
+    useStore.setState({ extensions: [{ id: EXTENSION_ID, identifier: 'lumiverse_suite', enabled: true, has_frontend: true }] as any })
+  })
   afterEach(async () => {
     destroyAllComponentsForExtension(EXTENSION_ID)
     clearLiveRootsForExtension(EXTENSION_ID)
@@ -129,10 +134,18 @@ describe('Quick Toolbar retained dock host lifecycle', () => {
     expect(root.getAttribute('data-dock-request')).toBe('strip')
     const surface = root.querySelector('[data-spindle-host-surface="quick_toolbar.workspace"]')
     expect(surface).not.toBeNull()
-    const workspace = surface?.querySelector<HTMLElement>('[data-surface-id="quick_toolbar.workspace"]')
+    let workspace = surface?.querySelector<HTMLElement>('[data-surface-id="quick_toolbar.workspace"]')
     expect(workspace).not.toBeNull()
     expect(workspace?.getAttribute('data-lifecycle')).toBe('workspace')
     expect(surface?.querySelector('[data-toolbar-action-scroller="ready"]')).not.toBeNull()
+
+    const installed = useStore.getState().extensions
+    await act(async () => { useStore.setState({ extensions: [] }) })
+    expect(surface?.querySelector('[data-surface-id]')).toBeNull()
+    expect(root.hasAttribute('data-dock-request')).toBe(false)
+    await act(async () => { useStore.setState({ extensions: installed }) })
+    expect(surface?.querySelector('[data-toolbar-action-scroller="ready"]')).not.toBeNull()
+    workspace = surface?.querySelector<HTMLElement>('[data-surface-id="quick_toolbar.workspace"]')
 
     await act(async () => {
       useStore.setState({ quickToolbarSettings: { ...original, quickToolbarPlacement: 'chat_top_dock', hideInChatTopDock: false } })
@@ -158,5 +171,37 @@ describe('Quick Toolbar retained dock host lifecycle', () => {
       useStore.setState({ quickToolbarSettings: original })
       for (let index = 0; index < 5; index += 1) await Promise.resolve()
     })
+  })
+
+  test('every retained Suite host surface stays unmounted without an enabled frontend', async () => {
+    const root = document.createElement('div')
+    root.setAttribute('data-spindle-extension-root', EXTENSION_ID)
+    document.body.append(root)
+    const unregister = registerLiveRoot(EXTENSION_ID, root, null, 1)
+    const helper = createComponentsHelper(EXTENSION_ID, 'retained-dock-integration', async () => ({ categories: [] }), 1, { hasPermission: () => true })
+    const installed = useStore.getState().extensions[0]
+    const originalSettings = useStore.getState().quickToolbarSettings
+    const previousOverflow = document.body.style.overflow
+
+    for (const extensions of [[], [{ ...installed, enabled: false }], [{ ...installed, has_frontend: false }]]) {
+      await act(async () => { useStore.setState({ extensions }) })
+      for (const surfaceId of PRODUCTIVITY_HOST_SURFACES) {
+        let handle: ReturnType<typeof helper.mountHostSurface>
+        await act(async () => {
+          handle = helper.mountHostSurface(root, surfaceId, {
+            contractVersion: 1, ownerToken: EXTENSION_ID, generation: 1, capabilities: [],
+            state: { open: true, bookId: 'book', entryId: null, invocationId: null },
+          })
+        })
+        expect(root.textContent).toBe('')
+        expect(root.querySelector('[data-surface-id]')).toBeNull()
+        expect(root.hasAttribute('data-dock-request')).toBe(false)
+        expect(document.body.style.overflow).toBe(previousOverflow)
+        expect(getLorebookWorkspaceOverlayOpen()).toBe(false)
+        await act(async () => { handle!.destroy() })
+      }
+    }
+    expect(useStore.getState().quickToolbarSettings).toBe(originalSettings)
+    unregister()
   })
 })

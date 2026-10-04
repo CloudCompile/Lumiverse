@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test'
 
 const storeState = {
-  extensions: [{ id: 'suite', enabled: true, has_frontend: true }],
+  extensions: [{ id: 'suite', identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   inputBarActions: [] as Array<{
     extensionId: string
     contributionId: string

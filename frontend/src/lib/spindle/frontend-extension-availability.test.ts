@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import { JSDOM } from 'jsdom'
 import {
   filterEnabledFrontendContributions,
   hasEnabledFrontendExtension,
   hasEnabledFrontendExtensionId,
+  hasAvailableFrontendSurface,
 } from './frontend-extension-availability'
 
 describe('frontend extension availability', () => {
@@ -33,5 +35,16 @@ describe('frontend extension availability', () => {
       { id: 'suite-widget', extensionId: 'suite' },
       { id: 'active-widget', extensionId: 'active' },
     ], extensions)).toEqual([{ id: 'active-widget', extensionId: 'active' }])
+  })
+
+  test('retained Suite homepage roots release their native surface when unavailable', () => {
+    const dom = new JSDOM('<div data-spindle-extension-root="suite" data-spindle-ext-id="lumiverse_suite"><div data-ready="true"></div></div>')
+    const installed = { id: 'suite', identifier: 'lumiverse_suite', enabled: true, has_frontend: true }
+    expect(hasAvailableFrontendSurface(dom.window.document, '[data-ready]', [installed])).toBe(true)
+    for (const extensions of [[], [{ ...installed, enabled: false }], [{ ...installed, has_frontend: false }]]) {
+      expect(hasAvailableFrontendSurface(dom.window.document, '[data-ready]', extensions)).toBe(false)
+    }
+    expect(dom.window.document.querySelector('[data-ready]')).not.toBeNull()
+    dom.window.close()
   })
 })

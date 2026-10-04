@@ -18,7 +18,6 @@
 }
 
 .title {
-  composes: title from './SettingsSection.module.css';
   flex: 1;
   margin: 0;
 }

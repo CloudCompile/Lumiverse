@@ -12,6 +12,7 @@ import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
 import { resolveCharacterDisplaySettings } from '@/lib/characterDisplaySettings'
+import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import {
   applyCharacterPage,
   characterQueryKey,
@@ -52,6 +53,8 @@ function isAbortError(error: unknown) {
 
 export function useHomepageCharacterLibrary() {
   const settings = useStore((s) => s.homepageCharacterLibrarySettings)
+  const suiteEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
+  const enabled = suiteEnabled && settings.enabled
   const tabSettings = useStore((s) => s.characterTabDisplaySettings)
   const favorites = useStore((s) => s.favorites)
   const activeChatId = useStore((s) => s.activeChatId)
@@ -110,6 +113,7 @@ export function useHomepageCharacterLibrary() {
   previewRef.current = preview
 
   const updateSettings = useCallback((patch: Partial<HomepageCharacterLibrarySettings>) => {
+    if (!hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
     setSetting('homepageCharacterLibrarySettings', { ...settingsRef.current, ...patch })
   }, [setSetting])
 
@@ -126,7 +130,7 @@ export function useHomepageCharacterLibrary() {
   }, [search])
 
   useEffect(() => {
-    if (!settings.enabled) return
+    if (!enabled) return
 
     const invalidate = () => {
       // Both refs must be cleared: retryVersion reruns the fetch effect, and
@@ -154,10 +158,10 @@ export function useHomepageCharacterLibrary() {
     }
 
     return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
-  }, [resolved.query.sortField, settings.enabled])
+  }, [resolved.query.sortField, enabled])
 
   useEffect(() => {
-    if (!settings.enabled) return
+    if (!enabled) return
 
     // The effect's dependency list re-runs on object identity (`favorites` is a fresh array
     // on unrelated store writes) and on the debounce settling to a value it already had.
@@ -258,7 +262,7 @@ export function useHomepageCharacterLibrary() {
     resolved.query.sortField,
     selectedTag,
     retryVersion,
-    settings.enabled,
+    enabled,
   ])
 
   /**
@@ -266,6 +270,7 @@ export function useHomepageCharacterLibrary() {
    * the IntersectionObserver in the component never has to re-subscribe because of it.
    */
   const loadMore = useCallback(() => {
+    if (!hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
     const state = pageStateRef.current
     if (!shouldLoadMore(state, { loading: loadingRef.current, loadingMore: loadingMoreRef.current })) {
       return
@@ -300,13 +305,13 @@ export function useHomepageCharacterLibrary() {
   }, [commitPageState])
 
   useEffect(() => {
-    if (!settings.enabled) return
+    if (!enabled) return
     charactersApi.listTags().then(setTags).catch((err) => {
       console.error('[HomepageCharacterLibrary] Failed to load tags:', err)
     })
-  }, [settings.enabled])
+  }, [enabled])
 
-  const selectedCharacterId = settings.lastSelectedCharacterId
+  const selectedCharacterId = !enabled ? null : settings.lastSelectedCharacterId
     && characters.some((character) => character.id === settings.lastSelectedCharacterId)
     ? settings.lastSelectedCharacterId
     : characters[0]?.id ?? null
@@ -337,6 +342,7 @@ export function useHomepageCharacterLibrary() {
   }, [updateSettings])
 
   const openCharacterChat = useCallback(async (character: CharacterSummary) => {
+    if (!hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
     if (openingCharacterIdRef.current) return
     openingCharacterIdRef.current = character.id
     setOpeningCharacterId(character.id)
@@ -362,6 +368,7 @@ export function useHomepageCharacterLibrary() {
   }, [navigate, selectCharacter])
 
   const editCharacter = useCallback(async (id: string) => {
+    if (!hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
     const editRequestId = ++editRequestIdRef.current
     setError(null)
     try {
@@ -395,7 +402,11 @@ export function useHomepageCharacterLibrary() {
 
   const closePanel = useCallback(() => setPanelOpen(false), [])
   const openSettings = useCallback(
-    () => openSettingsModal('productivity', { anchorId: 'homepage-character-library-settings' }),
+    () => {
+      if (hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) {
+        openSettingsModal('productivity', { anchorId: 'homepage-character-library-settings' })
+      }
+    },
     [openSettingsModal],
   )
   const retry = useCallback(() => {
@@ -405,7 +416,7 @@ export function useHomepageCharacterLibrary() {
   }, [])
 
   return {
-    settings,
+    settings: enabled ? settings : { ...settings, enabled: false },
     display: resolved.display,
     characters,
     tags,

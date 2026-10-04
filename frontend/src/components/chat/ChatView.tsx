@@ -155,7 +155,8 @@ export default function ChatView() {
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
-  const [portraitSurfaceOccupied, setPortraitSurfaceOccupied] = useState(false)
+  const [portraitSurfaceMounted, setPortraitSurfaceMounted] = useState(false)
+  const portraitSurfaceOccupied = suiteExtensionEnabled && portraitSurfaceMounted
   const quickToolbarSettings = useStore((s) => s.quickToolbarSettings)
   const nativeDockActionSide = suiteExtensionEnabled
     ? (quickToolbarSettings?.nativeDockActionSide === 'left' ? 'left' : 'right')
@@ -194,8 +195,8 @@ export default function ChatView() {
       // therefore miss the live owner and briefly restore the native dock. The
       // host-surface marker is unique to the extension-owned Portrait Dock, so it
       // is the ownership authority regardless of which current anchor contains it.
-      setPortraitSurfaceOccupied(Boolean(
-        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"]'),
+      setPortraitSurfaceMounted(Boolean(
+        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"] [data-surface-id="portrait_dock.workspace"]'),
       ))
       // Same authority rule for the shared oldest-message action: the rendered
       // control decides ownership, not the persisted toolbar setting. The
