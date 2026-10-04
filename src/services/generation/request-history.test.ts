@@ -12,6 +12,7 @@ import { getRequestHistory, getRequestHistoryEntry, setRequestHistoryTracking, o
 import { requestHistoryStore } from "../request-history-store";
 import { ProviderRegistry } from "../../spindle/provider-registry";
 import { WorkerHost } from "../../spindle/worker-host";
+import { WorkerHostDesktopCaptureApi } from "../../spindle/worker-host-desktop-capture-api";
 
 const userId = "request-history-test";
 let secretSpy: ReturnType<typeof spyOn>;
@@ -90,10 +91,22 @@ test("Spindle generation records the host's extension identity instead of input 
     manifest: { name: "Trusted extension", identifier: "trusted-extension" },
     extensionId: "installation-1",
     generationAbortControllers: new Map(),
+    captureGenerationRequests: new Set(),
     hasPermission: () => true,
     resolveEffectiveUserId: () => userId,
     enforceScopedUser: () => {},
     postToWorker: (message: unknown) => posted.push(message),
+  });
+  host.desktopCaptureApi = new WorkerHostDesktopCaptureApi({
+    extensionId: host.extensionId,
+    identifier: host.manifest.identifier,
+    name: host.manifest.name,
+    declaredPermissions: ["generation"],
+    hasPermission: host.hasPermission,
+    authorize: () => () => true,
+    resolveEffectiveUserId: host.resolveEffectiveUserId,
+    enforceScopedUser: host.enforceScopedUser,
+    postResponse: host.postToWorker,
   });
   await host.handleGeneration("worker-request", {
     type: "quiet", userId: "untrusted-user", connection_id: connectionId,
@@ -101,6 +114,8 @@ test("Spindle generation records the host's extension identity instead of input 
     origin: { kind: "extension", name: "forged", extensionId: "forged" },
   });
   expect(posted[0].error).toBeUndefined();
+  expect(host.generationAbortControllers.size).toBe(0);
+  expect(host.captureGenerationRequests.size).toBe(0);
   expect(getRequestHistory(userId).entries[0]).toMatchObject({
     generationId: "worker-request", origin: { kind: "extension", name: "Trusted extension", extensionId: "installation-1", operation: "quiet" },
   });

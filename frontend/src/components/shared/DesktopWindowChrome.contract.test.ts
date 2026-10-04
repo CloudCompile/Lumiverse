@@ -67,7 +67,7 @@ describe('desktop window chrome contract', () => {
     expect(desktopFrontend).toContain(`border-radius:{corner_radius}px {corner_radius}px 0 0;overflow:hidden`)
     expect(desktopFrontend).toContain("root.setAttribute('data-desktop-windows-corners', '{windows_corners}')")
     expect(desktopFrontend).toContain('.shadow(rounded_windows)')
-    expect(desktopFrontend).toContain('window.set_shadow(rounded_windows)')
+    expect(desktopFrontend).toMatch(/window\s*\.set_shadow\(rounded_windows\)/)
   })
 
   test('keeps desktop chrome outside the connection hard-stop', () => {

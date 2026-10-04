@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { closeDatabase, getDb, initDatabase } from "./connection";
 import {
   startAutomaticDatabaseMaintenance,
@@ -13,45 +14,8 @@ import {
 function initSchedulerDb(): void {
   closeDatabase();
   initDatabase(":memory:");
-  getDb().run(`CREATE TABLE generation_outbox (
-    id TEXT PRIMARY KEY,
-    request_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    chat_id TEXT NOT NULL,
-    branch_chat_id TEXT NOT NULL,
-    edited_message_id TEXT NOT NULL,
-    target_message_id TEXT,
-    target_swipe_index INTEGER,
-    expected_version INTEGER NOT NULL,
-    generation_id TEXT NOT NULL UNIQUE,
-    mode TEXT NOT NULL CHECK(mode IN ('normal', 'swipe')),
-    status TEXT NOT NULL CHECK(status IN ('pending', 'claimed', 'running', 'completed', 'failed', 'cancelled')),
-    lease_owner TEXT,
-    lease_expires_at INTEGER,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at INTEGER,
-    last_error_code TEXT,
-    terminal_reason TEXT,
-    dispatched_at INTEGER,
-    completed_at INTEGER,
-    cancelled_at INTEGER,
-    created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL,
-    -- migrations/111_generation_outbox_connection_id.sql. This fixture builds the
-    -- schema by hand instead of running migrations, so the column has to be
-    -- mirrored here (last, matching the ALTER TABLE append order) or every
-    -- edit-and-send write fails with "no such column: connection_id".
-    connection_id TEXT
-  )`);
-  getDb().run(`CREATE TABLE messages (
-    id TEXT PRIMARY KEY,
-    chat_id TEXT NOT NULL,
-    index_in_chat INTEGER NOT NULL DEFAULT 0,
-    is_user INTEGER NOT NULL DEFAULT 0,
-    content TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL DEFAULT 0,
-    revision INTEGER NOT NULL DEFAULT 1
-  )`);
+  getDb().run("PRAGMA foreign_keys = OFF");
+  getDb().run(readFileSync(new URL("./baseline.sql", import.meta.url), "utf8"));
 }
 
 function insertOutbox(overrides: Record<string, string | number | null> = {}): string {
@@ -90,6 +54,27 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
     overrides.created_at ?? now,
     overrides.updated_at ?? now,
   );
+  // Dispatch requires the immutable cursor committed alongside the outbox row.
+  const committed = row(id);
+  const cursor = {
+    generationId: committed.generation_id,
+    chatId: committed.branch_chat_id,
+    requestId: committed.request_id,
+    mode: committed.mode,
+    editAndSendContext: {
+      editedUserMessageId: committed.edited_message_id,
+      committedRevision: committed.expected_version + 1,
+    },
+  };
+  getDb().query(
+    `INSERT INTO edit_and_send_requests (
+      id, request_id, user_id, chat_id, request_fingerprint, branch_chat_id,
+      edited_message_id, target_message_id, target_swipe_index, generation_id,
+      response, cursor, created_at, updated_at
+    ) SELECT id, request_id, user_id, chat_id, 'scheduler-fixture', branch_chat_id,
+      edited_message_id, target_message_id, target_swipe_index, generation_id,
+      '{}', ?, created_at, updated_at FROM generation_outbox WHERE id = ?`,
+  ).run(JSON.stringify(cursor), id);
   return id;
 }
 
@@ -164,9 +149,11 @@ describe("automatic maintenance outbox sweep", () => {
 
   test("tick dispatches a never-attempted pending row once its backoff elapses", async () => {
     const starts: string[] = [];
+    const contexts: unknown[] = [];
     const active = new Set<string>();
-    setEditAndSendStartGeneration(async (input) => {
+    setEditAndSendStartGeneration(async (input, options) => {
       starts.push(input.generationId);
+      contexts.push(options?.editAndSendContext);
       active.add(input.generationId);
       return { generationId: input.generationId, status: "streaming" };
     });
@@ -203,6 +190,7 @@ describe("automatic maintenance outbox sweep", () => {
       .run(Date.now() - 1, "orphan-run");
 
     expect(await waitFor(() => row("orphan-run")?.status === "running")).toBe(true);
-    expect(starts).toContain("gen-orphan");
+    expect(starts).toEqual(["gen-orphan"]);
+    expect(contexts).toEqual([{ editedUserMessageId: "m1", committedRevision: 2 }]);
   });
 });
