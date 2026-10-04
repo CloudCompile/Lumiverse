@@ -17,7 +17,8 @@ export function EntryFolderList({ summary, onOpen }: { summary: WorldBookEntryOr
   </nav>
 }
 
-export default function EntryOrganizationControls({ bookId, books, summary, folder, root, tags, entries, selectedIds, busy, onRoot, onTags, onReload, onFolderChanged, ref }: {
+export default function EntryOrganizationControls({ bookId, books, summary, folder, root, tags, entries, selectedIds, busy, onRoot, onTags, onReload, onFolderChanged, hideFilters = false, ref }: {
+  hideFilters?: boolean
   ref?: Ref<EntryOrganizationHandle>
   bookId: string; books: WorldBook[]; summary: WorldBookEntryOrganizationSummary | null
   folder?: string; root: boolean; tags: string[]; entries: WorldBookEntry[]; selectedIds: string[]; busy?: boolean
@@ -114,14 +115,17 @@ export default function EntryOrganizationControls({ bookId, books, summary, fold
   return <>
     <div className={styles.controls}>
       {needsReload && !action && <div role="alert">{error}<button type="button" disabled={pending} onClick={() => void reload()}>Reload entries</button></div>}
+      {root && <strong>Folders</strong>}
       {!root && <div className={styles.row}><button type="button" onClick={onRoot}>‹ Folders</button><strong>{folder === undefined ? 'All entries' : folder || 'Unfiled'}</strong></div>}
       {!root && <>
+        <div hidden={hideFilters}>
         <label>Filter by tags (all selected)
           <select aria-label="Filter entry tags" value="" onChange={event => { if (event.target.value) onTags([...new Set([...tags, event.target.value])]) }}>
             <option value="">Choose tag…</option>{summary?.tags.filter(item => !tags.includes(item.name)).map(item => <option key={item.name} value={item.name}>{item.name} ({item.count})</option>)}
           </select>
         </label>
         <div className={styles.chips}>{tags.map(tag => <button type="button" key={tag} aria-label={`Clear tag filter ${tag}`} onClick={() => onTags(tags.filter(value => value !== tag))}>{tag} ×</button>)}</div>
+        </div>
         <div className={styles.row}>
           {named && <><button type="button" disabled={busy || pending || needsReload} onClick={event => open('rename', event.currentTarget)}>Rename folder</button><button type="button" disabled={busy || pending || needsReload} onClick={event => open('move_folder', event.currentTarget)}>Move folder…</button><button type="button" disabled={busy || pending || needsReload} onClick={event => open('remove', event.currentTarget)}>Remove folder</button></>}
           {selectedIds.length > 0 && <><button type="button" disabled={busy || pending || needsReload} onClick={event => open('move', event.currentTarget)}>Move selected…</button><button type="button" disabled={busy || pending || needsReload} onClick={event => open('add_tags', event.currentTarget)}>Add tags…</button><button type="button" disabled={busy || pending || needsReload} onClick={event => open('remove_tags', event.currentTarget)}>Remove tags…</button></>}

@@ -149,12 +149,13 @@ mock.module('@/lib/dndUiScale', () => ({
   useScaledSortableStyle: (input: unknown) => input,
 }))
 mock.module('@/hooks/useScrollGate', () => ({ useScrollGate: noop }))
-mock.module('@/hooks/useIsMobile', () => ({ default: () => false }))
+let mobileFixture = false
+mock.module('@/hooks/useIsMobile', () => ({ default: () => mobileFixture }))
 mock.module('@/components/shared/WorldBookEntryEditor', () => ({
   default: ({ entry, onUpdate }: { entry: WorldBookEntry; onUpdate(entryId: string, updates: Record<string, unknown>): void }) => (
-    <button type="button" data-testid={`edit-${entry.id}`} onClick={() => onUpdate(entry.id, { content: 'optimistic content' })}>
+    <><input aria-label="Fixture editor draft" defaultValue={entry.content} /><button type="button" data-testid={`edit-${entry.id}`} onClick={() => onUpdate(entry.id, { content: 'optimistic content' })}>
       edit
-    </button>
+    </button></>
   ),
 }))
 mock.module('@/components/panels/world-book/WorldBookTokenReportModal', () => ({ default: noop }))
@@ -244,14 +245,14 @@ async function wait(ms: number): Promise<void> {
   })
 }
 
-async function render(entries: WorldBookEntry[]): Promise<{ root: Root; host: HTMLDivElement }> {
+async function render(entries: WorldBookEntry[], presentation?: 'workspace' | 'navigation', onOpenEntry?: (id: string) => void): Promise<{ root: Root; host: HTMLDivElement }> {
   listEntriesResult = { data: entries, total: entries.length }
   const host = document.createElement('div')
   document.body.appendChild(host)
   const { createRoot } = await import('react-dom/client')
   const root = createRoot(host)
   await act(async () => {
-    root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id }))
+    root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id, presentation, onOpenEntry }))
     await flush()
   })
   await wait(225)
@@ -291,6 +292,7 @@ afterEach(() => {
   updateDeferred = null
   listEntriesResult = { data: [], total: 0 }
   storeState.pendingWorldBookEditEntryId = null
+  mobileFixture = false
   document.body.replaceChildren()
 })
 
@@ -473,6 +475,118 @@ describe('native organization server pagination', () => {
       expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', tag: ['a,b'], limit: 50, offset: 0 })
       expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
       expect(host.querySelector('[data-entry-id="entry-0"]')).toBeNull()
+    } finally { unmount(root) }
+  })
+})
+
+
+describe('native workspace presentation', () => {
+  test('tabs preserve drafts across folders; split and closing tabs never delete entries', async () => {
+    const first = { ...entry('entry-1'), folder: 'Characters' }
+    const second = { ...entry('entry-2'), folder: 'Plot' }
+    const { root, host } = await render([first, second], 'workspace')
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector<HTMLInputElement>('#entry-panel-entry-1 input')!
+      draft.value = 'retained unsaved draft'
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      expect(host.querySelector('[data-entry-id="entry-1"]')).toBeNull()
+      expect(host.querySelector('#entry-panel-entry-1 input') === draft).toBe(true)
+      click(host, '[data-entry-id="entry-2"] button[aria-label="Open entry editor"]')
+      click(host, '#entry-tab-entry-1')
+      expect(host.querySelector('strong')?.textContent).toBe('Plot')
+      expect(draft.value).toBe('retained unsaved draft')
+      updateDeferred = createDeferred<WorldBookEntry>()
+      click(host, '[data-testid="edit-entry-1"]'); await wait(450)
+      expect(updateCalls.at(-1)).toMatchObject({ entryId: 'entry-1', input: { content: 'optimistic content', expected_revision: 7 } })
+      await act(async () => { updateDeferred!.resolve({ ...first, content: 'optimistic content', revision: 8 }); await flush() })
+      clickByText(host, 'Split')
+      expect(host.querySelectorAll('[role="tabpanel"]:not([hidden])').length).toBe(2)
+      clickByText(host, 'Swap panes')
+      expect(host.querySelector('#entry-tab-entry-2')?.getAttribute('aria-selected')).toBe('true')
+      clickByText(host, 'Close split')
+      expect(host.querySelectorAll('[role="tabpanel"]:not([hidden])').length).toBe(1)
+      click(host, '[aria-label="Close tab entry-1"]')
+      expect(deleteCalls).toEqual([])
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+    } finally { unmount(root) }
+  })
+
+  test('list/detail keeps a draft node mounted across responsive changes and returns to the same context', async () => {
+    const { root, host } = await render([entry('entry-1')], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector<HTMLInputElement>('[aria-label="Fixture editor draft"]')!
+      draft.value = 'unsaved controlled draft'
+      mobileFixture = true
+      await act(async () => { root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id, presentation: 'workspace' })); await flush() })
+      expect(host.querySelector('[aria-label="Fixture editor draft"]') === draft).toBe(true)
+      expect(draft.value).toBe('unsaved controlled draft')
+      expect(host.querySelector('[aria-label="Entry detail"]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-1"]')?.closest('[hidden]')).not.toBeNull()
+      const previousRaf = window.requestAnimationFrame
+      window.requestAnimationFrame = callback => { callback(0); return 1 }
+      try { clickByText(host, '‹ Entries') } finally { window.requestAnimationFrame = previousRaf }
+      expect(host.querySelector('[aria-label="Entry detail"]')?.closest('[hidden]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-1"]')?.closest('[hidden]')).toBeNull()
+      expect(host.querySelector('strong')?.textContent).toBe('All entries')
+    } finally { unmount(root) }
+  })
+  test('closing an off-page tab does not cancel its queued revision-guarded save', async () => {
+    const first = { ...entry('entry-1'), folder: 'Characters' }
+    const second = { ...entry('entry-2'), folder: 'Plot' }
+    const { root, host } = await render([first, second], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      updateDeferred = createDeferred<WorldBookEntry>()
+      click(host, '[data-testid="edit-entry-1"]')
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      click(host, '[aria-label="Close tab entry-1"]')
+      await wait(450)
+      expect(updateCalls.at(-1)).toMatchObject({ entryId: 'entry-1', input: { content: 'optimistic content', expected_revision: 7 } })
+      await act(async () => { updateDeferred!.resolve({ ...first, content: 'optimistic content', revision: 8 }); await flush() })
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('strong')?.textContent).toBe('Plot')
+      expect(deleteCalls).toEqual([])
+    } finally { unmount(root) }
+  })
+  test('off-page websocket deletion removes its tab without unmounting the other draft', async () => {
+    const { root, host } = await render([{ ...entry('entry-1'), folder: 'Characters' }, { ...entry('entry-2'), folder: 'Plot' }], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      click(host, '[data-entry-id="entry-2"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector('#entry-panel-entry-2 input')!
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      expect(host.querySelector('[data-entry-id="entry-1"]')).toBeNull()
+      await act(async () => { wsHandlers.get('world-book-entry-deleted')?.({ id: 'entry-1', worldBookId: book.id }); await flush() })
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('#entry-panel-entry-2 input') === draft).toBe(true)
+      expect(host.querySelector('#entry-tab-entry-2')?.getAttribute('aria-selected')).toBe('true')
+    } finally { unmount(root) }
+  })
+  test('sidebar folder entries expand inline and collapse without losing folder context', async () => {
+    const { root, host } = await render([{ ...entry('entry-1'), folder: 'Characters' }])
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      click(host, '[data-entry-id="entry-1"] button[aria-label="expandEditor"]')
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeTruthy()
+      expect(host.querySelector('strong')?.textContent).toBe('Characters')
+      expect(host.querySelector('[role="tablist"]')).toBeNull()
+      click(host, '[data-entry-id="entry-1"] button[aria-label="collapseEditor"]')
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeNull()
+      expect(host.querySelector('strong')?.textContent).toBe('Characters')
+      expect(deleteCalls).toEqual([])
+    } finally { unmount(root) }
+  })
+  test('light navigation opens the native authoring surface without expanding a second form', async () => {
+    const opened: string[] = []
+    const { root, host } = await render([entry('entry-1')], 'navigation', id => opened.push(id))
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="expandEditor"]')
+      expect(opened).toEqual(['entry-1'])
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeNull()
     } finally { unmount(root) }
   })
 })

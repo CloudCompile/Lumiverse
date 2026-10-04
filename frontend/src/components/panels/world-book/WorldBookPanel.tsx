@@ -739,7 +739,7 @@ export default function WorldBookPanel() {
         </div>
       )}
       <div className={styles.bookActionRow}>
-        <Button variant="primary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
+        <Button variant="secondary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
           {reindexing ? t('worldBookPanel.reindexing') : t('worldBookPanel.reindexVectorSearch')}
         </Button>
         <Button variant="secondary" size="sm" onClick={handleConvertToVectorizedPreview} disabled={reindexing}>
@@ -1072,9 +1072,10 @@ export default function WorldBookPanel() {
         <div className={styles.panelBody}>
           {selectedBookId ? (
             <>
-              {bookFieldsContent}
+              <details className={styles.bookSettings}><summary>Book settings</summary>{bookFieldsContent}</details>
 
               <WorldBookEntriesSection
+                editorDensity="compact"
                 books={books}
                 selectedBookId={selectedBookId}
                 onRefreshVectorSummary={loadVectorSummary}

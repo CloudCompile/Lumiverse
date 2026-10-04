@@ -21,6 +21,7 @@ export interface EntryEditorConflictState {
 
 export interface EntryEditorProps {
   density?: 'default' | 'compact'
+  scrollMode?: 'self' | 'parent'
   entry: WorldBookEntry
   onUpdate: (id: string, updates: Record<string, any>) => void
   onImmediateUpdate: (id: string, updates: Record<string, any>) => void
@@ -53,10 +54,10 @@ function DisclosureSection({ id, label, summary, open, onToggle, trailing, colla
 
   if (!collapsible) {
     return (
-      <>
+      <section className={styles.disclosureSection}>
         <span className={styles.sectionHeading}>{label}</span>
         {children}
-      </>
+      </section>
     )
   }
 
@@ -93,7 +94,7 @@ function DisclosureSection({ id, label, summary, open, onToggle, trailing, colla
   )
 }
 
-export default function WorldBookEntryEditor({ entry, density = 'default', onUpdate, onImmediateUpdate, conflict, onRetryConflict, onUseServerConflict }: EntryEditorProps) {
+export default function WorldBookEntryEditor({ entry, density = 'default', scrollMode = 'self', onUpdate, onImmediateUpdate, conflict, onRetryConflict, onUseServerConflict }: EntryEditorProps) {
   const { t } = useTranslation('panels', { keyPrefix: 'worldBookPanel.entryEditor' })
   const { positionOptions, roleOptions, selectiveLogicOptions } = useWorldBookEntryLabels()
   const { addableMarkers, markerLabel, markerSectionLabel } = useLoomOptionLabels()
@@ -278,10 +279,10 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
 
   return (
     <div
-      className={clsx(styles.entryEditor, density === 'compact' && styles.compactEntryEditor)}
+      className={clsx(styles.entryEditor, density === 'compact' && styles.compactEntryEditor, scrollMode === 'parent' && styles.parentScrollEditor)}
       data-world-book-entry-editor="true"
       data-density={density}
-      data-editor-scroll-owner={density === 'compact' ? 'true' : undefined}
+      data-editor-scroll-owner={density === 'compact' && scrollMode === 'self' ? 'true' : undefined}
     >
       <span data-spindle-mount="world_book_entry_editor" data-spindle-scope={`world-book-entry:${entry.id}:editor`} style={{ display: 'contents' }} />
       {conflict && (
@@ -364,7 +365,7 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         collapsible={density === 'compact'}
       >
         <div className={styles.entryFieldGroup}>
-        <div className={styles.entryFieldRow}>
+        <div className={clsx(styles.entryFieldRow, styles.injectionRow)}>
           <div className={styles.entryField}>
             <label className={styles.fieldLabel}>{t('fields.position')}</label>
             <select
@@ -461,65 +462,72 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         open={activationOpen}
         onToggle={() => setActivationOpen((open) => !open)}
         collapsible={density === 'compact'}
-        trailing={
+        trailing={entry.vectorized &&
           <span className={clsx(styles.vectorStatusBadge, styles.vectorStatusTrigger, vectorStatusClass)}>
             {getVectorIndexStatusLabel(entry.vector_index_status)}
           </span>
         }
       >
         <div className={styles.entryFieldGroup}>
-        <div className={styles.toggleRow}>
-          <Toggle.Checkbox
-            checked={entry.selective}
-            onChange={() => onImmediateUpdate(entry.id, { selective: !entry.selective })}
-            label={t('toggles.selective')}
-          />
-          <Toggle.Checkbox
-            checked={entry.constant}
-            onChange={() => onImmediateUpdate(entry.id, { constant: !entry.constant })}
-            label={t('toggles.constant')}
-          />
-          <Toggle.Checkbox
-            checked={entry.disabled}
-            onChange={() => onImmediateUpdate(entry.id, { disabled: !entry.disabled })}
-            label={t('toggles.disabled')}
-          />
-          <Toggle.Checkbox
-            checked={entry.case_sensitive}
-            onChange={() => onImmediateUpdate(entry.id, { case_sensitive: !entry.case_sensitive })}
-            label={t('toggles.caseSensitive')}
-          />
-          <Toggle.Checkbox
-            checked={entry.match_whole_words}
-            onChange={() => onImmediateUpdate(entry.id, { match_whole_words: !entry.match_whole_words })}
-            label={t('toggles.matchWholeWords')}
-          />
-          <Toggle.Checkbox
-            checked={entry.use_regex}
-            onChange={() => onImmediateUpdate(entry.id, { use_regex: !entry.use_regex })}
-            label={t('toggles.useRegex')}
-          />
-          <Toggle.Checkbox
-            checked={entry.use_probability}
-            onChange={() => onImmediateUpdate(entry.id, { use_probability: !entry.use_probability })}
-            label={t('toggles.useProbability')}
-          />
-          <Toggle.Checkbox
-            checked={entry.vectorized}
-            onChange={() => onImmediateUpdate(entry.id, { vectorized: !entry.vectorized })}
-            label={t('toggles.vectorized')}
-          />
+        <div className={clsx(styles.entryFieldRow, styles.activationRow)}>
+          <label className={styles.entryField}>
+            <span className={styles.fieldLabel}>{t('fields.activationMethod', { defaultValue: 'Activation method' })}</span>
+            <select className={styles.entrySelect} aria-label="Activation method"
+              value={entry.constant && entry.vectorized ? 'combined' : entry.constant ? 'constant' : entry.vectorized ? 'vector' : 'trigger'}
+              onChange={(event) => onImmediateUpdate(entry.id, {
+                constant: event.target.value === 'constant' || event.target.value === 'combined',
+                vectorized: event.target.value === 'vector' || event.target.value === 'combined',
+              })}>
+              <option value="trigger">{t('activation.trigger', { defaultValue: 'Key match' })}</option>
+              <option value="constant">{t('toggles.constant')}</option>
+              <option value="vector">{t('toggles.vectorized')}</option>
+              {entry.constant && entry.vectorized && <option value="combined">{t('activation.combined', { defaultValue: 'Constant + vector' })}</option>}
+            </select>
+          </label>
+          <label className={styles.entryField}>
+            <span className={styles.fieldLabel}>{t('fields.status', { defaultValue: 'Status' })}</span>
+            <select className={styles.entrySelect} aria-label="Entry status" value={entry.disabled ? 'disabled' : 'enabled'}
+              onChange={(event) => onImmediateUpdate(entry.id, { disabled: event.target.value === 'disabled' })}>
+              <option value="enabled">{t('activation.enabled', { defaultValue: 'Enabled' })}</option>
+              <option value="disabled">{t('toggles.disabled')}</option>
+            </select>
+          </label>
+          <label className={styles.entryField}>
+            <span className={styles.fieldLabel}>{t('fields.probability')}</span>
+            <select className={styles.entrySelect} aria-label="Probability mode" value={entry.use_probability ? 'chance' : 'always'}
+              onChange={(event) => onImmediateUpdate(entry.id, { use_probability: event.target.value === 'chance' })}>
+              <option value="always">{t('activation.always', { defaultValue: 'Always' })}</option>
+              <option value="chance">{t('activation.chance', { defaultValue: 'Use chance' })}</option>
+            </select>
+          </label>
         </div>
-        <div className={styles.vectorStatusRow}>
+        <div className={styles.matchingRules}>
+          <span className={styles.fieldLabel}>{t('fields.matchingRules', { defaultValue: 'Matching rules' })}</span>
+          <div className={styles.toggleRow}>
+            <Toggle.Checkbox checked={entry.selective}
+              onChange={() => onImmediateUpdate(entry.id, { selective: !entry.selective })}
+              label={t('toggles.selective')} />
+            <Toggle.Checkbox checked={entry.case_sensitive}
+              onChange={() => onImmediateUpdate(entry.id, { case_sensitive: !entry.case_sensitive })}
+              label={t('toggles.caseSensitive')} />
+            <Toggle.Checkbox checked={entry.match_whole_words}
+              onChange={() => onImmediateUpdate(entry.id, { match_whole_words: !entry.match_whole_words })}
+              label={t('toggles.matchWholeWords')} />
+            <Toggle.Checkbox checked={entry.use_regex}
+              onChange={() => onImmediateUpdate(entry.id, { use_regex: !entry.use_regex })}
+              label={t('toggles.useRegex')} />
+          </div>
+        </div>
+        {(entry.vectorized || entry.vector_index_status === 'error' || entry.vector_index_status === 'pending') && <div className={styles.vectorStatusRow}>
           <span className={clsx(styles.vectorStatusBadge, vectorStatusClass)}>
             {getVectorIndexStatusLabel(entry.vector_index_status)}
           </span>
           <span className={styles.vectorStatusText}>
             {getVectorIndexStatusDescription(entry)}
           </span>
-        </div>
+        </div>}
         <div className={styles.entryFieldRow}>
-          <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
+          {entry.use_probability && <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
             <label className={styles.fieldLabel}>{t('fields.probability')}</label>
             <NumberStepper
               value={entry.probability}
@@ -527,7 +535,7 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
               max={100}
               onChange={(v) => onImmediateUpdate(entry.id, { probability: v ?? 0 })}
             />
-          </div>
+          </div>}
           <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
             <label className={styles.fieldLabel}>{t('fields.scanDepth')}</label>
             <NumberStepper
@@ -557,6 +565,44 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         </div>
       </DisclosureSection>
 
+      {/* Group (collapsible) */}
+      <DisclosureSection
+        id={`${disclosureId}-group`}
+        label={t('sections.group')}
+        open={groupOpen}
+        onToggle={() => setGroupOpen((open) => !open)}
+      >
+        <div className={styles.entryFieldGroup}>
+          <div className={clsx(styles.entryFieldRow, styles.groupRow)}>
+            <div className={styles.entryField}>
+              <label className={styles.fieldLabel}>{t('fields.groupName')}</label>
+              <input
+                type="text"
+                className={styles.entryInput}
+                value={groupName}
+                onChange={(e) => {
+                  markDirty('group_name')
+                  setGroupName(e.target.value)
+                  onUpdate(entry.id, { group_name: e.target.value })
+                }}
+              />
+            </div>
+            <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
+              <label className={styles.fieldLabel}>{t('fields.weight')}</label>
+              <NumberStepper
+                value={entry.group_weight}
+                onChange={(v) => onImmediateUpdate(entry.id, { group_weight: v ?? 0 })}
+              />
+            </div>
+          </div>
+          <Toggle.Checkbox
+            checked={entry.group_override}
+            onChange={() => onImmediateUpdate(entry.id, { group_override: !entry.group_override })}
+            label={t('toggles.groupOverride')}
+          />
+        </div>
+      </DisclosureSection>
+
       {/* Timing (collapsible) */}
       <DisclosureSection
         id={`${disclosureId}-timing`}
@@ -565,7 +611,7 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         onToggle={() => setTimingOpen((open) => !open)}
       >
         <div className={styles.entryFieldGroup}>
-          <div className={styles.entryFieldRow}>
+          <div className={clsx(styles.entryFieldRow, styles.timingRow)}>
             <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
               <label className={styles.fieldLabel}>{t('fields.priority')}</label>
               <NumberStepper
@@ -637,44 +683,6 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         </div>
       </DisclosureSection>
 
-      {/* Group (collapsible) */}
-      <DisclosureSection
-        id={`${disclosureId}-group`}
-        label={t('sections.group')}
-        open={groupOpen}
-        onToggle={() => setGroupOpen((open) => !open)}
-      >
-        <div className={styles.entryFieldGroup}>
-          <div className={styles.entryFieldRow}>
-            <div className={styles.entryField}>
-              <label className={styles.fieldLabel}>{t('fields.groupName')}</label>
-              <input
-                type="text"
-                className={styles.entryInput}
-                value={groupName}
-                onChange={(e) => {
-                  markDirty('group_name')
-                  setGroupName(e.target.value)
-                  onUpdate(entry.id, { group_name: e.target.value })
-                }}
-              />
-            </div>
-            <div className={clsx(styles.entryField, styles.entryFieldSmall)}>
-              <label className={styles.fieldLabel}>{t('fields.weight')}</label>
-              <NumberStepper
-                value={entry.group_weight}
-                onChange={(v) => onImmediateUpdate(entry.id, { group_weight: v ?? 0 })}
-              />
-            </div>
-          </div>
-          <Toggle.Checkbox
-            checked={entry.group_override}
-            onChange={() => onImmediateUpdate(entry.id, { group_override: !entry.group_override })}
-            label={t('toggles.groupOverride')}
-          />
-        </div>
-      </DisclosureSection>
-
       {/* Metadata (collapsible) */}
       <DisclosureSection
         id={`${disclosureId}-metadata`}
@@ -682,10 +690,10 @@ export default function WorldBookEntryEditor({ entry, density = 'default', onUpd
         open={metadataOpen}
         onToggle={() => setMetadataOpen((open) => !open)}
       >
-        <div className={styles.entryFieldGroup}>
+        <div className={clsx(styles.entryFieldRow, styles.metadataRow)}>
           <div className={styles.entryField}>
             <label className={styles.fieldLabel}>{t('fields.uid')}</label>
-            <span className={styles.readOnlyValue}>{entry.uid}</span>
+            <input aria-label="Entry UID" readOnly className={clsx(styles.entryInput, styles.readOnlyValue)} value={entry.uid} />
           </div>
           <div className={styles.entryField}>
             <label className={styles.fieldLabel}>{t('fields.automationId')}</label>

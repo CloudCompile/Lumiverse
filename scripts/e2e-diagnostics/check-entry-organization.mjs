@@ -37,7 +37,7 @@ for (const name of (process.env.ENTRY_ORGANIZATION_BROWSERS ?? 'chromium,firefox
       assert.equal(await trigger.evaluate(el => el === document.activeElement), true, 'focus returns to trigger')
       await trigger.click(); await page.getByLabel('Destination folder', { exact: true }).fill('Locations')
       await page.getByLabel('Destination folder', { exact: true }).press('Enter')
-      await dialog.waitFor({ state: 'detached' })
+      try { await dialog.waitFor({ state: 'detached' }) } catch (error) { console.error(JSON.stringify({ name, width, scale, errors, dialog: await dialog.innerText(), active: await page.evaluate(() => ({ tag: document.activeElement?.tagName, value: document.activeElement?.value })) })); throw error }
       await page.getByRole('button', { name: '‹ Folders', exact: true }).click()
       await page.getByRole('button', { name: 'Locations 1', exact: true }).click()
       await page.getByLabel('Filter entry tags').selectOption('a,b')

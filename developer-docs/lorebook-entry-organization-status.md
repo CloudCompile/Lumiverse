@@ -1,5 +1,16 @@
 # Lorebook entry organization: backend implementation and verification
 
+## Final PR handoff — October 4, 2026
+
+The user completed desktop/mobile visual review and live export/reimport checks, then authorized commit, push and PR creation. Native Lumiverse export retained Beta in folder `a` and Alpha in folder `b`, with exact tags including the single comma-containing `a,b` tag; SillyTavern export/reimport correctly omitted entry organization. The two exported files were parsed and matching UIDs, content and activation values compared. Export files and personal data are not included in the repository.
+
+Freshly fetched canonical `upstream/staging` is still `27a9660bc264ea4b440909d8b5d00b4502f414ce`, already an ancestor of this branch; no further rebase was necessary. Final focused backend/runtime checks: **463 pass, 0 fail**, 2,335 assertions across 46 files. Final frontend checks including the existing workspace bulk suite: **72 pass, 0 fail**, 364 assertions across ten files. Backend TypeScript and final frontend TypeScript/checked production build and lint pass. Final workspace diagnostics pass 30 Chromium/Firefox/WebKit viewport/scale cases. Organization diagnostics pass 18 Chromium/Firefox cases plus nine isolated WebKit cases. Two WebKit Enter-submit close waits timed out on prior attempts; an isolated rerun passed all nine without a product change, and failure-context logging now records engine/viewport/scale, dialog state and focus for diagnosis. This intermittent timing issue remains disclosed. The full-suite results below remain historical and are not claimed as green.
+
+The final UI includes independent Books and contextual Folder/Entry navigation, retained workspace tabs, optional desktop split, native maximize/restore, scaled draggable column edges and a mobile editing header. Sidebar entries retain inline compact forms and their outer panel scroll owner. Activation choices, compact rows, theme-aware section surfaces and organization controls were reviewed live. The form/workspace follow-up documents describe the final behavior and regression fixes; earlier implementation notes below are historical snapshots.
+
+Only intentional source, tests and developer documentation are committed. The generated `frontend/dist` stays uncommitted while serving the user's live review instance and is excluded from the PR. Dependencies, lockfiles and local configuration are unchanged. Prolix's maintainer review remains outstanding.
+
+
 Branch: `codex/lorebook-entry-organization`. Isolated worktree: `.worktrees/lorebook-entry-organization`.
 
 Started from freshly fetched, pristine `upstream/staging` at `eaab8aa70deb7c509aed141c04c5a73a0901d979`. Rebased at the user's request onto current `upstream/staging`, `0284320f82c1c16287f7c0c632c6db399ce95b83`, on October 4, 2026. The temporary autostash was restored successfully; SHA-256 checks confirmed all 30 implementation files were preserved byte-for-byte. The user authorized a local feature commit and a further rebase on October 4, 2026. No push or PR is authorized; the aesthetics pass is pending. The existing desktop-update checkout was preserved.
@@ -106,3 +117,7 @@ Detailed failure-by-failure handoff: [lorebook-entry-organization-test-failures.
 The feature was committed locally at the user's request as `1b8ef479` after rebasing onto freshly fetched `upstream/staging` at `27a9660b` without conflicts. Upstream changes do not overlap this feature's modified files or generated dist. Generated live build bytes are checked before and after rebase; they are excluded from the commit and retained for the ongoing visual review. The ordinary-terminal failure report remains a historical report of the earlier base; newer staging includes fixes for several recorded failures. No new full-suite result is inferred from those fixes.
 
 Post-rebase focused checks: **463 backend/runtime tests pass, 0 fail; 2,335 assertions across 46 files**; **53 frontend tests pass, 0 fail; 267 assertions across seven files**. Backend and frontend TypeScript checks and frontend lint passed with no errors or warnings. Git converted one generated Workbox asset to CRLF when restoring the temporary autostash; its original bytes were restored from the saved build after proving that only newline representation differed. All 29 served build files match the preserved production build byte-for-byte. Source diff whitespace checks pass, and only generated dist remains dirty. The live build is the previously verified build; it was deliberately retained during the user's ongoing aesthetics review rather than rebuilding or restarting their running server.
+
+## Native workspace structural pass
+
+The subsequent, uncommitted layout pass is documented in [lorebook-workspace-first-pass.md](lorebook-workspace-first-pass.md). Its new verification results do not replace the historical full-suite failure report above.

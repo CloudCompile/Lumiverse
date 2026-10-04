@@ -1,5 +1,8 @@
 .controls, .fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 10px; color: var(--lumiverse-text); }
-.fields { border: 1px solid var(--lumiverse-border); border-radius: 8px; margin: 8px 0; }
+.fields { display: grid; grid-template-columns: minmax(0, .7fr) minmax(0, 1fr) auto; border: 0; border-bottom: 1px solid var(--lumiverse-border); border-radius: 0; padding: 0 0 10px; margin: 0; }
+.fields > .chips { grid-column: 1 / -1; }
+.fields > button { align-self: end; }
+.fields legend { font-weight: 600; color: var(--lumiverse-text-muted); font-size: calc(11.5px * var(--lumiverse-font-scale, 1)); padding-bottom: 6px; }
 .controls label, .fields label, .dialog label { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .controls input, .controls select, .fields input, .dialog input, .dialog select { width: 100%; min-width: 0; box-sizing: border-box; background: var(--lumiverse-bg); color: var(--lumiverse-text); border: 1px solid var(--lumiverse-border); border-radius: 6px; padding: 8px; }
 .controls button, .fields button, .dialog button { min-height: 36px; padding: 6px 10px; background: var(--lumiverse-bg-elevated); color: var(--lumiverse-text); border: 1px solid var(--lumiverse-border); border-radius: 6px; cursor: pointer; }
@@ -18,3 +21,13 @@
 .dialog p { margin: 0; overflow-wrap: anywhere; }
 .error { color: var(--lumiverse-danger, #e89090); overflow-wrap: anywhere; }
 .badges { display: inline; color: var(--lumiverse-text-muted); font-size: .85em; overflow-wrap: anywhere; }
+
+.fields input { padding: 5px 8px; font-size: calc(12px * var(--lumiverse-font-scale, 1)); height: 30px; }
+.fields label { font-size: calc(11.5px * var(--lumiverse-font-scale, 1)); color: var(--lumiverse-text-muted); }
+.fields button { min-height: 30px; padding: 4px 8px; font-size: calc(12px * var(--lumiverse-font-scale, 1)); }
+
+.root button { min-height: 34px; padding: 6px 9px; font-size: calc(12px * var(--lumiverse-font-scale, 1)); font-weight: 400; }
+.root button strong { font-size: calc(11px * var(--lumiverse-font-scale, 1)); font-weight: 500; color: var(--lumiverse-text-muted); }
+
+.fields { padding: 8px; border: 1px solid var(--lumiverse-border); border-radius: 7px; background: var(--world-book-detail-bg, var(--lumiverse-bg-deep, var(--lumiverse-bg))); }
+.fields legend { float: left; width: 100%; grid-column: 1 / -1; padding: 0 0 6px; }

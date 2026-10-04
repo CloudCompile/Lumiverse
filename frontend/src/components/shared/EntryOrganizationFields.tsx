@@ -33,14 +33,14 @@ export default function EntryOrganizationFields({ bookId, folder, tags, onChange
         onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} />
     </label>
     <datalist id={`${id}-folders`}>{folders.map(name => <option key={name} value={name} />)}</datalist>
-    <div className={styles.chips} aria-label="Entry tags">{tags.map(value =>
-      <button type="button" key={value} aria-label={`Remove tag ${value}`} onClick={() => onChange({ tags: tags.filter(t => t !== value) })}>{value} ×</button>,
-    )}</div>
     <label>Add tag
       <input aria-label="Add entry tag" list={`${id}-tags`} value={tag} onChange={event => setTag(event.target.value)}
         onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); add() } }} />
     </label>
     <datalist id={`${id}-tags`}>{suggestions.map(value => <option key={value} value={value} />)}</datalist>
     <button type="button" disabled={!tag.trim()} onClick={add}>Add tag</button>
+    {tags.length > 0 && <div className={styles.chips} aria-label="Entry tags">{tags.map(value =>
+      <button type="button" key={value} aria-label={`Remove tag ${value}`} onClick={() => onChange({ tags: tags.filter(t => t !== value) })}>{value} ×</button>,
+    )}</div>}
   </fieldset>
 }

@@ -174,6 +174,8 @@ async function renderEditor(
   onUpdate: ReturnType<typeof jest.fn>,
   density: 'default' | 'compact' = 'default',
   currentEntry = entry(),
+  onImmediateUpdate = jest.fn(),
+  scrollMode: 'self' | 'parent' = 'self',
 ) {
   container = document.createElement('div')
   document.body.append(container)
@@ -181,9 +183,10 @@ async function renderEditor(
   await act(async () => {
     root?.render(createElement(WorldBookEntryEditor, {
       density,
+      scrollMode,
       entry: currentEntry,
       onUpdate,
-      onImmediateUpdate: jest.fn(),
+      onImmediateUpdate,
     }))
   })
 
@@ -329,6 +332,14 @@ describe('WorldBookEntryEditor compact layout', () => {
     expect(onUpdate).toHaveBeenCalledWith('entry-1', { content: 'saved after disclosure changes' })
   })
 
+  test('lets inline compact editors use their parent scroll area', async () => {
+    await renderEditor(jest.fn(), 'compact', entry(), jest.fn(), 'parent')
+    expect(container?.querySelector('[data-world-book-entry-editor]')?.getAttribute('data-editor-scroll-owner')).toBeNull()
+    expect(disclosure('sections.injection').panel.hidden).toBe(true)
+    await act(async () => disclosure('sections.injection').button.click())
+    expect(disclosure('sections.injection').panel.hidden).toBe(false)
+  })
+
   test('keeps default density on the static expanded injection and activation path', async () => {
     await renderEditor(jest.fn(), 'default', entry('before', { position: 4 }))
     const editor = container?.querySelector<HTMLElement>('[data-world-book-entry-editor]')
@@ -344,9 +355,9 @@ describe('WorldBookEntryEditor compact layout', () => {
     const component = await Bun.file(new URL('./WorldBookEntryEditor.tsx', import.meta.url)).text()
 
     expect(component).toContain('data-content-flex-region="true"')
-    expect(component).toContain("data-editor-scroll-owner={density === 'compact' ? 'true' : undefined}")
+    expect(component).toContain("data-editor-scroll-owner={density === 'compact' && scrollMode === 'self' ? 'true' : undefined}")
     expect(component).toContain('hidden={!open}')
-    expect(source).toContain('container-name: wbEntryEditorCompact')
+    expect(source).toContain('container-name: wbEntryEditor wbEntryEditorCompact')
     expect(source).toContain('.compactEntryEditor .identityContentSection')
     expect(source).toContain('flex: 1 1 240px')
     expect(source).toContain('.compactEntryEditor .contentField > div:not(.fieldLabelRow)')
@@ -359,4 +370,59 @@ describe('WorldBookEntryEditor compact layout', () => {
     expect(source).toContain('overflow-wrap: anywhere')
   })
 
+})
+
+
+describe('WorldBookEntryEditor activation choices', () => {
+  test('method changes save both activation flags together without changing matching settings', async () => {
+    const save = jest.fn()
+    await renderEditor(jest.fn(), 'default', entry('Content', { selective: true, use_regex: true }), save)
+    const select = container!.querySelector<HTMLSelectElement>('select[aria-label="Activation method"]')!
+    expect(save).not.toHaveBeenCalled()
+    for (const [value, constant, vectorized] of [['constant', true, false], ['vector', false, true], ['trigger', false, false]] as const) {
+      await act(async () => { select.value = value; select.dispatchEvent(new Event('change', { bubbles: true })) })
+      expect(save).toHaveBeenLastCalledWith('entry-1', { constant, vectorized })
+    }
+  })
+
+  test('an imported combined method is displayed without silently rewriting it', async () => {
+    const save = jest.fn()
+    await renderEditor(jest.fn(), 'default', entry('Content', { constant: true, vectorized: true }), save)
+    expect(container!.querySelector<HTMLSelectElement>('select[aria-label="Activation method"]')!.value).toBe('combined')
+    expect(save).not.toHaveBeenCalled()
+    const { button, panel } = disclosure('sections.recursion')
+    await act(async () => button.click())
+    expect([...panel.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].every(input => input.disabled)).toBe(true)
+  })
+
+  test('status and probability gating are sparse updates and preserve the stored chance', async () => {
+    const save = jest.fn()
+    await renderEditor(jest.fn(), 'default', entry('Content', { probability: 42 }), save)
+    const probability = container!.querySelector<HTMLSelectElement>('select[aria-label="Probability mode"]')!
+    const status = container!.querySelector<HTMLSelectElement>('select[aria-label="Entry status"]')!
+    expect(probability.value).toBe('always')
+    await act(async () => { probability.value = 'chance'; probability.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(save).toHaveBeenLastCalledWith('entry-1', { use_probability: true })
+    await act(async () => { status.value = 'disabled'; status.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(save).toHaveBeenLastCalledWith('entry-1', { disabled: true })
+  })
+
+  test('group precedes timing and retains its draft when the disclosure closes', async () => {
+    const save = jest.fn()
+    await renderEditor(save)
+    const group = disclosure('sections.group')
+    const timing = disclosure('sections.timing')
+    expect(group.button.compareDocumentPosition(timing.button) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    await act(async () => group.button.click())
+    const input = group.panel.querySelector<HTMLInputElement>('input[type="text"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'Characters')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(save).toHaveBeenLastCalledWith('entry-1', { group_name: 'Characters' })
+    await act(async () => group.button.click())
+    await act(async () => group.button.click())
+    expect(group.panel.querySelector('input')).toBe(input)
+    expect(input.value).toBe('Characters')
+  })
 })
