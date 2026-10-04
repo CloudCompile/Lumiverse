@@ -9,6 +9,7 @@ import {
   type MemoryStats,
   type DatabankStats,
   type ContextClipStats,
+  EditAndSendContextError,
 } from "../llm/types";
 import {
   resolveCounter,
@@ -54,6 +55,7 @@ import {
 import type { AstNode, MacroEnv } from "../macros/types";
 import { parse } from "../macros/MacroParser";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
+import { readMessageRevision } from "../utils/message-revision";
 import {
   isClaudeOpusAtLeast,
   supportsClaudeOpusXhigh,
@@ -1808,11 +1810,53 @@ export async function assemblePrompt(
 
   const allMessages =
     pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
+
+  // Validate the snapshot and live row, then cap history at the committed turn
+  // before WI, macros, and MessageLimit. Context errors survive the worker boundary.
+  let editedContextMessages = allMessages;
+  const editAndSendContext = ctx.editAndSendContext;
+  if (editAndSendContext) {
+    const selectedIndex = allMessages.findIndex(
+      (m) => m.id === editAndSendContext.editedUserMessageId,
+    );
+    if (selectedIndex < 0) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const selected = allMessages[selectedIndex];
+    if (selected.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is not a user message",
+      );
+    }
+    const snapshotRevision = readMessageRevision(selected);
+    if (snapshotRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    // Prefetch may predate a concurrent edit, so also check the live row.
+    const live = chatsSvc.getMessage(ctx.userId, editAndSendContext.editedUserMessageId);
+    if (!live || live.chat_id !== ctx.chatId || live.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const liveRevision = readMessageRevision(live);
+    if (liveRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    editedContextMessages = allMessages.slice(0, selectedIndex + 1);
+  }
+
   // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
   // so it doesn't appear in macros, WI scanning, or any assembly path.
   const messages = ctx.excludeMessageId
-    ? allMessages.filter((m) => m.id !== ctx.excludeMessageId)
-    : allMessages;
+    ? editedContextMessages.filter((m) => m.id !== ctx.excludeMessageId)
+    : editedContextMessages;
   const contextAnchorMessageId =
     typeof chat.metadata?.context_history_anchor_message_id === "string"
       ? chat.metadata.context_history_anchor_message_id

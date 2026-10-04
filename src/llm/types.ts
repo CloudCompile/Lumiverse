@@ -281,6 +281,23 @@ export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'i
 
 export type ImpersonateMode = 'prompts' | 'preset' | 'oneliner' | 'sovereign_hand';
 
+/** Committed user turn, carried through the durable cursor to prompt assembly. */
+export interface EditAndSendContext {
+  editedUserMessageId: string;
+  /** Actual post-edit revision, read back from the written message. */
+  committedRevision: number;
+}
+
+/** Preserved by the assembly worker protocol to distinguish terminal rejection. */
+export const EDIT_AND_SEND_CONTEXT_ERROR_NAME = "EditAndSendContextError";
+
+export class EditAndSendContextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = EDIT_AND_SEND_CONTEXT_ERROR_NAME;
+  }
+}
+
 export interface AssemblyContext {
   userId: string;
   chatId: string;
@@ -306,6 +323,8 @@ export interface AssemblyContext {
   userInput?: string;
   /** For regenerate: exclude this message from chat history (it has a blank swipe). */
   excludeMessageId?: string;
+  /** Validate the committed user turn and cap history inclusively at it. */
+  editAndSendContext?: EditAndSendContext;
   /** For regenerate/swipe: content of the active target swipe before it was replaced. */
   rejectedSwipe?: string;
   /** For continue: source message id of the assistant turn being extended. */

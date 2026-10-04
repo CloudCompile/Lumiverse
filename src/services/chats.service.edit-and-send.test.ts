@@ -5,6 +5,25 @@ import { getGenerationOutboxByRequest } from "./edit-and-send-dispatcher.service
 
 const USER = "u1";
 
+interface StoredCursor {
+  generationId: string;
+  chatId: string;
+  requestId: string;
+  mode: string;
+  editAndSendContext?: { editedUserMessageId: string; committedRevision: number };
+}
+
+function readStoredCursor(chatId: string, requestId: string): StoredCursor {
+  const row = getDb()
+    .query(
+      `SELECT cursor FROM edit_and_send_requests
+       WHERE user_id = ? AND chat_id = ? AND request_id = ?`,
+    )
+    .get(USER, chatId, requestId) as { cursor: string } | null;
+  if (!row) throw new Error("no stored cursor for request");
+  return JSON.parse(row.cursor) as StoredCursor;
+}
+
 function initEditAndSendTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
@@ -566,5 +585,107 @@ describe("edit-and-send branching", () => {
         "SELECT COUNT(*) AS count FROM generation_outbox WHERE user_id = ? AND chat_id = ? AND request_id = ?",
       ).get(USER, chatId, requestId)).toEqual({ count: 1 });
     }
+  });
+
+  test("records the committed post-edit revision in the cursor and keeps the outbox expectedVersion pre-edit", () => {
+    // Branch mode: the copy starts at revision 1 and the commit bumps it to 2.
+    // The recorded committedRevision must be the value actually written (2),
+    // NOT expectedVersion (7) and NOT expectedVersion + 1 (8).
+    seedChat("cursor-branch");
+    seedMessage("cursor-branch-user", "cursor-branch", "Original", {
+      index: 0,
+      isUser: true,
+      revision: 7,
+    });
+
+    const branch = editAndSend(USER, "cursor-branch", {
+      messageId: "cursor-branch-user",
+      content: "Rewritten",
+      expectedVersion: 7,
+      requestId: "cursor-branch-req",
+      branchChatOnEditAndSend: true,
+    });
+    expect(branch.status).toBe("ok");
+    if (branch.status !== "ok") return;
+
+    const branchCursor = readStoredCursor("cursor-branch", "cursor-branch-req");
+    expect(branchCursor.editAndSendContext).toEqual({
+      editedUserMessageId: branch.payload.editedMessageId,
+      committedRevision: 2,
+    });
+    expect(branchCursor.chatId).toBe(branch.payload.branchChatId);
+    expect(branchCursor.generationId).toBe(branch.payload.generationCursor.generationId);
+    // The edited copy in the branch really is at revision 2, so the cursor
+    // agrees with the live row.
+    expect(getMessage(USER, branch.payload.editedMessageId)).toMatchObject({ revision: 2 });
+
+    const branchOutbox = getGenerationOutboxByRequest(USER, "cursor-branch", "cursor-branch-req");
+    expect(branchOutbox?.expected_version).toBe(7);
+
+    // In-place mode: the source row keeps its own revision and the write bumps
+    // 6 -> 7, so the SAME branch of the code records a different committed
+    // revision than the branch case. expectedVersion stays the pre-edit 6.
+    seedChat("cursor-inplace");
+    seedMessage("cursor-inplace-user", "cursor-inplace", "Old", {
+      index: 0,
+      isUser: true,
+      revision: 6,
+    });
+
+    const inPlace = editAndSend(USER, "cursor-inplace", {
+      messageId: "cursor-inplace-user",
+      content: "New",
+      expectedVersion: 6,
+      requestId: "cursor-inplace-req",
+      branchChatOnEditAndSend: false,
+    });
+    expect(inPlace.status).toBe("ok");
+    if (inPlace.status !== "ok") return;
+
+    const inPlaceCursor = readStoredCursor("cursor-inplace", "cursor-inplace-req");
+    expect(inPlaceCursor.editAndSendContext).toEqual({
+      editedUserMessageId: "cursor-inplace-user",
+      committedRevision: 7,
+    });
+    expect(inPlaceCursor.chatId).toBe("cursor-inplace");
+    expect(getMessage(USER, "cursor-inplace-user")).toMatchObject({ revision: 7 });
+    expect(
+      getGenerationOutboxByRequest(USER, "cursor-inplace", "cursor-inplace-req")?.expected_version,
+    ).toBe(6);
+  });
+
+  test("replay returns the stored cursor snapshot byte-for-byte and creates no second outbox row", () => {
+    seedChat("cursor-replay");
+    seedMessage("cursor-replay-user", "cursor-replay", "Original", {
+      index: 0,
+      isUser: true,
+      revision: 4,
+    });
+    const input = {
+      messageId: "cursor-replay-user",
+      content: "Rewritten",
+      expectedVersion: 4,
+      requestId: "cursor-replay-req",
+    } as const;
+
+    const first = editAndSend(USER, "cursor-replay", input);
+    expect(first.status).toBe("ok");
+    if (first.status !== "ok") return;
+    const cursorAfterFirst = readStoredCursor("cursor-replay", "cursor-replay-req");
+
+    const replay = editAndSend(USER, "cursor-replay", input);
+    expect(replay).toEqual({ status: "ok", replayed: true, payload: first.payload });
+    expect(readStoredCursor("cursor-replay", "cursor-replay-req")).toEqual(cursorAfterFirst);
+
+    expect(
+      getDb().query(
+        "SELECT COUNT(*) AS count FROM generation_outbox WHERE user_id = ? AND chat_id = ? AND request_id = ?",
+      ).get(USER, "cursor-replay", "cursor-replay-req"),
+    ).toEqual({ count: 1 });
+    expect(
+      getDb().query(
+        "SELECT COUNT(*) AS count FROM edit_and_send_requests WHERE user_id = ? AND chat_id = ? AND request_id = ?",
+      ).get(USER, "cursor-replay", "cursor-replay-req"),
+    ).toEqual({ count: 1 });
   });
 });
