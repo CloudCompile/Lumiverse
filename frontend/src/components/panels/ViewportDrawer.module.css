@@ -614,6 +614,7 @@
 
 .folderToolbar {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   min-height: 34px;
@@ -683,15 +684,18 @@
 
 .folderList {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   border: 1px solid var(--lumiverse-border);
   border-radius: 11px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: color-mix(in srgb, var(--lumiverse-bg-panel, var(--lumiverse-bg)) 96%, white 4%);
 }
 
 .folderTile {
   display: grid;
+  flex-shrink: 0;
   grid-template-columns: 32px minmax(0, 1fr) 14px;
   align-items: center;
   gap: 9px;
