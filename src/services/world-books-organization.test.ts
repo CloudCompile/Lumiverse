@@ -66,7 +66,7 @@ describe("native lorebook entry organization", () => {
     for (const format of ["character_book", "sillytavern"] as const) {
       const payload = svc.exportWorldBook(owner, original.id, format)!;
       const exported = Array.isArray(payload.entries) ? payload.entries[0] : payload.entries["0"];
-      expect(exported).toMatchObject({ content: "Lore", insertion_order: 19, keys: ["alpha"] });
+      expect(exported).toMatchObject(format === "sillytavern" ? { uid: 0, content: "Lore", order: 19, key: ["alpha"] } : { content: "Lore", insertion_order: 19, keys: ["alpha"] });
       expect(exported.folder).toBeUndefined();
       expect(exported.tags).toBeUndefined();
       expect(exported.extensions?.folder).toBeUndefined();
@@ -74,6 +74,46 @@ describe("native lorebook entry organization", () => {
     }
     const bulk = await svc.importWorldBookBulk(owner, native);
     expect(svc.listEntries(owner, bulk.worldBook.id)[0]).toMatchObject({ folder: "Characters", tags: ["villain"] });
+  });
+
+  test("ST export renders every UUID-backed row and preserves canonical settings despite legacy extension aliases", () => {
+    const book = svc.createWorldBook(owner, { name: "ST compatibility fixture" });
+    for (let index = 0; index < 44; index++) svc.createEntry(owner, book.id, {
+      content: `Lore ${index}`, comment: `Entry ${index}`, key: [`key ${index}`], keysecondary: ["secondary"],
+      folder: "Characters", tags: ["a,b"], disabled: index % 2 === 0, order_value: 77,
+      role: index % 3 === 0 ? "assistant" : index % 3 === 1 ? "user" : "system",
+      group_override: true, group_weight: 23, case_sensitive: true, match_whole_words: true,
+      scan_depth: 6, automation_id: "automation", prevent_recursion: true, exclude_recursion: true,
+      delay_until_recursion: true, use_probability: false, probability: 37,
+      extensions: { uid: "stale-uuid", key: ["stale"], keys: ["stale alias"], order: -1,
+        insertion_order: -2, disable: false, enabled: true, case_sensitive: false,
+        groupWeight: -3, displayIndex: 999, revision: 99, characterFilter: { names: ["fixture"], isExclude: false } },
+    });
+    const source = svc.listEntries(owner, book.id);
+    const exported = svc.exportWorldBook(owner, book.id, "sillytavern")!;
+    // Minimal ST consumer: enumerate entries, then locate each row by its UID.
+    const rendered = Object.values(exported.entries).map((entry: any) => {
+      expect(Number.isInteger(entry.uid)).toBe(true);
+      expect(exported.entries[entry.uid]).toBe(entry);
+      expect(Array.isArray(entry.key)).toBe(true);
+      expect(Array.isArray(entry.keysecondary)).toBe(true);
+      return entry;
+    });
+    expect(rendered.length).toBe(44);
+    rendered.forEach((entry, index) => {
+      expect(entry).toMatchObject({ uid: index, displayIndex: index, key: source[index].key,
+        keysecondary: ["secondary"], disable: source[index].disabled, order: 77,
+        role: source[index].role === "assistant" ? 2 : source[index].role === "user" ? 1 : 0,
+        groupOverride: true, groupWeight: 23, caseSensitive: true, matchWholeWords: true,
+        scanDepth: 6, automationId: "automation", preventRecursion: true, excludeRecursion: true,
+        delayUntilRecursion: 1, useProbability: false, probability: 37,
+        characterFilter: { names: ["fixture"], isExclude: false } });
+      for (const key of ["folder", "tags", "revision", "keys", "secondary_keys", "enabled", "insertion_order", "case_sensitive"]) expect(entry[key]).toBeUndefined();
+      expect(svc.normalizeImportedEntryInput(entry, index)).toMatchObject({ key: source[index].key,
+        disabled: source[index].disabled, order_value: index, role: source[index].role,
+        group_weight: 23, case_sensitive: true, folder: "", tags: [] });
+    });
+    expect(svc.exportWorldBook(owner, book.id, "lumiverse")!.entries[0].uid).toBe(source[0].uid);
   });
 
   test("combines scope, tags, text, type and sort before pagination; facets cover the whole book", () => {
