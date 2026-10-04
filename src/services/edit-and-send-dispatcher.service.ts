@@ -1,5 +1,6 @@
 import { getDb } from "../db/connection";
 import type { SQLQueryBindings } from "bun:sqlite";
+import type { EditAndSendContext } from "../llm/types";
 import { clampErrorMessage, ConnectionCredentialError } from "../utils/provider-errors";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -83,6 +84,8 @@ export interface StartGenerationOptions {
    * unchanged legacy ladder.
    */
   connectionId?: string;
+  /** Trusted cursor identity, kept out of the client-controlled request body. */
+  editAndSendContext?: EditAndSendContext;
 }
 
 export type StartEditAndSendGenerationFn = (
@@ -196,6 +199,46 @@ export function getGenerationOutboxByGenerationId(generationId: string): Generat
     .query("SELECT * FROM generation_outbox WHERE generation_id = ?")
     .get(generationId) as any;
   return row ? rowToOutbox(row) : null;
+}
+
+/** Validate the stored cursor against the tenant, request, generation, and targets. */
+function readCommittedEditAndSendContext(
+  row: GenerationOutboxRow,
+): EditAndSendContext | null {
+  const stored = getDb()
+    .query(
+      `SELECT cursor FROM edit_and_send_requests
+       WHERE user_id = ? AND chat_id = ? AND request_id = ?`,
+    )
+    .get(row.user_id, row.chat_id, row.request_id) as { cursor?: string } | undefined;
+  if (!stored || typeof stored.cursor !== "string") return null;
+
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(stored.cursor);
+  } catch {
+    return null;
+  }
+  if (!cursor || typeof cursor !== "object") return null;
+  const record = cursor as Record<string, unknown>;
+
+  if (record.generationId !== row.generation_id) return null;
+  if (record.chatId !== row.branch_chat_id) return null;
+
+  const context = record.editAndSendContext;
+  if (!context || typeof context !== "object") return null;
+  const { editedUserMessageId, committedRevision } = context as Record<string, unknown>;
+
+  if (editedUserMessageId !== row.edited_message_id) return null;
+  if (
+    typeof committedRevision !== "number" ||
+    !Number.isInteger(committedRevision) ||
+    committedRevision < 1
+  ) {
+    return null;
+  }
+
+  return { editedUserMessageId, committedRevision };
 }
 
 function isClaimable(row: GenerationOutboxRow, now: number): boolean {
@@ -354,6 +397,25 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   }
   if (row.dispatched_at) return row;
 
+  // An invalid immutable cursor is terminal; retry cannot repair it.
+  const editAndSendContext = readCommittedEditAndSendContext(row);
+  if (!editAndSendContext) {
+    markDispatchFailure(row, "edit_and_send_context_invalid", "edit_and_send_context_invalid");
+    eventBus.emit(
+      EventType.GENERATION_ENDED,
+      {
+        generationId: row.generation_id,
+        chatId: row.branch_chat_id,
+        error: "Edit-and-Send context is no longer valid",
+        errorCode: "edit_and_send_context_invalid",
+        errorMessage: "Edit-and-Send context is no longer valid",
+        generationType: row.mode,
+      },
+      row.user_id,
+    );
+    return getGenerationOutboxById(row.id);
+  }
+
   const input: StartEditAndSendGenerationInput = {
     userId: row.user_id,
     chat_id: row.branch_chat_id,
@@ -376,6 +438,7 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   const options: StartGenerationOptions = {
     origin: "edit_and_send",
     connectionId: row.connection_id ?? undefined,
+    editAndSendContext,
   };
 
   try {

@@ -31,10 +31,14 @@ export async function readImageMetadata(
     };
   } catch {
     const metadata = await sharp(input as any).metadata();
+    // Sharp names the decoder/container; AV1 compression identifies AVIF.
+    const format = metadata.format === "heif" && metadata.compression === "av1"
+      ? "avif"
+      : metadata.format ?? null;
     return {
       width: metadata.width ?? null,
       height: metadata.height ?? null,
-      format: metadata.format ?? null,
+      format,
     };
   }
 }

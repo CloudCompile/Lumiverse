@@ -10,8 +10,8 @@ This guide walks you through configuring the council for AI-assisted tool feedba
 
 ## Enabling Council Mode
 
-1. Open the **Council** panel (or find it in Settings)
-2. Toggle **Council Mode** on
+1. Open **Council → Setup** in the drawer
+2. Enable Council using the toggle at the top
 3. Add members (you need at least one)
 
 ---
@@ -46,9 +46,7 @@ Setting chance below 100% adds variety — not every member speaks on every turn
 
 Council tools need an AI model to run their analysis. This is the **sidecar connection** — a separate model (usually smaller and cheaper) used for background tasks.
 
-Configure the sidecar in:
-- **Sidecar Settings** in the Settings panel
-- Or legacy: **Council Settings > Tools Settings > Sidecar**
+Configure the connection profile, model, and sampling controls under **Council → Setup → Sidecar LLM**. Choose **Sidecar** or **Inline** under **Tools Configuration**.
 
 !!! tip "Use a fast, cheap model"
     The sidecar handles quick analysis tasks, not full creative writing. A smaller model (like Haiku, Flash, or GPT-4o-mini) works well and keeps costs low.

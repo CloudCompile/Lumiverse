@@ -30,6 +30,100 @@ const MAX_RETAINED_LOG_FILES: usize = 12;
 const LOG_TRUNCATED_MARKER: &[u8] =
     b"\n[desktop launcher: log limit reached; further output was discarded]\n";
 
+#[cfg(any(target_os = "windows", test))]
+const WINDOWS_DESKTOP_UPDATE_HELPER: &str = r#"
+param(
+  [Parameter(Mandatory=$true)][int]$ParentPid,
+  [Parameter(Mandatory=$true)][string]$InstallerPath,
+  [Parameter(Mandatory=$true)][string]$FallbackExecutable,
+  [Parameter(Mandatory=$true)][string]$LogPath,
+  [Parameter(Mandatory=$true)][string]$ReadyPath,
+  [Parameter(Mandatory=$true)][int]$ResumeServer,
+  [Parameter(Mandatory=$true)][int]$ReopenFrontend
+)
+
+$ErrorActionPreference = 'Stop'
+$resumeArguments = @('--resume-after-update')
+if ($ResumeServer -eq 1) { $resumeArguments += '--resume-server' }
+if ($ReopenFrontend -eq 1) { $resumeArguments += '--reopen-frontend' }
+
+function Write-UpdateLog([string]$Message) {
+  $stamp = (Get-Date).ToString('o')
+  Add-Content -LiteralPath $LogPath -Value "[$stamp] $Message" -Encoding UTF8
+}
+
+function Resolve-LumiverseDesktopExecutable {
+  $roots = @(
+    [Environment]::GetFolderPath('Programs'),
+    [Environment]::GetFolderPath('CommonPrograms')
+  ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) }
+
+  foreach ($root in $roots) {
+    $link = Get-ChildItem -LiteralPath $root -Filter 'Lumiverse Desktop.lnk' -File -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($link) {
+      $shell = New-Object -ComObject WScript.Shell
+      $target = $shell.CreateShortcut($link.FullName).TargetPath
+      if ($target -and (Test-Path -LiteralPath $target -PathType Leaf)) {
+        return $target
+      }
+    }
+  }
+
+  if (Test-Path -LiteralPath $FallbackExecutable -PathType Leaf) {
+    return $FallbackExecutable
+  }
+  return $null
+}
+
+try {
+  Set-Content -LiteralPath $ReadyPath -Value 'ready' -Encoding ASCII
+  Write-UpdateLog "Updater helper armed; waiting for desktop PID $ParentPid to exit."
+
+  $deadline = (Get-Date).AddSeconds(90)
+  while (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
+    if ((Get-Date) -ge $deadline) {
+      throw "Timed out waiting for Lumiverse Desktop PID $ParentPid to exit"
+    }
+    Start-Sleep -Milliseconds 200
+  }
+
+  if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
+    throw "Desktop installer disappeared before it could run: $InstallerPath"
+  }
+
+  Write-UpdateLog "Launching silent NSIS installer: $InstallerPath"
+  $installer = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru -Wait
+  if ($installer.ExitCode -ne 0) {
+    throw "Desktop installer exited with code $($installer.ExitCode)"
+  }
+
+  $launch = Resolve-LumiverseDesktopExecutable
+  if (-not $launch) {
+    throw 'Desktop install completed, but no Lumiverse Desktop executable could be resolved for relaunch'
+  }
+
+  Write-UpdateLog "Installer completed; relaunching: $launch"
+  Start-Process -FilePath $launch -ArgumentList $resumeArguments -WindowStyle Hidden | Out-Null
+  Write-UpdateLog 'Desktop update handoff completed successfully.'
+  exit 0
+} catch {
+  Write-UpdateLog "Desktop update handoff failed: $($_.Exception.Message)"
+  $parentStillRunning = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
+  if (-not $parentStillRunning -and (Test-Path -LiteralPath $FallbackExecutable -PathType Leaf)) {
+    try {
+      Write-UpdateLog "Attempting fallback relaunch: $FallbackExecutable"
+      Start-Process -FilePath $FallbackExecutable -ArgumentList $resumeArguments -WindowStyle Hidden | Out-Null
+    } catch {
+      Write-UpdateLog "Fallback relaunch also failed: $($_.Exception.Message)"
+    }
+  }
+  exit 1
+} finally {
+  Remove-Item -LiteralPath $ReadyPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+"#;
+
 struct Running {
     child: Arc<Mutex<Child>>,
     stdin: Mutex<ChildStdin>,
@@ -38,6 +132,44 @@ struct Running {
 #[derive(Default)]
 pub struct RunnerState {
     inner: Mutex<Option<Running>>,
+}
+
+/// Update launch intent is kept in memory and consumed once by the tray. It
+/// never changes normal auto-start preferences or survives a later app launch.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopUpdateResume {
+    resume_server: bool,
+    reopen_frontend: bool,
+}
+
+impl DesktopUpdateResume {
+    fn from_args(args: impl IntoIterator<Item = String>) -> Option<Self> {
+        let args: Vec<String> = args.into_iter().collect();
+        args.iter()
+            .any(|arg| arg == "--resume-after-update")
+            .then(|| Self {
+                resume_server: args.iter().any(|arg| arg == "--resume-server"),
+                reopen_frontend: args.iter().any(|arg| arg == "--reopen-frontend"),
+            })
+    }
+}
+
+pub struct DesktopUpdateResumeState(Mutex<Option<DesktopUpdateResume>>);
+
+impl Default for DesktopUpdateResumeState {
+    fn default() -> Self {
+        Self(Mutex::new(DesktopUpdateResume::from_args(
+            std::env::args().skip(1),
+        )))
+    }
+}
+
+#[tauri::command]
+pub fn take_desktop_update_resume(
+    state: State<'_, DesktopUpdateResumeState>,
+) -> Option<DesktopUpdateResume> {
+    state.0.lock().unwrap().take()
 }
 
 struct BoundedLog {
@@ -597,6 +729,173 @@ pub fn desktop_shell_sha() -> Option<String> {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn validate_desktop_update_artifact(
+    artifact_path: &str,
+    repo_dir: &str,
+) -> Result<PathBuf, String> {
+    if !repo_is_valid(repo_dir) {
+        return Err("The configured folder is not a Lumiverse checkout".to_owned());
+    }
+    let repo = Path::new(repo_dir)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the configured Lumiverse checkout: {error}"))?;
+    let bundle_dir = repo
+        .join("desktop")
+        .join("src-tauri")
+        .join("target")
+        .join("release")
+        .join("bundle")
+        .join("nsis")
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the desktop NSIS bundle directory: {error}"))?;
+    let artifact = Path::new(artifact_path)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve the rebuilt desktop installer: {error}"))?;
+
+    if !artifact.is_file() {
+        return Err("The rebuilt desktop installer is not a file".to_owned());
+    }
+    if artifact
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map_or(true, |extension| !extension.eq_ignore_ascii_case("exe"))
+    {
+        return Err(
+            "Automatic desktop replacement only accepts the Windows NSIS .exe bundle"
+                .to_owned(),
+        );
+    }
+    if artifact.strip_prefix(&bundle_dir).is_err() {
+        return Err(
+            "Refusing to run a desktop installer outside this checkout's release/bundle/nsis directory"
+                .to_owned(),
+        );
+    }
+
+    Ok(artifact)
+}
+
+/// Arm a detached Windows updater that waits for this process to exit, runs the
+/// freshly built NSIS bundle silently, and relaunches the installed app. The
+/// helper writes a ready marker before this command succeeds, so the JS side
+/// never quits on faith that PowerShell happened to launch correctly.
+#[tauri::command]
+pub fn stage_desktop_update(
+    app: AppHandle,
+    artifact_path: String,
+    repo_dir: String,
+    resume_server: bool,
+    reopen_frontend: bool,
+) -> Result<String, String> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, artifact_path, repo_dir, resume_server, reopen_frontend);
+        Err("Automatic desktop replacement is currently supported only on Windows".to_owned())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+        let artifact = validate_desktop_update_artifact(&artifact_path, &repo_dir)?;
+        let current_exe = std::env::current_exe()
+            .map_err(|error| {
+                format!("Could not resolve the running desktop executable: {error}")
+            })?;
+        let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
+
+        let log_dir = app
+            .path()
+            .app_log_dir()
+            .map_err(|error| format!("Could not resolve the desktop log directory: {error}"))?;
+        fs::create_dir_all(&log_dir)
+            .map_err(|error| format!("Could not create the desktop log directory: {error}"))?;
+        let log_path = log_dir.join("desktop-update.log");
+
+        let token = uuid::Uuid::new_v4();
+        let temp_dir = std::env::temp_dir();
+        let helper_path = temp_dir.join(format!("lumiverse-desktop-update-{token}.ps1"));
+        let ready_path = temp_dir.join(format!("lumiverse-desktop-update-{token}.ready"));
+        fs::write(&helper_path, WINDOWS_DESKTOP_UPDATE_HELPER)
+            .map_err(|error| format!("Could not write the desktop updater helper: {error}"))?;
+
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+            ])
+            .arg(&helper_path)
+            .arg("-ParentPid")
+            .arg(std::process::id().to_string())
+            .arg("-InstallerPath")
+            .arg(&artifact)
+            .arg("-FallbackExecutable")
+            .arg(&current_exe)
+            .arg("-LogPath")
+            .arg(&log_path)
+            .arg("-ReadyPath")
+            .arg(&ready_path)
+            .arg("-ResumeServer")
+            .arg(if resume_server { "1" } else { "0" })
+            .arg("-ReopenFrontend")
+            .arg(if reopen_frontend { "1" } else { "0" })
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+
+        let mut helper = command
+            .spawn()
+            .map_err(|error| format!("Could not launch the desktop updater helper: {error}"))?;
+
+        let mut armed = false;
+        for _ in 0..50 {
+            if ready_path.is_file() {
+                armed = true;
+                break;
+            }
+            if let Some(status) = helper
+                .try_wait()
+                .map_err(|error| format!("Could not inspect the desktop updater helper: {error}"))?
+            {
+                let _ = fs::remove_file(&helper_path);
+                let _ = fs::remove_file(&ready_path);
+                return Err(format!(
+                    "Desktop updater helper exited before arming itself ({status}). See {}",
+                    log_path.display()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        if !armed {
+            let _ = helper.kill();
+            let _ = fs::remove_file(&helper_path);
+            let _ = fs::remove_file(&ready_path);
+            return Err(format!(
+                "Desktop updater helper did not become ready within 5 seconds. See {}",
+                log_path.display()
+            ));
+        }
+
+        // The helper owns cleanup from here. Removing the marker now is safe:
+        // it has already passed the only readiness checkpoint and is waiting
+        // solely on this process's PID.
+        let _ = fs::remove_file(&ready_path);
+        Ok(log_path.to_string_lossy().into_owned())
+    }
+}
+
 /// Locate a usable bun binary. GUI apps on macOS get a minimal PATH, so
 /// probe the common install locations before falling back to PATH lookup.
 #[tauri::command]
@@ -829,5 +1128,112 @@ mod tests {
             ))
         );
         assert_eq!(log_session_frame(&json, "backend-output"), None);
+    }
+
+    #[test]
+    fn desktop_update_artifact_must_be_the_checkout_nsis_bundle() {
+        let dir = test_dir();
+        let scripts = dir.join("scripts");
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(scripts.join("runner.ts"), b"fixture").unwrap();
+        let bundle = dir
+            .join("desktop")
+            .join("src-tauri")
+            .join("target")
+            .join("release")
+            .join("bundle")
+            .join("nsis");
+        fs::create_dir_all(&bundle).unwrap();
+        let installer = bundle.join("Lumiverse Desktop_0.3.0_x64-setup.exe");
+        fs::write(&installer, b"fixture").unwrap();
+        let outside = dir.join("not-the-bundle.exe");
+        fs::write(&outside, b"fixture").unwrap();
+        let wrong_type = bundle.join("Lumiverse Desktop_0.3.0_x64.msi");
+        fs::write(&wrong_type, b"fixture").unwrap();
+
+        assert_eq!(
+            validate_desktop_update_artifact(
+                installer.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            )
+            .unwrap(),
+            installer.canonicalize().unwrap(),
+        );
+        assert!(validate_desktop_update_artifact(
+            outside.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        )
+        .unwrap_err()
+        .contains("outside this checkout"));
+        assert!(validate_desktop_update_artifact(
+            wrong_type.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        )
+        .unwrap_err()
+        .contains("NSIS .exe"));
+
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn desktop_update_resume_requires_an_update_launch_and_preserves_stopped_state() {
+        let parse = |args: &[&str]| {
+            DesktopUpdateResume::from_args(args.iter().map(|arg| (*arg).to_owned()))
+        };
+        assert_eq!(parse(&[]), None);
+        assert_eq!(parse(&["--resume-server", "--reopen-frontend"]), None);
+        assert_eq!(
+            parse(&["--resume-after-update"]),
+            Some(DesktopUpdateResume {
+                resume_server: false,
+                reopen_frontend: false
+            }),
+        );
+        assert_eq!(
+            parse(&["--resume-after-update", "--resume-server"]),
+            Some(DesktopUpdateResume {
+                resume_server: true,
+                reopen_frontend: false
+            }),
+        );
+        assert_eq!(
+            parse(&["--resume-after-update", "--reopen-frontend"]),
+            Some(DesktopUpdateResume {
+                resume_server: false,
+                reopen_frontend: true
+            }),
+        );
+        let resume = parse(&[
+            "--resume-after-update",
+            "--resume-server",
+            "--reopen-frontend",
+        ]);
+        assert_eq!(
+            serde_json::to_value(&resume).unwrap(),
+            serde_json::json!({
+                "resumeServer": true, "reopenFrontend": true,
+            })
+        );
+        let state = DesktopUpdateResumeState(Mutex::new(resume.clone()));
+        assert_eq!(state.0.lock().unwrap().take(), resume);
+        assert_eq!(state.0.lock().unwrap().take(), None);
+    }
+
+    #[test]
+    fn desktop_update_helper_arms_before_waiting_and_relaunches_after_nsis() {
+        let script = WINDOWS_DESKTOP_UPDATE_HELPER;
+        let ready = script.find("Set-Content -LiteralPath $ReadyPath").unwrap();
+        let wait = script.find("while (Get-Process -Id $ParentPid").unwrap();
+        let install = script
+            .find("Start-Process -FilePath $InstallerPath -ArgumentList '/S'")
+            .unwrap();
+        let relaunch = script.find("Start-Process -FilePath $launch").unwrap();
+
+        assert!(ready < wait);
+        assert!(wait < install);
+        assert!(install < relaunch);
+        assert!(script.contains("Lumiverse Desktop.lnk"));
+        assert!(script.contains("Attempting fallback relaunch"));
+        assert!(script.contains("Remove-Item -LiteralPath $PSCommandPath"));
     }
 }

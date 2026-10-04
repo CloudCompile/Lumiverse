@@ -8,17 +8,21 @@ Lumiverse generates scene illustrations, character shots, and chat attachments f
 
 ---
 
-## What's New
+## Finding the controls
 
-The image generation system was substantially rebuilt. If you used Lumiverse before this release, the parts you'll notice first:
+Open **Image Gen** in the sidebar. The drawer keeps the choices for your next generation together: connection, mode, output, active main prompt preset (in Custom or Chat-aware Custom mode), active LoRA preset, and **Quick Behavior**. Progress, the last scene, previews, **Generate Now**, and **Force Generate** stay here too.
 
-- **Three prompt modes** — _Scene tool_, _Custom prompt_, and _Chat-aware custom_ (your instructions, but applied to the live chat context by a parser LLM).
-- **Prompt presets** with per-character and per-persona **bindings** — splice character or persona snippets into a main preset with `{{character_prompt}}` / `{{persona_prompt}}`.
-- **Output targets** — send the result to the chat background, insert it as a new chat image, or attach it to the most recent message.
-- **Prompt preview** — see (and optionally edit) the resolved prompt before the image provider is called.
-- **Six providers** — ComfyUI and SwarmUI for local generation, plus Google Gemini, NovelAI, NanoGPT, and Pollinations in the cloud.
-- **Configurable timeouts** — separate limits for the parser/scene LLM and for the image provider itself.
-- **Gallery integration** — generated images can be auto-added to the active character's gallery and (optionally) re-sent to the LLM as multimodal context.
+Deep editing opens in a modal:
+
+| Entry point | What it contains |
+|-------------|------------------|
+| **Edit** beside the prompt preset / **Prompt Studio…** in Scene mode | Main, Character, Persona, and Captioning preset editors, macro insertion, and parser connection/model settings. |
+| **Edit** beside the LoRA preset | **LoRA Studio**: ordered LoRA rows, strengths, base tags, preset save/delete, bypass controls, and strength scale. |
+| **Configure Generation…** | **Generation Settings**: provider parameters and models, source images where supported, automation, background display, and timeouts. |
+| **Caption Image** | Upload an image to generate descriptive tags with the existing captioner. |
+| **Export / Import** | Import or export image-generation configuration from the centered utility row beside **Caption Image**. Available even while image generation is disabled. |
+
+**Done** closes an editor. Provider parameters and behavior settings persist as you change them; Done does not perform a separate save. Prompt and LoRA presets have their own explicit save actions. Closing and reopening a studio while the drawer remains mounted preserves its current draft.
 
 ---
 
@@ -29,7 +33,7 @@ The image generation system was substantially rebuilt. If you used Lumiverse bef
 3. The active **image-gen connection** generates the image.
 4. The result is routed to the **output target** you chose — background, new chat image, or attached to the last message — and optionally linked into the character gallery.
 
-In Scene mode the cycle is automatic: each new reply is checked against the previous scene, and a new image is generated only when enough fields have changed (you control the sensitivity). In Custom and Chat-aware modes you trigger generation yourself with the **Generate** button.
+**Auto-Generate On Reply** triggers generation after replies using the selected mode. In Scene mode, the scene-change check can skip an image when too little has changed. Turn auto-generation off for manual control with **Generate Now**; **Force Generate** bypasses scene detection for one request.
 
 ---
 
@@ -63,11 +67,14 @@ Generated images are persisted with thumbnails and a public URL, are addressable
 | Provider | Runs | Strength |
 |----------|------|----------|
 | **ComfyUI** | Local | Bring-your-own workflow. Full control over samplers, schedulers, checkpoints, and any custom node graph you've already built. |
-| **SwarmUI** | Local | Friendlier wrapper around Comfy with built-in model browsing and component overrides (VAE, text encoders). |
+| **SwarmUI** | Local | Model browsing and component overrides (VAE, text encoders). |
+| **SD API** | Local | Connect to a supported stable-diffusion.cpp / A1111 API. |
 | **Google Gemini** | Cloud | Prose prompts, multiple aspect ratios, up to 4K. |
 | **NovelAI** | Cloud | Anime/illustration with Danbooru-style tags and **director reference images** (character / persona avatars or your own uploads). |
 | **NanoGPT** | Cloud | Aggregator — access to Flux, HiDream, DALL·E 3, Imagen 4, Midjourney, Recraft, SDXL, SD 3.5, Reve, and others under one key. |
 | **Pollinations** | Cloud | Lightweight provider with optional `enhance`, transparency, and quality tiers. |
+| **OpenRouter** | Cloud | Use image-capable models through an OpenRouter connection. |
+| **OpenAI** | Cloud | Use an OpenAI image-generation connection. |
 
 See [Setup & Providers](setup.md) for connection setup and per-provider quirks.
 

@@ -27,6 +27,7 @@ import {
   type UpdateState,
 } from "./runner-client";
 import { loadSettings, saveSetting, type TraySettings } from "./settings";
+import { restoreDesktopSession, type DesktopUpdateResume } from "./update-resume";
 import { type InstanceConnection, LOCAL_INSTANCE_CONNECTION } from "./instance-connection";
 import {
   pendingRemoteSnapshot,
@@ -41,6 +42,7 @@ const POLL_INTERVAL_MS = 15_000;
 // so the request client can never become the earlier cutoff.
 const DESKTOP_REBUILD_TIMEOUT_MS = 2 * 60 * 60_000 + 5 * 60_000;
 const isMac = navigator.userAgent.includes("Mac");
+const isWindows = navigator.userAgent.includes("Windows");
 
 /**
  * Alerts and pickers go through Rust commands so they never parent to —
@@ -329,12 +331,12 @@ async function refreshStatus(): Promise<void> {
   }
 }
 
-async function startServer(): Promise<void> {
+async function startServer(reopenFrontend = true): Promise<void> {
   if (isRemoteMode()) throw new Error("Switch to the local instance before starting its server.");
   await ensureRunner();
   // The runner acknowledges this request while the server is still starting.
   // Defer opening the native WebView until its `running` state notification.
-  openIntegratedBrowserWhenReady = true;
+  openIntegratedBrowserWhenReady = reopenFrontend;
   serverState = "starting";
   await updateMenu();
   await client.request("start-server");
@@ -455,9 +457,9 @@ async function applyUpdate(): Promise<void> {
 /**
  * Compile the desktop shell from the configured checkout.
  *
- * This produces a bundle; it cannot replace the running app, because a process
- * cannot overwrite its own bundle. The build therefore ends by pointing the
- * user at what it made.
+ * Windows can hand the fresh NSIS bundle to a detached native helper, then
+ * gracefully exit so that helper can install it and relaunch the application.
+ * Other platforms retain the existing manual bundle handoff for now.
  */
 async function rebuildDesktop(): Promise<void> {
   await ensureRunner();
@@ -478,15 +480,63 @@ async function rebuildDesktop(): Promise<void> {
       await alert("Lumiverse", "The desktop app was rebuilt.");
       return;
     }
-    await alert(
-      "Desktop app rebuilt",
-      "The new build is ready. Quit Lumiverse Desktop and replace the " +
-        "installed app with it to finish updating.\n\n" +
-        result.bundlePath,
-    );
-    // Best-effort: a file manager that refuses to open must not turn a
-    // successful build into a reported failure.
-    await revealItemInDir(result.bundlePath).catch(() => {});
+
+    if (!isWindows) {
+      await alert(
+        "Desktop app rebuilt",
+        "The new build is ready. Quit Lumiverse Desktop and replace the " +
+          "installed app with it to finish updating.\n\n" +
+          result.bundlePath,
+      );
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    if (!repoDir) {
+      throw new Error("No Lumiverse checkout is configured for the desktop update.");
+    }
+
+    const restartNow = await invoke<boolean>("confirm", {
+      title: "Desktop app rebuilt",
+      message:
+        "The new desktop build is ready. Restart Lumiverse Desktop now to install it?\n\n" +
+        "The app will close, the NSIS installer will run silently, and Lumiverse Desktop " +
+        "will reopen automatically. Your checkout is not modified by this step.",
+      okLabel: "Install and restart",
+      cancelLabel: "Later",
+    });
+
+    if (!restartNow) {
+      // Keep the old escape hatch: the bundle remains usable for a manual
+      // install, and revealing it makes choosing Later non-destructive.
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    try {
+      // Capture at handoff time, since the user can start/stop the server or
+      // hide the browser during a long build. Do not restart external servers.
+      const status = await client.fullStatus();
+      const reopenFrontend = await invoke<boolean>("frontend_visible");
+      await invoke("stage_desktop_update", {
+        artifactPath: result.bundlePath,
+        repoDir,
+        resumeServer: !isRemoteMode() && (status.state === "running" || status.state === "starting"),
+        reopenFrontend,
+      });
+    } catch (error) {
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `The desktop build succeeded, but the automatic installer handoff failed: ${reason}\n\n` +
+          `The bundle is still available at:\n${result.bundlePath}`,
+      );
+    }
+
+    // The native helper is now independent of this process and waits for our
+    // PID to disappear before running NSIS. Use the normal graceful shutdown
+    // so the runner/server are not abandoned during the handoff.
+    await quit();
   } catch (err) {
     busyMessage = null;
     await updateMenu();
@@ -957,6 +1007,7 @@ async function boot(): Promise<void> {
   await buildTray();
   await updateMenu();
   await invoke("desktop_startup_ready");
+  const updateResume = await invoke<DesktopUpdateResume | null>("take_desktop_update_resume");
 
   if (!repoDir && !isRemoteMode()) {
     await alert(
@@ -969,11 +1020,21 @@ async function boot(): Promise<void> {
     void pollRemoteInstance().then(updateMenu).catch((error) => {
       console.warn("Unable to restore remote instance authorization", error);
     });
-  } else if (settings.autoStartServer && repoDir && bunPath) {
-    action(startServer)();
-  } else {
-    void detectExternalServer().then(updateMenu);
   }
+  action(async () => {
+    await restoreDesktopSession(updateResume, {
+      remote: isRemoteMode(),
+      canStartServer: Boolean(repoDir && bunPath),
+      autoStartServer: settings.autoStartServer,
+    }, {
+      startServer,
+      detectExternalServer,
+      showFrontend: async () => {
+        await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
+      },
+    });
+    await updateMenu();
+  })();
 
   setInterval(() => void tick(), POLL_INTERVAL_MS);
 }

@@ -9,6 +9,7 @@ import {
   type MemoryStats,
   type DatabankStats,
   type ContextClipStats,
+  EditAndSendContextError,
 } from "../llm/types";
 import {
   resolveCounter,
@@ -54,6 +55,7 @@ import {
 import type { AstNode, MacroEnv } from "../macros/types";
 import { parse } from "../macros/MacroParser";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
+import { readMessageRevision } from "../utils/message-revision";
 import {
   isClaudeOpusAtLeast,
   supportsClaudeOpusXhigh,
@@ -63,6 +65,7 @@ import {
   activateWorldInfo,
   applyWorldInfoGroupLogic,
   createWorldInfoActivationScanCache,
+  estimateWorldInfoEntryTokens,
   finalizeActivatedWorldInfoEntries,
   materializeWorldInfoCache,
   primeWorldInfoActivationScanCache,
@@ -362,17 +365,28 @@ export function resolveChatHistoryInsertionIndex(
 
 export function insertBlocksIntoTaggedHistory(
   messages: LlmMessage[],
-  blocks: Array<Pick<LlmMessage, "role" | "content"> & { depth: number }>,
+  blocks: Array<
+    Pick<LlmMessage, "role" | "content"> & {
+      depth: number;
+      worldInfo?: boolean;
+    }
+  >,
 ): void {
-  // Insert in reverse so blocks that resolve to the same chat-history boundary
-  // keep their original prompt_order sequence after repeated splices.
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    const insertAt = resolveChatHistoryInsertionIndex(messages, block.depth);
+  // Resolve every boundary before splicing, then insert from the last boundary
+  // back so earlier indices stay valid. Within one boundary the later block goes
+  // in first, so blocks sharing a boundary keep their prompt_order sequence.
+  const placements = blocks.map((block, order) => ({
+    block,
+    order,
+    insertAt: resolveChatHistoryInsertionIndex(messages, block.depth),
+  }));
+  placements.sort((a, b) => b.insertAt - a.insertAt || b.order - a.order);
+  for (const { block, insertAt } of placements) {
     messages.splice(insertAt, 0, {
       role: block.role,
       content: block.content,
     });
+    if (block.worldInfo) markAsWorldInfoEntry(messages[insertAt]);
   }
 }
 
@@ -1807,11 +1821,53 @@ export async function assemblePrompt(
 
   const allMessages =
     pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
+
+  // Validate the snapshot and live row, then cap history at the committed turn
+  // before WI, macros, and MessageLimit. Context errors survive the worker boundary.
+  let editedContextMessages = allMessages;
+  const editAndSendContext = ctx.editAndSendContext;
+  if (editAndSendContext) {
+    const selectedIndex = allMessages.findIndex(
+      (m) => m.id === editAndSendContext.editedUserMessageId,
+    );
+    if (selectedIndex < 0) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const selected = allMessages[selectedIndex];
+    if (selected.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is not a user message",
+      );
+    }
+    const snapshotRevision = readMessageRevision(selected);
+    if (snapshotRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    // Prefetch may predate a concurrent edit, so also check the live row.
+    const live = chatsSvc.getMessage(ctx.userId, editAndSendContext.editedUserMessageId);
+    if (!live || live.chat_id !== ctx.chatId || live.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const liveRevision = readMessageRevision(live);
+    if (liveRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    editedContextMessages = allMessages.slice(0, selectedIndex + 1);
+  }
+
   // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
   // so it doesn't appear in macros, WI scanning, or any assembly path.
   const messages = ctx.excludeMessageId
-    ? allMessages.filter((m) => m.id !== ctx.excludeMessageId)
-    : allMessages;
+    ? editedContextMessages.filter((m) => m.id !== ctx.excludeMessageId)
+    : editedContextMessages;
   const contextAnchorMessageId =
     typeof chat.metadata?.context_history_anchor_message_id === "string"
       ? chat.metadata.context_history_anchor_message_id
@@ -1958,7 +2014,7 @@ export async function assemblePrompt(
     return {
       ...legacyResult,
       ...(preset
-        ? { resolvedPreset: { id: preset.id, name: preset.name } }
+        ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
         : {}),
     };
   }
@@ -3082,6 +3138,7 @@ export async function assemblePrompt(
     blockName: string;
     blockId: string;
     marker?: string;
+    worldInfo?: boolean;
   }[] = [];
   let chatHistoryInserted = false;
   let chatHistoryCount = 0;
@@ -3513,6 +3570,22 @@ export async function assemblePrompt(
       if (wiCache.before.length > 0) {
         for (const entry of wiCache.before) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info Before",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3533,6 +3606,22 @@ export async function assemblePrompt(
       if (wiCache.after.length > 0) {
         for (const entry of wiCache.after) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info After",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3877,6 +3966,15 @@ export async function assemblePrompt(
   insertBlocksIntoTaggedHistory(result, pendingDepthBlocks);
 
   for (const depthBlock of pendingDepthBlocks) {
+    if (depthBlock.worldInfo) {
+      breakdown.push({
+        type: "world_info",
+        name: depthBlock.blockName,
+        role: depthBlock.role,
+        content: depthBlock.content,
+      });
+      continue;
+    }
     breakdown.push({
       type: "block",
       name: depthBlock.blockName,
@@ -4439,7 +4537,7 @@ export async function assemblePrompt(
     breakdown,
     parameters,
     ...(preset
-      ? { resolvedPreset: { id: preset.id, name: preset.name } }
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
       : {}),
     trimIncompleteWords: prompts.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,
@@ -5013,6 +5111,9 @@ export function mergeActivatedWorldInfoEntries(
         bookId: entry.world_book_id,
         bookSource: bookSourceMap?.get(entry.world_book_id),
         bookName: bookNameMap?.get(entry.world_book_id),
+        estimatedTokens: estimateWorldInfoEntryTokens(
+          selectionContentByEntryId?.get(entry.id) ?? entry.content,
+        ),
       };
     });
 
@@ -8092,7 +8193,7 @@ async function onelinerImpersonation(
     breakdown,
     parameters,
     ...(preset
-      ? { resolvedPreset: { id: preset.id, name: preset.name } }
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
       : {}),
     trimIncompleteWords: preset?.prompts?.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,

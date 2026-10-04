@@ -45,6 +45,8 @@ async function commit(cwd: string, message: string): Promise<void> {
     "user.name=Lumiverse Test",
     "-c",
     "user.email=lumiverse@example.invalid",
+    "-c",
+    "commit.gpgsign=false",
     "commit",
     "-m",
     message,

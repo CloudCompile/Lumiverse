@@ -1,5 +1,5 @@
 import { useStore } from '@/store'
-import { hasEnabledFrontendExtensionId } from '@/lib/spindle/frontend-extension-availability'
+import { hasEnabledFrontendExtension, hasEnabledFrontendExtensionId } from '@/lib/spindle/frontend-extension-availability'
 
 export type LorebookEditorLaunchTarget = 'native' | 'half' | 'full'
 
@@ -15,6 +15,7 @@ let invocationSequence = 0
 function extensionActionFor(target: Exclude<LorebookEditorLaunchTarget, 'native'>) {
   const actionId = ACTION_IDS[target]
   const state = useStore.getState()
+  if (!hasEnabledFrontendExtension(state.extensions, 'lumiverse_suite')) return undefined
   return state.inputBarActions.find((action) =>
     action.contributionId === actionId
     && hasEnabledFrontendExtensionId(state.extensions, action.extensionId)

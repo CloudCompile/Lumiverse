@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } fr
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
+import { readProductivityFeature } from '@/lib/spindle/productivity-feature-toggles'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { generateUUID } from '@/lib/uuid'
 import {
@@ -422,6 +423,7 @@ export function useMessageCard(message: Message, chatId: string) {
   }, [clearMessageEdit, editAndSendPending])
 
   const handleEditAndSend = useCallback(async () => {
+    if (!readProductivityFeature(useStore.getState(), 'showEditAndSend')) return
     if (!message.is_user || editAndSendPending || isStreaming) return
     const cleanContent = editContent.trim()
     if (!cleanContent) {

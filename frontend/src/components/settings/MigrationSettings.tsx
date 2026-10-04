@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { CheckCircle, XCircle, ArrowRight, ArrowLeft, Play, RotateCcw } from 'lucide-react'
+import clsx from 'clsx'
 import { Spinner } from '@/components/shared/Spinner'
 import { Toggle } from '@/components/shared/Toggle'
 import { toast } from '@/lib/toast'
@@ -12,6 +13,7 @@ import type { MigrationProgressPayload } from '@/types/ws-events'
 import type { AuthUser } from '@/types/store'
 import DirectoryBrowser from './DirectoryBrowser'
 import ConnectionPicker from './ConnectionPicker'
+import sectionStyles from './SettingsSection.module.css'
 import styles from './MigrationSettings.module.css'
 
 type Step = 'browse' | 'stUser' | 'scan' | 'target' | 'confirm' | 'progress'
@@ -440,7 +442,7 @@ export default function MigrationSettings() {
 
   const renderBrowseStep = () => (
     <div className={styles.section}>
-      <h3 className={styles.title}>{t('migration.browseTitle')}</h3>
+      <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.browseTitle')}</h3>
       <p className={styles.subtitle}>
         {t('migration.browseSubtitle')}
       </p>
@@ -578,7 +580,7 @@ export default function MigrationSettings() {
 
   const renderStUserStep = () => (
     <div className={styles.section}>
-      <h3 className={styles.title}>{t('migration.stUserTitle')}</h3>
+      <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.stUserTitle')}</h3>
       <p className={styles.subtitle}>
         {t('migration.stUserSubtitle')}
       </p>
@@ -613,7 +615,7 @@ export default function MigrationSettings() {
 
   const renderScanStep = () => (
     <div className={styles.section}>
-      <h3 className={styles.title}>{t('migration.scanTitle')}</h3>
+      <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.scanTitle')}</h3>
       {scanning ? (
         <div className={styles.validChecking}>
           <Spinner size={14} />
@@ -697,7 +699,7 @@ export default function MigrationSettings() {
 
   const renderTargetStep = () => (
     <div className={styles.section}>
-      <h3 className={styles.title}>{t('migration.targetTitle')}</h3>
+      <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.targetTitle')}</h3>
       <p className={styles.subtitle}>
         {t('migration.targetSubtitle')}
       </p>
@@ -741,7 +743,7 @@ export default function MigrationSettings() {
 
     return (
       <div className={styles.section}>
-        <h3 className={styles.title}>{t('migration.confirmTitle')}</h3>
+        <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.confirmTitle')}</h3>
         <div className={styles.summaryCard}>
           <div className={styles.summaryRow}>
             <span className={styles.summaryLabel}>{t('migration.connection')}</span>
@@ -797,7 +799,7 @@ export default function MigrationSettings() {
 
     return (
       <div className={styles.progressContainer}>
-        <h3 className={styles.title}>{t('migration.progressTitle')}</h3>
+        <h3 className={clsx(sectionStyles.title, styles.title)}>{t('migration.progressTitle')}</h3>
 
         {migrationResult ? (
           <div className={styles.resultSuccess}>

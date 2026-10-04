@@ -25,7 +25,7 @@ test('controlled Loom cases pass in an isolated module graph', async () => {
   clearTimeout(watchdog)
   const summary = `${stdout}\n${stderr}`
   expect(timedOut).toBe(false)
-  expect(exitCode).toBe(0)
+  expect(exitCode, summary).toBe(0)
   expect(summary).toMatch(/\b[1-9]\d* pass\b/)
   expect(summary).toMatch(/\b0 fail\b/)
   expect(summary).toMatch(/\b[1-9]\d* expect\(\) calls\b/)

@@ -238,6 +238,9 @@ mock.module('@dnd-kit/core', () => ({
   DndContext: TestDndContext,
   closestCenter: () => null,
 }))
+mock.module('@/lib/dndUiScale', () => ({
+  DndContext: TestDndContext,
+}))
 
 mock.module('@dnd-kit/sortable', () => ({
   SortableContext: TestSortableContext,

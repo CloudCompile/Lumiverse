@@ -12,6 +12,15 @@ import {
 } from './drawer-layout'
 
 describe('drawer layout', () => {
+  test('retires Council subpages from saved folders and legacy tab order', () => {
+    const layout = reconcileDrawerLayout({
+      layout: [{ type: 'folder', id: 'council-folder', name: 'Council', children: ['council', 'prompt', 'ooc', 'feedback', 'create'] }],
+      builtInIds: ['council', 'create'], extensionIds: [],
+    })
+    expect(layout).toEqual([{ type: 'folder', id: 'council-folder', name: 'Council', children: ['council', 'prompt', 'create'] }])
+    expect(createDefaultDrawerLayout({ builtInIds: ['council', 'prompt', 'create'], extensionIds: [], legacyTabOrder: ['feedback', 'ooc', 'prompt', 'council', 'create'] }))
+      .toEqual([{ type: 'tab', tabId: 'prompt' }, { type: 'tab', tabId: 'council' }, { type: 'tab', tabId: 'create' }])
+  })
 
   test('canonicalizes Spindle drawer IDs across reload counters', () => {
     expect(canonicalDrawerLayoutTabId('spindle:macro-lab:tab:main:17')).toBe('spindle:macro-lab:tab:main')

@@ -1,5 +1,6 @@
 import type { DrawerCustomIconData, DrawerLayoutItem } from '@/types/store'
 import { sanitizeDrawerCustomIconData } from '@/lib/drawer-custom-icon'
+import { councilViewForTab } from '@/lib/council-navigation'
 export const DEFAULT_EXTENSION_DIVIDER_ID = 'extensions'
 export const DRAWER_LAYOUT_ROOT_END_ID = 'drawer-layout:root-end'
 
@@ -34,6 +35,7 @@ function sanitizeLegacyTabOrder(tabOrder?: string[] | null): string[] {
   for (const raw of tabOrder) {
     if (typeof raw !== 'string' || raw.length === 0) continue
     const tabId = canonicalDrawerLayoutTabId(raw)
+    if (councilViewForTab(tabId)) continue
     if (seen.has(tabId)) continue
     seen.add(tabId)
     result.push(tabId)
@@ -67,7 +69,7 @@ export function sanitizeDrawerLayout(layout?: unknown): DrawerLayoutItem[] {
     if (candidate.type === 'tab') {
       const rawTabId = cleanString(candidate.tabId)
       const tabId = rawTabId ? canonicalDrawerLayoutTabId(rawTabId) : null
-      if (!tabId || claimedTabs.has(tabId)) continue
+      if (!tabId || councilViewForTab(tabId) || claimedTabs.has(tabId)) continue
       claimedTabs.add(tabId)
       result.push({ type: 'tab', tabId })
       continue
@@ -91,7 +93,7 @@ export function sanitizeDrawerLayout(layout?: unknown): DrawerLayoutItem[] {
         for (const rawChild of candidate.children) {
           const rawTabId = cleanString(rawChild)
           const tabId = rawTabId ? canonicalDrawerLayoutTabId(rawTabId) : null
-          if (!tabId || claimedTabs.has(tabId)) continue
+          if (!tabId || councilViewForTab(tabId) || claimedTabs.has(tabId)) continue
           claimedTabs.add(tabId)
           children.push(tabId)
         }
