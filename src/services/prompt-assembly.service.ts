@@ -365,7 +365,12 @@ export function resolveChatHistoryInsertionIndex(
 
 export function insertBlocksIntoTaggedHistory(
   messages: LlmMessage[],
-  blocks: Array<Pick<LlmMessage, "role" | "content"> & { depth: number }>,
+  blocks: Array<
+    Pick<LlmMessage, "role" | "content"> & {
+      depth: number;
+      worldInfo?: boolean;
+    }
+  >,
 ): void {
   // Resolve every boundary before splicing, then insert from the last boundary
   // back so earlier indices stay valid. Within one boundary the later block goes
@@ -381,6 +386,7 @@ export function insertBlocksIntoTaggedHistory(
       role: block.role,
       content: block.content,
     });
+    if (block.worldInfo) markAsWorldInfoEntry(messages[insertAt]);
   }
 }
 
@@ -3132,6 +3138,7 @@ export async function assemblePrompt(
     blockName: string;
     blockId: string;
     marker?: string;
+    worldInfo?: boolean;
   }[] = [];
   let chatHistoryInserted = false;
   let chatHistoryCount = 0;
@@ -3563,6 +3570,22 @@ export async function assemblePrompt(
       if (wiCache.before.length > 0) {
         for (const entry of wiCache.before) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info Before",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3583,6 +3606,22 @@ export async function assemblePrompt(
       if (wiCache.after.length > 0) {
         for (const entry of wiCache.after) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info After",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3927,6 +3966,15 @@ export async function assemblePrompt(
   insertBlocksIntoTaggedHistory(result, pendingDepthBlocks);
 
   for (const depthBlock of pendingDepthBlocks) {
+    if (depthBlock.worldInfo) {
+      breakdown.push({
+        type: "world_info",
+        name: depthBlock.blockName,
+        role: depthBlock.role,
+        content: depthBlock.content,
+      });
+      continue;
+    }
     breakdown.push({
       type: "block",
       name: depthBlock.blockName,
