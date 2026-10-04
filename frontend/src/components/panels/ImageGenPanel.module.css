@@ -301,3 +301,27 @@
   justify-content: center;
   cursor: pointer;
 }
+
+.panel { min-width: 0; }
+.inlineRow > :first-child { flex: 1; min-width: 0; }
+.utilities { justify-content: center; }
+.generationActions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 12px 0;
+  background: var(--lumiverse-bg);
+  border-top: 1px solid var(--lumiverse-border);
+}
+.modelOverrides summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+.quickBehavior { display: flex; flex-direction: column; gap: 6px; }
+.quickBehavior h3 { margin: 0 0 4px; color: var(--lumiverse-text-muted); font-size: calc(11px * var(--lumiverse-font-scale, 1)); text-transform: uppercase; }
+.quickBehavior .toggle { background: transparent; border: 0; padding: 4px 0; border-radius: 0; }
+@media(max-width:480px) { .inlineRow { flex-wrap: wrap; } .workflowCard { flex-wrap: wrap; } }
+
+.runtimeField { margin-bottom: 0; }

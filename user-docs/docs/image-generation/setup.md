@@ -25,6 +25,17 @@ You can duplicate a connection to keep variant presets (for example, two SwarmUI
 
 ---
 
+## Generation Settings
+
+Keep connection selection in the **Image Gen** drawer. Open **Configure Generation…** for deeper controls:
+
+- **Generation** contains the provider’s main parameters, collapsed **Model Overrides**, and ComfyUI workflow status and custom mapped fields. Expand **Model Overrides** to change individual model components.
+- **Sources** appears when the connection supports reference images, source images, or source-related schema parameters. Upload up to 14 reference images, remove them, or include character/persona avatars where supported. References are saved on the selected connection.
+- **Automation** contains scene sensitivity, context limits, image recycling, gallery behavior, and background display when the output is Set as background.
+- **Advanced** contains advanced parameters, additional provider groups, and the two generation timeouts.
+
+The fields follow the selected provider’s capability schema. Switching connections updates the available controls. Parser settings are in **Prompt Studio**, and LoRA layers are in **LoRA Studio**.
+
 ## Provider-Specific Setup
 
 ### ComfyUI (local)
@@ -90,14 +101,14 @@ ComfyUI doesn't have fixed parameters — your workflow defines what's adjustabl
 
 ### Importing
 
-1. In the ComfyUI panel of your connection, choose **Import workflow** and upload a workflow JSON (either the editor's "graph" format or the "API" format).
+1. In **Configure Generation… → Generation**, choose **Import Workflow** (or **Edit Workflow** for an existing workflow) and upload a workflow JSON (either the editor's "graph" format or the "API" format).
 2. Lumiverse parses the graph and auto-detects the nodes that should receive standard parameters (positive prompt, negative prompt, sampler, steps, CFG, seed, width, height, checkpoint).
 3. Review the detected **field mappings** — every parameter is shown alongside the node and field it routes to. Adjust mappings if Lumiverse picked the wrong node.
 4. Save. The workflow JSON and your mappings live on the connection.
 
 ### Custom Fields
 
-If your workflow has parameters that aren't in the standard set (for example, a LoRA strength or a custom sampler choice), expose them as **custom fields**. They appear in the panel's Advanced section and override the matching node value at generation time.
+If your workflow has parameters that aren't in the standard set (for example, a LoRA strength or a custom sampler choice), expose them as **custom fields**. They appear in **Generation Settings → Generation**, under the workflow and override the matching node value at generation time.
 
 ### Capabilities Discovery
 
@@ -105,15 +116,11 @@ The connection's **Capabilities** button queries the live ComfyUI server for ava
 
 ---
 
-## Connection Defaults vs. Live Parameters
+## Connection Parameter Persistence
 
-Every numeric/select parameter shown in the panel can be set at three levels:
+Provider controls in **Generation Settings** update the active connection’s **default parameters** immediately. Those settings are reused whenever that connection is selected, including other chats. Clearing an override allows the provider/schema default to apply where supported.
 
-1. **Connection default** — set on the connection itself, applied to every generation.
-2. **Panel override** — temporary, lives in the open Image Generation panel.
-3. **Provider-level fallback** — the provider's own default if neither of the above is set.
-
-Lower levels override higher ones, so anything you change in the panel only affects the current chat session unless you explicitly save it back to the connection.
+**Done** closes the modal; it does not save or cancel a staged transaction. To keep separate parameter configurations, duplicate the connection and switch between profiles from the drawer.
 
 ---
 
@@ -125,8 +132,8 @@ If you ran a previous version of Lumiverse that stored Gemini / NanoGPT / NovelA
 
 ## Tips
 
-!!! tip "Test before saving defaults"
-    Run a generation with a one-off panel value first; once you're happy with the result, copy it back to the connection's default parameters so future chats pick it up automatically.
+!!! tip "Keep experiments in a separate connection"
+    Duplicate a connection before trying a different set of parameters. Generation Settings writes changes to the active profile immediately.
 
 !!! tip "Pre-warm slow connections"
     For ComfyUI / SwarmUI with large models, the first generation after a server restart can be slow while the checkpoint loads. Either bump the **Image Generation Timeout** (see [Scene, Output & Timeouts](scene-and-output.md)) or run a quick test from your server's UI first.
