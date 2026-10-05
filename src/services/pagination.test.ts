@@ -77,4 +77,9 @@ describe("parsePagination", () => {
     expect(parsePagination("5000")).toEqual({ limit: MAX_LIMIT, offset: 0 });
     expect(parsePagination("0")).toEqual({ limit: 1, offset: 0 });
   });
+
+  test("ignores malformed numeric values instead of partially parsing them", () => {
+    expect(parsePagination("50abc", "10xyz")).toEqual({ limit: 50, offset: 0 });
+    expect(parsePagination("12.5", "1.5")).toEqual({ limit: 50, offset: 0 });
+  });
 });

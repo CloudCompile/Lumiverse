@@ -21,7 +21,8 @@ Chatting is the heart of Lumiverse. Once you have a character and a connection s
 | [Speech-to-Text](speech-to-text.md) | Dictate messages with Web Speech or Whisper/STT connections |
 | [OOC Comments](ooc.md) | Out-of-character asides and meta-commentary |
 | [Loom Summary](loom-summary.md) | Automatic and manual story summarization |
-| [Long-Term Memory](memory.md) | Recall relevant past moments via vector search |
+| [Long-Term Memory / Chat Memory](memory.md) | Recall older passages; compare memory systems and find their settings |
+| [Memory Cortex](memory-cortex.md) | Optional entity, relationship, importance, and scene/arc analysis |
 | [Guided Generation](guided-generation.md) | Reusable prompt fragments that shape responses |
 | [Quick Replies](quick-replies.md) | Pre-written message templates for fast input |
 | [Regen Feedback](regen-feedback.md) | Guide regenerations with specific feedback |

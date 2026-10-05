@@ -3,6 +3,8 @@ mod frontend;
 mod notifications;
 mod remote_instance;
 mod runner;
+#[cfg(any(target_os = "linux", test))]
+mod webview_media;
 #[cfg(target_os = "linux")]
 mod wayland_background_effect;
 
@@ -222,6 +224,7 @@ pub fn run() {
             None,
         ))
         .manage(runner::RunnerState::default())
+        .manage(runner::DesktopUpdateResumeState::default())
         .manage(frontend::FrontendState::default())
         .manage(frontend::DesktopWidgetCatalogState::default())
         .manage(notifications::DesktopNotificationTransportState::default())
@@ -236,6 +239,8 @@ pub fn run() {
             runner::discover_repo,
             runner::resolve_bun,
             runner::desktop_shell_sha,
+            runner::stage_desktop_update,
+            runner::take_desktop_update_resume,
             frontend::desktop_startup_ready,
             frontend::close_current_sso_popup,
             runner::quit_app,

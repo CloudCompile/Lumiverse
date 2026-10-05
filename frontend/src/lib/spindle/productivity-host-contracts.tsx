@@ -23,6 +23,8 @@ import {
 import { getUiScale } from '@/lib/uiScale'
 import { launchLorebookEditorThen } from '@/lib/lorebookLauncher'
 import { setLorebookWorkspaceVisibility } from '@/lib/lorebookWorkspaceVisibility'
+import { LumiverseSuiteGate } from './LumiverseSuiteGate'
+import { hasEnabledFrontendExtension, hasEnabledFrontendExtensionId } from './frontend-extension-availability'
 import modalStyles from '@/components/modals/WorldBookEditorModal.module.css'
 
 export const PRODUCTIVITY_HOST_CONTRACT_VERSION = 1
@@ -174,6 +176,12 @@ function stringProp(props: Record<string, unknown>, key: string): string {
   return typeof value === 'string' ? value : ''
 }
 
+function canEmitProductivityCommand(context: HostSurfaceRenderContext): boolean {
+  const extensions = useStore.getState().extensions
+  return hasEnabledFrontendExtension(extensions, 'lumiverse_suite')
+    && hasEnabledFrontendExtensionId(extensions, context.extensionId)
+}
+
 function syncCanonicalSettings(surfaceId: ProductivityHostSurfaceId, value: unknown): void {
   // Core owns the canonical Productivity rows and renders every host surface.
   // The suite receives only a projection of those rows; treating that projection
@@ -239,7 +247,9 @@ function EnhancedLorebookWorkspaceSurface({
   ))
   const backdropPointerDownRef = useRef<EventTarget | null>(null)
   const close = useCallback(
-    () => context.emit('command', workspaceCloseCommand(props, state, generation)),
+    () => {
+      if (canEmitProductivityCommand(context)) context.emit('command', workspaceCloseCommand(props, state, generation))
+    },
     [context, generation, props, state],
   )
   const [rect, setRect] = useState(() => resolveWindowedEditorRect(settings.fullRect, viewport))
@@ -355,9 +365,11 @@ function LorebookWorkspaceSurface({
       bookId={state.bookId}
       entryId={state.entryId}
       forceHalfScreen
-      onClose={() => context.emit('command', workspaceCloseCommand(props, state, generation))}
+      onClose={() => {
+        if (canEmitProductivityCommand(context)) context.emit('command', workspaceCloseCommand(props, state, generation))
+      }}
       onOpenFullEditor={(bookId, entryId) => {
-        if (!bookId) return
+        if (!bookId || !canEmitProductivityCommand(context)) return
         launchLorebookEditorThen(
           { bookId, entryId, preferredTarget: 'full', source: 'half_editor' },
           () => context.emit('command', workspaceCloseCommand(props, state, generation)),
@@ -378,11 +390,13 @@ export function ProductivityHostSurfaceRenderer({
 }): ReactElement {
   if (!isSurfaceId(surfaceId)) throw new Error(`PRODUCTIVITY_SURFACE_UNKNOWN:${surfaceId}`)
 
-  if (surfaceId === 'lorebook.half.workspace' || surfaceId === 'lorebook.enhanced.workspace') {
-    return <LorebookWorkspaceSurface surfaceId={surfaceId} props={props} context={context} />
-  }
-
-  return <StandardProductivityHostSurface surfaceId={surfaceId} props={props} context={context} />
+  return (
+    <LumiverseSuiteGate ownerExtensionId={context.extensionId}>
+      {surfaceId === 'lorebook.half.workspace' || surfaceId === 'lorebook.enhanced.workspace'
+        ? <LorebookWorkspaceSurface surfaceId={surfaceId} props={props} context={context} />
+        : <StandardProductivityHostSurface surfaceId={surfaceId} props={props} context={context} />}
+    </LumiverseSuiteGate>
+  )
 }
 
 function StandardProductivityHostSurface({
@@ -447,6 +461,7 @@ function StandardProductivityHostSurface({
   }, [surfaceId])
 
   const emitCommand = (command: string): void => {
+    if (!canEmitProductivityCommand(context)) return
     const invocation = controller.invoke(command, generation, ownerToken)
     if (!invocation) return
     context.emit('command', invocation as unknown as HostSurfaceJsonValue)

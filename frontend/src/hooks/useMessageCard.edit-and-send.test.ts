@@ -90,6 +90,8 @@ type MessageEditDraft = {
 }
 
 const storeState = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
+  showEditAndSend: true,
   editingMessageId: 'user-1' as string | null,
   messageEditDraft: null as MessageEditDraft | null,
   setEditingMessageId,
@@ -255,6 +257,8 @@ async function unmount(root: Root): Promise<void> {
 
 describe('useMessageCard edit-and-send', () => {
   beforeEach(() => {
+    storeState.extensions = [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }]
+    storeState.showEditAndSend = true
     storeState.characters = []
     storeState.currentExpression = null
     storeState.currentExpressionImageId = null
@@ -340,6 +344,18 @@ describe('useMessageCard edit-and-send', () => {
     expect(storeState.editingMessageId).toBeNull()
     expect(storeState.messageEditDraft).toBeNull()
     expect(navigate).toHaveBeenCalledWith('/chat/branch-1')
+  })
+
+  test('a retained edit-and-send handler does nothing after Suite becomes unavailable', async () => {
+    await renderHook(user)
+    const retainedHandler = hookSurface.handleEditAndSend
+    for (const extensions of [[], [{ identifier: 'lumiverse_suite', enabled: false, has_frontend: true }]]) {
+      storeState.extensions = extensions
+      await act(async () => { await retainedHandler() })
+    }
+    expect(editAndSend).not.toHaveBeenCalled()
+    expect(messagesUpdate).not.toHaveBeenCalled()
+    expect(clearMessageEdit).not.toHaveBeenCalled()
   })
 
   test('in-place mode submits the flag without navigating to a branch', async () => {

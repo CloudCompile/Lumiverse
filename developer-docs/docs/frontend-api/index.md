@@ -48,3 +48,4 @@ Frontend UI can follow two supported rendering paths:
 | [Display Resolver](display-resolver.md) | Free | Resolve message display (macros, format, regex) in the browser for chats your extension owns |
 | [File Uploads](file-uploads.md) | Free | Open file picker and read selected files |
 | [Theme Authoring](theme-authoring.md) | Varies | Work with native theme assets, safe `.lumitheme` drafts, the component/variable catalog, and native Theme Editor navigation |
+| [Speech-to-text](speech-to-text.md) | `media` (discovery is free) | Record or transcribe audio through the host speech stack, including bundled on-device Whistle |

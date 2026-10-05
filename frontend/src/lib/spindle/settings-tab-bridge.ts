@@ -444,10 +444,9 @@ export function joinExtensionSettingsTabs(
       continue
     }
 
-    const allRegistrations = registrationsForTab(tabId)
     const registrations = visibleRegistrationsFor(tabId)
     if (registrations.length === 0) continue
-    const owner = allRegistrations.reduce((first, registration) =>
+    const owner = registrations.reduce((first, registration) =>
       registration.sequence < first.sequence ? registration : first
     )
     if (!owner) continue
@@ -465,7 +464,7 @@ export function joinExtensionSettingsTabs(
   }
 
   for (const entry of extensionEntries) {
-    const allRegistrations = registrationsForTab(entry.id)
+    const allRegistrations = visibleRegistrationsFor(entry.id)
     const owner = allRegistrations.length > 0
       ? allRegistrations.reduce((first, registration) =>
           registration.sequence < first.sequence ? registration : first

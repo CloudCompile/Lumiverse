@@ -79,6 +79,7 @@ import {
 import { useQuickToolbarActions, type ToolbarAction } from './useQuickToolbarActions'
 import { useQuickToolbarContext } from './useQuickToolbarContext'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
+import { LumiverseSuiteGate } from '@/lib/spindle/LumiverseSuiteGate'
 
 const RESIZE_HANDLES = ['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'] as const
 
@@ -280,6 +281,7 @@ function QuickToolbarNative() {
   // `getState()` snapshot at click time inside `useQuickToolbarActions`.
   const drawerOpen = useStore((state) => state.drawerOpen)
   const drawerTab = useStore((state) => state.drawerTab)
+  const councilView = useStore((state) => state.councilView)
   const settingsModalOpen = useStore((state) => state.settingsModalOpen)
   const settingsActiveView = useStore((state) => state.settingsActiveView)
   const characterEditorOpen = useStore((state) => Boolean(state.editingCharacterId))
@@ -311,8 +313,8 @@ function QuickToolbarNative() {
    */
   const [restoredOverModal, setRestoredOverModal] = useState(false)
   const uiState = useMemo<ToolbarUiState>(
-    () => ({ drawerOpen, drawerTab, settingsModalOpen, settingsActiveView }),
-    [drawerOpen, drawerTab, settingsModalOpen, settingsActiveView],
+    () => ({ drawerOpen, drawerTab, councilView, settingsModalOpen, settingsActiveView }),
+    [drawerOpen, drawerTab, councilView, settingsModalOpen, settingsActiveView],
   )
 
   // Visual variant is independent of dock placement. Absent/legacy/invalid
@@ -1669,6 +1671,10 @@ function QuickToolbarNative() {
   return createPortal(tree, document.body)
 }
 
-export function QuickToolbar() {
+function QuickToolbarSurface() {
   return useSpindleComponentOverride('QuickToolbar', QuickToolbarNative, {})
+}
+
+export function QuickToolbar() {
+  return <LumiverseSuiteGate><QuickToolbarSurface /></LumiverseSuiteGate>
 }

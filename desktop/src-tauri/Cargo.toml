@@ -59,6 +59,7 @@ windows = { version = "0.61", features = [
 # protocol against GTK's existing display/surface handles until that support
 # lands upstream.
 gtk = "0.18"
+webkit2gtk = { version = "2.0", features = ["v2_40"] }
 raw-window-handle = "0.6"
 wayland-client = { version = "0.31", features = ["system"] }
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }

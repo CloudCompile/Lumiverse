@@ -58,3 +58,28 @@ if ((ctx.host.capabilities['theme-editor-navigation-v1'] ?? 0) >= 1) {
 ```
 
 The bridge intentionally does not expose settings mutation, Zustand stores, arbitrary TSX installation, or component source files.
+
+## Wallpaper Library selectors
+
+The portalled Wallpaper Library container has `data-component="WallpaperLibraryModal"`; its backdrop has `data-modal="WallpaperLibraryModal"`. Both retain CSS-module classes. Scope inner selectors to the container instead of targeting generic elements under `body`:
+
+```css
+[data-component="WallpaperLibraryModal"] [data-part="card"] {
+  border-radius: 12px;
+}
+[data-component="WallpaperLibraryModal"] [data-part="card"][data-current="true"] {
+  border-color: var(--lumiverse-primary);
+}
+```
+
+Every named part also has a CSS-module class, available in the component CSS reference.
+
+| Surface | `data-part` values |
+|---|---|
+| Header | `close`, `header`, `header-copy`, `title`, `subtitle`, `count` |
+| Content and states | `content`, `error`, `state`, `grid` |
+| Wallpaper card | `card`, `preview`, `preview-image`, `preview-placeholder`, `placeholder-label`, `video-badge`, `current-badge` |
+| Metadata | `metadata`, `filename`, `metadata-row`, `metadata-label`, `metadata-value` |
+| Actions | `card-actions`, `apply`, `delete`, `footer`, `load-more` |
+
+Cards expose `data-current="true|false"` and `data-media-type="image|video"`. Metadata rows expose `data-field="uploaded|size|resolution"`; state messages expose `data-state="loading|empty"`. Conditional parts appear only when their content is present. These selectors apply to both global and chat wallpaper selection.

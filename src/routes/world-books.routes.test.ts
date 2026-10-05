@@ -268,3 +268,99 @@ describe("world-book P8 REST mutation contracts", () => {
     });
   });
 });
+
+
+describe("entry organization read routes", () => {
+  test("forwards Unfiled, repeated tags, type and pagination and scopes facets to ownership", async () => {
+    const book = svc.createWorldBook(USER_ID, { name: "Organization" });
+    const matching = svc.createEntry(USER_ID, book.id, { tags: ["villain", "faction,a"], content: "alpha" })!;
+    svc.createEntry(USER_ID, book.id, { tags: ["villain"], folder: "Characters", content: "alpha" });
+    svc.createEntry(USER_ID, book.id, { tags: ["villain", "faction,a"], constant: true, content: "alpha" });
+    const response = await app.request(`http://localhost/world-books/${book.id}/entries?folder=&tag=villain&tag=faction%2Ca&type=trigger&search=alpha&limit=1`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ total: 1, data: [{ id: matching.id }] });
+    const summary = await app.request(`http://localhost/world-books/${book.id}/entry-organization`);
+    expect(await summary.json()).toMatchObject({ total: 3, unfiled: 2, folders: [{ name: "Characters", count: 1 }] });
+    const denied = await app.request(`http://localhost/world-books/${book.id}/entry-organization`, { headers: { "x-test-user": "other" } });
+    expect(denied.status).toBe(404);
+  });
+});
+
+describe("entry organization mutation routes", () => {
+  for (const operation of ["rename", "remove", "move"] as const) {
+    test(`folder ${operation} validates ownership and returns entry counts unaffected by FTS triggers`, async () => {
+      const source = svc.createWorldBook(USER_ID, { name: "Source" });
+      const target = svc.createWorldBook(USER_ID, { name: "Target" });
+      const entry = svc.createEntry(USER_ID, source.id, { folder: "Characters" })!;
+      const input = { action: operation, folder: "Characters", target_folder: "Locations", target_book_id: target.id };
+      const response = await app.request(`http://localhost/world-books/${source.id}/entry-folders`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ affected: 1 });
+      expect(svc.getEntry(USER_ID, entry.id)).toMatchObject({ folder: operation === "remove" ? "" : "Locations", world_book_id: operation === "move" ? target.id : source.id });
+      const denied = await app.request(`http://localhost/world-books/${source.id}/entry-folders`, { method: "POST", headers: { "content-type": "application/json", "x-test-user": "foreign" }, body: JSON.stringify(input) });
+      expect(denied.status).toBe(404);
+    });
+  }
+
+  for (const path of ["entries", "entries/bulk", "entry-folders", "entries/ENTRY_ID"]) {
+    for (const body of ["null", "[]", "false", "{invalid"]) {
+      test(`invalid JSON object ${body} at ${path} returns 400 without writes`, async () => {
+        const book = svc.createWorldBook(USER_ID, { name: "Source" });
+        const entry = svc.createEntry(USER_ID, book.id, { folder: "Characters", tags: ["history"] })!;
+        const before = svc.getEntry(USER_ID, entry.id);
+        const response = await app.request(`http://localhost/world-books/${book.id}/${path.replace("ENTRY_ID", entry.id)}`, { method: path.endsWith("ENTRY_ID") ? "PUT" : "POST", headers: { "content-type": "application/json" }, body });
+        expect(response.status).toBe(400);
+        expect(svc.getEntry(USER_ID, entry.id)).toEqual(before);
+        expect(svc.listEntries(USER_ID, book.id).length).toBe(1);
+      });
+    }
+  }
+
+  test("malformed folder/tag mutations return 400, target ownership returns 404 and stale selection returns 409", async () => {
+    const book = svc.createWorldBook(USER_ID, { name: "Source" });
+    const foreign = svc.createWorldBook("foreign", { name: "Foreign" });
+    const entry = svc.createEntry(USER_ID, book.id, { folder: "Characters" })!;
+    const before = svc.getEntry(USER_ID, entry.id);
+    const post = (path: string, input: unknown) => app.request(`http://localhost/world-books/${book.id}/${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
+    for (const input of [{ folder: 1 }, { tags: "wrong" }, { tags: [1] }]) expect((await post("entries", input)).status).toBe(400);
+    expect((await post("entries/bulk", { action: "add_tags", tags: [], entry_ids: [entry.id] })).status).toBe(400);
+    expect((await post("entry-folders", { action: "rename", folder: "Characters", target_folder: "" })).status).toBe(400);
+    expect((await post("entry-folders", { action: "move", folder: "Characters", target_book_id: foreign.id })).status).toBe(404);
+    expect((await post("entries/bulk", { action: "move", entry_ids: [entry.id], target_book_id: foreign.id })).status).toBe(404);
+    expect(svc.getEntry(USER_ID, entry.id)).toEqual(before);
+    svc.updateEntry(USER_ID, entry.id, { tags: ["winner"] });
+    expect((await post("entries/bulk", { action: "add_tags", entry_ids: [entry.id], tags: ["stale"], expected_revisions: { [entry.id]: 1 } })).status).toBe(409);
+  });
+
+  test("organization edits reject mismatched book URLs even when both books are owned", async () => {
+    const book = svc.createWorldBook(USER_ID, { name: "Source" });
+    const other = svc.createWorldBook(USER_ID, { name: "Other" });
+    const entry = svc.createEntry(USER_ID, book.id, { folder: "Characters" })!;
+    const response = await app.request(`http://localhost/world-books/${other.id}/entries/${entry.id}`, { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ folder: "Wrong" }) });
+    expect(response.status).toBe(404);
+    expect(svc.getEntry(USER_ID, entry.id)?.folder).toBe("Characters");
+  });
+});
+
+for (const path of ["", "/entries?folder=Characters"]) {
+  test(`same-second organization edits invalidate cached ${path || "book"} responses`, async () => {
+    const book = svc.createWorldBook(USER_ID, { name: "Source" });
+    const entry = svc.createEntry(USER_ID, book.id, { folder: "Characters" })!;
+    const beforeBook = svc.getWorldBook(USER_ID, book.id)!;
+    const url = `http://localhost/world-books/${book.id}${path}`;
+    const first = await app.request(url);
+    const etag = first.headers.get("etag")!;
+    const unchanged = await app.request(url, { headers: { "if-none-match": etag } });
+    expect(unchanged.status).toBe(304);
+    svc.updateEntry(USER_ID, entry.id, { folder: "Locations", tags: ["updated"] });
+    // Force the second-resolution timestamps to their exact original values.
+    getDb().query("UPDATE world_books SET updated_at = ? WHERE id = ?").run(beforeBook.updated_at, book.id);
+    getDb().query("UPDATE world_book_entries SET updated_at = ? WHERE id = ?").run(entry.updated_at, entry.id);
+    const changed = await app.request(url, { headers: { "if-none-match": etag } });
+    expect(changed.status).toBe(200);
+    expect(changed.headers.get("etag")).not.toBe(etag);
+    const payload = await changed.json();
+    if (path) expect(payload).toMatchObject({ total: 0, data: [] });
+    else expect(payload.entries.data[0]).toMatchObject({ folder: "Locations", tags: ["updated"] });
+  });
+}

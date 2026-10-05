@@ -26,6 +26,7 @@ import { assertNever } from '@/lib/assertNever'
 import { getCharacterAvatarUrl } from '@/lib/avatarUrls'
 import { resolveChatContentWidthForReclaim } from '@/lib/chatContentWidth'
 import { hostIntentEventName } from '@/lib/spindle/host-intent-registry'
+import { LumiverseSuiteGate } from '@/lib/spindle/LumiverseSuiteGate'
 import { DEFAULT_PORTRAIT_DOCK_SETTINGS } from '@/lib/uiProductivityDefaults'
 import { useStore } from '@/store'
 import { canPersistPortraitDockInitialization } from '@/store/slices/settings'
@@ -286,7 +287,11 @@ export function shouldAutoOpenPortraitForChat(
   return Boolean(activeChatId) && (open || closedChatId !== activeChatId)
 }
 
-export default function PortraitDock({ mobile = false, extensionOwned = false }: PortraitDockProps) {
+export default function PortraitDock(props: PortraitDockProps) {
+  return <LumiverseSuiteGate><PortraitDockSurface {...props} /></LumiverseSuiteGate>
+}
+
+function PortraitDockSurface({ mobile = false, extensionOwned = false }: PortraitDockProps) {
   const floatingAvatar = useStore((s) => s.floatingAvatar)
   const settings = useStore((s) => s.portraitDockSettings)
   const settingsLoaded = useStore((s) => s.settingsLoaded)

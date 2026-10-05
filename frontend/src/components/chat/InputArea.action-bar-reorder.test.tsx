@@ -289,6 +289,13 @@ describe('InputArea action bar live reorder', () => {
     expect(isExtensionComposerActionId('spindle:lumiverse_suite:open')).toBe(true)
     expect(isExtensionComposerActionId('promptVariables')).toBe(false)
     expect(isExtensionComposerActionId('continue')).toBe(false)
+    // PR stable and ephemeral extension keys are extension-owned; native Council
+    // tab/view aliases and the core composer stay native.
+    expect(isExtensionComposerActionId(FOREIGN_KEY)).toBe(true)
+    expect(isExtensionComposerActionId('ext-runtime:["input","ext_owner","ext_owner:action:widget:9"]')).toBe(true)
+    expect(isExtensionComposerActionId('council')).toBe(false)
+    expect(isExtensionComposerActionId('ooc')).toBe(false)
+    expect(isExtensionComposerActionId('feedback')).toBe(false)
   })
 
   test('InputArea drops persisted Suite-owned extras while retaining native extras when Suite is off', async () => {

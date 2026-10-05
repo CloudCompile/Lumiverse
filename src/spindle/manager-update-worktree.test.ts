@@ -48,6 +48,7 @@ function initGitRoot(path: string): void {
   runGit(path, ["init"]);
   runGit(path, ["config", "user.email", "n10-test@example.invalid"]);
   runGit(path, ["config", "user.name", "N10 test"]);
+  runGit(path, ["config", "commit.gpgsign", "false"]);
 }
 
 function writeManifest(

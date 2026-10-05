@@ -155,7 +155,8 @@ export default function ChatView() {
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
-  const [portraitSurfaceOccupied, setPortraitSurfaceOccupied] = useState(false)
+  const [portraitSurfaceMounted, setPortraitSurfaceMounted] = useState(false)
+  const portraitSurfaceOccupied = suiteExtensionEnabled && portraitSurfaceMounted
   const quickToolbarSettings = useStore((s) => s.quickToolbarSettings)
   const nativeDockActionSide = suiteExtensionEnabled
     ? (quickToolbarSettings?.nativeDockActionSide === 'left' ? 'left' : 'right')
@@ -194,8 +195,8 @@ export default function ChatView() {
       // therefore miss the live owner and briefly restore the native dock. The
       // host-surface marker is unique to the extension-owned Portrait Dock, so it
       // is the ownership authority regardless of which current anchor contains it.
-      setPortraitSurfaceOccupied(Boolean(
-        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"]'),
+      setPortraitSurfaceMounted(Boolean(
+        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"] [data-surface-id="portrait_dock.workspace"]'),
       ))
       // Same authority rule for the shared oldest-message action: the rendered
       // control decides ownership, not the persisted toolbar setting. The
@@ -216,8 +217,10 @@ export default function ChatView() {
   const wallpaper = useStore((s) => s.wallpaper)
   const useCharacterBackground = useStore((s) => s.useCharacterBackground)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
+  const centerChatWithSidebar = useStore((s) => s.centerChatWithSidebar)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const chatBodyRef = useRef<HTMLDivElement>(null)
   const chatColumnInnerRef = useRef<HTMLDivElement>(null)
   const chatColumnTopRef = useRef<HTMLDivElement>(null)
   const chatTopDockRef = useRef<HTMLDivElement>(null)
@@ -1067,10 +1070,11 @@ export default function ChatView() {
   }, [bubbleDisableHover, bubbleHideAvatarBg, bubbleOpacity])
 
   useLayoutEffect(() => {
+    const chatBody = chatBodyRef.current
     const chatColumnInner = chatColumnInnerRef.current
     const chatColumnTop = chatColumnTopRef.current
     const chatTopDock = chatTopDockRef.current
-    if (!chatColumnInner || !chatColumnTop || !chatTopDock) return
+    if (!chatBody || !chatColumnInner || !chatColumnTop || !chatTopDock) return
 
     const syncComposerAnchor = () => {
       const composerAbove = chatColumnInner.querySelector<HTMLSpanElement>(
@@ -1095,9 +1099,14 @@ export default function ChatView() {
       if (child && childRequest !== null && child.getAttribute('data-dock-request') !== childRequest) child.setAttribute('data-dock-request', childRequest)
     }
 
+    // The fill dock is `position: fixed`, and the half-editor host is a sibling of
+    // `.chatColumn` under `.body`. Publishing the measured rail height on the shared
+    // body is what lets both the fill-only padding and the desktop half-editor
+    // z-index rung read the real strip height; on `.chatColumnInner` the sibling
+    // subtree cannot see the variable at all.
     const syncTopDockHeight = () => {
       const height = measureLayoutHeight(chatTopDock)
-      chatColumnInner.style.setProperty('--lcs-top-dock-height', `${height}px`)
+      chatBody.style.setProperty('--lcs-top-dock-height', `${height}px`)
     }
 
     const sync = () => {
@@ -1141,7 +1150,7 @@ export default function ChatView() {
       chatColumnTop.removeAttribute('data-dock-request')
       chatTopDock.removeAttribute('data-dock-request')
       chatComposerAboveRef.current?.removeAttribute('data-dock-request')
-      chatColumnInner.style.removeProperty('--lcs-top-dock-height')
+      chatBody.style.removeProperty('--lcs-top-dock-height')
       chatComposerAboveRef.current = null
     }
   }, [chatId, dockQuickToolbar, keepFloatingDockHost, quickToolbarSettings])
@@ -1185,7 +1194,7 @@ export default function ChatView() {
         }}
       />
       <div className={clsx(styles.wallpaperTransitionLayer, wallpaperTransitioning && !sceneBackground && styles.wallpaperTransitionLayerActive)} />
-      <div className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
+      <div ref={chatBodyRef} className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
         <div data-spindle-mount="chat_sidebar_left" data-spindle-scope={`chat:${chatId}:sidebar-left`} style={{ display: 'contents' }} />
         {!portraitSurfaceOccupied && portraitPanelSide !== 'none' && portraitPanelSide === 'left' && (
           <div className={clsx(styles.portraitSide, styles.portraitSideLeft, portraitPanelOpen && styles.portraitSideOpen)}>
@@ -1201,7 +1210,7 @@ export default function ChatView() {
           </div>
         )}
 
-        <div className={styles.chatColumn} data-lumiverse-surface="chat-column">
+        <div className={clsx(styles.chatColumn, centerChatWithSidebar && styles.chatColumnCentered)} data-lumiverse-surface="chat-column">
           {(spindleNotice || visibleCortexNotice) && (
             <div className={styles.noticeDock} aria-live="polite" aria-atomic="true">
               {spindleNotice && (

@@ -11,6 +11,7 @@ import { FormField, TextInput } from '@/components/shared/FormComponents'
 import NumberStepper from '@/components/shared/NumberStepper'
 import LazyImage from '@/components/shared/LazyImage'
 import ToolSelector from './ToolSelector'
+import CreateToolButton from './CreateToolButton'
 import styles from '../CouncilManager.module.css'
 
 type CouncilMemberWithHistory = CouncilMember & {
@@ -147,6 +148,7 @@ export default function CouncilMemberItem({
           {/* Tools section */}
           <div className={styles.toolsSection}>
             <div className={styles.toolsSectionHeader}>
+              <CreateToolButton packId={member.packId} />
               <span className={styles.inlineLabel}>
                 <IconSettingsCog size={12} /> {t('councilManager.member.tools')}
               </span>

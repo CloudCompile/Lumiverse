@@ -10,6 +10,7 @@ import { DEFAULT_THEME, normalizeTheme } from '@/theme/presets'
 import { PRODUCTIVITY_DEFAULTS, migrateProductivitySetting } from '@/lib/uiProductivityDefaults'
 import { isMobileViewportOrDevice } from '@/lib/mobile'
 import { DEFAULT_IMPERSONATION_MODE, resolveImpersonationMode } from '@/lib/impersonationPreset'
+import { whistleLanguage } from '@/lib/whistle/config'
 import { createSettingsLoadGenerationGuard } from './settings-load-generation'
 import {
   deriveReorderArgs,
@@ -51,6 +52,7 @@ export const DATA_KEYS: ReadonlySet<string> = new Set([
   'saveDraftInput',
   'defaultImpersonationMode',
   'chatWidthMode',
+  'centerChatWithSidebar',
   'chatContentMaxWidth',
   'modalWidthMode',
   'modalMaxWidth',
@@ -702,6 +704,7 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
   saveDraftInput: false,
   defaultImpersonationMode: DEFAULT_IMPERSONATION_MODE,
   chatWidthMode: 'full',
+  centerChatWithSidebar: false,
   chatContentMaxWidth: 900,
   modalWidthMode: 'full',
   modalMaxWidth: 900,
@@ -880,8 +883,16 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
   setVoiceSettings: (partial) =>
     set((state) => {
       const voiceSettings = { ...state.voiceSettings, ...partial }
-      if (partial.sttProvider === 'webspeech') {
+      if (partial.sttProvider === 'webspeech' || partial.sttProvider === 'whistle') {
         voiceSettings.sttConnectionId = null
+      }
+      if (partial.sttProvider === 'whistle') {
+        voiceSettings.sttLanguage = whistleLanguage(voiceSettings.sttLanguage) || 'auto'
+      } else if (partial.sttProvider) {
+        const locales: Record<string, string> = {
+          auto: 'en-US', en: 'en-US', de: 'de-DE', fr: 'fr-FR', es: 'es-ES', it: 'it-IT', nl: 'nl-NL', pl: 'pl-PL',
+        }
+        voiceSettings.sttLanguage = locales[voiceSettings.sttLanguage] || voiceSettings.sttLanguage
       }
       if (partial.speechDetectionRules) {
         voiceSettings.speechDetectionRules = { ...state.voiceSettings.speechDetectionRules, ...partial.speechDetectionRules }

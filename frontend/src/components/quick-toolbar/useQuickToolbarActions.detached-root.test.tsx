@@ -31,6 +31,9 @@ Object.assign(globalObject, {
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const HALF_CONTRIBUTION = 'lumiverse_suite.lorebook.open_half'
+/** A non-Suite owner input action, keyed by the PR's stable `ext-action:` tuple. */
+const FOREIGN_CONTRIBUTION = 'widget'
+const FOREIGN_KEY = 'ext-action:["input","ext_owner","widget"]'
 /** Real chat-docker catalog ids used for the search-filter subset case. */
 const SUBSET_FIRST = 'chat.new'
 const SUBSET_TARGET = 'chat.manage'
@@ -60,6 +63,19 @@ function suiteHalfAction(runtimeSuffix: number, onClick?: () => void): InputBarA
   }
 }
 
+function foreignOwnerInputAction(runtimeSuffix: number, onClick?: () => void): InputBarActionState {
+  return {
+    id: `ext_owner:action:${FOREIGN_CONTRIBUTION}:${runtimeSuffix}`,
+    contributionId: FOREIGN_CONTRIBUTION,
+    extensionId: 'ext_owner',
+    extensionName: 'Ext Owner',
+    placement: 'input_bar.extras',
+    label: 'Widget',
+    enabled: true,
+    clickHandlers: new Set(onClick ? [onClick] : []),
+  }
+}
+
 function extensionDrawerTab(contributionId: string, runtimeSuffix: number): DrawerTabState {
   return {
     id: `spindle:ext_owner:tab:${contributionId}:${runtimeSuffix}`,
@@ -70,6 +86,15 @@ function extensionDrawerTab(contributionId: string, runtimeSuffix: number): Draw
     root: document.createElement('div'),
   }
 }
+
+/** Mutable native registry so a case can add the Council tab the hook aliases. */
+const nativeDrawerTabs: Array<{
+  id: string
+  tabName: string
+  tabDescription: string
+  tabIcon: () => null
+  keywords: string[]
+}> = []
 
 const state = {
   quickToolbarSettings: {
@@ -116,7 +141,7 @@ mock.module('@/lib/commands', () => ({
   }],
 }))
 mock.module('@/lib/drawer-tab-registry', () => ({
-  DRAWER_TABS: [],
+  DRAWER_TABS: nativeDrawerTabs,
   adaptExtensionTabs: (tabs: DrawerTabState[]) => tabs.map((tab) => ({
     id: tab.id,
     tabName: tab.title,
@@ -190,6 +215,7 @@ function Probe() {
     <output data-testid="visible-ids">{visibleIds.join('|')}</output>
     <output data-testid="ordered-ids">{orderedIds.join('|')}</output>
     <output data-testid="catalog-has-half">{actionById.has(HALF_CONTRIBUTION) ? 'yes' : 'no'}</output>
+    <output data-testid="catalog-has-foreign">{actionById.has(FOREIGN_KEY) ? 'yes' : 'no'}</output>
     <output data-testid="drawer-surfaces">{drawerSurfaces.join('|')}</output>
     {actions.map((action) => {
       const Icon = action.icon
@@ -198,6 +224,7 @@ function Probe() {
     <button data-testid="toggle-home" type="button" onClick={() => toggleAction('command:action-home')}>toggle home</button>
     <button data-testid="toggle-half" type="button" onClick={() => toggleAction(HALF_CONTRIBUTION)}>toggle half</button>
     <button data-testid="run-half" type="button" onClick={() => actions.find((action) => action.id === HALF_CONTRIBUTION)?.run()}>run half</button>
+    <button data-testid="run-foreign" type="button" onClick={() => actions.find((action) => action.id === FOREIGN_KEY)?.run()}>run foreign</button>
     <button data-testid="run-connections" type="button" onClick={() => actions.find((action) => action.id === 'lumiverse_suite.connections_picker.open')?.run()}>run connections</button>
     <button data-testid="run-by-key" type="button" onClick={() => actions[0]?.run()}>run first</button>
     <button data-testid="move-settings-up" type="button" onClick={() => moveAction('settings', -1)}>move settings up</button>
@@ -238,6 +265,7 @@ beforeAll(async () => {
 afterEach(() => {
   document.body.replaceChildren()
   settingWrites.length = 0
+  nativeDrawerTabs.length = 0
   state.drawerTabs = []
   state.inputBarActions = []
   state.extensions = INITIAL_EXTENSIONS
@@ -949,6 +977,124 @@ describe('useQuickToolbarActions detached host root', () => {
       visibleTabIds: [stableKey],
       iconOrder: [stableKey],
     })
+
+    await act(async () => root.unmount())
+  })
+
+  test('keeps native Council aliases and the stable extension key in one catalog', async () => {
+    // Staging adds legacy Council view aliases (ooc/feedback); the PR keys
+    // extension drawers by their logical tuple. Both must coexist: the aliases
+    // are native entries and must not shadow or be shadowed by the stable key.
+    nativeDrawerTabs.push({
+      id: 'council',
+      tabName: 'Council',
+      tabDescription: 'Configure the Lumia Council',
+      tabIcon: () => null,
+      keywords: ['council'],
+    })
+    const tab = extensionDrawerTab('notes', 3)
+    const stableKey = 'ext-action:["drawer","ext_owner","notes"]'
+    state.drawerTabs = [tab]
+    state.quickToolbarSettings = {
+      ...state.quickToolbarSettings,
+      visibleTabIds: ['council', 'ooc', 'feedback', stableKey],
+      iconOrder: ['council', 'ooc', 'feedback', stableKey],
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root: Root = createRoot(host)
+
+    await act(async () => {
+      root.render(<Probe />)
+      await Promise.resolve()
+    })
+
+    const surfaces = host.querySelector('[data-testid="drawer-surfaces"]')?.textContent ?? ''
+    // Native Council tab and its legacy view aliases all stay addressable.
+    expect(surfaces).toContain('council=>council')
+    expect(surfaces).toContain('ooc=>ooc')
+    expect(surfaces).toContain('feedback=>feedback')
+    // The extension preference stays keyed by tuple; the surface keeps the handle.
+    expect(surfaces).toContain(`${stableKey}=>${tab.id}`)
+    expect(surfaces).not.toContain(`${tab.id}=>${tab.id}`)
+    expect(host.querySelector('[data-testid="visible-ids"]')?.textContent)
+      .toBe(['council', 'ooc', 'feedback', stableKey].join('|'))
+
+    await act(async () => root.unmount())
+  })
+
+  test('hides a non-Suite owner extension action and blocks its run while the Suite is unavailable', async () => {
+    // The PR keys any owner's action by an `ext-action:` tuple, not only the
+    // legacy spindle:/input-action:/lumiverse_suite. shapes. The Suite gate must
+    // therefore recognise the tuple or a foreign owner's action is admitted to
+    // the rendered catalog and can run with the Suite switched off.
+    let opens = 0
+    state.extensions = [
+      { id: 'lumiverse_suite', identifier: 'lumiverse_suite', enabled: false, has_frontend: true },
+      INITIAL_EXTENSIONS[1],
+    ]
+    state.inputBarActions = [foreignOwnerInputAction(9, () => { opens += 1 })]
+    state.quickToolbarSettings = {
+      ...state.quickToolbarSettings,
+      visibleTabIds: [FOREIGN_KEY, 'settings'],
+      iconOrder: [FOREIGN_KEY, 'settings'],
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root: Root = createRoot(host)
+
+    await act(async () => {
+      root.render(<Probe />)
+      await Promise.resolve()
+    })
+    expect(host.querySelector('[data-testid="catalog-has-foreign"]')?.textContent).toBe('no')
+    expect(hasActionId(host, FOREIGN_KEY)).toBe(false)
+
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="run-foreign"]')?.click()
+      await Promise.resolve()
+    })
+    expect(opens).toBe(0)
+
+    await act(async () => root.unmount())
+  })
+
+  test('runs a non-Suite owner extension action only while the Suite stays enabled', async () => {
+    // Both owners enabled at render; the captured run reads the LATEST owner
+    // state, so once the Suite is withdrawn the foreign action's run must no-op.
+    let opens = 0
+    state.inputBarActions = [foreignOwnerInputAction(9, () => { opens += 1 })]
+    state.quickToolbarSettings = {
+      ...state.quickToolbarSettings,
+      visibleTabIds: [FOREIGN_KEY, 'settings'],
+      iconOrder: [FOREIGN_KEY, 'settings'],
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root: Root = createRoot(host)
+
+    await act(async () => {
+      root.render(<Probe />)
+      await Promise.resolve()
+    })
+    expect(hasActionId(host, FOREIGN_KEY)).toBe(true)
+
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="run-foreign"]')?.click()
+      await Promise.resolve()
+    })
+    expect(opens).toBe(1)
+
+    // Suite disabled with NO rerender: the captured handler must re-read state.
+    state.extensions = [
+      { id: 'lumiverse_suite', identifier: 'lumiverse_suite', enabled: false, has_frontend: true },
+      INITIAL_EXTENSIONS[1],
+    ]
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-testid="run-foreign"]')?.click()
+      await Promise.resolve()
+    })
+    expect(opens).toBe(1)
 
     await act(async () => root.unmount())
   })

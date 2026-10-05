@@ -11,6 +11,7 @@ interface CloseButtonProps {
   position?: 'static' | 'absolute'
   iconSize?: number
   className?: string
+  'data-part'?: string
 }
 
 export function CloseButton({
@@ -20,6 +21,7 @@ export function CloseButton({
   position = 'static',
   iconSize,
   className,
+  'data-part': dataPart,
 }: CloseButtonProps) {
   const { t: tc } = useTranslation('common')
   const resolvedIconSize = iconSize ?? (size === 'sm' ? 14 : 16)
@@ -27,6 +29,7 @@ export function CloseButton({
   return (
     <button
       type="button"
+      data-part={dataPart}
       onClick={onClick}
       aria-label={tc('actions.close')}
       className={clsx(

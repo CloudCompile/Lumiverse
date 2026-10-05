@@ -46,6 +46,7 @@ import {
   listSecretKeys,
   SYSTEM_SECRET_PRINCIPAL,
 } from "../services/secrets.service";
+import { parsePagination } from "../services/pagination";
 
 const app = new Hono();
 const CHECKPOINT_MODES = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
@@ -294,8 +295,8 @@ app.put("/broker-origins", async (c) => {
 // ── Logs ────────────────────────────────────────────────────────────────────
 
 app.get("/logs", (c) => {
-  const parsedLimit = parseInt(c.req.query("limit") || "150", 10);
-  const limit = Math.min(2000, Math.max(1, Number.isFinite(parsedLimit) ? parsedLimit : 150));
+  const requestedLimit = parsePagination(c.req.query("limit"), undefined, 150).limit;
+  const limit = Math.min(requestedLimit, 2000);
   const entries = operatorService.getLogs(limit);
   return c.json({ entries });
 });

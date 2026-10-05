@@ -294,7 +294,7 @@ fn trusted_url(url: &Url) -> bool {
         && url.host_str() == Some("localhost")
         && url.port() == Some(1430);
     (bundled || development)
-        && matches!(url.path(), "/" | "/index.html")
+        && matches!(url.path(), "" | "/" | "/index.html")
         && url.query().is_none()
         && url.fragment().is_none()
 }
@@ -751,6 +751,16 @@ mod tests {
     }
 
     #[test]
+    fn bundled_host_check_accepts_default_root_urls() {
+        let native_url = Url::parse("tauri://localhost").unwrap();
+        assert_eq!(native_url.path(), "");
+        assert!(trusted_url(&native_url));
+        assert!(trusted_url(&Url::parse("tauri://localhost/").unwrap()));
+        assert!(trusted_url(&Url::parse("http://tauri.localhost").unwrap()));
+        assert!(trusted_url(&Url::parse("https://tauri.localhost").unwrap()));
+    }
+
+    #[test]
     fn bundled_host_check_rejects_remote_and_unrelated_pages() {
         assert!(trusted_url(
             &Url::parse("tauri://localhost/index.html").unwrap()
@@ -768,6 +778,13 @@ mod tests {
         assert!(!trusted_url(
             &Url::parse("tauri://localhost/?extension=evil").unwrap()
         ));
+        assert!(!trusted_url(
+            &Url::parse("tauri://localhost?extension=evil").unwrap()
+        ));
+        assert!(!trusted_url(
+            &Url::parse("tauri://localhost#extension=evil").unwrap()
+        ));
+        assert!(!trusted_url(&Url::parse("tauri://untrusted").unwrap()));
     }
 
     #[test]

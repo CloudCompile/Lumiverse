@@ -8,6 +8,7 @@ import {
   subscribeChatDockerActionOwners,
 } from '@/components/chat/chatDockerActionCatalog'
 import { COMMANDS } from '@/lib/commands'
+import { COUNCIL_TAB_ALIASES } from '@/lib/council-navigation'
 import { adaptExtensionTabs, DRAWER_TABS, extensionCommandsToCommands, type DrawerTabEntry } from '@/lib/drawer-tab-registry'
 import { getVisibleSettingsTabs } from '@/lib/settings-tab-registry'
 import {
@@ -96,6 +97,7 @@ function readUi(): ToolbarUiState {
   return {
     drawerOpen: state.drawerOpen,
     drawerTab: state.drawerTab,
+    councilView: state.councilView,
     settingsModalOpen: state.settingsModalOpen,
     settingsActiveView: state.settingsActiveView,
   }
@@ -392,6 +394,7 @@ export function useQuickToolbarActions() {
   const extensionCommands = useStore((s) => s.extensionCommands)
   const inputBarActions = useStore((s) => s.inputBarActions)
   const extensions = useStore((s) => s.extensions)
+  const settingsTabs = useStore((s) => s.settingsTabs)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeChatId = useStore((s) => s.activeChatId)
   const isGroupChat = useStore((s) => s.isGroupChat)
@@ -428,6 +431,8 @@ export function useQuickToolbarActions() {
    * close it. `ViewportDrawer.tsx` shows the same caller-decides idiom.
    */
   const runSurface = useCallback((surface: ToolbarSurface, command?: () => void) => {
+    if (surface.kind === 'settings'
+      && !getVisibleSettingsTabs(useStore.getState().user?.role).some((tab) => tab.id === surface.view)) return
     const intent = resolveToolbarIntent(surface, readUi())
     switch (intent.type) {
       case 'open-drawer':
@@ -456,9 +461,12 @@ export function useQuickToolbarActions() {
   )
 
   const actionCatalog = useMemo(() => {
+    void settingsTabs
     const enabledDrawerTabs = filterEnabledFrontendContributions(extensionDrawerTabs, extensions)
     const enabledExtensionCommands = filterEnabledFrontendContributions(extensionCommands, extensions)
     const enabledInputBarActions = filterEnabledFrontendContributions(inputBarActions, extensions)
+    const councilTab = DRAWER_TABS.find((tab) => tab.id === 'council')
+    const legacyCouncilTabs = councilTab ? Object.entries(COUNCIL_TAB_ALIASES).map(([id, view]) => ({ ...councilTab, id, tabName: `Council · ${view === 'ooc' ? 'OOC' : view[0].toUpperCase() + view.slice(1)}` })) : []
     const toDrawerAction = (tab: DrawerTabEntry, id: string): ToolbarAction => {
       const surface: ToolbarSurface = { kind: 'drawer', tabId: tab.id }
       return {
@@ -473,6 +481,7 @@ export function useQuickToolbarActions() {
     }
     const drawerActions: ToolbarAction[] = [
       ...DRAWER_TABS.map((tab) => toDrawerAction(tab, tab.id)),
+      ...legacyCouncilTabs.map((tab) => toDrawerAction(tab, tab.id)),
       // A tuple registered twice has no stable key and is withheld until exactly
       // one registration remains; `surface.tabId` stays the runtime handle.
       ...adaptExtensionTabs(enabledDrawerTabs).flatMap((tab) => {
@@ -589,6 +598,14 @@ export function useQuickToolbarActions() {
       ? catalog
       : catalog.filter((action) => !isExtensionComposerActionId(action.id))
     return [...new Map(availableCatalog.map((action) => [action.id, action])).values()]
+      .map((action) => ({
+        ...action,
+        run: () => {
+          if (isExtensionComposerActionId(action.id)
+            && !hasEnabledFrontendExtension(useStore.getState().extensions, 'lumiverse_suite')) return
+          action.run()
+        },
+      }))
   }, [
     activeCharacterId,
     activeChatId,
@@ -598,6 +615,7 @@ export function useQuickToolbarActions() {
     extensionDrawerTabs,
     extensions,
     inputBarActions,
+    settingsTabs,
     isGroupChat,
     liveExtension,
     messageSelectMode,

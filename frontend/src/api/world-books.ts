@@ -7,6 +7,7 @@ import type {
   DuplicateWorldBookEntryInput, ReorderWorldBookEntriesInput,
   WorldBookEntryBulkActionInput, WorldBookEntryBulkActionResult,
   RenameWorldBookFolderResponse, DeleteWorldBookFolderResponse,
+  WorldBookEntryFolderActionInput, WorldBookEntryOrganizationSummary,
 } from '@/types/api'
 import { triggerBlobDownload } from '@/lib/downloads'
 
@@ -77,10 +78,17 @@ export const worldBooksApi = {
       sort_by?: 'order' | 'priority' | 'created' | 'updated' | 'name'
       sort_dir?: 'asc' | 'desc'
       search?: string
+      folder?: string
+      tag?: string[]
+      type?: 'trigger' | 'constant' | 'vector'
     },
     options?: RequestOptions,
   ) {
-    return get<PaginatedResult<WorldBookEntry>>(`/world-books/${bookId}/entries`, params, options)
+    const { tag, ...query } = params ?? {}
+    const tags = new URLSearchParams()
+    for (const value of tag ?? []) tags.append('tag', value)
+    const suffix = tags.size ? `?${tags}` : ''
+    return get<PaginatedResult<WorldBookEntry>>(`/world-books/${bookId}/entries${suffix}`, query, options)
   },
 
   /** Load every entry so book-wide tools are not limited by the editor's current page. */
@@ -104,6 +112,14 @@ export const worldBooksApi = {
     }
 
     return data
+  },
+
+  entryFolderAction(bookId: string, input: WorldBookEntryFolderActionInput) {
+    return post<{ affected: number; target_book_id: string }>(`/world-books/${bookId}/entry-folders`, input)
+  },
+
+  getEntryOrganization(bookId: string) {
+    return get<WorldBookEntryOrganizationSummary>(`/world-books/${bookId}/entry-organization`)
   },
 
   getEntry(bookId: string, entryId: string) {

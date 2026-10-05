@@ -1,4 +1,5 @@
 import { getDb } from "../db/connection";
+import { hasEnabledExtensionForUser } from "../spindle/extension-availability";
 import { REQUEST_HISTORY_SETTING, requestHistoryStore } from "./request-history-store";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -117,12 +118,14 @@ export function getSettingAcrossUsers(key: string): Array<{ user_id: string; val
  * the one way a wrong value could be reintroduced. Only the CANONICAL
  * `quickToolbarSettings` row is read; the namespaced compatibility mirror
  * `spindle:lumiverse_suite:quick_toolbar:quickToolbarSettings` is never
- * authoritative.
+ * authoritative. The opt-in also requires an enabled Suite installation that
+ * is visible to the acting user; retained preferences alone cannot enable it.
  */
 export function readEditAndSendAlwaysUseActiveConnection(userId: string): boolean {
   const value = getSetting(userId, "quickToolbarSettings")?.value;
   return !!value && typeof value === "object" && !Array.isArray(value)
-    && (value as Record<string, unknown>).editAndSendAlwaysUseActiveConnection === true;
+    && (value as Record<string, unknown>).editAndSendAlwaysUseActiveConnection === true
+    && hasEnabledExtensionForUser(userId, "lumiverse_suite");
 }
 
 export function getSettingsByKeys(userId: string, keys: string[]): Map<string, any> {

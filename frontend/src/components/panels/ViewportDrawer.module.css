@@ -123,6 +123,7 @@
 /* ── Drawer ── */
 
 .drawer {
+  position: relative;
   width: var(--drawer-panel-w);
   height: 100%;
   display: flex;
@@ -131,6 +132,26 @@
   pointer-events: auto;
   overflow: hidden;
   isolation: isolate;
+}
+
+.resizeHandle {
+  position: absolute;
+  inset-block: 0;
+  width: 8px;
+  z-index: 10;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.wrapperRight .resizeHandle { left: 0; }
+.wrapperLeft .resizeHandle { right: 0; }
+
+.resizeHandle:hover,
+.resizeHandle:focus-visible {
+  background: var(--lumiverse-primary-020);
+  outline: none;
+  box-shadow: inset 2px 0 var(--lumiverse-primary);
 }
 
 .wrapperRight .drawer {
@@ -593,6 +614,7 @@
 
 .folderToolbar {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   min-height: 34px;
@@ -662,15 +684,18 @@
 
 .folderList {
   display: flex;
+  min-height: 0;
   flex-direction: column;
   border: 1px solid var(--lumiverse-border);
   border-radius: 11px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   background: color-mix(in srgb, var(--lumiverse-bg-panel, var(--lumiverse-bg)) 96%, white 4%);
 }
 
 .folderTile {
   display: grid;
+  flex-shrink: 0;
   grid-template-columns: 32px minmax(0, 1fr) 14px;
   align-items: center;
   gap: 9px;

@@ -94,7 +94,7 @@ export function registerMemoryMacros(): void {
     builtIn: true,
     handler(ctx: MacroExecContext): string {
       const mem = getMemory(ctx);
-      if (!mem.enabled || mem.count === 0) return "";
+      if (!mem.enabled) return "";
 
       const countArg = ctx.args[0] ? parseInt(ctx.args[0], 10) : 0;
       if (countArg > 0 && countArg < mem.chunks.length) {
@@ -113,7 +113,7 @@ export function registerMemoryMacros(): void {
     builtIn: true,
     handler(ctx: MacroExecContext): string {
       const mem = getMemory(ctx);
-      return (mem.enabled && mem.count > 0) ? "yes" : "no";
+      return (mem.enabled && (mem.count > 0 || !!mem.formatted)) ? "yes" : "no";
     },
   });
 

@@ -16,6 +16,9 @@ import type {
 } from "../types/message";
 import type { BulkMessageInput } from "../types/migrate";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
+import type { EditAndSendContext } from "../llm/types";
+import { EditAndSendContextError } from "../llm/types";
+import { readMessageRevision } from "../utils/message-revision";
 import { paginatedQuery } from "./pagination";
 import * as embeddingsSvc from "./embeddings.service";
 import * as audioSvc from "./audio.service";
@@ -3122,6 +3125,13 @@ function scheduleMemoryRebuildForActiveMessageChange(userId: string, chatId: str
 
 // --- Swipes ---
 
+function userContentRevisionSql(message: Message, content: string): string {
+  // Assistant swipe staging is not persisted generation output.
+  return message.is_user && content !== message.content && messagesHaveRevisionColumn()
+    ? ", revision = revision + 1"
+    : "";
+}
+
 export function addSwipe(userId: string, messageId: string, content: string): Message | null {
   const msg = getMessage(userId, messageId);
   if (!msg) return null;
@@ -3137,7 +3147,7 @@ export function addSwipe(userId: string, messageId: string, content: string): Me
   );
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, content)} WHERE id = ? AND chat_id = ?`)
     .run(
       JSON.stringify(swipes),
       JSON.stringify(swipeDates),
@@ -3184,7 +3194,8 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
     ? [JSON.stringify(swipes), content, JSON.stringify(normalizedExtra), messageId, msg.chat_id]
     : [JSON.stringify(swipes), JSON.stringify(normalizedExtra), messageId, msg.chat_id];
 
-  getDb().query(`UPDATE messages SET ${updates} WHERE id = ? AND chat_id = ?`).run(...values);
+  const revisionSql = userContentRevisionSql(msg, swipes[msg.swipe_id]);
+  getDb().query(`UPDATE messages SET ${updates}${revisionSql} WHERE id = ? AND chat_id = ?`).run(...values);
   const updated = getMessage(userId, messageId)!;
   eventBus.emit(
     EventType.MESSAGE_SWIPED,
@@ -3204,7 +3215,12 @@ export function updateSwipe(userId: string, messageId: string, swipeIdx: number,
   return updated;
 }
 
-export function deleteSwipe(userId: string, messageId: string, swipeIdx: number): Message | null {
+export function deleteSwipe(
+  userId: string,
+  messageId: string,
+  swipeIdx: number,
+  options?: { restoreSwipeId: number },
+): Message | null {
   const msg = getMessage(userId, messageId);
   if (!msg || msg.swipes.length <= 1) return null; // can't delete last swipe
   if (swipeIdx < 0 || swipeIdx >= msg.swipes.length) return null;
@@ -3222,7 +3238,11 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   if (swipeIdx < msg.swipe_id) {
     newSwipeId = msg.swipe_id - 1;
   } else if (swipeIdx === msg.swipe_id) {
-    newSwipeId = Math.min(msg.swipe_id, swipes.length - 1);
+    const restoreSwipeId = options?.restoreSwipeId;
+    newSwipeId = restoreSwipeId != null && Number.isInteger(restoreSwipeId)
+      && restoreSwipeId >= 0 && restoreSwipeId < swipes.length
+      ? restoreSwipeId
+      : Math.min(msg.swipe_id, swipes.length - 1);
   }
 
   const newContent = swipes[newSwipeId] ?? swipes[0];
@@ -3234,7 +3254,7 @@ export function deleteSwipe(userId: string, messageId: string, swipeIdx: number)
   );
 
   getDb()
-    .query("UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipes = ?, swipe_dates = ?, swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, newContent)} WHERE id = ? AND chat_id = ?`)
     .run(
       JSON.stringify(swipes),
       JSON.stringify(swipeDates),
@@ -3279,7 +3299,7 @@ export function cycleSwipe(userId: string, messageId: string, direction: "left" 
   );
 
   getDb()
-    .query("UPDATE messages SET swipe_id = ?, content = ?, extra = ? WHERE id = ? AND chat_id = ?")
+    .query(`UPDATE messages SET swipe_id = ?, content = ?, extra = ?${userContentRevisionSql(msg, nextContent)} WHERE id = ? AND chat_id = ?`)
     .run(nextIdx, nextContent, JSON.stringify(normalizedExtra), messageId, msg.chat_id);
 
   const updated = getMessage(userId, messageId)!;
@@ -3450,6 +3470,8 @@ export interface EditAndSendGenerationCursor {
   chatId: string;
   requestId: string;
   mode: EditAndSendMode;
+  /** Committed edit identity, preserved by replay and forwarded by the dispatcher. */
+  editAndSendContext?: EditAndSendContext;
 }
 
 export interface EditAndSendSuccess {
@@ -3634,6 +3656,18 @@ export function editAndSend(
 
     editedCopy = getMessage(userId, editedMessageId);
     const generationId = crypto.randomUUID();
+    // Branch copies start at revision 1; read the written revision instead of
+    // deriving it from the source message's expectedVersion.
+    const committedRevision = readMessageRevision(editedCopy);
+    if (committedRevision == null) {
+      throw new EditAndSendContextError(
+        "edited message revision is unreadable at commit",
+      );
+    }
+    const editAndSendContext: EditAndSendContext = {
+      editedUserMessageId: editedMessageId,
+      committedRevision,
+    };
     const payload: EditAndSendSuccess = {
       branchChatId: targetChatId,
       editedMessageId,
@@ -3643,6 +3677,7 @@ export function editAndSend(
         chatId: targetChatId,
         requestId: input.requestId,
         mode,
+        editAndSendContext,
       },
     };
     const requestRowId = crypto.randomUUID();

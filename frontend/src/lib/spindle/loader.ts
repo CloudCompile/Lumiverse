@@ -10,7 +10,7 @@ import type {
   SpindleFloatWidgetHandle,
   SpindleDockPanelHandle,
 } from 'lumiverse-spindle-types'
-import { SPINDLE_HOST_CAPABILITIES } from 'lumiverse-spindle-types'
+import { SPINDLE_HOST_CAPABILITIES, SPINDLE_STT_HOST_CAPABILITIES } from 'lumiverse-spindle-types'
 import { frontendSessionId } from '@/lib/frontend-session'
 import type { MacroCatalogResponse } from '@/api/macros'
 import type {
@@ -80,6 +80,7 @@ import {
 import { generateUUID } from '@/lib/uuid'
 import { installSpindleNavigationGuards } from './navigation-guards'
 import { DRAWER_TABS, ensureRegistryRoot } from '@/lib/drawer-tab-registry'
+import { resolveCouncilTabId } from '@/lib/council-navigation'
 import {
   createUIEventsHelper,
   destroyAllUIEventBindingsForExtension,
@@ -168,6 +169,7 @@ import {
   type DecoratorOptions,
 } from './dom-decorator-service'
 import { registerHostIntentHandler, type HostIntentHandler, type JsonValue } from './host-intent-registry'
+import { createNativeSTTAPI } from './stt-native'
 
 declare const __APP_VERSION__: string
 
@@ -697,6 +699,7 @@ async function doLoadFrontendExtension(
     return tracked
   }
   let stateSelectors: StateSelectors | undefined
+  let speech: ReturnType<typeof createNativeSTTAPI> | undefined
   let cachedGrantedPermissions: string[] = []
   const settingsBridge = createSettingsBridge({
     manifestIdentifier: manifest.identifier,
@@ -826,6 +829,7 @@ async function doLoadFrontendExtension(
       clearComponentOverridesForOwner(extensionId, generation)
     }
     stateSelectors?.revokePermissions(revokedPermissions)
+    if (revokedPermissions.includes('media')) speech?.revoke()
     if (revokedPermissions.includes('app_manipulation')) revokeInlineCardWrappingOptOut(manifest.identifier)
     if (previous.includes('world_books') && !next.includes('world_books')) {
       destroyComponentsForExtensionPermission(extensionId, 'world_books', generation)
@@ -1275,6 +1279,11 @@ async function doLoadFrontendExtension(
       settingIds: CORE_SETTING_KEYS.map((entry) => entry.key),
     })
     stateSelectors = stateSelectorBridge
+    speech = createNativeSTTAPI({
+      assertActive: assertFrontendActive,
+      requirePermission: assertCanonicalPermission,
+      onTeardown,
+    })
     const domain = createFrontendDomainApi({
       store: useStore,
       assertActive: assertFrontendActive,
@@ -1398,7 +1407,7 @@ async function doLoadFrontendExtension(
     const host = Object.freeze({
       descriptorVersion: 1 as const,
       lumiverseVersion: LUMIVERSE_VERSION,
-      capabilities: Object.freeze({ ...SPINDLE_HOST_CAPABILITIES, ...THEME_AUTHORING_HOST_CAPABILITIES,
+      capabilities: Object.freeze({ ...SPINDLE_HOST_CAPABILITIES, ...THEME_AUTHORING_HOST_CAPABILITIES, ...SPINDLE_STT_HOST_CAPABILITIES,
         'frontend-session-origin-v1': 1,
       }),
       extensionInstallationId: extensionId,
@@ -1556,7 +1565,7 @@ async function doLoadFrontendExtension(
         },
         getBuiltInTabTitle(tabId: string): string | undefined {
           assertFrontendActive()
-          const tab = DRAWER_TABS.find((t) => t.id === tabId)
+          const tab = DRAWER_TABS.find((t) => t.id === resolveCouncilTabId(tabId))
           return tab ? (tab.tabHeaderTitle ?? tab.tabName) : undefined
         },
         getTabLocation(tabId: string): TabLocation {
@@ -2148,6 +2157,7 @@ async function doLoadFrontendExtension(
       state: stateSelectorBridge,
       domain,
       geometry: createFrontendGeometryAPI(),
+      stt: speech.api,
       onTeardown,
     })
 

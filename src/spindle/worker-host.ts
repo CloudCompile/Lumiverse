@@ -1,6 +1,7 @@
 import type {
   SpindleManifest,
   WorkerToHost,
+  ImageGenNativeControlWorkerMessage,
   HostToWorker,
   LlmMessageDTO,
   InterceptorBreakdownEntryDTO,
@@ -51,6 +52,7 @@ import {
   type WorldInfoInterceptorResultDTO,
 } from "./world-info-interceptor";
 import { projectWorldInfoCaptureContext } from "./world-info-capture";
+import { projectPresetMetadataContext } from "./preset-metadata-context";
 import { toolRegistry } from "./tool-registry";
 import {
   setPromptRegexOwnedChats,
@@ -303,6 +305,7 @@ type RuntimeWorkerToHost =
   | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorMatchDTO; required?: boolean }
   | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string; parameters?: Record<string, unknown>; breakdown?: InterceptorBreakdownEntryDTO[] }
   | WorkerToHost
+  | ImageGenNativeControlWorkerMessage
   | { type: "register_frontend_runtime_capability"; capability: string }
   | { type: "unregister_frontend_runtime_capability"; capability: string }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -326,7 +329,6 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
-  | { type: "image_gen_generate_native"; requestId: string; input: any }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | { type: "user_get_role"; requestId: string; userId?: string }
   | {
@@ -2534,6 +2536,12 @@ export class WorkerHost {
       case "image_gen_generate_native":
         void this.imageGenApi.handleGenerateNative(msg.requestId, msg.input);
         break;
+      case "image_gen_prompt_presets":
+        this.imageGenApi.handlePromptPresets(msg.requestId, msg.userId);
+        break;
+      case "image_gen_cancel_native":
+        this.imageGenApi.handleCancelNative(msg.requestId, msg.jobId, msg.userId);
+        break;
       case "image_gen_providers":
         this.imageGenApi.handleProviders(msg.requestId);
         break;
@@ -2923,6 +2931,7 @@ export class WorkerHost {
       userId: scopedUserId,
       priority: priority ?? 100,
       match,
+      presetMetadataNamespace: this.manifest.identifier,
       resolveTimeoutMs,
       required,
       handler: async (messages, context, signal) => {
@@ -2951,7 +2960,7 @@ export class WorkerHost {
 
         const interceptorContext =
           projectWorldInfoCaptureContext(
-            context,
+            projectPresetMetadataContext(context, this.manifest.identifier),
             this.extensionId,
           ) as unknown as Omit<InterceptorContextDTO, "signal">;
         this.activeInterceptorContexts.set(registrationId, interceptorContext);

@@ -76,6 +76,8 @@ import {
   type RegexActionActivation,
 } from '@/lib/regex/actionBus'
 import { createSTTEngine, getSupportedSTTAudioFormat, isWebSpeechAvailable, type STTAudioFrame, type STTEngine } from '@/lib/sttEngine'
+import { isWhistleAvailable } from '@/lib/whistle/config'
+import { whistleClient } from '@/lib/whistle/client'
 import { composeChatSafeZones } from '@/lib/chatSurfaceLayout'
 import { renderedPxToLayoutPx } from '@/lib/uiScale'
 import { applyChatAppearance } from '@/lib/chatAppearance'
@@ -1006,6 +1008,8 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const screenCornerRadius = useDeviceFrameRadius()
   const [inputFocused, setInputFocused] = useState(false)
   const [sttStatus, setSttStatus] = useState<'idle' | 'starting' | 'listening' | 'processing'>('idle')
+  const [sttLoadingProgress, setSttLoadingProgress] = useState<number | null>(null)
+  const sttSessionConfigRef = useRef<{ provider: string; language: string; connectionId: string | null } | null>(null)
   const [sttAudioFrame, setSttAudioFrame] = useState<STTAudioFrame | null>(null)
   const sttEngineRef = useRef<STTEngine | null>(null)
   const sttDraftBaseRef = useRef('')
@@ -1017,16 +1021,26 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
   const isSTTSupported = useMemo(() => {
     if (voiceSettings.sttProvider === 'webspeech') return isWebSpeechAvailable()
+    if (voiceSettings.sttProvider === 'whistle') return isWhistleAvailable()
     return getSupportedSTTAudioFormat() != null && typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
   }, [voiceSettings.sttProvider])
+  useEffect(() => {
+    if (voiceSettings.sttProvider === 'whistle' && isSTTSupported) {
+      // Prepare during normal chat use, without opening the microphone.
+      void whistleClient.prepare().catch(() => {})
+    }
+  }, [voiceSettings.sttProvider, isSTTSupported])
   const isListeningToSTT = sttStatus === 'starting' || sttStatus === 'listening' || sttStatus === 'processing'
   const showSTTIndicator = isListeningToSTT
   const sttIndicatorLabel = useMemo(() => {
+    if (sttStatus === 'starting' && voiceSettings.sttProvider === 'whistle' && sttLoadingProgress !== null) {
+      return t('input.sttWhistleLoading', { percent: Math.round(sttLoadingProgress * 100) })
+    }
     if (sttStatus === 'starting') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttStartingMic') : t('input.sttPreparingRecording')
     if (sttStatus === 'processing') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttFinalizingTranscript') : t('input.sttTranscribingAudio')
     if (sttStatus === 'listening') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttListening') : t('input.sttRecording')
     return ''
-  }, [sttStatus, voiceSettings.sttProvider, t])
+  }, [sttStatus, voiceSettings.sttProvider, sttLoadingProgress, t])
   const sttVisualizerBars = sttAudioFrame?.frequencies?.length ? sttAudioFrame.frequencies : STT_IDLE_BARS
   const sttVisualizerLevel = sttAudioFrame ? Math.max(sttAudioFrame.amplitude, sttAudioFrame.peak * 0.65) : 0.16
 
@@ -2988,6 +3002,12 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
   const handleSTTToggle = useCallback(async () => {
     if (isListeningToSTT) {
+      if (voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')) {
+        stopSTTSession('destroy')
+        setSttStatus('idle')
+        setSttLoadingProgress(null)
+        return
+      }
       setSttStatus('processing')
       stopSTTSession('stop')
       return
@@ -3010,6 +3030,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
     try {
       setSttStatus('starting')
+      setSttLoadingProgress(null)
       setSttAudioFrame(null)
       sttDraftBaseRef.current = text.trimEnd()
       sttInterimTextRef.current = ''
@@ -3028,12 +3049,23 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
       sttEngineRef.current?.destroy()
       sttEngineRef.current = engine
+      sttSessionConfigRef.current = {
+        provider: voiceSettings.sttProvider, language: voiceSettings.sttLanguage, connectionId: voiceSettings.sttConnectionId,
+      }
+
+      engine.onStatus?.((status) => {
+        if (sttEngineRef.current !== engine) return
+        setSttLoadingProgress(status.phase === 'loading' ? status.progress ?? 0 : null)
+        setSttStatus(status.phase === 'loading' ? 'starting' : status.phase)
+      })
 
       engine.onAudioFrame((frame) => {
+        if (sttEngineRef.current !== engine) return
         setSttAudioFrame(frame)
       })
 
       engine.onResult((result) => {
+        if (sttEngineRef.current !== engine) return
         if (result.isFinal) {
           const { text: commandStrippedText, shouldSend } = stripSTTSendCommand(result.text)
           if (shouldSend) sttShouldSendRef.current = true
@@ -3053,11 +3085,14 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
 
       engine.onStop(() => {
+        if (sttEngineRef.current !== engine) return
+        setSttLoadingProgress(null)
         setSttAudioFrame(null)
         void finalizeSTTTranscript()
       })
 
       engine.onError((err) => {
+        if (sttEngineRef.current !== engine) return
         const msg = err.message || 'Speech-to-text failed'
         stopSTTSession('destroy')
         sttInterimTextRef.current = ''
@@ -3071,13 +3106,30 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
 
       await engine.start()
+      if (sttEngineRef.current !== engine) return
       setSttStatus(engine.isListening() ? 'listening' : 'idle')
     } catch (err: any) {
       stopSTTSession('destroy')
       setSttStatus('idle')
       toast.error(err?.message || t('toast.sttFailed'), { title: t('toast.sttFailed') })
     }
-  }, [isListeningToSTT, isSTTSupported, voiceSettings, text, openModal, applySTTTranscript, stopSTTSession, finalizeSTTTranscript, t])
+  }, [isListeningToSTT, isSTTSupported, sttStatus, voiceSettings, text, openModal, applySTTTranscript, stopSTTSession, finalizeSTTTranscript, t])
+
+  useEffect(() => {
+    const config = sttSessionConfigRef.current
+    if (sttEngineRef.current && config && (config.provider !== voiceSettings.sttProvider
+      || config.language !== voiceSettings.sttLanguage || config.connectionId !== voiceSettings.sttConnectionId)) {
+      stopSTTSession('destroy')
+      setSttStatus('idle')
+      setSttLoadingProgress(null)
+    }
+  }, [voiceSettings.sttProvider, voiceSettings.sttLanguage, voiceSettings.sttConnectionId, stopSTTSession])
+
+  useEffect(() => {
+    stopSTTSession('destroy')
+    setSttStatus('idle')
+    setSttLoadingProgress(null)
+  }, [chatId, stopSTTSession])
 
   useEffect(() => {
     if (isGeneratingInChat && isListeningToSTT) {
@@ -4357,10 +4409,12 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
             '--stt-glow-x': `${12 + sttVisualizerLevel * 12}%`,
             '--stt-glow-size': `${10 + sttVisualizerLevel * 24}px`,
           } as CSSProperties}
-          onClick={sttStatus === 'processing' ? undefined : handleSTTToggle}
-          disabled={sttStatus === 'processing'}
-          title={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
-          aria-label={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          onClick={sttStatus === 'processing' && voiceSettings.sttProvider !== 'whistle' ? undefined : handleSTTToggle}
+          disabled={sttStatus === 'processing' && voiceSettings.sttProvider !== 'whistle'}
+          title={voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+            ? t('input.sttCancel') : sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          aria-label={voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+            ? t('input.sttCancel') : sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
           aria-live="polite"
         >
           <span className={styles.sttRecordingStatus}>
@@ -4389,7 +4443,8 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
             })}
           </span>
           <span className={styles.sttRecordingHint}>
-            {sttStatus === 'processing' ? t('input.transcribing') : t('input.tapToStopTranscribe')}
+            {voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+              ? t('input.sttTapToCancel') : sttStatus === 'processing' ? t('input.transcribing') : t('input.tapToStopTranscribe')}
           </span>
         </button>
       ) : (

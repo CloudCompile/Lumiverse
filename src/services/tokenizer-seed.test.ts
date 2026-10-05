@@ -51,6 +51,31 @@ describe("built-in tokenizer defaults", () => {
     expect(getTokenizerIdForModel("MiniMaxAI/MiniMax-M3")).toBe("minimax-m3");
   });
 
+  test.each(["pro", "flash"])("resolves MiMo V2.6 %s API and checkpoint identifiers", (variant) => {
+    const tokenizerId = `mimo-v2-6-${variant}`;
+    for (const modelId of [
+      `mimo-v2.6-${variant}`,
+      `xiaomi/mimo-v2.6-${variant}`,
+      `XiaomiMiMo/MiMo-V2.6-${variant}-RL`,
+      `XiaomiMiMo/MiMo-V2.6-${variant}-MOPD`,
+      `mimo-v2-6-${variant}`,
+      `mimov2.6.${variant}`,
+      `publisher:mimo-v2.6-${variant}`,
+      `xiaomi.mimo-v2.6-${variant}-20260925`,
+    ]) {
+      expect(getTokenizerIdForModel(modelId)).toBe(tokenizerId);
+    }
+    expect(getConfig(tokenizerId)?.is_built_in).toBe(true);
+    expect(getConfig(tokenizerId)?.type).toBe("huggingface");
+  });
+
+  test("does not route other MiMo versions or unrelated names to V2.6", () => {
+    expect(getTokenizerIdForModel("xiaomi/mimo-v2.5-pro")).toBe("mimo-v2-5-pro");
+    expect(getTokenizerIdForModel("xiaomi/mimo-v2.5")).toBe("mimo-v2-5");
+    expect(getTokenizerIdForModel("mimo-v2.7-pro")).toBe("approximate-4");
+    expect(getTokenizerIdForModel("notmimo-v2.6-flash")).toBe("approximate-4");
+  });
+
   test("resolves DeepSeek V4.1 Flash separately from the V4 tokenizer", () => {
     expect(getConfig("deepseek-v4-1-flash")?.config.url).toBe(
       "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/resolve/main/tokenizer.json",

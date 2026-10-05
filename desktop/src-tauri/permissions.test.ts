@@ -142,6 +142,18 @@ describe("capability origins", () => {
     expect(grants.flatMap((capability) => capability.json.windows as string[])).not.toContain("frontend");
   });
 
+  test("desktop installer handoff is callable only from the hidden local tray host", () => {
+    const grants = capabilities().filter((capability) =>
+      ((capability.json.permissions as Array<string | { identifier?: string }>) ?? [])
+        .some((permission) => permission === "desktop-update-install"
+          || (typeof permission === "object" && permission.identifier === "desktop-update-install")),
+    );
+    expect(grants.length).toBe(1);
+    expect(grants[0].json.remote).toBeUndefined();
+    expect(grants[0].json.local).not.toBe(false);
+    expect(grants[0].json.windows).toEqual(["main"]);
+  });
+
   test("capture control permissions never reach remote or extension windows", () => {
     const grants = capabilities().filter((capability) =>
       ((capability.json.permissions as string[]) ?? []).some((permission) =>
@@ -160,11 +172,24 @@ describe("capability origins", () => {
 });
 
 describe("native capture boundary", () => {
+  test("macOS explicitly links the configured compiler's availability runtime", () => {
+    const build = readFileSync(join(HERE, "build.rs"), "utf8");
+    expect(build).toContain(".get_compiler()");
+    expect(build).toContain(".to_command()");
+    expect(build).toContain('.arg("--print-file-name=libclang_rt.osx.a")');
+    expect(build).toContain("runtime_path.is_file()");
+    expect(build).toContain('cargo:rustc-link-search=native={}');
+    expect(build).toContain('cargo:rustc-link-lib=static=clang_rt.osx');
+  });
+
   test("macOS development builds retain the configured application identity", () => {
     const config = JSON.parse(readFileSync(join(HERE, "tauri.conf.json"), "utf8"));
     const plist = readFileSync(join(HERE, "Info.plist"), "utf8");
     expect(plist.match(/<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(config.identifier);
     expect(plist.match(/<key>CFBundleDisplayName<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(config.productName);
+    expect(plist.match(/<key>NSMicrophoneUsageDescription<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBeTruthy();
+    const entitlements = readFileSync(join(HERE, config.bundle.macOS.entitlements), "utf8");
+    expect(entitlements).toMatch(/<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\s*\/>/);
   });
 
   test("macOS explicitly offers other-app windows and entire displays through the system picker", () => {

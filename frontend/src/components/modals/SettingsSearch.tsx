@@ -33,6 +33,9 @@ function highlight(text: string, query: string): ReactNode {
 export default function SettingsSearch({ onNavigate }: SettingsSearchProps) {
   const { t, i18n } = useTranslation('settings')
   const userRole = useStore((s) => s.user?.role)
+  const extensions = useStore((s) => s.extensions)
+  const settingsTabs = useStore((s) => s.settingsTabs)
+  const productivityTabPosition = useStore((s) => s.productivityTabPosition)
 
   const [query, setQuery] = useState('')
   const [open, setOpen] = useState(false)
@@ -43,8 +46,14 @@ export default function SettingsSearch({ onNavigate }: SettingsSearchProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const openedAt = useRef(0)
 
-  // Rebuild the index when role or language changes (titles are resolved at build time).
-  const index = useMemo(() => getSettingsSearchIndex(userRole), [userRole])
+  const index = useMemo(() => {
+    // The registry reads external state and translations; rebuild when either changes.
+    void i18n.language
+    void extensions
+    void settingsTabs
+    void productivityTabPosition
+    return getSettingsSearchIndex(userRole)
+  }, [userRole, i18n.language, extensions, settingsTabs, productivityTabPosition])
 
   const { groups, flat } = useMemo(() => {
     const q = query.trim().toLowerCase()

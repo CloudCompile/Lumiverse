@@ -69,6 +69,24 @@ function input(id: string, extensionId: string, externallyInvocable = true): Inp
 }
 
 describe('H4 host surface catalog and invocation', () => {
+  test('retired Council drawer IDs stay invocable without appearing in the catalog', () => {
+    const calls: string[] = []
+    const api = createHostSurfaceAPI({
+      extensionId: 'ext-a', getGrantedPermissions: () => [],
+      getInputs: () => ({ drawerTabs: [drawer('council')], commands: [] }),
+      runtime: { openDrawer: (id) => { calls.push(id) } },
+    })
+    for (const id of ['ooc', 'feedback']) api.invoke({ kind: 'drawer_tab', id })
+    expect(calls).toEqual(['ooc', 'feedback'])
+    expect(api.list().filter((surface) => surface.kind === 'drawer_tab').map((surface) => surface.id)).toEqual(['council'])
+    expect(() => api.invoke({ kind: 'drawer_tab', id: 'unknown-drawer' })).toThrow('HOST_ACTION_UNAVAILABLE')
+    expect(() => api.invoke({ kind: 'drawer_tab', id: 'toString' })).toThrow('HOST_ACTION_UNAVAILABLE')
+    const unavailable = createHostSurfaceAPI({
+      extensionId: 'ext-a', getGrantedPermissions: () => [],
+      getInputs: () => ({ drawerTabs: [], commands: [] }),
+    })
+    expect(() => unavailable.invoke({ kind: 'drawer_tab', id: 'ooc' })).toThrow('HOST_ACTION_UNAVAILABLE')
+  })
   test('catalog assembly is deduplicated and keeps route/modal allowlists', () => {
     const catalog = buildHostSurfaceCatalog({
       drawerTabs: [drawer('profile'), drawer('profile')],

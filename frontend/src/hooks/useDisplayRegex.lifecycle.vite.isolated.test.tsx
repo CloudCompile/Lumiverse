@@ -139,6 +139,7 @@ mock.module('@/lib/toast', () => ({ toast: { warning: () => undefined } }))
 mock.module('@/i18n', () => ({ default: { t: (key: string) => key } }))
 
 const {
+  getDisplayContentCacheStatsForTests,
   invalidateDisplayRegexCache,
   resetDisplayRegexCachesForTests,
   useDisplayRegexState,
@@ -252,6 +253,59 @@ afterAll(() => {
 })
 
 describe('useDisplayRegex resolver lifecycle', () => {
+  test('large preset definitions are shared across cached answer frames', async () => {
+    isDisplayChatOwnedMock.mockImplementation(() => false)
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = Array.from({ length: 176 }, (_, index) => ({
+      ...originalScripts[0],
+      id: `large-preset-${index}`,
+      replace_string: `<style>.card-${index}{color:red}</style><div>${'x'.repeat(1500)}</div>`,
+    }))
+    const { host, root } = await createHarness()
+    try {
+      for (let frame = 0; frame < 6; frame++) {
+        const content = `chunk${' next'.repeat(frame)}`
+        await render(root, { content, isStreaming: true })
+        await settle(content, `card frame ${frame}`)
+        expect(readRendered(host)).toBe(`card frame ${frame}`)
+      }
+      const stats = getDisplayContentCacheStatsForTests()
+      expect(stats.size).toBe(6)
+      // Sola-sized replacements used to be serialized into every cache key.
+      expect(stats.keyCharacters).toBeLessThan(10_000)
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
+  test.each(['replacement', 'actions', 'reload', 'order'])('script %s changes invalidate cached output without relying on timestamps', async change => {
+    isDisplayChatOwnedMock.mockImplementation(() => false)
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = [
+      { ...originalScripts[0], id: 'first-script' },
+      { ...originalScripts[0], id: 'second-script' },
+    ]
+    const { host, root } = await createHarness()
+    try {
+      await render(root, { content: 'chunk', isStreaming: false })
+      await settle('chunk', 'previous cards')
+      const [first, second] = storeState.regexScripts
+      storeState.regexScripts = change === 'order' ? [second, first]
+        : change === 'reload' ? storeState.regexScripts.map(script => ({ ...script }))
+        : [{ ...first, ...(change === 'replacement'
+          ? { replace_string: '<div>Updated card</div>' }
+          : { metadata: { match_actions: ['repeat_back'] } }) }, second]
+      await render(root, { content: 'chunk', isStreaming: false })
+      await settle('chunk', 'updated cards')
+      expect(readRendered(host)).toBe('updated cards')
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(2)
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
   test.each(['', 'second state', undefined])('pairs cached body content with processing state %p', async nextState => {
     const { host, root } = await createHarness()
     try {

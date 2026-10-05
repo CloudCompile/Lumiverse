@@ -1,10 +1,12 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Ban, Trash2, ShieldCheck } from 'lucide-react'
+import clsx from 'clsx'
 import { useStore } from '@/store'
 import type { AuthUser } from '@/types/store'
 import { Button } from '@/components/shared/FormComponents'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
+import sectionStyles from './SettingsSection.module.css'
 import styles from './UserManagement.module.css'
 
 export default function UserManagement() {
@@ -140,7 +142,7 @@ export default function UserManagement() {
     <div className={styles.container}>
       <section className={styles.section}>
         <div className={styles.header}>
-          <h3 className={styles.title}>{t('users.title')}</h3>
+          <h3 className={clsx(sectionStyles.title, styles.title)}>{t('users.title')}</h3>
           <Button
             variant="ghost"
             size="sm"

@@ -3,6 +3,7 @@ import { useStore } from '@/store'
 import { trackInitialDisplayResolve } from '@/lib/chatDisplaySettle'
 import { applyDisplayRegexTiered } from '@/lib/regex/pipeline'
 import { canSkipDisplayRegex } from '@/lib/regex/match-gate'
+import { getRegexScriptCacheKey } from '@/lib/regex/script-cache-key'
 import { useDisplayTask } from './useDisplayTask'
 import { resolveMacrosBatch } from '@/api/macros'
 import { isDisplayChatOwned, getDisplayResolverForChat } from '@/lib/spindle/display-resolver-registry'
@@ -603,8 +604,10 @@ export function seedDisplayContentEntryForTests(entry: {
   evictDisplayRegexContentCacheOverflow()
 }
 
-export function getDisplayContentCacheStatsForTests(): { size: number; hasKey(key: string): boolean } {
-  return { size: displayRegexContentCache.size, hasKey: (k) => displayRegexContentCache.has(k) }
+export function getDisplayContentCacheStatsForTests(): { size: number; keyCharacters: number; hasKey(key: string): boolean } {
+  let keyCharacters = 0
+  for (const key of displayRegexContentCache.keys()) keyCharacters += key.length
+  return { size: displayRegexContentCache.size, keyCharacters, hasKey: (k) => displayRegexContentCache.has(k) }
 }
 
 export function resetDisplayRegexCachesForTests(): void {
@@ -758,13 +761,7 @@ export function useDisplayRegexState(
       scopedChatId,
       macroCharacterId,
       activePersonaId,
-      scripts: scriptsNeedingResolution.map((s) => [
-        s.id,
-        s.updated_at,
-        s.find_regex,
-        s.replace_string,
-        s.substitute_macros,
-      ]),
+      scripts: getRegexScriptCacheKey(scriptsNeedingResolution),
     })
   }, [scriptsNeedingResolution, scopedChatId, macroCharacterId, activePersonaId])
 
@@ -878,7 +875,7 @@ export function useDisplayRegexState(
     scopedChatId, messageId: preprocessOpts?.messageId, role: preprocessOpts?.role,
     macroCharacterId, activePersonaId, isUser, depth, macroCtx, messageIndex,
     resolvedTemplateKey, dynamicMacros, previousContent, displayOwned,
-    scripts: displayScripts,
+    scripts: getRegexScriptCacheKey(displayScripts),
   }), [scopedChatId, preprocessOpts?.messageId, preprocessOpts?.role, macroCharacterId,
     activePersonaId, isUser, depth, macroCtx, messageIndex, resolvedTemplateKey,
     dynamicMacros, previousContent, displayOwned, displayScripts])

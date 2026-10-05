@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand'
 import type { UISlice } from '@/types/store'
 import { CUSTOM_CSS_DOCK_DEFAULT_SIZE } from '@/lib/custom-css-dock'
 import { longMessageExpansionKey } from '@/lib/longMessageCollapse'
+import { councilViewForTab, resolveCouncilTabId } from '@/lib/council-navigation'
 
 let toastCounter = 0
 let settingsScrollCounter = 0
@@ -32,6 +33,8 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
   error: null,
   drawerOpen: false,
   drawerTab: null,
+  councilView: 'setup',
+  setCouncilView: (councilView) => set({ councilView }),
   settingsModalOpen: false,
   settingsActiveView: readPersistedSettingsActiveView() ?? 'display',
   settingsScrollTarget: null,
@@ -82,10 +85,14 @@ export const createUISlice: StateCreator<UISlice> = (set) => ({
   openDrawer: (tab) =>
     set((state) => ({
       drawerOpen: true,
-      drawerTab: tab ?? state.drawerTab,
+      drawerTab: tab ? resolveCouncilTabId(tab) : state.drawerTab,
+      ...(tab && councilViewForTab(tab) ? { councilView: councilViewForTab(tab) } : {}),
     })),
   closeDrawer: () => set({ drawerOpen: false }),
-  setDrawerTab: (tab) => set({ drawerTab: tab }),
+  setDrawerTab: (tab) => set({
+    drawerTab: resolveCouncilTabId(tab),
+    ...(councilViewForTab(tab) ? { councilView: councilViewForTab(tab) } : {}),
+  }),
 
   openSettings: (view, target) =>
     set((state) => {

@@ -10,6 +10,7 @@ commands.allow = [
   "discover_repo",
   "resolve_bun",
   "desktop_shell_sha",
+  "take_desktop_update_resume",
   "desktop_startup_ready",
   "quit_app",
   "alert",
@@ -75,3 +76,8 @@ commands.allow = [
   "remote_instance_poll",
   "remote_instance_disconnect"
 ]
+
+[[permission]]
+identifier = "desktop-update-install"
+description = "Allows only the hidden local tray host to stage a validated desktop installer handoff."
+commands.allow = ["stage_desktop_update"]

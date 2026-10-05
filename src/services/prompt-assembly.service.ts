@@ -9,6 +9,7 @@ import {
   type MemoryStats,
   type DatabankStats,
   type ContextClipStats,
+  EditAndSendContextError,
 } from "../llm/types";
 import {
   resolveCounter,
@@ -51,8 +52,10 @@ import {
   withPromptBlockContext,
   restoreLiteralBraces,
 } from "../macros";
-import type { MacroEnv } from "../macros";
+import type { AstNode, MacroEnv } from "../macros/types";
+import { parse } from "../macros/MacroParser";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
+import { readMessageRevision } from "../utils/message-revision";
 import {
   isClaudeOpusAtLeast,
   supportsClaudeOpusXhigh,
@@ -62,6 +65,7 @@ import {
   activateWorldInfo,
   applyWorldInfoGroupLogic,
   createWorldInfoActivationScanCache,
+  estimateWorldInfoEntryTokens,
   finalizeActivatedWorldInfoEntries,
   materializeWorldInfoCache,
   primeWorldInfoActivationScanCache,
@@ -361,17 +365,28 @@ export function resolveChatHistoryInsertionIndex(
 
 export function insertBlocksIntoTaggedHistory(
   messages: LlmMessage[],
-  blocks: Array<Pick<LlmMessage, "role" | "content"> & { depth: number }>,
+  blocks: Array<
+    Pick<LlmMessage, "role" | "content"> & {
+      depth: number;
+      worldInfo?: boolean;
+    }
+  >,
 ): void {
-  // Insert in reverse so blocks that resolve to the same chat-history boundary
-  // keep their original prompt_order sequence after repeated splices.
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    const insertAt = resolveChatHistoryInsertionIndex(messages, block.depth);
+  // Resolve every boundary before splicing, then insert from the last boundary
+  // back so earlier indices stay valid. Within one boundary the later block goes
+  // in first, so blocks sharing a boundary keep their prompt_order sequence.
+  const placements = blocks.map((block, order) => ({
+    block,
+    order,
+    insertAt: resolveChatHistoryInsertionIndex(messages, block.depth),
+  }));
+  placements.sort((a, b) => b.insertAt - a.insertAt || b.order - a.order);
+  for (const { block, insertAt } of placements) {
     messages.splice(insertAt, 0, {
       role: block.role,
       content: block.content,
     });
+    if (block.worldInfo) markAsWorldInfoEntry(messages[insertAt]);
   }
 }
 
@@ -1588,6 +1603,45 @@ const PROMPT_BLOCK_POSITIONS = new Set<PromptBlock["position"]>([
   "post_history",
   "in_history",
 ]);
+const MEMORY_CONTENT_MACROS = new Set([
+  "memories",
+  "memoriesraw",
+  "entities",
+  "entityfacts",
+  "relationships",
+  "arc",
+  "memorysalience",
+  "charactercolors",
+]);
+const DATABANK_CONTENT_MACROS = new Set(["databank", "databankraw"]);
+
+function detectPromptContextMacros(
+  blocks: PromptBlock[],
+  generationType: GenerationType,
+  characterTags: string[],
+): { memory: boolean; databank: boolean } {
+  const usage = { memory: false, databank: false };
+  for (const block of blocks) {
+    if (!block.enabled || !block.content) continue;
+    if (block.injectionTrigger?.length && !block.injectionTrigger.includes(generationType)) continue;
+    if (!promptBlockMatchesCharacterTags(block.characterTagTrigger, characterTags)) continue;
+    if (block.marker && STRUCTURAL_MARKERS.has(block.marker)) continue;
+
+    const pendingNodes: AstNode[] = [...parse(block.content)];
+    while (pendingNodes.length > 0) {
+      const node = pendingNodes.pop()!;
+      if (node.type === "text" || node.flags.close) continue;
+      const name = (registry.getMacro(node.name)?.name ?? node.name).toLowerCase();
+      if (name === "escape" || name === "comment" || name === "//") continue;
+      if (MEMORY_CONTENT_MACROS.has(name)) usage.memory = true;
+      if (DATABANK_CONTENT_MACROS.has(name)) usage.databank = true;
+      for (const argument of node.args) pendingNodes.push(...argument);
+      if (node.type === "scoped_macro") pendingNodes.push(...node.body);
+    }
+    if (usage.memory && usage.databank) break;
+  }
+  return usage;
+}
 
 function isPromptBlockPlacement(value: unknown): value is Pick<PromptBlock, "role" | "position" | "depth"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -1767,11 +1821,53 @@ export async function assemblePrompt(
 
   const allMessages =
     pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
+
+  // Validate the snapshot and live row, then cap history at the committed turn
+  // before WI, macros, and MessageLimit. Context errors survive the worker boundary.
+  let editedContextMessages = allMessages;
+  const editAndSendContext = ctx.editAndSendContext;
+  if (editAndSendContext) {
+    const selectedIndex = allMessages.findIndex(
+      (m) => m.id === editAndSendContext.editedUserMessageId,
+    );
+    if (selectedIndex < 0) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const selected = allMessages[selectedIndex];
+    if (selected.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is not a user message",
+      );
+    }
+    const snapshotRevision = readMessageRevision(selected);
+    if (snapshotRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    // Prefetch may predate a concurrent edit, so also check the live row.
+    const live = chatsSvc.getMessage(ctx.userId, editAndSendContext.editedUserMessageId);
+    if (!live || live.chat_id !== ctx.chatId || live.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const liveRevision = readMessageRevision(live);
+    if (liveRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    editedContextMessages = allMessages.slice(0, selectedIndex + 1);
+  }
+
   // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
   // so it doesn't appear in macros, WI scanning, or any assembly path.
   const messages = ctx.excludeMessageId
-    ? allMessages.filter((m) => m.id !== ctx.excludeMessageId)
-    : allMessages;
+    ? editedContextMessages.filter((m) => m.id !== ctx.excludeMessageId)
+    : editedContextMessages;
   const contextAnchorMessageId =
     typeof chat.metadata?.context_history_anchor_message_id === "string"
       ? chat.metadata.context_history_anchor_message_id
@@ -1918,7 +2014,7 @@ export async function assemblePrompt(
     return {
       ...legacyResult,
       ...(preset
-        ? { resolvedPreset: { id: preset.id, name: preset.name } }
+        ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
         : {}),
     };
   }
@@ -2817,7 +2913,11 @@ export async function assemblePrompt(
     chatMemSettings?.injectionStrategy ??
     embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS.injectionStrategy;
   const effectiveMemoryEnabled =
-    memoryResult.enabled && memoryInjectionStrategy !== "disabled";
+    (memoryResult.enabled || !!linkedMemoryText) && memoryInjectionStrategy !== "disabled";
+  const memoryFallbackAllowed =
+    memoryInjectionStrategy === "fallback" ||
+    !!macroEnv.extra.cortex?.formatted ||
+    !!linkedMemoryText;
 
   macroEnv.extra.memory = {
     chunks: memoryResult.chunks,
@@ -2874,14 +2974,10 @@ export async function assemblePrompt(
   };
   profiler.addPhase("databank-retrieval", performance.now() - phaseStartedAt);
 
-  // Detect if any enabled block uses the {{memories}} macro
-  const macroHandlesMemory = effectiveBlocks.some(
-    (b) => b.enabled && b.content && /\{\{memories(\b|::|\}\})/.test(b.content),
-  );
-
-  // Detect if any enabled block uses the {{databank}} macro
-  const macroHandlesDatabank = effectiveBlocks.some(
-    (b) => b.enabled && b.content && /\{\{databank(\b|::|\}\})/.test(b.content),
+  const { memory: macroHandlesMemory, databank: macroHandlesDatabank } = detectPromptContextMacros(
+    effectiveBlocks,
+    ctx.generationType,
+    focusedCharacter.tags,
   );
 
   // ---- Resolve #mentions in user messages ----
@@ -3042,6 +3138,7 @@ export async function assemblePrompt(
     blockName: string;
     blockId: string;
     marker?: string;
+    worldInfo?: boolean;
   }[] = [];
   let chatHistoryInserted = false;
   let chatHistoryCount = 0;
@@ -3129,10 +3226,11 @@ export async function assemblePrompt(
       // the global injection strategy allows fallback injection.
       if (
         !macroHandlesMemory &&
-        memoryResult.count > 0 &&
-        memoryInjectionStrategy === "fallback"
+        effectiveMemoryEnabled &&
+        combinedFormatted &&
+        memoryFallbackAllowed
       ) {
-        const memoryContent = memoryResult.formatted;
+        const memoryContent = combinedFormatted;
         result.push({ role: "system", content: memoryContent });
         breakdown.push({
           type: "long_term_memory",
@@ -3472,6 +3570,22 @@ export async function assemblePrompt(
       if (wiCache.before.length > 0) {
         for (const entry of wiCache.before) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info Before",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3492,6 +3606,22 @@ export async function assemblePrompt(
       if (wiCache.after.length > 0) {
         for (const entry of wiCache.after) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info After",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3657,12 +3787,12 @@ export async function assemblePrompt(
   // When memories are injected via {{memories}} macro, their content is embedded
   // inside a block. Add a separate breakdown entry so the prompt breakdown UI
   // shows memories as their own group.
-  if (macroHandlesMemory && memoryResult.count > 0 && memoryResult.formatted) {
+  if (macroHandlesMemory && effectiveMemoryEnabled && combinedFormatted) {
     breakdown.push({
       type: "long_term_memory",
       name: "Long-Term Memory",
       role: "system",
-      content: memoryResult.formatted,
+      content: combinedFormatted,
       excludeFromTotal: true, // tokens already counted in the block containing {{memories}}
     });
   }
@@ -3836,6 +3966,15 @@ export async function assemblePrompt(
   insertBlocksIntoTaggedHistory(result, pendingDepthBlocks);
 
   for (const depthBlock of pendingDepthBlocks) {
+    if (depthBlock.worldInfo) {
+      breakdown.push({
+        type: "world_info",
+        name: depthBlock.blockName,
+        role: depthBlock.role,
+        content: depthBlock.content,
+      });
+      continue;
+    }
     breakdown.push({
       type: "block",
       name: depthBlock.blockName,
@@ -4323,7 +4462,7 @@ export async function assemblePrompt(
       ? "disabled"
       : macroHandlesMemory
         ? "macro"
-        : memoryInjectionStrategy === "fallback"
+        : memoryFallbackAllowed
           ? "fallback"
           : "disabled",
     retrievedChunks: memoryResult.chunks.map((c) => ({
@@ -4398,7 +4537,7 @@ export async function assemblePrompt(
     breakdown,
     parameters,
     ...(preset
-      ? { resolvedPreset: { id: preset.id, name: preset.name } }
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
       : {}),
     trimIncompleteWords: prompts.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,
@@ -4972,6 +5111,9 @@ export function mergeActivatedWorldInfoEntries(
         bookId: entry.world_book_id,
         bookSource: bookSourceMap?.get(entry.world_book_id),
         bookName: bookNameMap?.get(entry.world_book_id),
+        estimatedTokens: estimateWorldInfoEntryTokens(
+          selectionContentByEntryId?.get(entry.id) ?? entry.content,
+        ),
       };
     });
 
@@ -6163,6 +6305,11 @@ function formatCortexForAssembly(
         ? memResult.formatted + "\n\n" + contextText
         : contextText;
     }
+    if (colorMapText) {
+      memResult.formatted = memResult.formatted
+        ? memResult.formatted + "\n\n" + colorMapText
+        : colorMapText;
+    }
 
     return memResult;
   }
@@ -6177,7 +6324,7 @@ function formatCortexForAssembly(
         messageRange: m.messageRange,
       },
     })),
-    formatted: shadowResult.text,
+    formatted: macroEnv.extra.cortex.formatted,
     count: cortexResult.memories.length,
     enabled: true,
     queryPreview: "",
@@ -8046,7 +8193,7 @@ async function onelinerImpersonation(
     breakdown,
     parameters,
     ...(preset
-      ? { resolvedPreset: { id: preset.id, name: preset.name } }
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
       : {}),
     trimIncompleteWords: preset?.prompts?.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,
