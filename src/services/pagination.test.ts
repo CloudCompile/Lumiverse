@@ -82,4 +82,12 @@ describe("parsePagination", () => {
     expect(parsePagination("50abc", "10xyz")).toEqual({ limit: 50, offset: 0 });
     expect(parsePagination("12.5", "1.5")).toEqual({ limit: 50, offset: 0 });
   });
+
+  test("clamps negative, oversized, and unsafe pagination values", () => {
+    expect(parsePagination("-1", "-10")).toEqual({ limit: 1, offset: 0 });
+    expect(parsePagination("999999999999999999999", "999999999999999999999")).toEqual({
+      limit: 50,
+      offset: 0,
+    });
+  });
 });

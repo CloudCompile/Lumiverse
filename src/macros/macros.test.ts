@@ -2467,6 +2467,11 @@ describe("foreachMessage macro", () => {
     );
   });
 
+  test("zero count returns nothing and negative count selects the last N", async () => {
+    expect(await ev("{{foreachMessage::0}}x{{/foreachMessage}}")).toBe("");
+    expect(await ev("{{foreachMessage::-2}}[{{.msg_name}}]{{/foreachMessage}}")).toBe("[Bob][Alice]");
+  });
+
   test("non-numeric first arg is the loop variable name", async () => {
     expect(await ev("{{foreachMessage::m}}{{.m_number}}{{/foreachMessage}}")).toBe("12345");
   });

@@ -311,10 +311,10 @@ export function registerIterationMacros(): void {
       // variable name; the second arg is the variable name when a count is given.
       const a0 = ctx.rawArgs[0] ? (await ctx.resolveNodes(ctx.rawArgs[0])).trim() : "";
       const a1 = ctx.rawArgs[1] ? (await ctx.resolveNodes(ctx.rawArgs[1])).trim() : "";
-      let count = 0; // 0 = all
+      let count: number | undefined; // undefined = all
       let varName = "msg";
       if (a0 !== "") {
-        if (/^\d+$/.test(a0)) {
+        if (/^-?\d+$/.test(a0)) {
           count = parseInt(a0, 10);
           if (a1) varName = a1;
         } else {
@@ -323,7 +323,7 @@ export function registerIterationMacros(): void {
       }
 
       const all = getMessages(ctx);
-      let messages = count > 0 ? all.slice(-count) : all;
+      let messages = count === undefined ? all : count > 0 ? all.slice(-count) : count < 0 ? all.slice(-Math.abs(count)) : [];
       if (messages.length > MAX_LIST_ITEMS) {
         ctx.warn(`{{foreachMessage}} capped at ${MAX_LIST_ITEMS} messages`);
         messages = messages.slice(-MAX_LIST_ITEMS);
