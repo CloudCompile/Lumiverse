@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
 import { RefreshCw, GripVertical, Plus } from 'lucide-react'
 import {
-  DndContext,
   closestCenter,
   MouseSensor,
   TouchSensor,
@@ -19,7 +18,7 @@ import {
   verticalListSortingStrategy,
   useSortable,
 } from '@dnd-kit/sortable'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { CloseButton } from '@/components/shared/CloseButton'
 import LanguageSwitcher from '@/components/shared/LanguageSwitcher'
 import { useTranslation } from 'react-i18next'
@@ -30,7 +29,9 @@ import { Toggle } from '@/components/shared/Toggle'
 import { spinClass } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
 import { useStore } from '@/store'
+import { isDesktopViewportZoomAvailable } from '@/lib/desktopViewportZoom'
 import { readProductivityFeature } from '@/lib/spindle/productivity-feature-toggles'
+import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
 import { spindleApi } from '@/api/spindle'
 import { connectionsApi } from '@/api/connections'
 import { chatsApi } from '@/api/chats'
@@ -82,9 +83,12 @@ import {
 } from '@/lib/authorizationPopup'
 import type { SettingsTabState } from '@/store/slices/spindle-placement'
 import SettingsSearch from './SettingsSearch'
+import sectionStyles from '@/components/settings/SettingsSection.module.css'
 import styles from './SettingsModal.module.css'
 import formStyles from '@/components/shared/FormComponents.module.css'
 import clsx from 'clsx'
+
+const sectionTitleClass = clsx(sectionStyles.title, styles.sectionTitle)
 
 interface SettingsModalProps {
   onClose: () => void
@@ -97,13 +101,16 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
   const settingsScrollTarget = useStore((s) => s.settingsScrollTarget)
   const user = useStore((s) => s.user)
   const settingsTabs = useStore((s) => s.settingsTabs)
+  const extensions = useStore((s) => s.extensions)
   const productivityTabPosition = useStore((s) => (s as any).productivityTabPosition ?? 'after-display')
   const [activeView, setActiveView] = useState(settingsActiveView || 'display')
 
   const VIEWS = useMemo(() => {
+    // The registry reads external state; these subscriptions invalidate its snapshot.
     void settingsTabs
+    void extensions
     return getVisibleSettingsTabs(user?.role, productivityTabPosition)
-  }, [settingsTabs, user?.role, productivityTabPosition])
+  }, [settingsTabs, extensions, user?.role, productivityTabPosition])
 
   const contentRef = useRef<HTMLDivElement>(null)
   const navNonce = useRef(0)
@@ -265,11 +272,12 @@ export default function SettingsModal({ onClose }: SettingsModalProps) {
 function SettingsView({ view }: { view: string }) {
   const { t } = useTranslation('shared')
   const settingsTabs = useStore((s) => s.settingsTabs)
+  const extensions = useStore((s) => s.extensions)
   const extensionTabs = useMemo(
-    () => settingsTabs
+    () => filterEnabledFrontendContributions(settingsTabs, extensions)
       .filter((tab) => tab.tabId === view)
       .sort((left, right) => left.order - right.order || left.sequence - right.sequence),
-    [settingsTabs, view],
+    [settingsTabs, extensions, view],
   )
   const hasCoreTab = SETTINGS_TABS.some((tab) => tab.id === view)
 
@@ -371,6 +379,7 @@ function DisplaySettings() {
   const { t } = useTranslation('settings')
   const { t: tc } = useTranslation('common')
   const drawerSettings = useStore((s) => s.drawerSettings)
+  const desktopPinchZoomEnabled = useStore((s) => s.desktopPinchZoomEnabled)
   const modalWidthMode = useStore((s) => s.modalWidthMode)
   const modalMaxWidth = useStore((s) => s.modalMaxWidth)
   const longMessageCollapseEnabled = useStore((s) => s.longMessageCollapseEnabled)
@@ -400,7 +409,18 @@ function DisplaySettings() {
     <div className={styles.settingsSection}>
       <LanguageSwitcher />
 
-      <h3 id={sectionAnchorId('display', 'longMessages')} className={styles.sectionTitle} style={{ marginTop: 16 }}>{t('display.longMessages.title')}</h3>
+      {isDesktopViewportZoomAvailable() && (
+        <>
+          <h3 id={sectionAnchorId('display', 'zoom')} className={sectionTitleClass} style={{ marginTop: 16 }}>{t('display.zoom.title')}</h3>
+          <Toggle.Checkbox
+            checked={desktopPinchZoomEnabled}
+            onChange={(checked) => setSetting('desktopPinchZoomEnabled', checked)}
+            label={t('display.zoom.desktopPinchZoom')}
+          />
+        </>
+      )}
+
+      <h3 id={sectionAnchorId('display', 'longMessages')} className={sectionTitleClass} style={{ marginTop: 16 }}>{t('display.longMessages.title')}</h3>
       <p className={styles.helperText}>
         {t('display.longMessages.helper')}
       </p>
@@ -466,7 +486,7 @@ function DisplaySettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('display', 'modalWidth')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.modalWidth.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'modalWidth')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.modalWidth.title')}</h3>
       <p className={styles.helperText}>
         {t('display.modalWidth.helper')}
       </p>
@@ -505,7 +525,7 @@ function DisplaySettings() {
         </div>
       )}
 
-      <h3 id={sectionAnchorId('display', 'drawer')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.drawer.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'drawer')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.drawer.title')}</h3>
 
       <div className={styles.drawerRow}>
         <div className={styles.field}>
@@ -571,45 +591,9 @@ function DisplaySettings() {
         hint={t('display.drawer.showTabLabelsHint')}
       />
 
-      <div className={styles.field}>
-        <label className={styles.fieldLabel}>{t('display.drawer.panelWidth')}</label>
-        <div className={styles.segmented}>
-          <button
-            type="button"
-            className={clsx(styles.segmentedBtn, drawerSettings.panelWidthMode !== 'custom' && styles.segmentedBtnActive)}
-            onClick={() => updateDrawer({ panelWidthMode: 'default' })}
-          >
-            {t('display.drawer.panelDefault')}
-          </button>
-          <button
-            type="button"
-            className={clsx(styles.segmentedBtn, drawerSettings.panelWidthMode === 'custom' && styles.segmentedBtnActive)}
-            onClick={() => updateDrawer({ panelWidthMode: 'custom' })}
-          >
-            {t('display.drawer.panelCustom')}
-          </button>
-        </div>
-      </div>
+      <p className={styles.helperText}>{t('display.drawer.resizeHint')}</p>
 
-      {drawerSettings.panelWidthMode === 'custom' && (
-        <div className={styles.field}>
-          <label className={styles.fieldLabel}>{t('display.drawer.customWidthVw')}</label>
-          <div className={styles.rangeRow}>
-            <input
-              type="range"
-              className={styles.rangeSlider}
-              min={20}
-              max={80}
-              step={1}
-              value={drawerSettings.customPanelWidth}
-              onChange={(e) => updateDrawer({ customPanelWidth: parseInt(e.target.value, 10) })}
-            />
-            <span className={styles.rangeValue}>{drawerSettings.customPanelWidth}vw</span>
-          </div>
-        </div>
-      )}
-
-      <h3 id={sectionAnchorId('display', 'toast')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('display.toast.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'toast')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('display.toast.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('display.toast.position')}</label>
@@ -634,7 +618,7 @@ function DisplaySettings() {
         </div>
       </div>
 
-      <h3 id={sectionAnchorId('display', 'chatHeads')} className={styles.sectionTitle} style={{ marginTop: 8 }}>{t('display.chatHeads.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'chatHeads')} className={sectionTitleClass} style={{ marginTop: 8 }}>{t('display.chatHeads.title')}</h3>
 
       <Toggle.Checkbox
         checked={chatHeadsEnabled}
@@ -709,7 +693,7 @@ function DisplaySettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('display', 'landing')} className={styles.sectionTitle} style={{ marginTop: 8 }}>{t('display.landing.title')}</h3>
+      <h3 id={sectionAnchorId('display', 'landing')} className={sectionTitleClass} style={{ marginTop: 8 }}>{t('display.landing.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('display.landing.layout')}</label>
@@ -937,6 +921,7 @@ function ChatSettings() {
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
+  const centerChatWithSidebar = useStore((s) => s.centerChatWithSidebar)
   const messagesPerPage = useStore((s) => s.messagesPerPage)
   const regenFeedback = useStore((s) => s.regenFeedback)
   const suppressContextDropWarnings = useStore((s) => s.suppressContextDropWarnings)
@@ -945,7 +930,7 @@ function ChatSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('chat', 'general')} className={styles.sectionTitle}>{t('chat.title')}</h3>
+      <h3 id={sectionAnchorId('chat', 'general')} className={sectionTitleClass}>{t('chat.title')}</h3>
 
       <div className={styles.field}>
         <label className={styles.fieldLabel}>{t('chat.displayMode')}</label>
@@ -1102,7 +1087,7 @@ function ChatSettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'width')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.widthTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'width')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.widthTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.widthHelper')}
       </p>
@@ -1141,7 +1126,13 @@ function ChatSettings() {
         </div>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'messagesPerPage')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.messagesPerPageTitle')}</h3>
+      <Toggle.Checkbox
+        checked={centerChatWithSidebar}
+        onChange={(checked) => setSetting('centerChatWithSidebar', checked)}
+        label={t('chat.centerWithSidebar')}
+        hint={t('chat.centerWithSidebarHint')}
+      />
+      <h3 id={sectionAnchorId('chat', 'messagesPerPage')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.messagesPerPageTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.messagesPerPageHelper')}
       </p>
@@ -1187,7 +1178,7 @@ function ChatSettings() {
         </div>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'input')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.inputTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'input')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.inputTitle')}</h3>
 
       <Toggle.Checkbox
         checked={enterToSend.desktop}
@@ -1235,7 +1226,7 @@ function ChatSettings() {
         </select>
       </div>
 
-      <h3 id={sectionAnchorId('chat', 'regen')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.regenTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'regen')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.regenTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.regenHelper')}
       </p>
@@ -1293,7 +1284,7 @@ function ChatSettings() {
         </>
       )}
 
-      <h3 id={sectionAnchorId('chat', 'messageInfo')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.messageInfoTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'messageInfo')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.messageInfoTitle')}</h3>
 
       <Toggle.Checkbox
         checked={useStore((s) => s.showMessageTokenCount ?? true)}
@@ -1316,7 +1307,7 @@ function ChatSettings() {
         hint={t('chat.preventDroppedMessageWarningHint')}
       />
 
-      <h3 id={sectionAnchorId('chat', 'swipe')} className={styles.sectionTitle} style={{ marginTop: 12 }}>{t('chat.swipeTitle')}</h3>
+      <h3 id={sectionAnchorId('chat', 'swipe')} className={sectionTitleClass} style={{ marginTop: 12 }}>{t('chat.swipeTitle')}</h3>
       <p className={styles.helperText}>
         {t('chat.swipeHelper')}
       </p>
@@ -1337,7 +1328,7 @@ function ExtensionSettingsView() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('extensions', 'general')} className={styles.sectionTitle}>{t('extensions.title')}</h3>
+      <h3 id={sectionAnchorId('extensions', 'general')} className={sectionTitleClass}>{t('extensions.title')}</h3>
       <p className={styles.placeholder}>
         {t('extensions.placeholder')}
         {frontendCount > 0
@@ -1711,7 +1702,7 @@ function GuidedGenerationSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('guided', 'general')} className={styles.sectionTitle}>{t('guided.title')}</h3>
+        <h3 id={sectionAnchorId('guided', 'general')} className={sectionTitleClass}>{t('guided.title')}</h3>
         <Button size="sm" onClick={addGuide}>{t('guided.newGuide')}</Button>
       </div>
       <p className={styles.placeholder}>{t('guided.helper')}</p>
@@ -1826,7 +1817,7 @@ function QuickRepliesSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('quickReplies', 'general')} className={styles.sectionTitle}>{t('quickReplies.title')}</h3>
+        <h3 id={sectionAnchorId('quickReplies', 'general')} className={sectionTitleClass}>{t('quickReplies.title')}</h3>
         <Button size="sm" onClick={addSet}>{t('quickReplies.newSet')}</Button>
       </div>
       <p className={styles.placeholder}>{t('quickReplies.helper')}</p>
@@ -2138,7 +2129,7 @@ function ExtensionPoolSettings() {
   return (
     <div className={styles.settingsSection}>
       <div className={styles.inlineHeader}>
-        <h3 id={sectionAnchorId('extensionPools', 'general')} className={styles.sectionTitle}>{t('extensionPools.title')}</h3>
+        <h3 id={sectionAnchorId('extensionPools', 'general')} className={sectionTitleClass}>{t('extensionPools.title')}</h3>
         <Button
           size="icon"
           onClick={() => load(true)}
@@ -2726,7 +2717,7 @@ function EmbeddingsSettings() {
   if (loading || !cfg) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('embeddings', 'general')} className={styles.sectionTitle}>{t('embeddings.title')}</h3>
+        <h3 id={sectionAnchorId('embeddings', 'general')} className={sectionTitleClass}>{t('embeddings.title')}</h3>
         <p className={styles.placeholder}>{t('embeddings.loading')}</p>
       </div>
     )
@@ -2788,7 +2779,7 @@ function EmbeddingsSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('embeddings', 'general')} className={styles.sectionTitle}>{t('embeddings.title')}</h3>
+      <h3 id={sectionAnchorId('embeddings', 'general')} className={sectionTitleClass}>{t('embeddings.title')}</h3>
       <p className={styles.placeholder}>{t('embeddings.helper')}</p>
 
       {inherited && (
@@ -3450,7 +3441,7 @@ function WebSearchSettings() {
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('webSearch', 'general')} className={styles.sectionTitle}>{t('webSearch.title')}</h3>
+        <h3 id={sectionAnchorId('webSearch', 'general')} className={sectionTitleClass}>{t('webSearch.title')}</h3>
         <p className={styles.placeholder}>{t('webSearch.loading')}</p>
       </div>
     )
@@ -3458,7 +3449,7 @@ function WebSearchSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('webSearch', 'general')} className={styles.sectionTitle}>{t('webSearch.title')}</h3>
+      <h3 id={sectionAnchorId('webSearch', 'general')} className={sectionTitleClass}>{t('webSearch.title')}</h3>
       <p className={styles.placeholder}>{t('webSearch.helper')}</p>
 
       {error && <p className={styles.errorText}>{error}</p>}
@@ -3673,7 +3664,7 @@ function AdvancedSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('advanced', 'general')} className={styles.sectionTitle}>{t('advanced.title')}</h3>
+      <h3 id={sectionAnchorId('advanced', 'general')} className={sectionTitleClass}>{t('advanced.title')}</h3>
 
       <CollapsibleSection title={t('advanced.spindleLogging')} defaultExpanded={false}>
         <Toggle.Checkbox
@@ -3939,7 +3930,7 @@ function LumiHubSettings() {
   const { t } = useTranslation('settings')
   const user = useStore((s) => s.user)
   const defaultInstanceName = user?.name ? `${user.name}'s Lumiverse` : t('lumihub.defaultInstance')
-  const [lumihubUrl, setLumihubUrl] = useState('https://lumi.spot')
+  const [lumihubUrl, setLumihubUrl] = useState('')
   const [instanceName, setInstanceName] = useState(defaultInstanceName)
   const [status, setStatus] = useState<{
     linked: boolean
@@ -4066,7 +4057,7 @@ function LumiHubSettings() {
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('lumihub', 'general')} className={styles.sectionTitle}>{t('lumihub.title')}</h3>
+        <h3 id={sectionAnchorId('lumihub', 'general')} className={sectionTitleClass}>{t('lumihub.title')}</h3>
         <span className={styles.helperText}>{t('lumihub.loading')}</span>
       </div>
     )
@@ -4074,7 +4065,7 @@ function LumiHubSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('lumihub', 'general')} className={styles.sectionTitle}>{t('lumihub.title')}</h3>
+      <h3 id={sectionAnchorId('lumihub', 'general')} className={sectionTitleClass}>{t('lumihub.title')}</h3>
       <span className={styles.helperText}>
         {t('lumihub.helper')}
       </span>
@@ -4192,6 +4183,14 @@ function IllarinSettings() {
     instance_name?: string
     instance_id?: string
     scopes?: string[]
+    permission_error?: string | null
+    pickup?: {
+      state: 'starting' | 'running' | 'retrying' | 'missing_permission' | 'stopped'
+      lastCollectAt: string | null
+      lastInstallAt: string | null
+      lastError: string | null
+      lastErrorAt: string | null
+    } | null
     linked_at?: string | null
     declaration_version?: string | null
     pending_link?: { status: 'pending' | 'linked' | 'failed'; reason?: string | null } | null
@@ -4201,8 +4200,11 @@ function IllarinSettings() {
   const statusRef = useRef(status)
   useEffect(() => { statusRef.current = status }, [status])
   const [unlinking, setUnlinking] = useState(false)
+  const [refreshingPermissions, setRefreshingPermissions] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [deviceCode, setDeviceCode] = useState<{ user_code: string; verification_url: string } | null>(null)
+  const [browserCode, setBrowserCode] = useState<string | null>(null)
+  const [browserAuthorizationUrl, setBrowserAuthorizationUrl] = useState<string | null>(null)
 
   // Loopback browser linking only reaches the backend when the BROWSER runs
   // on the same machine as the server; otherwise fall back to device codes.
@@ -4241,6 +4243,8 @@ function IllarinSettings() {
     stopPolling()
     setLinking(false)
     setDeviceCode(null)
+    setBrowserCode(null)
+    setBrowserAuthorizationUrl(null)
     fetchStatus()
   }
 
@@ -4305,6 +4309,8 @@ function IllarinSettings() {
 
     setError(null)
     setLinking(true)
+    setBrowserCode(null)
+    setBrowserAuthorizationUrl(null)
     if (!isLocalOrigin) {
       await startDeviceFlow(authorizationTab)
       return
@@ -4323,18 +4329,24 @@ function IllarinSettings() {
         setLinking(false)
         return
       }
-      const data = await res.json() as { authorize_url?: string }
-      const navigation = navigateAuthorizationPopup(authorizationTab, data.authorize_url)
-      if (navigation.status === 'invalid') {
+      const data = await res.json() as { authorize_url?: string; user_code?: string }
+      if (!data.user_code) {
         closeAuthorizationPopup(authorizationTab)
         setError(t('illarin.errLinkFailed'))
         setLinking(false)
         return
       }
+      setBrowserCode(data.user_code)
+      const navigation = navigateAuthorizationPopup(authorizationTab, data.authorize_url)
+      if (navigation.status === 'invalid') {
+        closeAuthorizationPopup(authorizationTab)
+        setError(t('illarin.errLinkFailed'))
+        setLinking(false)
+        setBrowserCode(null)
+        return
+      }
 
-      // Same-tab navigation still completes local loopback authorization when
-      // a browser blocks the reserved popup.
-      if (navigation.status === 'blocked') window.location.assign(navigation.url)
+      if (navigation.status === 'blocked') setBrowserAuthorizationUrl(navigation.url)
 
       // Backend listens on loopback while the authorization page is open.
       pollRef.current.timer = setInterval(async () => {
@@ -4344,6 +4356,8 @@ function IllarinSettings() {
             setError(t('illarin.errLinkFailed'))
             stopPolling()
             setLinking(false)
+            setBrowserCode(null)
+            setBrowserAuthorizationUrl(null)
           } else {
             finishLinking()
           }
@@ -4354,6 +4368,8 @@ function IllarinSettings() {
       closeAuthorizationPopup(authorizationTab)
       setError(err.message || t('illarin.errConnectFailed'))
       setLinking(false)
+      setBrowserCode(null)
+      setBrowserAuthorizationUrl(null)
     }
   }
 
@@ -4380,10 +4396,29 @@ function IllarinSettings() {
     }
   }
 
+  const handleRefreshPermissions = async () => {
+    setRefreshingPermissions(true)
+    setError(null)
+    try {
+      const response = await fetch('/api/v1/illarin/permissions/refresh', { method: 'POST', credentials: 'include' })
+      if (!response.ok) throw new Error(t('illarin.errRefreshPermissions'))
+      await fetchStatus()
+    } catch {
+      setError(t('illarin.errRefreshPermissions'))
+      await fetchStatus()
+    } finally {
+      setRefreshingPermissions(false)
+    }
+  }
+
+  const pickupStateLabel = status?.pickup
+    ? t(`illarin.pickupState.${status.pickup.state}`)
+    : t('illarin.pickupState.stopped')
+
   if (loading) {
     return (
       <div className={styles.settingsSection}>
-        <h3 id={sectionAnchorId('illarin', 'general')} className={styles.sectionTitle}>{t('illarin.title')}</h3>
+        <h3 id={sectionAnchorId('illarin', 'general')} className={sectionTitleClass}>{t('illarin.title')}</h3>
         <span className={styles.helperText}>{t('illarin.loading')}</span>
       </div>
     )
@@ -4391,7 +4426,7 @@ function IllarinSettings() {
 
   return (
     <div className={styles.settingsSection}>
-      <h3 id={sectionAnchorId('illarin', 'general')} className={styles.sectionTitle}>{t('illarin.title')}</h3>
+      <h3 id={sectionAnchorId('illarin', 'general')} className={sectionTitleClass}>{t('illarin.title')}</h3>
       <span className={styles.helperText}>{t('illarin.helper')}</span>
 
       {status?.linked ? (
@@ -4415,8 +4450,35 @@ function IllarinSettings() {
 
           <div className={styles.field}>
             <span className={styles.fieldLabel}>{t('illarin.scopesLabel')}</span>
-            <span className={styles.lumihubMeta}>{(status.scopes ?? []).join(', ')}</span>
+            <span className={styles.lumihubMeta}>{(status.scopes ?? []).join(', ') || t('illarin.noPermissions')}</span>
           </div>
+
+          <div className={styles.field}>
+            <span className={styles.fieldLabel}>{t('illarin.pickupLabel')}</span>
+            <span className={styles.lumihubMeta}>{pickupStateLabel}</span>
+          </div>
+
+          {status.pickup?.lastCollectAt && (
+            <span className={styles.lumihubMeta}>
+              {t('illarin.lastCollect', { time: new Date(status.pickup.lastCollectAt).toLocaleString() })}
+            </span>
+          )}
+
+          {status.pickup?.lastError && status.pickup.state !== 'missing_permission' && (
+            <span className={styles.helperText}>
+              {t('illarin.lastPickupError', { error: status.pickup.lastError })}
+            </span>
+          )}
+
+          {status.permission_error && (
+            <span className={styles.helperText}>{t('illarin.permissionOff', { permission: status.permission_error })}</span>
+          )}
+
+          <Button variant="ghost" size="sm" onClick={handleRefreshPermissions} disabled={refreshingPermissions} loading={refreshingPermissions}>
+            {t('illarin.refreshPermissions')}
+          </Button>
+
+          {error && <span className={styles.helperText} style={{ color: 'var(--lumiverse-danger)' }}>{error}</span>}
 
           {status.declaration_version && (
             <div className={styles.field}>
@@ -4475,6 +4537,21 @@ function IllarinSettings() {
                 {deviceCode.user_code}
               </span>
               <span className={styles.lumihubDisclosureText}>{t('illarin.deviceNote')}</span>
+            </div>
+          )}
+
+          {browserCode && (
+            <div className={styles.lumihubDisclosure}>
+              <span className={styles.lumihubDisclosureTitle}>{t('illarin.browserCodeTitle')}</span>
+              <span className={styles.lumihubDisclosureText}>{t('illarin.browserCodeNote')}</span>
+              {browserAuthorizationUrl && (
+                <a className={styles.illarinVerificationLink} href={browserAuthorizationUrl} target="_blank" rel="noopener noreferrer">
+                  {t('illarin.openAuthorization')}
+                </a>
+              )}
+              <span className={styles.lumihubInput} style={{ fontSize: '1.4em', textAlign: 'center', letterSpacing: '0.2em' }}>
+                {browserCode}
+              </span>
             </div>
           )}
 

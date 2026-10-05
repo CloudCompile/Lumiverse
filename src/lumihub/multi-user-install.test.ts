@@ -168,10 +168,10 @@ describe("remote installs with an owner and a separately linked member", () => {
         ? new Response(new Uint8Array(zipSync({ "theme.json": new TextEncoder().encode(JSON.stringify(data)) })))
         : Response.json(data));
       return {
-        id: `delivery-${kind}`, assetId: `asset-${kind}`, contentGeneration: 1,
-        kind, name: `Shared ${kind}`, format: "raw", label: "Test",
+        id: `delivery-${kind}`, workId: `asset-${kind}`, versionNumber: 1,
+        type: kind, name: `Shared ${kind}`, format: "raw", label: "Test",
         queuedAt: new Date().toISOString(), leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-        artifacts: [{ kind: "export", url }],
+        files: [{ type: "export", url }],
       };
     });
 
@@ -182,10 +182,10 @@ describe("remote installs with an owner and a separately linked member", () => {
         pair: {
           accessToken: `access-${userId}`, refreshToken: `refresh-${userId}`,
           accessTokenExpiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-          instance: { id: `instance-${userId}`, scopes: ["asset:receive"] },
+          connectedApp: { id: `instance-${userId}`, permissions: ["work:receive"] },
         },
       });
-      artifacts.set("https://illarin.example.test/api/v1/deliveries/collect", () => Response.json({ deliveries }));
+      artifacts.set("https://illarin.example.test/api/v1/sends/collect", () => Response.json({ sends: deliveries, takedowns: [] }));
       expect(await runDeliveryCycle(userId)).toEqual({ status: "continue", installed: 5, failed: 0 });
       for (const table of ["characters", "world_books", "presets", "packs", "regex_scripts"]) {
         expect(count(table, userId)).toBe(1);

@@ -9,6 +9,8 @@ import { chatsApi } from '@/api/chats'
 import WorldBookEntriesSection from '@/components/shared/WorldBookEntriesSection'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import ImportWorldBookModal, { type WorldBookImportResult } from '@/components/modals/ImportWorldBookModal'
+import { subscribeWindowFileImport } from '@/lib/window-file-import'
+import { worldBookPayloadFromFile } from '@/lib/world-book-file-import'
 import PostImportWorldBookModal from '@/components/shared/PostImportWorldBookModal'
 import NumericInput from '@/components/shared/NumericInput'
 import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookDiagnosticsModal'
@@ -427,6 +429,17 @@ export default function WorldBookPanel() {
     setPostImportBook(result.world_book)
   }, [])
 
+  useEffect(() => subscribeWindowFileImport('worldbook', async (files) => {
+    for (const file of files) {
+      try {
+        const result = await worldBooksApi.importJson(await worldBookPayloadFromFile(file))
+        handleImport(result)
+      } catch (error: any) {
+        toast.error(`${file.name}: ${error?.body?.error || error?.message || t('importWorldBook.importFailed', { ns: 'modals' })}`)
+      }
+    }
+  }), [handleImport, t])
+
   const handlePopOut = useCallback(() => {
     openModal('worldBookEditor', { bookId: selectedBookId })
   }, [openModal, selectedBookId])
@@ -726,7 +739,7 @@ export default function WorldBookPanel() {
         </div>
       )}
       <div className={styles.bookActionRow}>
-        <Button variant="primary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
+        <Button variant="secondary" size="sm" onClick={handleReindexVectors} disabled={reindexing}>
           {reindexing ? t('worldBookPanel.reindexing') : t('worldBookPanel.reindexVectorSearch')}
         </Button>
         <Button variant="secondary" size="sm" onClick={handleConvertToVectorizedPreview} disabled={reindexing}>
@@ -1059,9 +1072,10 @@ export default function WorldBookPanel() {
         <div className={styles.panelBody}>
           {selectedBookId ? (
             <>
-              {bookFieldsContent}
+              <details className={styles.bookSettings}><summary>Book settings</summary>{bookFieldsContent}</details>
 
               <WorldBookEntriesSection
+                editorDensity="compact"
                 books={books}
                 selectedBookId={selectedBookId}
                 onRefreshVectorSummary={loadVectorSummary}

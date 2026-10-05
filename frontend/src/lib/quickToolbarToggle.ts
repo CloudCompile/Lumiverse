@@ -20,9 +20,12 @@ export type ToolbarSurface =
   | { kind: 'command' }
 
 /** The slice of UI state a toolbar button needs. Mirrors `UISlice`'s fields. */
+import { councilViewForTab, resolveCouncilTabId, type CouncilView } from './council-navigation'
+
 export interface ToolbarUiState {
   drawerOpen: boolean
   drawerTab: string | null
+  councilView?: CouncilView
   settingsModalOpen: boolean
   settingsActiveView: string
 }
@@ -44,7 +47,8 @@ export type ToolbarIntent =
 export function isSurfaceActive(surface: ToolbarSurface, ui: ToolbarUiState): boolean {
   switch (surface.kind) {
     case 'drawer':
-      return ui.drawerOpen && ui.drawerTab === surface.tabId
+      return ui.drawerOpen && ui.drawerTab === resolveCouncilTabId(surface.tabId)
+        && (!councilViewForTab(surface.tabId) || ui.councilView === councilViewForTab(surface.tabId))
     case 'settings':
       return ui.settingsModalOpen && ui.settingsActiveView === surface.view
     case 'command':

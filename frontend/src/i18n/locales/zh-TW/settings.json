@@ -122,6 +122,7 @@
     "saving": "保存中…"
   },
   "display": {
+    "zoom": { "title": "縮放", "desktopPinchZoom": "在桌面端使用雙指縮放" },
     "longMessages": {
       "title": "長訊息",
       "helper": "將較長的訊息限制在舒適的高度，直到你將其展開。",
@@ -621,7 +622,7 @@
     "unlinking": "正在取消關聯…",
     "unlink": "取消 LumiHub 關聯",
     "instanceName": "實例名稱",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "我的 Lumiverse",
     "instanceHint": "在 LumiHub 上標識此實例的標籤（如「家用電腦」「筆記本」）",
     "waitingApproval": "等待批准…",

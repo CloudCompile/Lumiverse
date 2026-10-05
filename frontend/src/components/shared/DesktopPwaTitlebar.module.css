@@ -23,10 +23,7 @@
 :global(html[data-tauri-desktop]) .titlebar {
   display: block;
   height: var(--app-desktop-titlebar-height, 36px);
-  /* Match all four corners to the window mask. The titlebar uses a distinct
-     surface from the app body, so square lower corners are visible even
-     though the outer AppKit/WebView frame itself is rounded. */
-  border-radius: var(--desktop-window-corner-radius);
+  border-radius: var(--desktop-window-corner-radius) var(--desktop-window-corner-radius) 0 0;
   overflow: hidden;
   z-index: var(--app-window-chrome-z-index, 12000);
 }

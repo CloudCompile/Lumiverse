@@ -6,6 +6,14 @@
     "server": "Safe theme mode is active for this server. Custom CSS and component overrides are temporarily suppressed; unset LUMIVERSE_SAFE_THEME and restart to restore them.",
     "both": "Safe theme mode is active from both the URL and server controls. Custom CSS and component overrides are temporarily suppressed."
   },
+  "windowFileDrop": {
+    "dropToImport": "Drop files to import",
+    "chooseDestination": "Where should these files be imported?",
+    "unsupported": "No supported files were dropped.",
+    "characters": "Import characters",
+    "presets": "Import presets",
+    "worldBooks": "Import world books"
+  },
   "actions": {
     "save": "Save",
     "cancel": "Cancel",

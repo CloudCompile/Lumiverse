@@ -99,12 +99,13 @@ jobs:
         with:
           bun-version: 1.4.2
 
-      - name: Test Windows tray runner transport
+      - name: Test Windows tray runner and MSVC setup
         if: matrix.target == 'x86_64-pc-windows-msvc'
         run: >-
           bun test
           src/services/runner-control-transport.test.ts
           scripts/runner/server-manager.test.ts
+          scripts/windows-msvc.test.ts
 
       - uses: dtolnay/rust-toolchain@stable
         with:

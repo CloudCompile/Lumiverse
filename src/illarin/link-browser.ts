@@ -61,7 +61,7 @@ export interface BrowserLinkInput {
   /** Injectable transport for tests; production uses safeFetch. */
   fetchImpl?: IllarinFetch;
   /** Receives the authorization URL once the loopback listener is ready. */
-  openUrl: (authorizationUrl: string) => void;
+  openAuthorization: (authorization: { authorizationUrl: string; userCode: string }) => void;
   /** Test seam: called once the loopback listener accepts connections. */
   onListening?: (redirectUri: string) => void;
   timeoutMs?: number;
@@ -162,7 +162,7 @@ export async function runBrowserLink(input: BrowserLinkInput): Promise<BrowserLi
       codeChallengeMethod: "S256",
     }, { fetchImpl: input.fetchImpl });
 
-    input.openUrl(authorization.authorizationUrl);
+    input.openAuthorization({ authorizationUrl: authorization.authorizationUrl, userCode: authorization.userCode });
 
     const raced = await Promise.race([
       callbackReceived.then(() => "callback" as const),

@@ -1,15 +1,17 @@
 import type { TtsProviderCapabilities } from "../param-schema";
-import type { TtsRequest, TtsVoice } from "../types";
+import type { TtsRequest, TtsResponse, TtsStreamChunk, TtsVoice } from "../types";
 import { OpenAICompatibleTtsProvider } from "./openai-compatible-tts";
+import { wrapPcmInWav } from "./google-tts-shared";
 import { fetchProviderJson } from "../../utils/provider-errors";
 
 /**
  * OpenRouter Text-to-Speech.
  *
  * OpenRouter exposes an OpenAI-compatible `/audio/speech` endpoint, so this
- * reuses {@link OpenAICompatibleTtsProvider} for synthesis/streaming and only
- * overrides model discovery (TTS-capable models are found via the Models API's
- * `output_modalities=speech` filter rather than a name heuristic).
+ * reuses {@link OpenAICompatibleTtsProvider} for request transport. Gemini
+ * requests use PCM, wrapped as WAV for playback. TTS-capable models are found
+ * via the Models API's `output_modalities=speech` filter rather than a name
+ * heuristic.
  *
  * Voices are model-specific on OpenRouter (OpenAI, Gemini and Azure/MAI all use
  * different names) and there is no unified voices endpoint. We ship a curated
@@ -64,7 +66,7 @@ export class OpenRouterTtsProvider extends OpenAICompatibleTtsProvider {
     ],
     modelListStyle: "dynamic",
     supportsStreaming: true,
-    // OpenRouter only accepts mp3 or pcm. mp3 is browser-friendly; pcm is lower latency.
+    // OpenRouter accepts MP3 or raw PCM; Gemini models use PCM.
     supportedFormats: ["mp3", "pcm"],
     defaultUrl: "https://openrouter.ai/api/v1",
     defaultFormat: "mp3",
@@ -77,13 +79,54 @@ export class OpenRouterTtsProvider extends OpenAICompatibleTtsProvider {
     };
   }
 
+  private responseFormat(request: TtsRequest): string {
+    return /^google\/gemini-/i.test(request.model)
+      ? "pcm"
+      : request.outputFormat || this.capabilities.defaultFormat;
+  }
+
   protected override buildBody(request: TtsRequest): Record<string, any> {
     const body = super.buildBody(request);
+    body.response_format = this.responseFormat(request);
     // `instructions` is only honored by the OpenAI gpt-4o-mini-tts family.
     if (request.parameters.instructions && /gpt-4o-mini-tts/i.test(request.model)) {
       body.instructions = request.parameters.instructions;
     }
     return body;
+  }
+
+  override async synthesize(apiKey: string, apiUrl: string, request: TtsRequest): Promise<TtsResponse> {
+    const result = await super.synthesize(apiKey, apiUrl, request);
+    if (this.responseFormat(request) !== "pcm") return result;
+
+    const sampleRate = Number(/\brate=(\d+)/i.exec(result.contentType)?.[1]) || 24000;
+    const channels = Number(/\bchannels=(\d+)/i.exec(result.contentType)?.[1]) || 1;
+    return {
+      ...result,
+      audioData: wrapPcmInWav(new Uint8Array(result.audioData), sampleRate, channels),
+      contentType: "audio/wav",
+    };
+  }
+
+  override async *synthesizeStream(
+    apiKey: string,
+    apiUrl: string,
+    request: TtsRequest,
+  ): AsyncGenerator<TtsStreamChunk, void, unknown> {
+    if (this.responseFormat(request) !== "pcm") {
+      yield* super.synthesizeStream(apiKey, apiUrl, request);
+      return;
+    }
+
+    const result = await this.synthesize(apiKey, apiUrl, request);
+    yield {
+      data: new Uint8Array(result.audioData), done: false,
+      kind: "audio_file", mimeType: result.contentType,
+    };
+    yield {
+      data: new Uint8Array(0), done: true,
+      kind: "audio_file", mimeType: result.contentType,
+    };
   }
 
   /**

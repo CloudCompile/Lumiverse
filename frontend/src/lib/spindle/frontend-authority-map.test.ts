@@ -86,6 +86,10 @@ describe('frontend authority map', () => {
       expect(projected.get(row?.ctxLeaf)?.permission).toBe(member.permission)
     }
     expect(frontendAuthorityPermission('ctx_member', 'ctx.connections.models')).toBe('generation')
+    expect(frontendAuthorityPermission('ctx_member', 'ctx.stt.listProviders')).toBeNull()
+    for (const method of ['prepare', 'start', 'transcribe']) {
+      expect(frontendAuthorityPermission('ctx_member', `ctx.stt.${method}`)).toBe('media')
+    }
     expect(frontendAuthorityPermission('legacy_ctx_member', 'ctx.chats.updateMessage')).toBe('chats')
     for (const member of [
       'ctx.ui.registerConnectionEditorTab',

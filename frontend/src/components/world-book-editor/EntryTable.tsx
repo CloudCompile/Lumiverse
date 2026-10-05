@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
   closestCenter,
-  DndContext,
   KeyboardSensor,
   MouseSensor,
   TouchSensor,
@@ -35,7 +34,7 @@ import {
 } from '@/lib/lorebookRowMetrics'
 import { buildEntryIndexMap, planEntryReveal } from '@/lib/entryReveal'
 import { getUiScale as readUiScale } from '@/lib/uiScale'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { estimateTokens } from '@/lib/tokenEstimate'
 import type {
   EntrySearchResult,

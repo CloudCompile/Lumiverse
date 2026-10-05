@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useStore } from '@/store'
 import { generateThemeVariables } from '@/theme/engine'
@@ -213,7 +213,7 @@ function syncThemeColorMeta(vars: Record<string, string>) {
   meta.content = color
 }
 
-function resolveDesktopSurfaceColor(
+export function resolveDesktopSurfaceColor(
   config: ThemeConfig,
   vars: Record<string, string>,
   hasPaletteOverride: boolean,
@@ -393,7 +393,7 @@ function buildColorInterpolator(from: string, to: string): ((t: number) => strin
 /** Threshold: if an extension override provides this many variables, it IS the theme. */
 const FULL_THEME_MIN_KEYS = 40
 
-function buildResolvedThemeVars(
+export function buildResolvedThemeVars(
   theme: ThemeConfig | null,
   characterThemeOverlay: CharacterThemeOverlay | null,
   extensionThemeOverrides: ReturnType<typeof useStore.getState>['extensionThemeOverrides'],
@@ -410,7 +410,11 @@ function buildResolvedThemeVars(
     (o) => !mutedExtensionThemes[o.extensionId]
   )
   const hasOverrides = activeOverrides.length > 0
-  const hasPaletteOverride = activeOverrides.some((override) => !!override.paletteAccent)
+  const activeCharacterPalette = config.characterAware && !hasOverrides
+    ? characterThemeOverlay
+    : null
+  const hasPaletteOverride = activeCharacterPalette !== null
+    || activeOverrides.some((override) => !!override.paletteAccent)
 
   // Check if any extension provides a full theme-sized override (e.g. via
   // applyPalette). Even then, still layer it on top of the user's resolved
@@ -430,14 +434,14 @@ function buildResolvedThemeVars(
     }
   }
 
-  const effectiveConfig = config.characterAware && !hasOverrides && characterThemeOverlay
+  const effectiveConfig = activeCharacterPalette
     ? {
         ...config,
-        accent: characterThemeOverlay.accent,
+        accent: activeCharacterPalette.accent,
         baseColorsByMode: {
           ...config.baseColorsByMode,
-          dark: { ...config.baseColorsByMode?.dark, ...characterThemeOverlay.baseColors },
-          light: { ...config.baseColorsByMode?.light, ...characterThemeOverlay.baseColorsLight },
+          dark: { ...config.baseColorsByMode?.dark, ...activeCharacterPalette.baseColors },
+          light: { ...config.baseColorsByMode?.light, ...activeCharacterPalette.baseColorsLight },
         },
       }
     : config
@@ -497,7 +501,9 @@ export function useThemeApplicator() {
     }
   }, [])
 
-  useEffect(() => {
+  // Apply dimensions before paint; the resize notification below lets portal
+  // positioning and other geometry consumers update against the new scale.
+  useLayoutEffect(() => {
     const root = document.documentElement
     const motionMq = window.matchMedia('(prefers-reduced-motion: reduce)')
 
@@ -579,11 +585,6 @@ export function useThemeApplicator() {
       syncThemeColorMeta(vars)
       syncDesktopBackground(config, mode, vars, hasPaletteOverride)
 
-      if (!root.hasAttribute('data-pwa')) {
-        const us = parseFloat(vars['--lumiverse-ui-scale'] ?? '1') || 1
-        const vh = window.visualViewport?.height ?? window.innerHeight
-        root.style.setProperty('--app-shell-height', `${Math.round(vh / us)}px`)
-      }
       window.dispatchEvent(new Event('resize'))
 
       if (config.enableGlass && config.renderingMode !== 'efficiency' && !motionMq.matches) {

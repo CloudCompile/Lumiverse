@@ -1,6 +1,7 @@
 import { getDb } from "../db/connection";
 import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { DEFAULT_LIMIT, MAX_LIMIT } from "../types/pagination";
+import { parseStrictInteger } from "../utils/strict-integer";
 
 const MAX_STMT_CACHE = 200;
 const stmtCache = new Map<string, ReturnType<ReturnType<typeof getDb>["query"]>>();
@@ -37,14 +38,14 @@ export function parsePagination(
 ): PaginationParams {
   let limit = defaultLimit;
   if (rawLimit !== undefined) {
-    const parsed = parseInt(rawLimit, 10);
-    if (!isNaN(parsed)) limit = Math.min(Math.max(parsed, 1), MAX_LIMIT);
+    const parsed = parseStrictInteger(rawLimit);
+    if (parsed !== undefined) limit = Math.min(Math.max(parsed, 1), MAX_LIMIT);
   }
 
   let offset = 0;
   if (rawOffset !== undefined) {
-    const parsed = parseInt(rawOffset, 10);
-    if (!isNaN(parsed) && parsed >= 0) offset = parsed;
+    const parsed = parseStrictInteger(rawOffset);
+    if (parsed !== undefined && parsed >= 0) offset = parsed;
   }
 
   return { limit, offset };

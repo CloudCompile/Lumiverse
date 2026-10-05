@@ -19,7 +19,7 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { ifNoneMatchSatisfies } from "../utils/http-cache";
 import { getFrontendRuntimeCapabilities } from "../spindle/frontend-runtime-capabilities";
-import { reportLibraryToAll } from "../illarin/extensions";
+import { reportLibraryRemovalToAll } from "../illarin/extensions";
 
 const app = new Hono();
 
@@ -289,6 +289,7 @@ app.post("/:id/update", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+    if (ext.metadata?.illarin) return c.json({ error: "Illarin extensions update through Illarin sends, not Git" }, 400);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -347,7 +348,9 @@ app.delete("/:id", async (c) => {
 
     managerSvc.remove(ext.identifier);
     updateCheckSvc.clearCachedExtensionUpdate(ext.id);
-    if (ext.metadata?.illarin) void reportLibraryToAll();
+    const source = ext.metadata?.illarin as { workId?: string; assetId?: string } | undefined;
+    const workId = source?.workId ?? source?.assetId;
+    if (workId) void reportLibraryRemovalToAll(workId);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -367,6 +370,19 @@ app.post("/:id/enable", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+
+    const source = ext.metadata?.illarin as { permissionsApproved?: boolean } | undefined;
+    if (source && source.permissionsApproved === false) {
+      const body = await c.req.json().catch(() => null) as { approved_permissions?: unknown } | null;
+      const approved = body?.approved_permissions;
+      if (!Array.isArray(approved) ||
+          approved.length !== ext.permissions.length ||
+          !ext.permissions.every((permission) => approved.includes(permission))) {
+        return c.json({ error: "Approve every requested extension permission before its first run" }, 400);
+      }
+      for (const permission of ext.permissions) managerSvc.grantPermission(ext.identifier, permission);
+      managerSvc.setMetadataEntry(ext.identifier, "illarin", { ...source, permissionsApproved: true });
+    }
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -553,6 +569,7 @@ app.post("/:id/switch-branch", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+    if (ext.metadata?.illarin) return c.json({ error: "Illarin extensions cannot switch Git branches" }, 400);
 
     const body = await c.req.json();
     if (!body.branch || typeof body.branch !== "string") {

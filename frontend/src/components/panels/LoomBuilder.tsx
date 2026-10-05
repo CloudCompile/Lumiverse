@@ -4,7 +4,6 @@ import i18n from '@/i18n'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 
 import {
-  DndContext,
   closestCenter,
   MouseSensor,
   TouchSensor,
@@ -20,7 +19,7 @@ import {
   verticalListSortingStrategy,
   useSortable,
 } from '@dnd-kit/sortable'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import {
   GripVertical,
   ChevronDown,
@@ -74,7 +73,7 @@ import { presetsApi, type StashedPromptBlock } from '@/api/presets'
 import { imagesApi } from '@/api/images'
 import { usePresetProfiles } from '@/hooks/usePresetProfiles'
 import { getEffectivePromptVariableValues } from '@/hooks/preset-profile-prompt-variables'
-import { computeGroups, createBlock, createMarkerBlock, getRemotePresetOrigin, isProtectedSealedSource, resolvePromptBlockPlacements } from '@/lib/loom/service'
+import { computeGroups, createBlock, createMarkerBlock, detectImportedPresetKind, getRemotePresetOrigin, isProtectedSealedSource, resolvePromptBlockPlacements } from '@/lib/loom/service'
 import { sanitizeCharacterTagTrigger, splitCharacterTagTriggerInput } from '@/lib/loom/characterTagTrigger'
 import {
   PROMPT_TEMPLATES,
@@ -102,6 +101,7 @@ import { toast } from '@/lib/toast'
 import { useLongPress } from '@/hooks/useLongPress'
 import { markLoomRuntimeProfileContext } from '@/lib/loom/runtimeProfile'
 import { importPresetFiles } from '@/lib/loom/preset-import-batch'
+import { subscribeWindowFileImport } from '@/lib/window-file-import'
 import SpindlePresetEditorTabContent from '@/components/spindle/SpindlePresetEditorTabContent'
 import SpindlePresetEditorToolbarItem from '@/components/spindle/SpindlePresetEditorToolbarItem'
 import { applyPresetEditorDraft, toPresetEditorDraft } from '@/lib/spindle/preset-editor-adapter'
@@ -763,7 +763,10 @@ export function BlockEditor({
     <div className={clsx(s.layout, compact && s.layoutCompact)}>
       {compact && (
         <div className={s.toolbar} style={{ justifyContent: 'space-between' }}>
-          <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+            <span data-spindle-mount="loom_block_editor_actions" data-spindle-scope={`loom-block:${block.id}:editor-actions`} style={{ display: 'contents' }} />
+          </div>
           <span style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', fontWeight: 600 }}>{t('blockEditor.title')}</span>
           <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> {t('blockEditor.save')}</button>
         </div>
@@ -771,6 +774,7 @@ export function BlockEditor({
       {!compact && (
         <div className={s.header}>
           <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <span data-spindle-mount="loom_block_editor_actions" data-spindle-scope={`loom-block:${block.id}:editor-actions`} style={{ display: 'contents' }} />
           <h3 className={s.title}>{t('blockEditor.title')}</h3>
           <div style={{ flex: 1 }} />
           <button className={clsx(s.btn, s.btnPrimary)} onClick={handleSave} type="button"><Check size={14} /> {t('blockEditor.save')}</button>
@@ -1062,6 +1066,7 @@ export interface ControlledLoomBlockEditorProps {
   onDraftChange?: (blockId: string, updates: Partial<PromptBlock> | null) => void
   selectedBlockId?: string | null
   onSelectedBlockChange?: (blockId: string | null) => void
+  onMoveVariable?: (sourceBlockId: string, variable: PromptVariableDef, targetBlockId: string) => boolean
   availableMacros: MacroGroup[]
   refreshMacros?: () => void
   readOnly?: boolean
@@ -1081,6 +1086,7 @@ export function ControlledLoomBlockEditor({
   onDraftChange,
   selectedBlockId,
   onSelectedBlockChange,
+  onMoveVariable,
   availableMacros,
   refreshMacros,
   readOnly = false,
@@ -1168,6 +1174,7 @@ export function ControlledLoomBlockEditor({
           explicitlyClearedDraftBlockIdRef.current = null
           onDraftChange?.(editingBlock.id, updates)
         }}
+        onMoveVariable={onMoveVariable}
         availableMacros={availableMacros}
         refreshMacros={refreshMacros}
         compact={compact}
@@ -2481,10 +2488,12 @@ function LoomBuilderNative({
   const activePresetEditorTabRef = useRef(activePresetEditorTab)
   const updatePresetDraftRef = useRef(updatePresetDraft)
   const flushPresetDraftRef = useRef(flushPresetDraft)
+  const movePromptVariableRef = useRef(movePromptVariable)
 
   useEffect(() => { activePresetEditorTabRef.current = activePresetEditorTab }, [activePresetEditorTab])
   useEffect(() => { updatePresetDraftRef.current = updatePresetDraft }, [updatePresetDraft])
   useEffect(() => { flushPresetDraftRef.current = flushPresetDraft }, [flushPresetDraft])
+  useEffect(() => { movePromptVariableRef.current = movePromptVariable }, [movePromptVariable])
 
   useEffect(() => {
     setPresetEditorController({
@@ -2521,6 +2530,9 @@ function LoomBuilderNative({
           applyPresetEditorDraft(current, mutator(toPresetEditorDraft(current)))
         ), immediate)
       },
+      movePromptVariable: (sourceBlockId, variable, targetBlockId) => (
+        movePromptVariableRef.current(sourceBlockId, variable, targetBlockId)
+      ),
       flush: () => flushPresetDraftRef.current(),
     })
     return () => { setPresetEditorController(null) }
@@ -2963,19 +2975,16 @@ useEffect(() => {
     fileInputRef.current?.click()
   }, [])
 
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    // Snapshot before resetting: clearing a file input also empties its live
-    // FileList in Chromium.
-    const files = Array.from(e.target.files ?? [])
-    e.target.value = ''
+  const importSelectedFiles = useCallback(async (files: File[], importType: string) => {
     if (files.length === 0 || presetImportInProgressRef.current) return
 
-    const importType = importTypeRef.current
     presetImportInProgressRef.current = true
     try {
       const result = await importPresetFiles(
         files,
-        importType === 'st' ? importFromST : importFromFile,
+        (payload, filename) => importType === 'st' || (importType === 'auto' && detectImportedPresetKind(payload) === 'legacy')
+          ? importFromST(payload, filename)
+          : importFromFile(payload, filename),
         {
           invalidJson: lb('toast.invalidPresetJson'),
           importFailed: lb('toast.presetImportFailed'),
@@ -2993,6 +3002,14 @@ useEffect(() => {
       presetImportInProgressRef.current = false
     }
   }, [importFromFile, importFromST, lb])
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
+    e.target.value = ''
+    await importSelectedFiles(files, importTypeRef.current)
+  }, [importSelectedFiles])
+
+  useEffect(() => subscribeWindowFileImport('preset', (files) => importSelectedFiles(files, 'auto')), [importSelectedFiles])
 
   const presetEditorToolbar = presetEditorToolbarItems.some((item) => item.visible) ? (
     <div className={s.extensionToolbar}>

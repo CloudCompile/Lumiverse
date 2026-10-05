@@ -64,7 +64,7 @@ import {
   type LandingPageTab,
 } from '@/lib/landingPageTabs'
 import { readDeviceLandingPageStartTab } from '@/lib/landingPageStartTab'
-import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
+import { hasAvailableFrontendSurface, hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import { resolveLandingChatPageSize } from '@/lib/landingChatPagination'
 import {
   consumeLandingPageChatReturn,
@@ -523,12 +523,6 @@ function EmptyState({ filtered = false }: { filtered?: boolean }) {
 const containerVariants: Variants = {
   hidden: { opacity: 0 },
   visible: { opacity: 1 },
-  leaving: {
-    opacity: 0,
-    y: 10,
-    scale: 0.985,
-    transition: { duration: 0.22, ease: 'easeOut' },
-  },
   exit: { opacity: 0 },
 }
 
@@ -934,7 +928,6 @@ interface VirtualizedChatRowsProps {
   initialPageSize: number
   animateInitialEntries: boolean
   eagerImages: boolean
-  navigatingToChat: boolean
   shiftPressed: boolean
   onContainerChange: (node: HTMLDivElement | null) => void
   onChatClick: (item: GroupedRecentChat) => void
@@ -960,7 +953,6 @@ function VirtualizedChatRows({
   initialPageSize,
   animateInitialEntries,
   eagerImages,
-  navigatingToChat,
   shiftPressed,
   onContainerChange,
   onChatClick,
@@ -1036,7 +1028,7 @@ function VirtualizedChatRows({
 
   return (
     <motion.div
-      className={clsx(styles.virtualChats, navigatingToChat && styles.chatsLeaving)}
+      className={styles.virtualChats}
       data-component="LandingPageChats"
       data-layout-columns={virtualColumns}
       data-spindle-mount="landing_recent_chats"
@@ -1045,7 +1037,7 @@ function VirtualizedChatRows({
       style={{ height: chatVirtualizer.getTotalSize() }}
       variants={containerVariants}
       initial={animateInitialEntries ? 'hidden' : false}
-      animate={navigatingToChat ? 'leaving' : 'visible'}
+      animate="visible"
       exit="exit"
     >
       {virtualItems.map((virtualRow) => {
@@ -1099,6 +1091,7 @@ function LandingPageNative() {
   const logout = useStore((s) => s.logout)
   const authUser = useStore((s) => s.user)
   const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
+  const extensions = useStore((s) => s.extensions)
   const [restoredSnapshot] = useState(() => readLandingPageSnapshot(authUser?.id))
   const [isChatReturn] = useState(() => consumeLandingPageChatReturn() || Boolean(restoredSnapshot))
   const hasRestoredChatReturn = Boolean(restoredSnapshot)
@@ -1133,23 +1126,30 @@ function LandingPageNative() {
   const [requestedLandingTab, setRequestedLandingTab] = useState<LandingPageTab>(
     restoredSnapshot?.requestedTab ?? 'characters',
   )
-  const [homepageSurfaceReady, setHomepageSurfaceReady] = useState(() => (
-    typeof document !== 'undefined' && Boolean(document.querySelector(
+  const [homepageSurfaceMounted, setHomepageSurfaceReady] = useState(() => (
+    typeof document !== 'undefined' && hasAvailableFrontendSurface(document,
       `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`,
-    ))
+      extensions,
+    )
   ))
   const [suiteHomepageSurfaceReady, setSuiteHomepageSurfaceReady] = useState(() => (
     typeof document !== 'undefined' && Boolean(document.querySelector(
       `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"][data-spindle-ext-id="lumiverse_suite"]`,
     ))
   ))
+  const homepageSurfaceReady = useMemo(
+    () => homepageSurfaceMounted && hasAvailableFrontendSurface(document,
+      `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`, extensions),
+    [homepageSurfaceMounted, extensions],
+  )
   const selectedCharactersForReady = useRef(false)
   const initializedStartTabForUser = useRef<string | null>(null)
   useEffect(() => {
     const readReady = () => {
-      const ready = Boolean(document.querySelector(
+      const ready = hasAvailableFrontendSurface(document,
         `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"]`,
-      ))
+        extensions,
+      )
       const suiteReady = Boolean(document.querySelector(
         `[data-spindle-mount="${'landing_characters'}"] [data-homepage-character-library-ready="true"][data-spindle-ext-id="lumiverse_suite"]`,
       ))
@@ -1167,22 +1167,29 @@ function LandingPageNative() {
     const observer = new Observer(readReady)
     observer.observe(document.body, { childList: true, subtree: true })
     return () => observer.disconnect()
-  }, [])
+  }, [extensions])
   // Symmetric seam for the Chats tab: an extension-owned chats surface
   // (e.g. a Recent Chats browser) marks its root ready and takes over the
   // tab, suppressing the native chat browser exactly like the character
   // library does for Characters. Unlike Characters it never auto-switches
   // tabs — the native list stays usable until the user picks Chats.
-  const [chatsSurfaceReady, setChatsSurfaceReady] = useState(() => (
-    typeof document !== 'undefined' && Boolean(document.querySelector(
+  const [chatsSurfaceMounted, setChatsSurfaceReady] = useState(() => (
+    typeof document !== 'undefined' && hasAvailableFrontendSurface(document,
       `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`,
-    ))
+      extensions,
+    )
   ))
+  const chatsSurfaceReady = useMemo(
+    () => chatsSurfaceMounted && hasAvailableFrontendSurface(document,
+      `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`, extensions),
+    [chatsSurfaceMounted, extensions],
+  )
   useEffect(() => {
     const readReady = () => {
-      setChatsSurfaceReady(Boolean(document.querySelector(
+      setChatsSurfaceReady(hasAvailableFrontendSurface(document,
         `[data-spindle-mount="${'landing_chats'}"] [data-recent-chats-ready="true"]`,
-      )))
+        extensions,
+      ))
     }
     readReady()
     const Observer = document.defaultView?.MutationObserver
@@ -1190,7 +1197,7 @@ function LandingPageNative() {
     const observer = new Observer(readReady)
     observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-recent-chats-ready'] })
     return () => observer.disconnect()
-  }, [])
+  }, [extensions])
   const availableLandingTabs = useMemo(
     () => getAvailableLandingPageTabs({ characterLibraryEnabled: homepageSurfaceReady }),
     [homepageSurfaceReady],
@@ -2035,12 +2042,17 @@ function LandingPageNative() {
           styles.content,
           isExpandedGallery && styles.contentExpanded,
           landingEntryAnimating && styles.routeEntering,
+          navigatingToChat && styles.routeLeaving,
         )}
         data-component="LandingPageCharacters"
         data-entry-mode={landingEntryMode}
         initial={hasRestoredChatReturn ? chatReturnInitial : freshLandingInitial}
-        animate={hasRestoredChatReturn ? chatReturnAnimate : freshLandingAnimate}
-        transition={hasRestoredChatReturn
+        animate={navigatingToChat
+          ? chatReturnInitial
+          : hasRestoredChatReturn
+            ? chatReturnAnimate
+            : freshLandingAnimate}
+        transition={navigatingToChat || hasRestoredChatReturn
           ? chatReturnTransition
           : freshLandingTransition}
         onAnimationComplete={() => {
@@ -2260,7 +2272,7 @@ function LandingPageNative() {
           <div id={landingPageTabPanelId('chats')} role={suiteLandingTabsReady ? 'tabpanel' : undefined}
             aria-labelledby={suiteLandingTabsReady ? landingPageTabId('chats') : undefined}
             data-component="LandingPageChatsPanel" data-spindle-mount="landing_chats"
-            hidden={activeLandingTab !== 'chats'} />
+            hidden={activeLandingTab !== 'chats' || !chatsSurfaceReady} />
           <AnimatePresence mode="wait">
             {activeLandingTab === 'characters' || chatsSurfaceReady ? null : !settingsLoaded || (loading && items.length === 0) ? (
               <motion.div
@@ -2296,7 +2308,6 @@ function LandingPageNative() {
                 initialPageSize={chatPageSizeRef.current}
                 animateInitialEntries={animateInitialEntries}
                 eagerImages={hasRestoredChatReturn}
-                navigatingToChat={navigatingToChat}
                 shiftPressed={shiftPressed}
                 onContainerChange={handleVirtualContainerChange}
                 onChatClick={handleChatClick}

@@ -416,7 +416,7 @@ CREATE TABLE illarin_delivery_receipt (
   content_generation INTEGER NOT NULL,
   installed_at TEXT NOT NULL DEFAULT (datetime('now')),
   acknowledged_at TEXT,
-  PRIMARY KEY (user_id, delivery_id)
+  PRIMARY KEY (user_id, instance_id, delivery_id)
 );
 
 CREATE TABLE image_gen_connections (
@@ -1899,3 +1899,7 @@ CREATE INDEX IF NOT EXISTS idx_signup_audit_ip ON signup_audit(ip_address);
 CREATE INDEX IF NOT EXISTS idx_signup_audit_created_at ON signup_audit(created_at);
 CREATE INDEX IF NOT EXISTS idx_user_username_lower ON "user"(LOWER(username));
 CREATE INDEX IF NOT EXISTS idx_user_email_lower ON "user"(LOWER(email));
+
+-- 122: UI-only entry organization.
+ALTER TABLE world_book_entries ADD COLUMN folder TEXT NOT NULL DEFAULT '';
+ALTER TABLE world_book_entries ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';

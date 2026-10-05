@@ -4,12 +4,31 @@ import { join } from "path";
 import { PROJECT_ROOT } from "./lib/constants";
 import { launchServerProcess } from "./server-process-launcher";
 import { forwardServerOutput } from "./server-process-output";
-import { serverLaunchTransport } from "./server-manager";
+import { backendBunCommand, serverLaunchTransport } from "./server-manager";
 
 test("the backend launcher avoids Bun IPC only on Windows", () => {
   expect(serverLaunchTransport("win32")).toBe("socket");
   expect(serverLaunchTransport("darwin")).toBe("ipc");
   expect(serverLaunchTransport("linux")).toBe("ipc");
+});
+
+test("the backend launcher preserves the native Termux Bun wrapper", () => {
+  const bunPath = "/data/data/com.termux/files/home/.bun/bin/bun";
+  expect(backendBunCommand(["--smol", "/repo/src/index.ts"], {
+    LUMIVERSE_BUN_METHOD: "grun",
+    LUMIVERSE_BUN_PATH: bunPath,
+    LUMIVERSE_BUN_EXECUTABLE: bunPath,
+  })).toEqual(["grun", bunPath, "--smol", "/repo/src/index.ts"]);
+});
+
+test("the backend launcher keeps the validated executable outside Termux", () => {
+  expect(backendBunCommand(["--smol", "C:\\repo\\src\\index.ts"], {
+    LUMIVERSE_BUN_EXECUTABLE: "C:\\Lumiverse\\runtimes\\bun.exe",
+  })).toEqual([
+    "C:\\Lumiverse\\runtimes\\bun.exe",
+    "--smol",
+    "C:\\repo\\src\\index.ts",
+  ]);
 });
 
 test("the socket-controlled spawn exchanges messages with a real backend process", async () => {

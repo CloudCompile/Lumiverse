@@ -6,6 +6,14 @@
     "server": "此服务器已启用安全主题模式。自定义 CSS 和组件覆盖已暂时停用；请取消 LUMIVERSE_SAFE_THEME 并重启以恢复。",
     "both": "URL 和服务器均已启用安全主题模式。自定义 CSS 和组件覆盖已暂时停用。"
   },
+  "windowFileDrop": {
+    "dropToImport": "拖放文件以导入",
+    "chooseDestination": "要将这些文件导入到哪里？",
+    "unsupported": "没有可导入的文件。",
+    "characters": "导入角色",
+    "presets": "导入预设",
+    "worldBooks": "导入世界书"
+  },
   "actions": {
     "save": "保存",
     "cancel": "取消",

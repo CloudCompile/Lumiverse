@@ -1287,3 +1287,6 @@
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+
+.bookSettings { border: 1px solid var(--lumiverse-border); border-radius: 7px; background: var(--lumiverse-bg-deep, var(--lumiverse-bg)); }
+.bookSettings > summary { cursor: pointer; padding: 8px 10px; font-size: calc(12px * var(--lumiverse-font-scale, 1)); font-weight: 600; color: var(--lumiverse-text); }

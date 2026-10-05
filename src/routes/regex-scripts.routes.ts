@@ -11,7 +11,8 @@ const app = new Hono();
 
 const APPLY_MAX_CONTENT_LENGTH = 500_000;
 const APPLY_MAX_SCRIPT_COUNT = 500;
-const APPLY_MAX_PATTERN_LENGTH = 10_000;
+const APPLY_MAX_PATTERN_LENGTH = svc.MAX_REGEX_PATTERN_LENGTH;
+const ACTIVATION_MAX_PATTERN_LENGTH = 10_000;
 const APPLY_MAX_RESOLVED_TEMPLATE_LENGTH = 100_000;
 const APPLY_VALID_PLACEMENTS = new Set<RegexPlacement>(["user_input", "ai_output", "world_info", "reasoning"]);
 const APPLY_VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
@@ -242,7 +243,7 @@ app.post("/test-activation", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body.content !== "string" || typeof body.find_regex !== "string"
     || typeof body.flags !== "string" || !validateFlags(body.flags) || !body.prompt_activation
-    || body.find_regex.length > APPLY_MAX_PATTERN_LENGTH) {
+    || body.find_regex.length > ACTIVATION_MAX_PATTERN_LENGTH) {
     return c.json({ error: "A pattern, flags, content and prompt activation configuration are required" }, 400);
   }
   if (body.content.length > MAX_ACTIVATION_CONTENT_LENGTH) return c.json({ error: "Content exceeds maximum length" }, 413);

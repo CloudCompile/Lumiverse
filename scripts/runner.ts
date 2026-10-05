@@ -29,6 +29,8 @@ import { getCurrentBranch } from "./runner/lib/git.js";
 import { UPDATE_CHECK_INTERVAL_MS } from "./runner/lib/constants.js";
 import { goodbyeLines } from "./runner/goodbye-lines.js";
 import { attachHeadlessBridge, type HeadlessBridge } from "./runner/headless-bridge.js";
+import { bootstrapBunRuntime } from "../src/runtime/bun-runtime.js";
+import { PROJECT_ROOT } from "./runner/lib/constants.js";
 
 function pickRandomGoodbyeLine(lines: readonly string[]): string {
   if (lines.length === 0) return "Goodbye.";
@@ -37,21 +39,9 @@ function pickRandomGoodbyeLine(lines: readonly string[]): string {
 }
 
 // ─── Bun version gate ───────────────────────────────────────────────────────
-// Checked before anything else so the operator sees a clear message.
-{
-  const [M = 0, m = 0, p = 0] = Bun.version
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-  const minimum: readonly [number, number, number] = [1, 4, 0];
-  const [requiredM, requiredMnr, requiredP] = minimum;
-  const isTooOld = M < requiredM
-    || (M === requiredM && (m < requiredMnr || (m === requiredMnr && p < requiredP)));
-  if (isTooOld) {
-    console.error(`\n  Bun ${Bun.version} is too old — Lumiverse requires Bun >= ${minimum.join(".")} on this platform.`);
-    console.error(`  Update with ${process.platform === "win32" ? ".\\start.ps1" : "./start.sh"}.\n`);
-    process.exit(1);
-  }
-}
+// Keep the old process as a stdio proxy when Windows has locked its executable;
+// this preserves both terminal and desktop-supervisor ownership across re-exec.
+await bootstrapBunRuntime(PROJECT_ROOT);
 
 // ─── Parse arguments ────────────────────────────────────────────────────────
 
@@ -245,5 +235,5 @@ if (isHeadless) {
 } else {
   printBanner();
   setupKeyboard();
-  startServer(isDev);
+  await startServer(isDev);
 }

@@ -1,7 +1,10 @@
+mod capture;
 mod frontend;
 mod notifications;
 mod remote_instance;
 mod runner;
+#[cfg(any(target_os = "linux", test))]
+mod webview_media;
 #[cfg(target_os = "linux")]
 mod wayland_background_effect;
 
@@ -221,11 +224,12 @@ pub fn run() {
             None,
         ))
         .manage(runner::RunnerState::default())
+        .manage(runner::DesktopUpdateResumeState::default())
         .manage(frontend::FrontendState::default())
-        .manage(frontend::FrontendDropState::default())
         .manage(frontend::DesktopWidgetCatalogState::default())
         .manage(notifications::DesktopNotificationTransportState::default())
         .manage(remote_instance::RemoteInstanceState::default())
+        .manage(capture::DesktopCaptureState::default())
         .invoke_handler(tauri::generate_handler![
             runner::runner_start,
             runner::runner_send,
@@ -235,9 +239,10 @@ pub fn run() {
             runner::discover_repo,
             runner::resolve_bun,
             runner::desktop_shell_sha,
+            runner::stage_desktop_update,
+            runner::take_desktop_update_resume,
             frontend::desktop_startup_ready,
             frontend::close_current_sso_popup,
-            frontend::read_frontend_drop_file,
             runner::quit_app,
             runner::alert,
             runner::confirm,
@@ -266,8 +271,10 @@ pub fn run() {
             remote_instance::remote_instance_connect,
             remote_instance::remote_instance_poll,
             remote_instance::remote_instance_disconnect,
-        ])
-        .on_webview_event(frontend::track_frontend_drop_event);
+            capture::desktop_capture_connect,
+            capture::desktop_capture_disconnect,
+            capture::desktop_capture_status,
+        ]);
 
     #[cfg(target_os = "macos")]
     let builder = builder
@@ -294,6 +301,7 @@ pub fn run() {
         .expect("error while building Lumiverse")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
+                capture::shutdown(app);
                 // Cover native exit paths on every platform, including ones
                 // that never passed through the tray's JS quit handshake.
                 notifications::stop_desktop_notification_transport(app);

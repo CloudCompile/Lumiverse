@@ -46,6 +46,7 @@ mock.module('@/components/shared/Toggle', () => ({
   },
 }))
 mock.module('@/lib/dndUiScale', () => ({
+  DndContext: ({ children }: { children?: unknown }) => children,
   useScaledSortableStyle: () => ({ setNodeRef: () => undefined, style: {} }),
 }))
 mock.module('@/lib/toolbarActionSearch', () => ({

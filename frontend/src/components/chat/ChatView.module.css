@@ -240,7 +240,7 @@
 .noticeDock,
 .cortexNoticeDock {
   position: absolute;
-  top: calc(48px + var(--lcs-top-dock-height, 0px));
+  top: 48px;
   left: 12px;
   right: 12px;
   z-index: 5;
@@ -506,8 +506,26 @@
   margin: 0 !important;
 }
 
-.chatColumnInner:has(.chatToolbar [data-component='QuickToolbar'][data-fill-top-dock='1']) {
+/* Fill dock is `position: fixed`: reserve its strip on the shared `.body` row that
+   also holds the half-editor sibling. `border-box` + bounded `height` keeps the row
+   at `.body`'s height while `height: 100%` children fill the padding box — a single
+   reservation. */
+.body:has(.chatToolbar [data-component='QuickToolbar'][data-fill-top-dock='1']) {
+  box-sizing: border-box;
+  height: 100%;
   padding-top: var(--lcs-top-dock-height, 41px);
+}
+
+/* Desktop only (>= 769px): the half-editor host is a flex sibling inside the row and
+   would paint under the fill rail (9999). Raise only that host, one rung above it,
+   resolving through the `display: contents` spindle wrappers — a contents box cannot
+   carry a z-index. Below 769px the host keeps its own mobile/full-bleed rules. */
+@media (min-width: 769px) {
+  .body:has(.chatToolbar [data-component='QuickToolbar'][data-fill-top-dock='1'])
+    :global([data-spindle-mount='lorebook_half_workspace'] > [data-spindle-extension-root] > [data-spindle-host-surface='lorebook.half.workspace'])
+    > :global([data-component='LorebookHalfScreenEditor']) {
+    z-index: 10000;
+  }
 }
 
 .chatToolbar > :global([data-component='QuickToolbar'][data-quick-toolbar-placement='chat_top_dock']),
@@ -733,7 +751,7 @@
 @media (max-width: 600px) {
   .noticeDock,
   .cortexNoticeDock {
-    top: calc(54px + var(--lcs-top-dock-height, 0px));
+    top: 54px;
     left: 8px;
     right: 8px;
   }
@@ -793,4 +811,8 @@
   .portraitTab {
     pointer-events: auto;
   }
+}
+.chatColumnCentered {
+  margin-left: max(0px, calc(var(--chat-drawer-left, 0px) - var(--spindle-dock-left, 0px)));
+  margin-right: max(0px, calc(var(--chat-drawer-right, 0px) - var(--spindle-dock-right, 0px)));
 }

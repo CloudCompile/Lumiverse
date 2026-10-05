@@ -4,6 +4,7 @@ import { createSandboxFrame } from './sandbox-frame'
 import {
   computeRelativePath,
   generateInjectionId,
+  isOuterMessageRoot,
   register as registerInjection,
   unregisterByElement,
   unregisterByExtension,
@@ -109,6 +110,7 @@ export function createDOMHelper(
               rawHtml: html,
               relativePath,
               position: resolvedPosition,
+              outer: isOuterMessageRoot(messageId, messageRoot),
               element: wrapper,
             })
           }

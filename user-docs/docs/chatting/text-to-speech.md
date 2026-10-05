@@ -36,6 +36,15 @@ The built-in providers are listed below. Enabled [Spindle extensions](../extensi
 - **Streaming:** Supported. Lumiverse buffers the stream and plays it as a single clip.
 - **Output formats:** MP3, Opus, AAC, FLAC, WAV, PCM (default: MP3).
 
+### OpenRouter TTS
+
+- **API key:** Required — your OpenRouter API key.
+- **Default URL:** `https://openrouter.ai/api/v1`.
+- **Models:** Fetched live using OpenRouter's speech-output filter.
+- **Voices:** Model-specific; choose a listed voice or enter the model's voice ID.
+- **Output formats:** Gemini models automatically request PCM, even when MP3 is configured. Lumiverse wraps the PCM as WAV for browser playback. Other models default to MP3 and also support PCM.
+- **Streaming:** Supported. PCM responses are buffered and receive one WAV header before playback.
+
 ### ElevenLabs
 
 - **API key:** Required (sent as `xi-api-key`).

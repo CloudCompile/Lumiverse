@@ -5,6 +5,7 @@
 // cache path inherits a stale or empty value. Pin it to a deterministic
 // project-local directory before any other code runs.
 import { resolve as _resolve } from "path";
+import { bootstrapBunRuntime } from "./runtime/bun-runtime";
 if (!("BUN_RUNTIME_TRANSPILER_CACHE_PATH" in process.env)) {
   process.env.BUN_RUNTIME_TRANSPILER_CACHE_PATH = _resolve(
     import.meta.dir,
@@ -15,21 +16,9 @@ if (!("BUN_RUNTIME_TRANSPILER_CACHE_PATH" in process.env)) {
 }
 
 // ── Bun version gate ────────────────────────────────────────────────────────
-// Bun 1.4 includes package-install, runtime, and Windows IPC fixes required by
-// Lumiverse, along with the production memory and stream improvements we rely on.
-const [_bunMaj = 0, _bunMin = 0, _bunPat = 0] = Bun.version
-  .split(".")
-  .map((part) => Number.parseInt(part, 10) || 0);
-const _bunMinimum: readonly [number, number, number] = [1, 4, 0];
-const [_requiredBunMaj, _requiredBunMin, _requiredBunPat] = _bunMinimum;
-const _bunTooOld = _bunMaj < _requiredBunMaj
-  || (_bunMaj === _requiredBunMaj
-    && (_bunMin < _requiredBunMin || (_bunMin === _requiredBunMin && _bunPat < _requiredBunPat)));
-if (_bunTooOld) {
-  console.error(`[startup] Bun ${Bun.version} is too old — Lumiverse requires Bun >= ${_bunMinimum.join(".")} on this platform.`);
-  console.error(`[startup] Update with ${process.platform === "win32" ? ".\\start.ps1" : "./start.sh"}.`);
-  process.exit(1);
-}
+// On Windows this can install a side-by-side runtime and re-exec the entrypoint;
+// replacing the currently running bun.exe in place is not reliable.
+await bootstrapBunRuntime(_resolve(import.meta.dir, ".."));
 
 // ── Native Dependency Pre-flight ────────────────────────────────────────────
 // Must run BEFORE any application code is imported so that environment variables

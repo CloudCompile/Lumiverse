@@ -51,17 +51,23 @@ describe('desktop window chrome contract', () => {
     expect(desktopFrontend).toMatch(/\.lumiverse-startup-drag\{\{[^}]*pointer-events:auto/)
   })
 
-  test('rounds the complete Tauri titlebar against the app surface', () => {
+  test('rounds only the top of the Tauri titlebar and matches Windows window corners', () => {
     const cssRadius = resetCss.match(/--desktop-window-corner-radius:\s*(\d+)px/)?.[1]
     const nativeRadius = desktopFrontend.match(/const FRONTEND_CORNER_RADIUS:\s*u32\s*=\s*(\d+);/)?.[1]
+    const windowsCssRadius = resetCss.match(/data-desktop-windows-corners="rounded"\]\s*\{\s*--desktop-window-corner-radius:\s*(\d+)px/)?.[1]
+    const windowsNativeRadius = desktopFrontend.match(/const FRONTEND_WINDOWS_CORNER_RADIUS:\s*u32\s*=\s*(\d+);/)?.[1]
 
     expect(cssRadius).toBeDefined()
     expect(nativeRadius).toBe(cssRadius)
+    expect(windowsNativeRadius).toBe(windowsCssRadius)
+    expect(resetCss).toMatch(/data-desktop-windows-corners="square"\]\s*\{\s*--desktop-window-corner-radius:\s*0px/)
     expect(titlebarCss).toMatch(
-      /html\[data-tauri-desktop\][\s\S]*?\.titlebar\s*\{[\s\S]*?border-radius:\s*var\(--desktop-window-corner-radius\)/,
+      /html\[data-tauri-desktop\][\s\S]*?\.titlebar\s*\{[\s\S]*?border-radius:\s*var\(--desktop-window-corner-radius\) var\(--desktop-window-corner-radius\) 0 0/,
     )
-    expect(titlebarCss).not.toMatch(/border-(?:top|bottom)-(?:left|right)-radius/)
-    expect(desktopFrontend).toContain(`border-radius:{corner_radius}px;overflow:hidden`)
+    expect(desktopFrontend).toContain(`border-radius:{corner_radius}px {corner_radius}px 0 0;overflow:hidden`)
+    expect(desktopFrontend).toContain("root.setAttribute('data-desktop-windows-corners', '{windows_corners}')")
+    expect(desktopFrontend).toContain('.shadow(rounded_windows)')
+    expect(desktopFrontend).toMatch(/window\s*\.set_shadow\(rounded_windows\)/)
   })
 
   test('keeps desktop chrome outside the connection hard-stop', () => {

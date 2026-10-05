@@ -13,6 +13,7 @@
 import { existsSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
+import { resolveWindowsMsvc } from "./windows-msvc";
 
 /** Minimum Bun the desktop build requires (see desktop/README.md). */
 export const MIN_BUN_VERSION = "1.4.2";
@@ -240,21 +241,18 @@ async function checkLinuxPrerequisites(): Promise<ToolchainCheck[]> {
   return checks;
 }
 
-function checkWindowsPrerequisites(): ToolchainCheck[] {
-  // Both of these can be present in forms this probe would not recognise: the
-  // MSVC linker only appears on PATH inside a Developer Command Prompt, and
-  // WebView2 ships preinstalled on Windows 11. Reporting them as missing would
-  // send people to reinstall software they already have, so surface them as
-  // requirements to confirm rather than as failures.
+async function checkWindowsPrerequisites(): Promise<ToolchainCheck[]> {
+  const msvc = await resolveWindowsMsvc();
   return [
     {
       id: "msvc",
       label: "MSVC build tools",
-      status: "unverified",
-      detail: "cannot be detected reliably outside a Developer Command Prompt",
-      remedy: [
-        "If the build fails at the link step, install the Visual Studio",
-        "Build Tools with the C++ workload.",
+      status: msvc.ready ? "ok" : "missing",
+      detail: msvc.detail,
+      remedy: msvc.ready ? [] : [
+        "In Visual Studio Installer, modify Build Tools and select Desktop development with C++",
+        "with MSVC C++ build tools and a Windows SDK, then retry.",
+        "Or use the x64 Native Tools Command Prompt and verify: where link.exe",
       ],
     },
     {
@@ -282,7 +280,7 @@ export async function inspectDesktopToolchain(): Promise<DesktopToolchainReport>
       checks.push(...(await checkLinuxPrerequisites()));
       break;
     case "windows":
-      checks.push(...checkWindowsPrerequisites());
+      checks.push(...(await checkWindowsPrerequisites()));
       break;
     default:
       break;
@@ -296,6 +294,8 @@ export async function inspectDesktopToolchain(): Promise<DesktopToolchainReport>
 }
 
 /** The command that builds the desktop app on the current platform. */
-export function desktopBuildCommand(): string {
-  return "cd desktop && bun install && bun run tauri:finalized build";
+export function desktopBuildCommand(target: DesktopPlatform = currentDesktopPlatform()): string {
+  return target === "windows"
+    ? ".\\start.ps1 -InstallDesktop"
+    : "cd desktop && bun install && bun run tauri:finalized build";
 }

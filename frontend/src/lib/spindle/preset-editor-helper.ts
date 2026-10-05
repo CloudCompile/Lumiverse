@@ -4,8 +4,9 @@ import type {
   SpindlePresetEditorScopedHelper,
   SpindlePresetEditorState,
 } from './preset-editor-types'
-import type { PromptVariableValueDTO, PromptVariableValuesDTO } from 'lumiverse-spindle-types'
+import type { PromptBlockDTO, PromptVariableValueDTO, PromptVariableValuesDTO } from 'lumiverse-spindle-types'
 import { isLoomOwnedPresetMetadataKey, projectPublicPromptBlocks, pruneOrphanPromptVariables } from '@/lib/loom/service'
+import type { PromptVariableDef } from '@/lib/loom/types'
 
 type PresetMutator = (preset: SpindlePresetEditorDraft) => SpindlePresetEditorDraft
 
@@ -14,6 +15,7 @@ interface PresetEditorController {
   getPromptVariableValues?(): PromptVariableValuesDTO
   setActiveTab(tabId: string): void
   updatePreset(mutator: PresetMutator, immediate: boolean): void
+  movePromptVariable?(sourceBlockId: string, variable: PromptVariableDef, targetBlockId: string): boolean
   flush(): Promise<void>
 }
 
@@ -182,6 +184,50 @@ export function syncPresetEditorState(
 export function getPresetEditorState(): SpindlePresetEditorState {
   // A published transition snapshot is authoritative during listener delivery.
   return cloneState(getCurrentState())
+}
+
+function matchesPresetEditorBlockGraph(blocks: readonly Pick<PromptBlockDTO, 'id'>[]): boolean {
+  const current = getCurrentState()
+  if (!controller || !current.open || !current.presetId || !current.preset) return false
+  const currentBlocks = current.preset.blocks
+  if (blocks.length !== currentBlocks.length) return false
+
+  const seen = new Set<string>()
+  for (let index = 0; index < blocks.length; index += 1) {
+    const id = blocks[index]?.id
+    if (typeof id !== 'string' || !id || seen.has(id) || currentBlocks[index]?.id !== id) return false
+    seen.add(id)
+  }
+  return true
+}
+
+/**
+ * True only when a mounted public Loom editor is an exact block-identity view
+ * of the preset currently open in Loom and the host still exposes the
+ * canonical variable mover. This is intentionally internal: extensions do not
+ * gain a second preset-mutation API.
+ */
+export function canMovePresetEditorPromptVariables(
+  blocks: readonly Pick<PromptBlockDTO, 'id'>[],
+): boolean {
+  return typeof controller?.movePromptVariable === 'function' && matchesPresetEditorBlockGraph(blocks)
+}
+
+/**
+ * Route a native VariablesEditor move through Loom's existing mover so saved
+ * values and host-only placement bindings travel with the definition. The
+ * mounted editor must still be bound to the exact active preset graph.
+ */
+export function movePresetEditorPromptVariable(
+  blocks: readonly Pick<PromptBlockDTO, 'id'>[],
+  sourceBlockId: string,
+  variable: PromptVariableDef,
+  targetBlockId: string,
+): boolean {
+  if (!canMovePresetEditorPromptVariables(blocks)) return false
+  const move = controller?.movePromptVariable
+  if (!move) return false
+  return move(sourceBlockId, clone(variable), targetBlockId)
 }
 
 export function subscribePresetEditorState(

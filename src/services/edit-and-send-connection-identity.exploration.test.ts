@@ -86,6 +86,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE characters (
     id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '', scenario TEXT NOT NULL DEFAULT '', first_mes TEXT NOT NULL DEFAULT '',
@@ -643,7 +648,7 @@ describe("Case 7 — active profile points at a deleted profile", () => {
 
 // ── Case 8 (task 1.8) ──────────────────────────────────────────────────────
 
-describe("Case 8 — the opt-in is inert on a chat that carries a live binding", () => {
+describe("Case 8 — the opt-in overrides a live binding for Edit-and-Send", () => {
   test("Edit-and-Send uses the active profile and drops the binding's model override", async () => {
     const chatId = "case8";
     await seedOptInFixture(chatId);
@@ -662,13 +667,11 @@ describe("Case 8 — the opt-in is inert on a chat that carries a live binding",
     // the unfixed and the fixed tree.
     await start(input, { origin: "edit_and_send" }).catch(() => { /* assembly is stubbed out */ });
 
-    expect({
-      resolvedConnectionId: (input as { connection_id?: string }).connection_id,
-      resolvedModel: pool.getPoolEntry(generationId)?.model,
-    }).toEqual({
-      resolvedConnectionId: PROFILE_A,
-      resolvedModel: MODEL_A,
+    expect(pool.getPoolEntry(generationId)).toMatchObject({
+      connectionName: "Local LM Studio",
+      model: MODEL_A,
     });
+    expect(input).not.toHaveProperty("connection_id");
   });
 
   test("the same fixture leaves an interactive swipe on the bound profile with its model override", async () => {
@@ -702,6 +705,7 @@ describe("Case 9 — the origin cannot be forged in band", () => {
     // from body spreading, which is why the origin lives out of band.
     const body: Record<string, unknown> = {
       chat_id: chatId,
+      generationId: "gen-case9",
       generation_type: "normal",
       origin: "edit_and_send",
       edit_and_send: true,
@@ -709,12 +713,13 @@ describe("Case 9 — the origin cannot be forged in band", () => {
     };
     const input = { ...body, userId: USER, signal: undefined } as unknown as StartArgs;
 
-    const started = await start(input).catch(() => null);
+    await start(input).catch(() => { /* assembly is stubbed out */ });
 
-    expect((input as { connection_id?: string }).connection_id).toBe(PROFILE_C);
-    if (started) {
-      expect(pool.getPoolEntry(started.generationId)?.model).toBe(BINDING_MODEL_OVERRIDE);
-    }
+    expect(pool.getPoolEntry("gen-case9")).toMatchObject({
+      connectionName: "Pinned Profile",
+      model: BINDING_MODEL_OVERRIDE,
+    });
+    expect(input).not.toHaveProperty("connection_id");
     expect(getSettingSpy.mock.calls.map((call) => call[1])).not.toContain("quickToolbarSettings");
   });
 });

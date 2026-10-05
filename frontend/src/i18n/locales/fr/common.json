@@ -6,6 +6,14 @@
     "server": "Le mode thème sécurisé est actif pour ce serveur. Le CSS personnalisé et les remplacements de composants sont temporairement désactivés ; supprimez LUMIVERSE_SAFE_THEME et redémarrez pour les restaurer.",
     "both": "Le mode thème sécurisé est actif via l’URL et le serveur. Le CSS personnalisé et les remplacements de composants sont temporairement désactivés."
   },
+  "windowFileDrop": {
+    "dropToImport": "Déposez des fichiers à importer",
+    "chooseDestination": "Où importer ces fichiers ?",
+    "unsupported": "Aucun fichier pris en charge n’a été déposé.",
+    "characters": "Importer des personnages",
+    "presets": "Importer des préréglages",
+    "worldBooks": "Importer des livres de monde"
+  },
   "actions": {
     "save": "Enregistrer",
     "cancel": "Annuler",

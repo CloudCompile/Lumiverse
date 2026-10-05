@@ -137,6 +137,8 @@
 .popoverPortal {
   position: fixed;
   right: auto;
+  /* The measured width is capped to the scaled viewport in reposition(). */
+  min-width: 0;
   /* Portaled popovers float over arbitrary content (modals, rails, the page).
      --lumiverse-bg is intentionally translucent (0.95) for inline use, but over a
      busy/blurred backdrop that bleed makes the list unreadable — see it stacking

@@ -1383,7 +1383,6 @@
     "cancel": "キャンセル",
     "dropToImport": "インポートするキャラクター ファイルをドロップ",
     "dropFileTypes": ".json、.png、.charx、.jpg",
-    "desktopDropReadFailed": "Lumiverse Desktop はドロップされたファイルを読み取れませんでした。",
     "tagFilter": {
       "label": "タグ",
       "labelWithCount": "タグ ({{count}})",

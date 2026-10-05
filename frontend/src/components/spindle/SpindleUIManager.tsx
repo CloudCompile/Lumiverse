@@ -13,6 +13,7 @@ import { InputPromptModal } from '@/components/shared/InputPromptModal'
 import ContextMenu, { type ContextMenuEntry } from '@/components/shared/ContextMenu'
 import type { SpindleModalItem } from '@/types/store'
 import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
+import { resolveCurrentSpindleModalGeometry } from '@/lib/spindle/modal-geometry'
 
 function SpindleTextEditor() {
   const reqId = useStore((s) => s.pendingTextEditor?.requestId ?? null)
@@ -141,6 +142,7 @@ function SpindleModal() {
       closeModal(req.requestId, 'user')
     }
   }
+  const geometry = resolveCurrentSpindleModalGeometry(req)
 
   return createPortal(
     <motion.div
@@ -162,8 +164,8 @@ function SpindleModal() {
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.15 }}
         style={{
-          width: Math.min(req.width || 420, window.innerWidth - 40),
-          maxHeight: Math.min(req.maxHeight || 520, window.innerHeight - 40),
+          width: geometry.width,
+          maxHeight: geometry.maxHeight,
           background: 'var(--lumiverse-bg)', borderRadius: 12,
           border: '1px solid var(--lumiverse-border)',
           display: 'flex', flexDirection: 'column', overflow: 'hidden',

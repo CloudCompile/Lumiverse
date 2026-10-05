@@ -1,17 +1,15 @@
 //! Frontend window — a native WebView loading the local Lumiverse server.
 
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex,
     },
-    time::{Duration, Instant},
 };
 use tauri::{
-    ipc::Response, webview::DownloadEvent, AppHandle, Emitter, LogicalSize, Manager, State,
-    Webview, WebviewEvent, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
+    webview::DownloadEvent, AppHandle, Emitter, LogicalSize, Manager, State, Webview, WebviewUrl,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 
 /// Emit a native marker after the hidden webview has created its tray icon.
@@ -110,10 +108,10 @@ const DEFAULT_WIDTH: u32 = 1200;
 const DEFAULT_HEIGHT: u32 = 800;
 const FRONTEND_TITLEBAR_HEIGHT: u32 = 36;
 const FRONTEND_CORNER_RADIUS: u32 = 12;
+const FRONTEND_WINDOWS_CORNER_RADIUS: u32 = 8;
 const RESTORE_MARGIN: i32 = 24;
 const FRONTEND_STARTUP_APPEARANCE_FILE: &str = "frontend_startup_appearance.json";
 static NEXT_FRONTEND_POPUP_ID: AtomicU64 = AtomicU64::new(1);
-const FRONTEND_DROP_AUTHORIZATION_TTL: Duration = Duration::from_secs(120);
 const CHROMELESS_WIDGET_MIN_SIZE: u32 = 24;
 const CHROMED_WIDGET_MIN_WIDTH: u32 = 160;
 const CHROMED_WIDGET_MIN_HEIGHT: u32 = 100;
@@ -138,14 +136,6 @@ fn configure_webview_runtime<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
     builder
 }
 
-#[derive(Default)]
-pub struct FrontendDropState {
-    /// Native drag events are the authority for filesystem access. The remote
-    /// frontend may read only supported files the user just dragged into its
-    /// own WebView, and each authorization is consumed on first read.
-    paths: Mutex<HashMap<PathBuf, Instant>>,
-}
-
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopDownloadEvent {
@@ -153,90 +143,6 @@ struct DesktopDownloadEvent {
     id: String,
     file_name: String,
     success: Option<bool>,
-}
-
-fn supported_frontend_drop_path(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "json" | "png" | "charx" | "jpg" | "jpeg"
-            )
-        })
-}
-
-fn canonical_supported_drop_path(path: &std::path::Path) -> Option<PathBuf> {
-    if !supported_frontend_drop_path(path) {
-        return None;
-    }
-    let canonical = path.canonicalize().ok()?;
-    canonical.is_file().then_some(canonical)
-}
-
-/// Mirror Tauri's native drag lifecycle into a short-lived, one-use file-read
-/// grant. Tauri's drag event reaches this hook before its matching JavaScript
-/// event is delivered to the WebView.
-pub fn track_frontend_drop_event(webview: &Webview, event: &WebviewEvent) {
-    if webview.label() != FRONTEND_LABEL {
-        return;
-    }
-    let WebviewEvent::DragDrop(event) = event else {
-        return;
-    };
-    let state = webview.state::<FrontendDropState>();
-    let mut paths = state.paths.lock().unwrap();
-    let now = Instant::now();
-    paths
-        .retain(|_, granted_at| now.duration_since(*granted_at) <= FRONTEND_DROP_AUTHORIZATION_TTL);
-
-    match event {
-        tauri::DragDropEvent::Enter { paths: entered, .. }
-        | tauri::DragDropEvent::Drop { paths: entered, .. } => {
-            paths.clear();
-            paths.extend(
-                entered
-                    .iter()
-                    .filter_map(|path| canonical_supported_drop_path(path))
-                    .map(|path| (path, now)),
-            );
-        }
-        tauri::DragDropEvent::Leave => paths.clear(),
-        tauri::DragDropEvent::Over { .. } => {}
-        _ => {}
-    }
-}
-
-/// Read one file from the most recent native drop as a binary IPC response.
-/// The path must have been granted by `track_frontend_drop_event`, is limited
-/// to character-card formats, and is removed before any filesystem read.
-#[tauri::command]
-pub async fn read_frontend_drop_file(
-    window: WebviewWindow,
-    state: State<'_, FrontendDropState>,
-    path: PathBuf,
-) -> Result<Response, String> {
-    if window.label() != FRONTEND_LABEL {
-        return Err("Only the Lumiverse frontend can read dropped files".into());
-    }
-    let canonical = canonical_supported_drop_path(&path)
-        .ok_or_else(|| "Dropped file is missing or unsupported".to_string())?;
-    {
-        let mut authorized = state.paths.lock().unwrap();
-        let now = Instant::now();
-        authorized.retain(|_, granted_at| {
-            now.duration_since(*granted_at) <= FRONTEND_DROP_AUTHORIZATION_TTL
-        });
-        if authorized.remove(&canonical).is_none() {
-            return Err("Dropped file is no longer authorized".into());
-        }
-    }
-
-    let bytes = tauri::async_runtime::spawn_blocking(move || std::fs::read(canonical))
-        .await
-        .map_err(|error| format!("Could not schedule dropped-file read: {error}"))?
-        .map_err(|error| format!("Could not read dropped file: {error}"))?;
-    Ok(Response::new(bytes))
 }
 
 fn download_file_name(url: &tauri::Url, path: Option<&std::path::Path>) -> String {
@@ -501,10 +407,17 @@ fn save_frontend_startup_appearance<R: tauri::Runtime>(
     std::fs::write(file, json).map_err(|error| error.to_string())
 }
 
-fn frontend_startup_shell_script(appearance: &FrontendStartupAppearance) -> String {
+fn frontend_startup_shell_script(
+    appearance: &FrontendStartupAppearance,
+    windows_corners: &str,
+) -> String {
     let snapshot = serde_json::to_string(appearance).unwrap_or_else(|_| "{}".into());
     let titlebar_height = FRONTEND_TITLEBAR_HEIGHT;
-    let corner_radius = FRONTEND_CORNER_RADIUS;
+    let corner_radius = match windows_corners {
+        "rounded" => FRONTEND_WINDOWS_CORNER_RADIUS,
+        "square" => 0,
+        _ => FRONTEND_CORNER_RADIUS,
+    };
     format!(
         r#"(() => {{
   const snapshot = {snapshot};
@@ -515,6 +428,7 @@ fn frontend_startup_shell_script(appearance: &FrontendStartupAppearance) -> Stri
   set('--lumiverse-startup-text-muted', snapshot.textMuted);
   set('--lumiverse-startup-primary', snapshot.primary);
   root.setAttribute('data-tauri-desktop', '');
+  if ('{windows_corners}') root.setAttribute('data-desktop-windows-corners', '{windows_corners}');
   root.setAttribute('data-lumiverse-startup-shell', '');
 
   const mount = () => {{
@@ -524,7 +438,7 @@ fn frontend_startup_shell_script(appearance: &FrontendStartupAppearance) -> Stri
     shell.setAttribute('aria-hidden', 'true');
     shell.innerHTML = '<div class="lumiverse-startup-titlebar"><div class="lumiverse-startup-drag" data-tauri-drag-region="deep"><span class="lumiverse-startup-dot"></span><span>Lumiverse</span></div><span class="lumiverse-startup-controls"><i></i><i></i><i></i></span></div><div class="lumiverse-startup-pulse"></div>';
     const style = document.createElement('style');
-    style.textContent = '#lumiverse-startup-shell{{position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:var(--lumiverse-startup-background,#0a0812);color:var(--lumiverse-startup-text-muted,rgba(255,255,255,.64));font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.02em}}.lumiverse-startup-titlebar{{position:relative;height:{titlebar_height}px;box-sizing:border-box;border-radius:{corner_radius}px;overflow:hidden;border-bottom:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.08));background:color-mix(in srgb,var(--lumiverse-startup-background,#0a0812) 86%,transparent)}}.lumiverse-startup-drag{{position:absolute;inset:1px 1px 0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:auto;cursor:grab;user-select:none;-webkit-user-select:none}}.lumiverse-startup-dot{{width:8px;height:8px;border-radius:999px;background:var(--lumiverse-startup-primary,#9370db);box-shadow:0 0 0 3px color-mix(in srgb,var(--lumiverse-startup-primary,#9370db) 12%,transparent)}}.lumiverse-startup-controls{{position:absolute;top:50%;right:12px;display:flex;gap:7px;transform:translateY(-50%)}}.lumiverse-startup-controls i{{display:block;width:11px;height:11px;border-radius:999px;border:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.12))}}.lumiverse-startup-pulse{{position:absolute;top:50%;left:50%;width:42px;height:42px;margin:-21px;border-radius:50%;border:2px solid var(--lumiverse-startup-primary,#9370db);border-left-color:transparent;opacity:.55;animation:lumiverse-startup-spin .9s linear infinite}}@keyframes lumiverse-startup-spin{{to{{transform:rotate(360deg)}}}}';
+    style.textContent = '#lumiverse-startup-shell{{position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:var(--lumiverse-startup-background,#0a0812);color:var(--lumiverse-startup-text-muted,rgba(255,255,255,.64));font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.02em}}.lumiverse-startup-titlebar{{position:relative;height:{titlebar_height}px;box-sizing:border-box;border-radius:{corner_radius}px {corner_radius}px 0 0;overflow:hidden;border-bottom:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.08));background:color-mix(in srgb,var(--lumiverse-startup-background,#0a0812) 86%,transparent)}}.lumiverse-startup-drag{{position:absolute;inset:1px 1px 0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:auto;cursor:grab;user-select:none;-webkit-user-select:none}}.lumiverse-startup-dot{{width:8px;height:8px;border-radius:999px;background:var(--lumiverse-startup-primary,#9370db);box-shadow:0 0 0 3px color-mix(in srgb,var(--lumiverse-startup-primary,#9370db) 12%,transparent)}}.lumiverse-startup-controls{{position:absolute;top:50%;right:12px;display:flex;gap:7px;transform:translateY(-50%)}}.lumiverse-startup-controls i{{display:block;width:11px;height:11px;border-radius:999px;border:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.12))}}.lumiverse-startup-pulse{{position:absolute;top:50%;left:50%;width:42px;height:42px;margin:-21px;border-radius:50%;border:2px solid var(--lumiverse-startup-primary,#9370db);border-left-color:transparent;opacity:.55;animation:lumiverse-startup-spin .9s linear infinite}}@keyframes lumiverse-startup-spin{{to{{transform:rotate(360deg)}}}}';
     document.head.appendChild(style);
     document.body.appendChild(shell);
     // The shell must lift on every route the frontend can land on, not just
@@ -713,6 +627,21 @@ pub fn show_frontend(
         return Err("Frontend URL must start with http:// or https://".into());
     }
 
+    #[cfg(target_os = "windows")]
+    let rounded_windows =
+        supports_windows_rounded_corners(windows_version::OsVersion::current().build);
+    #[cfg(not(target_os = "windows"))]
+    let rounded_windows = false;
+    let windows_corners = if cfg!(target_os = "windows") {
+        if rounded_windows {
+            "rounded"
+        } else {
+            "square"
+        }
+    } else {
+        ""
+    };
+
     // Keep the current URL and in-memory frontend state when the frontend is
     // hidden and reopened. Only reset to the frontend root if its server port
     // has genuinely changed.
@@ -720,7 +649,9 @@ pub fn show_frontend(
         // Apply this on the reuse path too. The tray normally hides rather
         // than destroys the frontend window, so a newly changed shadow policy
         // must not wait for a full desktop-process restart.
-        window.set_shadow(false).map_err(|e| e.to_string())?;
+        window
+            .set_shadow(rounded_windows)
+            .map_err(|e| e.to_string())?;
         #[cfg(target_os = "macos")]
         enforce_frontend_content_corner_radius(&window)?;
         let target_changed = window
@@ -753,6 +684,7 @@ pub fn show_frontend(
     let popup_app = app.clone();
     let mut builder = WebviewWindowBuilder::new(&app, FRONTEND_LABEL, WebviewUrl::External(url))
         .title(FRONTEND_TITLE)
+        .disable_drag_drop_handler()
         .inner_size(DEFAULT_WIDTH as f64, DEFAULT_HEIGHT as f64)
         .min_inner_size(800.0, 600.0)
         // The frontend renders the title bar and window controls so it can
@@ -762,9 +694,7 @@ pub fn show_frontend(
         // WebView otherwise consumes the first click only to activate the
         // window, so its drag region does not see that gesture.
         .accept_first_mouse(true)
-        // The frontend owns its rounded document edge. A native shadow creates
-        // a square-ish outline around that curve on transparent windows.
-        .shadow(false)
+        .shadow(rounded_windows)
         // The tray host starts without a Dock/taskbar entry. Enable the
         // frontend's entry immediately before its first show below.
         .skip_taskbar(true)
@@ -776,7 +706,10 @@ pub fn show_frontend(
         .background_color(native_background)
         // Install a lightweight titlebar/surface before the remote frontend's
         // bundle executes. It removes itself as soon as the app root mounts.
-        .initialization_script(frontend_startup_shell_script(&startup_appearance))
+        .initialization_script(frontend_startup_shell_script(
+            &startup_appearance,
+            windows_corners,
+        ))
         // Embedded WebViews do not provide a browser download shelf. Publish
         // the native lifecycle so the frontend can show immediate feedback.
         .on_download(report_frontend_download)
@@ -843,12 +776,16 @@ pub fn show_frontend(
     }
 
     let window = builder.build().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    crate::webview_media::configure_frontend_microphone(&window)?;
     // Applying this again after construction keeps a hot-reloaded frontend
     // from inheriting caption buttons from a previously decorated platform
     // window. A full desktop-process restart is still required to replace an
     // already-created native window.
     window.set_decorations(false).map_err(|e| e.to_string())?;
-    window.set_shadow(false).map_err(|e| e.to_string())?;
+    window
+        .set_shadow(rounded_windows)
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
     enforce_frontend_content_corner_radius(&window)?;
     // A newly-created hidden GTK window does not have a wl_surface yet. Apply
@@ -1324,6 +1261,11 @@ pub fn return_extension_widget_from_tray(
 /// supplies the platform blur. This is shared by the launch snapshot and the
 /// live frontend command, so their first and steady-state frames agree.
 #[cfg(any(target_os = "windows", test))]
+fn supports_windows_rounded_corners(build: u32) -> bool {
+    build >= 22_000
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn supports_windows_system_backdrop(build: u32) -> bool {
     // This is the same cutoff used by window-vibrancy 0.6 before it selects
     // DWMWA_SYSTEMBACKDROP_TYPE instead of SetWindowCompositionAttribute.
@@ -1467,9 +1409,23 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        download_file_name, is_frontend_popup_label, supported_frontend_drop_path,
-        supports_windows_system_backdrop, valid_widget_size,
+        download_file_name, frontend_startup_shell_script, is_frontend_popup_label,
+        supports_windows_rounded_corners, supports_windows_system_backdrop, valid_widget_size,
+        FrontendStartupAppearance,
     };
+
+    #[test]
+    fn rounds_only_supported_windows_frames() {
+        assert!(!supports_windows_rounded_corners(19_045));
+        assert!(!supports_windows_rounded_corners(21_999));
+        assert!(supports_windows_rounded_corners(22_000));
+
+        let appearance = FrontendStartupAppearance::default();
+        let rounded = frontend_startup_shell_script(&appearance, "rounded");
+        let square = frontend_startup_shell_script(&appearance, "square");
+        assert!(rounded.contains("border-radius:8px 8px 0 0;overflow:hidden"));
+        assert!(square.contains("border-radius:0px 0px 0 0;overflow:hidden"));
+    }
 
     #[test]
     fn selects_system_backdrops_at_window_vibrancy_cutoff() {
@@ -1486,22 +1442,6 @@ mod tests {
         assert!(!is_frontend_popup_label("frontend-popup-"));
         assert!(!is_frontend_popup_label("frontend-popup-settings"));
         assert!(!is_frontend_popup_label("frontend-popup-1-other"));
-    }
-
-    #[test]
-    fn native_drop_scope_matches_the_character_import_formats() {
-        for path in [
-            "card.json",
-            "card.PNG",
-            "card.charx",
-            "card.jpg",
-            "card.JPEG",
-        ] {
-            assert!(supported_frontend_drop_path(Path::new(path)), "{path}");
-        }
-        for path in ["card.zip", "card.txt", "card"] {
-            assert!(!supported_frontend_drop_path(Path::new(path)), "{path}");
-        }
     }
 
     #[test]

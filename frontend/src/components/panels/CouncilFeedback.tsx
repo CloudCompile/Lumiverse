@@ -21,6 +21,7 @@ function renderMinimalMarkdown(text: string): string {
 export default function CouncilFeedback() {
   const { t } = useTranslation('panels')
   const councilExecuting = useStore((s) => s.councilExecuting)
+  const councilEnabled = useStore((s) => s.councilSettings.councilMode)
   const councilToolResults = useStore((s) => s.councilToolResults)
   const councilExecutionResult = useStore((s) => s.councilExecutionResult)
 
@@ -56,7 +57,7 @@ export default function CouncilFeedback() {
             )}
           </div>
         ) : (
-          <div className={styles.statusIdle}>{t('councilFeedback.noResultsYet')}</div>
+          <div className={styles.statusIdle}>{councilEnabled ? t('councilFeedback.ready', { defaultValue: 'Council enabled — waiting for tool feedback' }) : t('councilFeedback.noResultsYet')}</div>
         )}
       </div>
 

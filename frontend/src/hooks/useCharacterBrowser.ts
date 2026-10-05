@@ -13,6 +13,7 @@ import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImpor
 import type { AlternateFieldsSummaryInfo } from '@/components/modals/AlternateFieldsSummaryModal'
 import { getEmbeddedCharacterBookEntryCount } from '@/utils/character-world-books'
 import { sortFolderGroups } from '@/lib/folderSorting'
+import { reconcileLoadedCharacters } from '@/lib/reconcileLoadedCharacters'
 import i18n from '@/i18n'
 
 /**
@@ -256,6 +257,7 @@ export function useCharacterBrowser() {
   )
 
   const loadAllCharacters = useCallback(async () => {
+    const previousIds = new Set(useStore.getState().characters.map((character) => character.id))
     const PAGE = 200
     let all: Character[] = []
     let offset = 0
@@ -267,7 +269,7 @@ export function useCharacterBrowser() {
       offset += result.data.length
       if (result.data.length < PAGE) break
     }
-    setCharacters(all)
+    setCharacters(reconcileLoadedCharacters(previousIds, all, useStore.getState().characters))
   }, [setCharacters])
 
   // ─── Fetch current page from server ─────────────────────────────────────

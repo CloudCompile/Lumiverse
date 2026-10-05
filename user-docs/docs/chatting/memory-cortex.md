@@ -4,312 +4,162 @@ title: Memory Cortex
 
 # Memory Cortex
 
-Memory Cortex is an advanced memory layer that sits on top of [Long-Term Memory](memory.md). While basic long-term memory retrieves relevant text chunks by similarity, the cortex understands *what happened* — tracking characters, relationships, emotional beats, and narrative arcs across your entire conversation.
+Memory Cortex adds entity tracking, relationship records, narrative importance scores, emotional recall, and scene/arc consolidation to chat-history recall. It is optional: [Chat Memory / LTM](memory.md) works with Cortex disabled. [Summary](loom-summary.md) is a separate saved overview, not a Cortex consolidation.
 
----
+## Where Everything Lives
 
-## What Does It Add?
+| Location | What you do there |
+|----------|-------------------|
+| **Settings → Embeddings** | Configure embeddings and enable **Vectorise chat messages** |
+| **Settings → Advanced → Long-Term Chat Memory** | Shared chunking, exclusion, query settings, templates, and Injection Strategy; Conservative/Balanced/Aggressive/Manual modes |
+| **Settings → Memory Cortex** | Global switch, Simple/Standard/Advanced modes, sidecar connections, formatter, ranking, and consolidation |
+| Sidebar **Memory** | Inspect/edit this chat's entities, colors, chunks, relationships, consolidations, and links |
+| Sidebar **Memory → Stats** | Enable/disable Cortex for this chat; the global switch must also be on |
+| Chat input bar quick menu → **Recompile Memories** | Prepare Chat Memory and, when enabled for the chat, Cortex |
 
-| Feature | Long-Term Memory | Memory Cortex |
-|---------|:---:|:---:|
-| Retrieve relevant past passages | Yes | Yes |
-| Track named characters, locations, factions | - | Yes |
-| Map relationships between entities | - | Yes |
-| Score narrative importance (salience) | - | Yes |
-| Detect emotional tones | - | Yes |
-| Summarize story arcs | - | Yes |
-| Attribute font colors to characters | - | Yes |
-
-Memory Cortex doesn't replace long-term memory — it enhances it. With the cortex enabled, retrieved memories are ranked using narrative importance, emotional resonance, and entity relevance in addition to raw text similarity.
-
----
+Cortex's **Advanced** mode is inside the Memory Cortex tab. **Settings → Advanced** holds the shared LTM controls. These are different places.
 
 ## Getting Started
 
-### 1. Enable the Cortex
+1. Set up [Chat Memory](memory.md#set-up-chat-memory-without-cortex), including a tested embedding connection and **Vectorise chat messages**.
+2. In **Settings → Memory Cortex**, turn on **Enable Memory Cortex**. Check the per-chat toggle under **Memory → Stats** if Cortex is disabled for this chat.
+3. Choose **Simple** or **Standard**. Heuristic entity/importance analysis does not require a sidecar LLM.
+4. Add `{{memories}}` to an enabled system block in your active preset for combined memory context. Keep `{{loomSummary}}` in a separate block if you also use Summary.
+5. Use **Recompile Memories** from the chat input bar. Cortex settings also provide **Rebuild** for the open chat. Wait for processing, inspect **Memory → Stats**, then inspect the resolved prompt.
 
-Open **Settings > Memory Cortex** and flip the master toggle on.
+**Warm Memory Cortex when opening a chat** is opt-in. It prepares state on chat open; manual recompilation works while it is off. Chat Memory's warmup toggle is separately located in Settings → Advanced.
 
-### 2. Pick a Preset
+### What the Modes Actually Change
 
-Three presets configure the cortex for different use cases:
+| Mode | Behavior |
+|------|----------|
+| **Simple** | Heuristic extraction/scoring, fused ranking, emotional resonance, diversity selection, and entity context. Consolidation, relationship injection, and arc injection are off. |
+| **Standard** | Heuristic extraction/scoring plus relationship/arc injection and consolidation. Selecting it enables sidecar consolidation when a sidecar connection is already configured. |
+| **Advanced** | Keeps your current configuration and exposes detailed controls. It does **not** automatically enable LLM extraction or select a connection. |
 
-| Preset | Entity Tracking | Salience Scoring | Consolidation | Sidecar LLM | Best For |
-|--------|:---:|:---:|:---:|:---:|------|
-| **Simple** | Heuristic | Heuristic | Off | Off | Casual chats, low overhead |
-| **Standard** | Heuristic | Heuristic | On | Off | Most roleplay (recommended) |
-| **Advanced** | Heuristic + LLM | Heuristic + LLM | On | On | Long epics, maximum accuracy |
+Choosing a sidecar connection can switch extraction/scoring to sidecar mode and enable AI summaries. Check those controls after choosing a connection or switching modes; the mode name alone does not establish which model is doing the work.
 
-!!! tip "Start with Standard"
-    Standard gives you entity tracking, salience scoring, and consolidation using zero-cost heuristics — no extra API calls. You can always upgrade to Advanced later.
+## How Cortex Processes and Recalls History
 
-### 3. Rebuild Existing Chats
+**Analysis** enriches chunks with salience (importance), emotional tags, entities, facts, and relationships. Heuristics use text patterns; a configured sidecar can analyze these with an LLM. Both can misidentify names or infer incorrect facts, so review the Memory panel.
 
-If you enable the cortex on a chat that already has history, click **Rebuild** in the Memory Cortex settings. This processes all existing chunks through the cortex pipeline. New messages are processed automatically going forward.
+**Retrieval** combines semantic relevance with configured signals such as importance, recency, reinforcement, emotional resonance, and entity relevance. Diversity selection avoids closely clustered passages. Core-memory protection affects decay/ranking; it does not guarantee inclusion in every prompt.
 
----
+**Consolidation** groups older chunks into scene summaries, then scene summaries into arcs when thresholds are reached. Without AI summaries it extracts source text; with a sidecar it can generate summaries. Inspect these under **Memory → Stats → Consolidations**. They do not update `{{loomSummary}}`.
 
-## How It Works
+**Prompt assembly reads usable cached Cortex results**, rather than waiting for a fresh query on every send. On a cold cache or an unusable result, it falls back to basic Chat Memory while Cortex work runs in the background. Basic Chat Memory also uses a cache, so a cold start can initially have no recall. Enabling Cortex does not guarantee entities or arcs in the very next prompt.
 
-Every time a message is sent, the cortex processes the corresponding chunk through several layers:
+## Sidecar LLM
 
-### Salience Scoring
+An embedding model creates search vectors. A **sidecar LLM** extracts or summarizes information. They are different connections and workloads; enabling embeddings does not configure a sidecar.
 
-Each chunk gets a narrative importance score (0.0 to 1.0) based on:
+In **Settings → Memory Cortex**, choose a sidecar **Connection** and **Model**, then check extraction mode, salience mode, and **AI summaries**. The picker includes built-in LLM connections and providers from enabled [Spindle extensions](../extensions/index.md#extension-provided-ai-providers).
 
-- **Emotional signals** — grief, joy, tension, intimacy, betrayal, and more
-- **Narrative flags** — first meetings, deaths, promises, confessions, departures
-- **Dialogue content** — commitments, revelations, emotional declarations
-- **Character actions** — named characters doing emotionally significant things
-- **Milestone markers** — "for the first time", "nothing would be the same"
-- **Information density** — scenes with many proper nouns and new facts
+The sidecar can assist with entities/facts, relationships, importance, color attribution, and consolidation. **Chunks per request** batches analysis; **Parallel requests** controls rebuild concurrency; **Requests per minute** throttles starts (0 disables throttling). **Max output tokens** must accommodate the batch's structured response. This makes additional model requests, including on rebuild; it is not necessarily one call per chunk.
 
-High-salience memories resist decay over time. Pivotal moments (score above 0.7 or carrying narrative flags like `death` or `promise`) are protected as **core memories** — they decay 5x slower and never drop below a 0.5 retrieval floor.
+### Failure Handling and Fallback Connections
 
-### Entity Tracking
+Extraction/query work and memory summarization have independent connection chains. Each tries primary, secondary, and additional fallbacks in order, once per connection. Each connection keeps its own model and credentials.
 
-The cortex extracts and tracks named entities from your chat across six types:
+After the chain fails:
 
-- **Characters** — detected by verb adjacency ("Melina sighed"), dialogue attribution, interaction patterns
-- **Locations** — detected by suffixes ("Sixth Street"), locative phrases ("arrived at Dustwell")
-- **Factions** — detected by collective nouns ("Sons of Calydon"), business suffixes ("PubSec")
-- **Items** — detected by weapon/vehicle verbs ("wielding the Starblade")
-- **Concepts** — proper-noun ideas, magic systems, doctrines, named phenomena
-- **Events** — named happenings (battles, ceremonies, festivals) that recur across the story
+- **Heuristic fallback** permits heuristic analysis; failed AI consolidation can use extractive summaries.
+- **AI Only — skip chunk, retry on warmup** avoids persisting the failed chunk's analysis and leaves it for a later warmup.
 
-Each entity accumulates facts, emotional associations, and a salience profile over time. The entity graph handles aliases automatically — if a character named "Pulchra Fellini" is sometimes called "Pulchra" or "Pul", those references are resolved to the same entity.
+**Sidecar Timeout** bounds each call. AI Only with an unavailable sidecar can leave analysis incomplete instead of filling the graph with heuristics.
 
-You can browse entities in the **Memory panel** (sidebar > Memory > Entities tab). Delete any that were incorrectly extracted.
-
-### Relationship Mapping
-
-When two named entities appear in the same chunk, the cortex analyzes their interaction:
-
-- **Verb-mediated** — "Melina protected Caesar" (ally, positive sentiment)
-- **Relational nouns** — "Melina's brother" near "Caesar" (sibling)
-- **Coordinated action** — "Melina and Caesar fought together" (ally)
-- **Terms of address** — endearments or hostile language in dialogue
-- **Physical proximity** — two characters described near each other
-
-Relationships are reinforced each time they're observed, building a strength score over time.
-
-### Consolidation
-
-As your chat grows, older chunks are compressed into summaries:
-
-- **Scene summaries** (Tier 1) — groups of chunks consolidated into a single paragraph capturing key events
-- **Story arcs** (Tier 2) — groups of scene summaries compressed into high-level arc descriptions
-
-Consolidation triggers automatically when enough unconsolidated chunks accumulate (configurable threshold). This keeps the memory footprint bounded while preserving narrative continuity.
-
-You can view consolidations in the **Memory panel** (sidebar > Memory > Stats > Consolidations).
-
-### Emotional Recall
-
-When you generate a new message, the cortex analyzes the emotional tone of recent messages and boosts retrieval of memories with matching emotions. A sad scene naturally surfaces memories of past grief and loss. A tense confrontation recalls previous conflicts.
-
-This "Proustian recall" works alongside semantic similarity — memories that are both topically relevant *and* emotionally resonant score highest.
-
----
-
-## Sidecar LLM (Tier 2)
-
-For maximum accuracy, you can assign a secondary LLM connection to assist the cortex. This sidecar model handles:
-
-- **Deeper entity extraction** — catches entities the heuristic misses
-- **Better relationship detection** — understands implied relationships
-- **Calibrated salience scoring** — judges narrative importance by consequence, not just keyword presence
-- **Font color attribution** — identifies which character owns each HTML color tag
-- **Key fact extraction** — pulls concrete, memorable facts from each passage
-- **Generative consolidation** — produces coherent narrative summaries instead of sentence extractions
-
-### Setting Up a Sidecar
-
-1. In **Memory Cortex settings**, select a **Connection Profile** under the Sidecar section
-2. Choose a **Model** (smaller, faster models work well here — the sidecar doesn't need to be creative)
-3. Optionally add separate fallback connections for extraction and memory summaries
-4. Adjust **Temperature** (0.1 recommended for factual extraction)
-5. Set **Parallel Requests** to control how many concurrent LLM calls run during a rebuild
-6. Set **Requests Per Minute** to throttle the sidecar against your provider's rate limits (0 = unlimited)
-
-The connection picker includes both built-in connections and sidecar providers contributed by enabled [Spindle extensions](../extensions/index.md#extension-provided-ai-providers).
-
-!!! note "Sidecar Costs"
-    The sidecar makes one LLM call per chunk during live chat, and one per chunk during rebuilds. A chat with 200 chunks would make 200 API calls on rebuild. Choose an inexpensive model for the sidecar to keep costs reasonable.
-
-### Failure Handling
-
-Choose how to handle a failed sidecar call:
-
-| Setting | Description |
-|---------|-------------|
-| **Fallback** | `heuristic` writes the heuristic result if the sidecar fails; `skip` holds the chunk for reprocessing on the next pass. |
-| **Sidecar Timeout** | Per-call timeout in milliseconds before the call is abandoned. |
-
-### Connection Failover
-
-Memory Cortex keeps two independent ordered chains because extraction and summarization have different workloads:
-
-- **Extraction secondary / fallbacks** handle query generation, entity extraction, relationships, and related analysis.
-- **Summary secondary / fallbacks** handle scene and story-arc consolidation.
-
-The primary connection is attempted once. Lumiverse does not automatically retry requests against the same connection. If it remains unavailable or times out, Lumiverse tries the corresponding secondary connection and then each additional fallback in order, once per connection. Only after that chain is exhausted does the **Fallback** reliability setting decide whether to use heuristics or leave the work for a later pass.
-
-Fallback connections keep their own models and credentials. Removing a fallback from one chain does not remove it from the other.
-
-### Arbitration
-
-When the sidecar is enabled, two optional behaviors give it authority over heuristic data:
-
-- **Arbitrates Heuristics** — the sidecar reviews each heuristic entity before it is persisted and can reject or rename misidentifications (e.g. discarding common words mistakenly extracted as characters).
-- **Grades Existing Records** — periodically re-evaluates already-saved entities and removes ones that have become noise. Useful after a long chat has accumulated mistakes.
-
-If every configured sidecar connection fails and **Fallback** is set to `heuristic`, the heuristic result is used as a safe default.
-
----
+**Arbitrates Heuristics** lets successful sidecar analysis reject or rename heuristic candidates. **Grades Existing Records** can remove invalid existing entities; user-edited entities are protected from that grading. Inspect the records rather than assuming every fact is correct.
 
 ## Memory Panel
 
-The sidebar's **Memory** tab gives you a live view of the cortex data for the current chat. It has four tabs:
+| Tab | Contents and controls |
+|-----|-----------------------|
+| **Entities** | Names, types, descriptions, aliases, facts, status, mentions, emotional profiles. Edit mistakes or delete individually/in bulk. |
+| **Colors** | Character color attributions and confidence; supplies `{{characterColors}}` |
+| **Stats** | Total/vectorized chunks, entities, relationships, consolidations, salience. Click cards to inspect records. Also contains the per-chat Cortex toggle. |
+| **Links** | Attach vaults/interlinks and manage the Vault Library |
 
-### Entities Tab
-Browse all tracked entities — characters, locations, items, factions, concepts, events. Each entity card shows:
-
-- Type and status (active, inactive, deceased, destroyed, unknown)
-- Mention count and salience average
-- Description (auto-populated from first appearance)
-- Known facts
-- Emotional profile (top emotional associations)
-- Aliases
-
-You can select multiple entities and delete them in bulk, or delete a single incorrectly extracted entity directly from this panel.
-
-### Colors Tab
-Shows font color attributions — which hex color belongs to which character, with confidence scores. Useful for chats where characters use distinct colors for speech, thought, or narration.
-
-### Stats Tab
-Overview of the cortex data:
-
-- Memory chunks (total and vectorized)
-- Entities (active and archived)
-- Relations between entities
-- Consolidations (scene summaries and arcs)
-- Salience records (sourced from `heuristic` or `sidecar`)
-
-Click any stat card to drill down into the raw records.
-
-### Links Tab
-Manages cross-chat memory sharing — see [Vaults & Interlinks](#vaults-interlinks) below.
-
----
+Stored records are not this generation's retrieved context. Seeing entities here does not mean every entity will appear in `{{entities}}`.
 
 ## Vaults & Interlinks
 
-Cortex memory can be shared between chats in two ways. Both are managed from the **Links** tab in the Memory panel.
+A **vault** is a frozen snapshot of a chat's memory state for other chats to consume. Use it for a finished campaign or shared backstory. Changes to the original chat do not keep updating the snapshot. Vault embeddings can be rebuilt after changing embedding configuration.
 
-### Vaults
+An **interlink** reads another chat's evolving memory. It can share entities, relationships, and optionally chunks. Links can be directional or bidirectional; the other chat receives your memory only if configured that way.
 
-A **vault** is a frozen snapshot of a chat's cortex state — its chunks, entities, and relationships — packaged into a reusable, read-only knowledge object. You can attach a vault to any number of other chats so the cortex on those chats can retrieve from it during generation.
+In **Memory → Links**, choose **Add Link**, choose **Vault** or **Interlink**, then select the vault or target chat. The **Vault Library** lists saved vaults and consumers. Linked context is retrieved/cached separately and can appear in combined `{{memories}}` output; it is not pasted into every prompt in full.
 
-Typical uses:
+## Put Cortex in the Prompt
 
-- Bottle a finished campaign into a vault, then start a sequel chat that "remembers" the prior arc
-- Build a "world bible" vault from a worldbuilding chat and attach it to every chat set in that universe
-- Share canonical character history across roleplay branches without re-pasting it
+### Combined Context
 
-Vault chunks are stored alongside chat chunks in the embeddings table (`source_type='vault_chunk'`) so semantic search continues to work seamlessly. You can also **rebuild** a vault's embeddings if you change your embedding provider.
+Use one enabled system block before Chat History:
 
-### Interlinks
+```text
+{{memories}}
+```
 
-An **interlink** is a live, bidirectional connection between two chats. Each chat can see the other's entities, relationships, and (optionally) chunks in real time. Unlike a vault, an interlink stays in sync — new entities discovered in either chat become visible to the other on the next generation.
+With a usable Cortex result, this supplies combined formatted recall, selected graph/consolidation context, and color guidance. If Cortex falls back to basic recall, it supplies that instead. This is a useful starting point for both systems.
 
-Use interlinks when two chats are happening in the same continuity and should share evolving memory (e.g. one chat tracks Character A's POV while another tracks Character B's POV in the same scene).
+### Individual Cortex Macros
 
-### Adding a Link
+For a custom layout, use individual macros in enabled blocks:
 
-1. Open the **Memory panel** and switch to the **Links** tab
-2. Click **Add Link** and choose **Vault** or **Interlink**
-3. Pick an existing vault / a target chat (interlinks can be flipped to bidirectional from the same dialog)
-
-The **Vault Library** at the bottom of the tab lists all your saved vaults and the chats currently consuming them. Delete a vault from there when you no longer need it.
-
----
-
-## Macros
-
-Memory Cortex data is available in your presets through macros. Add these via **Add Prompt > Memory Cortex** in the preset editor:
+```text
+{{if {{cortexActive}} = yes}}
+{{entities}}
+{{relationships}}
+{{arc}}
+{{characterColors}}
+{{/if}}
+```
 
 | Macro | Returns |
 |-------|---------|
-| `{{entities}}` | Active entity snapshots with facts and relationships |
-| `{{entityFacts::Name}}` | Facts about a specific entity (e.g., `{{entityFacts::Melina}}`) |
-| `{{relationships}}` | Active relationship edges between entities |
-| `{{arc}}` | Current narrative arc summary |
-| `{{memorySalience}}` | The single highest-importance memory from retrieval |
-| `{{cortexActive}}` | `"yes"` or `"no"` for conditional blocks |
-| `{{entityCount}}` | Number of entities in the current context |
-| `{{characterColors}}` | Character speech / thought / narration color guidance derived from cortex state |
+| `{{entities}}` | Selected entity snapshots with facts/relationships; `{{entities::3}}` limits to three |
+| `{{entityFacts::Name}}` | Facts for a case-insensitive name match in **retrieved entity context**, not a search of every stored entity |
+| `{{relationships}}` | Selected relationship edges |
+| `{{arc}}` | Cortex arc text, not Loom Summary |
+| `{{memorySalience}}` | One retrieved passage with highest salience, not the complete memory section |
+| `{{characterColors}}` | Available character color guidance |
+| `{{cortexActive}}` | `yes` when this prompt has Cortex content; otherwise `no`. Not simply the master toggle's value. |
+| `{{entityCount}}` | Retrieved entity count, not total stored entities |
 
-The standard memory macros (`{{memories}}`, `{{memoriesRaw}}`, etc.) continue to work alongside cortex macros. When the cortex is enabled, `{{memories}}` returns cortex-enhanced results formatted in shadow-prompt style.
+Cortex macros return empty content when their data is unavailable. With Cortex off, `{{memories}}` can still work while these are empty.
 
-!!! important "Cortex memories inject automatically too"
-    As with [long-term memory](memory.md), the cortex-enhanced memory section injects whenever the cortex is enabled — the `{{memories}}` macro only controls **where** it lands. Remove the macro and the section still injects as a system message before the chat history. To stop it, disable Memory Cortex (and, if you don't want basic recall either, **Vectorise chat messages**). Note that the standalone cortex macros (`{{entities}}`, `{{relationships}}`, `{{arc}}`, etc.) render *only* where you place them — they have no auto-injection fallback.
+### Automatic Injection and Duplicate Content
 
----
+Usable Cortex or linked memory can be inserted as a system message before Chat History if no memory content macro owns placement, **even when shared Injection Strategy is Macro only**. **Disabled** stops that combined injection and `{{memories}}`; it does not stop standalone Cortex macros.
 
-## Configuration Reference
+Any applicable enabled block containing `{{memories}}` (or aliases), `{{memoriesRaw}}`, `{{entities}}`, `{{entityFacts}}`, `{{relationships}}`, `{{arc}}`, `{{memorySalience}}`, or `{{characterColors}}` owns placement and suppresses combined fallback. Status/count macros alone do not.
 
-### Formatter Mode
+A block containing only `{{entities}}` therefore does not also receive the rest of the combined section automatically. Add the other content you want explicitly. Conversely, `{{memories}}` alongside individual macros can repeat graph/arc content already included in the combined section.
 
-Controls how retrieved memories are formatted for the prompt:
+Macro presence is detected in applicable block source before conditions finish resolving. A false condition around a content macro can suppress fallback even when no memory text is output. Inspect the resolved prompt, not just the diagnostics label.
 
-| Mode | Style |
-|------|-------|
-| **Shadow** | Prose-register context with "do not recite" instructions (default) |
-| **Attributed** | Each memory labeled with source and salience |
-| **Clinical** | Bullet-point factual summaries |
-| **Minimal** | Raw content, minimal formatting |
+## Formatting and Retrieval Controls
 
-### Decay Settings
+**Use Long-Term Chat Memory formatting** in Cortex settings preserves the Advanced tab's templates for raw chunks. Consolidations, entities, relationships, and arcs still use the selected Cortex formatter. Turning it off uses Cortex formatting for the combined section.
 
-Memories lose relevance over time through a decay function:
+| Formatter | Style |
+|-----------|-------|
+| **Shadow** | Prose-style continuity context with instructions against reciting it |
+| **Attributed** | Memories presented with character perspective and temporal distance |
+| **Clinical** | Factual bullets |
+| **Minimal** | Memory passages only; omits the formatter's entity/relationship/arc sections |
 
-| Setting | Description |
-|---------|-------------|
-| **Half-Life (turns)** | After this many messages, a memory's recency score halves |
-| **Reinforcement Weight** | How much retrieval boosts a memory's score (prevents useful memories from decaying) |
-| **Core Memory Threshold** | Salience score above which a memory becomes a protected "core memory" |
-| **Core Memory Flags** | Narrative flags that automatically mark a memory as core (e.g., death, promise) |
+**Context Token Budget** controls Cortex formatting. Choose **Advanced** mode and expand detailed settings to tune emotional resonance, diversity, entity/relationship/arc injection, consolidation thresholds, decay/core-memory protection, and pruning. Pruning can archive stale single-mention entities; protected terms help retain fantasy names extraction might filter.
 
-### Entity Pruning
+## Troubleshooting Cortex
 
-Keeps the entity graph bounded:
+| Symptom | What to check |
+|---------|---------------|
+| `{{memories}}` works with Cortex off | Expected: basic recall is independent. Check Cortex preparation/cache separately. |
+| `{{cortexActive}}` says `no` while enabled | Check global/per-chat switches, recompile, and wait for background processing. Cold-cache prompts can use basic recall while Cortex warms. |
+| Stored entities exist but `{{entities}}` is empty | The macro uses this prompt's selected cached context. Check entity injection and resolved output. |
+| `{{arc}}` is empty | Check consolidation/arc injection and whether enough history exists for an arc. A saved Loom Summary does not populate this macro. |
+| Everything is heuristic after adding a sidecar | Check extraction/scoring modes, credentials/model, failure policy, and rebuild status. Heuristic fallback can legitimately write heuristic records. |
+| No old passages | Check embeddings, **Vectorise chat messages**, chunk/vector counts, exclusion window, and shared Injection Strategy. |
+| Conditional block is empty | Check condition/macros in the resolved prompt. Try a simple `{{memories}}` block to distinguish combined recall from Cortex-only output. |
 
-| Setting | Description |
-|---------|-------------|
-| **Enabled** | Toggle automatic pruning |
-| **Stale After (messages)** | Entities not seen for this many messages get archived |
-| **Min Confidence** | Minimum extraction confidence to create new entities |
-
-### Protected Terms
-
-The **entity whitelist** lets you specify proper nouns that should always be recognized as entities, even if they look like common words. Useful for fantasy names that might be filtered out.
-
----
-
-## Tips
-
-!!! tip "Rebuild after changing settings"
-    If you change chunking parameters or enable the sidecar, click **Rebuild** to reprocess all chunks. The cortex detects stale data automatically on the next generation, but a manual rebuild ensures immediate freshness.
-
-!!! tip "Delete bad entities early"
-    If you spot an incorrectly extracted entity (like a common word being tracked as a character), delete it from the Memory panel. This prevents it from accumulating relationships and facts that pollute the graph.
-
-!!! tip "Pair with Loom Summary"
-    The cortex excels at granular recall (specific moments, entity facts, relationships). [Loom Summary](loom-summary.md) provides a structured overview of the whole story. Use both for comprehensive long-term coherence.
-
-!!! tip "Sidecar model selection"
-    For the sidecar, prioritize speed and cost over creativity. Models like Gemini Flash, Haiku, or GPT-4o-mini work well — the sidecar does structured extraction, not creative writing.
-
-!!! tip "Check the Stats tab"
-    The Stats tab shows whether salience records are sourced from "heuristic" or "sidecar". After a rebuild with a sidecar configured, you should see "sidecar" entries. If everything still shows "heuristic", check that your sidecar connection is configured correctly.
+Inspect the prompt breakdown / dry-run for exact text and placement (`macro`, `fallback`, or `disabled`). If rebuilding has finished but output still fails, report app version, mode, global/per-chat switches, chunk/vector counts, sidecar status, and affected preset block. These checks distinguish configuration issues from regressions; a missing macro result alone does not establish the cause.

@@ -331,7 +331,7 @@ app.get("/:id", (c) => {
   // entries signature covers count/content; together they version the embedded
   // entries page so an unchanged book+page returns 304 without re-serializing.
   const sig = svc.getWorldBookEntriesSignature(book.id);
-  const etag = `"wb-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${pagination.limit}-${pagination.offset}"`;
+  const etag = `"wb-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${sig.revisionSum}-${pagination.limit}-${pagination.offset}"`;
   if (ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": REVALIDATE_PRIVATE } });
   }
@@ -918,23 +918,55 @@ app.get("/:id/entries", (c) => {
   // keyed by the full URL, so distinct searches never collide), keeping any
   // user input out of the response header.
   const sig = svc.getWorldBookEntriesSignature(book.id);
-  const etag = `"wb-entries-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${pagination.limit}-${pagination.offset}-${sortBy ?? ""}-${sortDir ?? ""}"`;
+  const etag = `"wb-entries-${book.id}-${book.updated_at}-${sig.count}-${sig.maxUpdatedAt}-${sig.revisionSum}-${pagination.limit}-${pagination.offset}-${sortBy ?? ""}-${sortDir ?? ""}"`;
   if (ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
     return new Response(null, { status: 304, headers: { ETag: etag, "Cache-Control": REVALIDATE_PRIVATE } });
   }
   c.header("ETag", etag);
   c.header("Cache-Control", REVALIDATE_PRIVATE);
-  return c.json(svc.listEntriesPaginated(userId, book.id, pagination, { sortBy, sortDir, search }));
+  const folder = c.req.query("folder");
+  const tags = c.req.queries("tag");
+  const rawType = c.req.query("type");
+  const type = rawType === "trigger" || rawType === "constant" || rawType === "vector" ? rawType : undefined;
+  return c.json(svc.listEntriesPaginated(userId, book.id, pagination, { sortBy, sortDir, search, folder, tags, type }));
+});
+
+app.get("/:id/entry-organization", (c) => {
+  const summary = svc.getEntryOrganizationSummary(c.get("userId"), c.req.param("id"));
+  if (!summary) return c.json({ error: "World book not found" }, 404);
+  return c.json(summary);
+});
+
+app.post("/:id/entry-folders", async (c) => {
+  const userId = c.get("userId");
+  const bookId = c.req.param("id");
+  if (!svc.getWorldBook(userId, bookId)) return c.json({ error: "World book not found" }, 404);
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "JSON object required" }, 400);
+  try {
+    const result = svc.operateEntryFolder(userId, bookId, body);
+    if (!result) return c.json({ error: "World book not found" }, 404);
+    return c.json(result);
+  } catch (error) {
+    if (error instanceof svc.WorldBookEntryOrganizationError) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 app.post("/:id/entries", async (c) => {
   const userId = c.get("userId");
   const book = svc.getWorldBook(userId, c.req.param("id"));
   if (!book) return c.json({ error: "World book not found" }, 404);
-  const body = await c.req.json();
-  const entry = svc.createEntry(userId, book.id, body);
-  if (!entry) return c.json({ error: "World book not found" }, 404);
-  return c.json(entry, 201);
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "JSON object required" }, 400);
+  try {
+    const entry = svc.createEntry(userId, book.id, body);
+    if (!entry) return c.json({ error: "World book not found" }, 404);
+    return c.json(entry, 201);
+  } catch (error) {
+    if (error instanceof svc.WorldBookEntryOrganizationError) return c.json({ error: error.message }, error.status);
+    throw error;
+  }
 });
 
 app.post("/:id/entries/reorder", async (c) => {
@@ -966,7 +998,8 @@ app.post("/:id/entries/bulk", async (c) => {
   const bookId = c.req.param("id");
   const book = svc.getWorldBook(userId, bookId);
   if (!book) return c.json({ error: "World book not found" }, 404);
-  const body = await c.req.json();
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "JSON object required" }, 400);
   if (!body?.action) return c.json({ error: "action is required" }, 400);
   if (!Array.isArray(body?.entry_ids) || body.entry_ids.length === 0) {
     return c.json({ error: "entry_ids is required" }, 400);
@@ -976,6 +1009,7 @@ app.post("/:id/entries/bulk", async (c) => {
     if (!result) return c.json({ error: "World book not found" }, 404);
     return c.json(result);
   } catch (error) {
+    if (error instanceof svc.WorldBookEntryOrganizationError) return c.json({ error: error.message }, error.status);
     if (error instanceof svc.WorldBookEntryConflictError) {
       return c.json(error.payload, 409);
     }
@@ -988,12 +1022,16 @@ app.post("/:id/entries/bulk", async (c) => {
 
 app.put("/:id/entries/:eid", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json();
+  const existing = svc.getEntry(userId, c.req.param("eid"));
+  if (!existing || existing.world_book_id !== c.req.param("id")) return c.json({ error: "Not found" }, 404);
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body !== "object" || Array.isArray(body)) return c.json({ error: "JSON object required" }, 400);
   try {
     const entry = svc.updateEntry(userId, c.req.param("eid"), body);
     if (!entry) return c.json({ error: "Not found" }, 404);
     return c.json(entry);
   } catch (error) {
+    if (error instanceof svc.WorldBookEntryOrganizationError) return c.json({ error: error.message }, error.status);
     if (error instanceof svc.WorldBookEntryConflictError) {
       return c.json(error.payload, 409);
     }

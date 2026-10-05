@@ -7,6 +7,7 @@ import { WorldInfoMatcher, makeScanState } from "./world-info-matcher.service";
 
 function entry(partial: Partial<WorldBookEntry>): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: "entry-1",
     world_book_id: "book-1",
     uid: "uid-1",

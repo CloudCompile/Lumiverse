@@ -1,8 +1,9 @@
 .contextMenu {
   position: fixed;
   z-index: 11000;
-  min-width: 180px;
-  max-height: min(calc(100vh - 16px), 420px);
+  min-width: min(180px, calc((var(--app-viewport-width, 100vw) - 16px) / var(--lumiverse-ui-scale, 1)));
+  max-width: calc((var(--app-viewport-width, 100vw) - 16px) / var(--lumiverse-ui-scale, 1));
+  max-height: min(calc((var(--app-viewport-height, 100dvh) - 16px) / var(--lumiverse-ui-scale, 1)), 420px);
   padding: 4px;
   overflow-x: hidden;
   overflow-y: auto;

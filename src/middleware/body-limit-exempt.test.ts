@@ -35,4 +35,13 @@ describe("isLargeUploadBodyLimitExemptPath", () => {
   test("allows SillyTavern ZIP backups through the global 10MB guard", () => {
     expect(isLargeUploadBodyLimitExemptPath("/api/v1/st-migration/backup")).toBe(true);
   });
+
+  test("allows full preset writes through the global 10MB guard", () => {
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets", "POST")).toBe(true);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets/preset-1", "PUT")).toBe(true);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets", "GET")).toBe(false);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets/preset-1", "POST")).toBe(false);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets/stash", "POST")).toBe(false);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets/stash", "PUT")).toBe(true);
+  });
 });

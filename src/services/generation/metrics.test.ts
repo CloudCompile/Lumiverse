@@ -32,6 +32,7 @@ test("TPS starts at visible response content and excludes reasoning time", () =>
       streamingStartedAt: 1_000,
       firstTokenAt: 2_000,
       firstContentTokenAt: 5_000,
+      responseStoppedAt: 7_000,
       completedAt: 7_000,
       wasStreaming: true,
     },
@@ -51,6 +52,7 @@ test("reasoning-only generations do not report visible-response TPS", () => {
     {
       streamingStartedAt: 1_000,
       firstTokenAt: 2_000,
+      responseStoppedAt: 7_000,
       completedAt: 7_000,
       wasStreaming: true,
     },
@@ -61,19 +63,48 @@ test("reasoning-only generations do not report visible-response TPS", () => {
   expect(metrics.tps).toBeUndefined();
 });
 
-test("deferred metric work does not extend generation duration", () => {
+test("non-streaming generations never report TTFT or TPS", () => {
+  const metrics = calculateGenerationTimingMetrics({
+    streamingStartedAt: 1_000,
+    firstTokenAt: 2_000,
+    firstContentTokenAt: 2_000,
+    responseStoppedAt: 5_000,
+    completedAt: 5_000,
+    wasStreaming: false,
+  }, 40);
+
+  expect(metrics).toEqual({ durationMs: 4_000, wasStreaming: false });
+});
+
+test("message persistence and deferred metric work do not lower TPS", () => {
   const metrics = calculateGenerationTimingMetrics(
     {
       streamingStartedAt: 1_000,
       firstTokenAt: 2_000,
       firstContentTokenAt: 3_000,
-      completedAt: 5_000,
+      responseStoppedAt: 5_000,
+      completedAt: 25_000,
       wasStreaming: true,
     },
     10,
     50_000,
   );
 
-  expect(metrics.durationMs).toBe(4_000);
+  expect(metrics.durationMs).toBe(24_000);
   expect(metrics.tps).toBe(5);
+});
+
+test("TPS needs both a provider content token and a terminal stop", () => {
+  expect(calculateGenerationTimingMetrics({
+    streamingStartedAt: 1_000,
+    firstTokenAt: 2_000,
+    firstContentTokenAt: 3_000,
+    completedAt: 5_000,
+  }, 10).tps).toBeUndefined();
+  expect(calculateGenerationTimingMetrics({
+    streamingStartedAt: 1_000,
+    firstTokenAt: 2_000,
+    responseStoppedAt: 5_000,
+    completedAt: 5_000,
+  }, 10).tps).toBeUndefined();
 });

@@ -38,6 +38,7 @@
     "saving": "Salvataggio..."
   },
   "display": {
+    "zoom": { "title": "Zoom", "desktopPinchZoom": "Pizzica per ingrandire su desktop" },
     "longMessages": {
       "title": "Messaggi lunghi",
       "helper": "Limita i messaggi lunghi a un’altezza comoda finché non vengono espansi.",
@@ -537,7 +538,7 @@
     "unlinking": "Disconnessione...",
     "unlink": "Disconnetti da LumiHub",
     "instanceName": "Nome istanza",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "Il mio Lumiverse",
     "instanceHint": "Un'etichetta per identificare questa istanza su LumiHub (es. \"PC di casa\", \"Laptop\")",
     "waitingApproval": "In attesa di approvazione...",

@@ -45,3 +45,17 @@ test("the PowerShell launcher runs its first-install guard before installing Bun
   expect(guardCall).toBeGreaterThan(-1);
   expect(bunCall).toBeGreaterThan(guardCall);
 });
+
+test("the PowerShell launcher checks installed Bun before downloading it", () => {
+  const launcher = readFileSync(resolve(import.meta.dir, "..", "start.ps1"), "utf8");
+  const lookup = launcher.indexOf("function Find-Bun {");
+  const ensure = launcher.indexOf("function Ensure-Bun {");
+  const download = launcher.indexOf('iex "& {$(irm https://bun.sh/install.ps1)}"');
+
+  expect(lookup).toBeGreaterThan(-1);
+  expect(ensure).toBeGreaterThan(lookup);
+  expect(download).toBeGreaterThan(ensure);
+  expect(launcher.slice(ensure, download)).toContain("if (Find-Bun)");
+  expect(launcher.slice(ensure, download)).toContain("Add-RegisteredPath");
+  expect(launcher.slice(lookup, ensure)).toContain('Join-Path (Join-Path $env:USERPROFILE ".bun") "bin"');
+});

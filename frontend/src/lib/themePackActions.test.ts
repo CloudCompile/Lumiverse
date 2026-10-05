@@ -86,7 +86,7 @@ afterEach(() => {
   URL.revokeObjectURL = originalRevokeURL
 })
 
-function setup() {
+function setup(stateOverrides: Partial<Parameters<typeof createThemePackActions>[0]> = {}) {
   const applied: ThemePack[] = []
   const asset = fixture.assets[0]
   const services: Parameters<typeof createThemePackActions>[1] = {
@@ -107,8 +107,10 @@ function setup() {
     theme: fixture.theme,
     customCSS: { css: fixture.globalCSS, enabled: true, revision: 1, bundleId: fixture.bundleId },
     componentOverrides: fixture.components,
+    savedThemes: [],
     applyThemePack: pack => { applied.push(pack) },
     addSavedTheme,
+    ...stateOverrides,
   }, services)
   return { ...actions, applied, addSavedTheme, ...services }
 }
@@ -131,6 +133,41 @@ describe('shared LumiTheme entry points', () => {
     const hook = readFileSync(new URL('../hooks/useThemePackActions.ts', import.meta.url), 'utf8')
     expect(hook).toContain('createThemePackActions(')
     expect(hook).toContain("useTranslation('modals', { keyPrefix: 'customCss' })")
+  })
+
+  test('exports the active My Themes display name instead of the stale preset name', async () => {
+    const staleTheme = { ...fixture.theme!, id: 'slate', name: 'Slate' }
+    const stalePack = { ...fixture, name: 'Slate', theme: staleTheme }
+    const io = setup({
+      theme: staleTheme,
+      savedThemes: [{
+        kind: 'pack',
+        id: 'saved-starry',
+        name: 'Starry Elegance',
+        createdAt: 1,
+        pack: stalePack,
+      }],
+    })
+
+    await io.handleExportPack()
+
+    expect(downloads).toHaveLength(1)
+    expect(downloads[0].filename).toBe('starry-elegance.lumitheme')
+    const archive = unzipSync(new Uint8Array(await downloads[0].blob.arrayBuffer()))
+    const manifest = JSON.parse(strFromU8(archive['theme.json']))
+    expect(manifest.name).toBe('Starry Elegance')
+    expect(manifest.theme.name).toBe('Starry Elegance')
+
+    selectedFile = new File([downloads[0].blob], downloads[0].filename, { type: 'application/zip' })
+    await io.handleImportPack()
+    expect(io.addSavedTheme).toHaveBeenLastCalledWith(expect.objectContaining({
+      kind: 'pack',
+      name: 'Starry Elegance',
+      pack: expect.objectContaining({
+        name: 'Starry Elegance',
+        theme: expect.objectContaining({ name: 'Starry Elegance' }),
+      }),
+    }))
   })
 
   test('canonical archive round-trip preserves CSS, overrides and assets, and disables imported TSX', async () => {

@@ -1382,7 +1382,6 @@
     "cancel": "Annulla",
     "dropToImport": "Trascina file personaggio per importare",
     "dropFileTypes": ".json, .png, .charx, .jpg",
-    "desktopDropReadFailed": "Lumiverse Desktop non è riuscito a leggere il file trascinato.",
     "tagFilter": {
       "label": "Tag",
       "labelWithCount": "Tag ({{count}})",

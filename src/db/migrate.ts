@@ -135,6 +135,8 @@ const BASELINE_MIGRATIONS: readonly string[] = [
   "114_cleanup_stale_message_breakdowns.sql",
   "117_desktop_notification_destinations.sql",
   "118_desktop_oauth_provider.sql",
+  "120_illarin_receipts_per_installation.sql",
+  "122_world_book_entry_organization.sql",
 ];
 
 const BASELINE_SET = new Set(BASELINE_MIGRATIONS);

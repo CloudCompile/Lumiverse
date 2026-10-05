@@ -65,10 +65,10 @@ const TOKEN_PAIR: TokenPair = {
   accessToken: "ia1.test-access",
   accessTokenExpiresAt: "2026-08-22T18:30:00Z",
   refreshToken: "ir1.test-refresh",
-  instance: { id: "instance-1", scopes: ["asset:receive", "library:sync"] },
+  connectedApp: { id: "instance-1", permissions: ["work:receive", "library:sync"] },
 };
 
-const DECLARATION = buildDeclaration({ instanceName: "test box", scopes: ["asset:receive"] });
+const DECLARATION = buildDeclaration({ instanceName: "test box", scopes: ["work:receive"] });
 
 describe("illarin api client", () => {
   const mocks: MockServer[] = [];
@@ -81,39 +81,40 @@ describe("illarin api client", () => {
     while (mocks.length) mocks.pop()?.stop();
   });
 
-  test("posts the exact browser authorization body to /api/v1/link/authorizations", async () => {
-    const illarin = mock(() => Response.json({ authorizationUrl: "https://illarin.com/link/abc", expiresAt: "2026-08-22T12:00:00Z" }));
+  test("posts the exact browser authorization body and receives a user code", async () => {
+    const illarin = mock(() => Response.json({ authorizationUrl: "https://illarin.com/connect/abc", userCode: "BCDF-2345", expiresAt: "2026-08-22T12:00:00Z" }));
 
     const response = await createBrowserAuthorization(`${illarin.baseUrl}/`, {
       ...DECLARATION,
-      applicationVersion: "1.1.6",
+      appVersion: "1.1.6",
       redirectUri: "http://127.0.0.1:49152/illarin/callback",
       state: "s".repeat(32),
       codeChallenge: "c".repeat(43),
       codeChallengeMethod: "S256",
     }, { fetchImpl: illarin.testFetch });
 
-    expect(response.authorizationUrl).toContain("/link/abc");
+    expect(response.authorizationUrl).toContain("/connect/abc");
+    expect(response.userCode).toBe("BCDF-2345");
     const sent = JSON.parse(illarin.requests[0].body!) as Record<string, unknown>;
     expect(Object.keys(sent).sort()).toEqual([
-      "acceptedTargets",
-      "applicationName",
-      "applicationVersion",
+      "acceptedFormats",
+      "appName",
+      "appVersion",
       "capabilities",
       "codeChallenge",
       "codeChallengeMethod",
-      "instanceName",
+      "name",
+      "permissions",
       "protocolVersion",
       "redirectUri",
-      "scopes",
       "state",
     ]);
     expect(sent.codeChallengeMethod).toBe("S256");
     // Trailing slash on the base URL must not double up the path.
-    expect(illarin.requests[0].url.endsWith("/api/v1/link/authorizations")).toBe(true);
+    expect(illarin.requests[0].url.endsWith("/api/v1/connect/authorizations")).toBe(true);
   });
 
-  test("exchanges the callback code at /api/v1/link/token", async () => {
+  test("exchanges the callback code at /api/v1/connect/token", async () => {
     const illarin = mock(() => Response.json(TOKEN_PAIR));
 
     const pair = await exchangeAuthorizationCode(illarin.baseUrl, {
@@ -143,16 +144,17 @@ describe("illarin api client", () => {
     const illarin = mock(() => Response.json({}, { status: 200 }));
 
     await updateInstanceDeclaration(illarin.baseUrl, "ia1.live", {
-      applicationVersion: "1.2.0",
+      appVersion: "1.2.0",
       protocolVersion: 1,
       capabilities: [...DECLARATION.capabilities],
-      acceptedTargets: [...DECLARATION.acceptedTargets],
+      acceptedFormats: [...DECLARATION.acceptedFormats],
     }, { fetchImpl: illarin.testFetch });
 
     expect(illarin.requests[0].method).toBe("PUT");
-    expect(illarin.requests[0].url.endsWith("/api/v1/instances/me")).toBe(true);
+    expect(illarin.requests[0].url.endsWith("/api/v1/connected-apps/me")).toBe(true);
     expect(illarin.requests[0].headers.get("authorization")).toBe("Bearer ia1.live");
     const sent = JSON.parse(illarin.requests[0].body!) as Record<string, unknown>;
+    expect(sent).toEqual({ appVersion: "1.2.0", protocolVersion: 1, capabilities: DECLARATION.capabilities, acceptedFormats: DECLARATION.acceptedFormats });
     expect(Object.keys(sent)).not.toContain("applicationName");
     expect(Object.keys(sent)).not.toContain("instanceName");
     expect(Object.keys(sent)).not.toContain("scopes");
@@ -171,35 +173,35 @@ describe("illarin api client", () => {
 
     expect(request.userCode).toBe("ABCD-1234");
     expect(request.interval).toBe(5);
-    expect(illarin.requests[0].url.endsWith("/api/v1/link/requests")).toBe(true);
+    expect(illarin.requests[0].url.endsWith("/api/v1/connect/requests")).toBe(true);
     expect(JSON.parse(illarin.requests[0].body!)).toEqual(DECLARATION);
   });
 
   test("collects deliveries with required acknowledgements and maps 204 to an empty wait", async () => {
     const delivery = {
       id: "delivery-1",
-      assetId: "asset-1",
-      contentGeneration: 4,
-      kind: "character",
+      workId: "asset-1",
+      versionNumber: 4,
+      type: "character",
       name: "Aster",
       format: "chara_card_v3",
       label: "Character Card V3",
       queuedAt: "2026-08-23T18:30:00Z",
       leaseExpiresAt: "2026-08-23T18:45:00Z",
-      artifacts: [{ kind: "export", url: "https://cdn.illarin.com/delivery/1" }],
+      files: [{ type: "export", url: "https://cdn.illarin.com/send/1" }],
     };
-    const notice = { assetId: "asset-2", name: "Quiet Toolbox", withheldAt: "2026-09-14T06:00:00Z" };
-    const illarin = mock(() => Response.json({ deliveries: [delivery], withheld: [notice] }));
+    const notice = { workId: "asset-2", name: "Quiet Toolbox", takenDownAt: "2026-09-14T06:00:00Z" };
+    const illarin = mock(() => Response.json({ sends: [delivery], takedowns: [notice] }));
 
     expect(await collectDeliveries(illarin.baseUrl, "ia1.live", ["prior-delivery"], { fetchImpl: illarin.testFetch }))
-      .toEqual({ deliveries: [delivery], withheld: [notice] });
-    expect(illarin.requests[0].url.endsWith("/api/v1/deliveries/collect")).toBe(true);
+      .toEqual({ sends: [delivery], takedowns: [notice] });
+    expect(illarin.requests[0].url.endsWith("/api/v1/sends/collect")).toBe(true);
     expect(illarin.requests[0].headers.get("authorization")).toBe("Bearer ia1.live");
     expect(JSON.parse(illarin.requests[0].body!)).toEqual({ acknowledge: ["prior-delivery"] });
 
     const empty = mock(() => new Response(null, { status: 204 }));
     expect(await collectDeliveries(empty.baseUrl, "ia1.live", [], { fetchImpl: empty.testFetch }))
-      .toEqual({ deliveries: [], withheld: [] });
+      .toEqual({ sends: [], takedowns: [] });
     expect(JSON.parse(empty.requests[0].body!)).toEqual({ acknowledge: [] });
   });
 
@@ -210,7 +212,7 @@ describe("illarin api client", () => {
     };
 
     expect(await collectDeliveries("http://127.0.0.1", "ia1.live", [], { fetchImpl: longPoll }))
-      .toEqual({ deliveries: [], withheld: [] });
+      .toEqual({ sends: [], takedowns: [] });
   });
 
   test("fetches signed delivery artifacts without forwarding a bearer token", async () => {
@@ -241,25 +243,44 @@ describe("illarin api client", () => {
     const illarin = mock(() => Response.json({ accepted: 1, removed: 0, ignored: 0 }));
     const result = await syncLibrary(illarin.baseUrl, "ia1.live", {
       snapshot: false,
-      entries: [{ assetId: "asset-1", contentGeneration: 4 }],
+      appVersion: "1.2.0",
+      entries: [{ workId: "asset-1", versionNumber: 4 }],
       removed: [],
     }, { fetchImpl: illarin.testFetch });
 
-    expect(result).toEqual({ accepted: 1, removed: 0, ignored: 0, withheld: [] });
+    expect(result).toEqual({ accepted: 1, removed: 0, ignored: 0, takedowns: [] });
     expect(illarin.requests[0].url.endsWith("/api/v1/library/sync")).toBe(true);
     expect(illarin.requests[0].headers.get("authorization")).toBe("Bearer ia1.live");
+    expect(JSON.parse(illarin.requests[0].body!)).toEqual({
+      snapshot: false,
+      appVersion: "1.2.0",
+      entries: [{ workId: "asset-1", versionNumber: 4 }],
+      removed: [],
+    });
     await expect(syncLibrary(illarin.baseUrl, "ia1.live", {
       snapshot: true,
+      appVersion: "1.2.0",
       entries: [],
       removed: ["asset-1"],
     }, { fetchImpl: illarin.testFetch })).rejects.toThrow(/snapshot cannot include removals/);
+
+    await syncLibrary(illarin.baseUrl, "ia1.live", {
+      snapshot: true,
+      appVersion: "1.2.0",
+      entries: [{ workId: "legacy-work" }],
+    }, { fetchImpl: illarin.testFetch });
+    expect(JSON.parse(illarin.requests[1].body!)).toEqual({
+      snapshot: true,
+      appVersion: "1.2.0",
+      entries: [{ workId: "legacy-work" }],
+    });
   });
 
   test("maps every documented poll outcome", async () => {
     const outcomes: Array<{ respond: () => Response; expected: DevicePollResult }> = [
       { respond: () => Response.json({ status: "pending" }), expected: { kind: "pending" } },
       {
-        respond: () => Response.json({ status: "linked", ...TOKEN_PAIR }),
+        respond: () => Response.json({ status: "connected", ...TOKEN_PAIR }),
         expected: { kind: "linked", tokens: TOKEN_PAIR },
       },
       { respond: () => Response.json({ error: "access_denied" }, { status: 400 }), expected: { kind: "denied" } },
@@ -283,6 +304,12 @@ describe("illarin api client", () => {
     }
   });
 
+  test("refuses an unknown poll state rather than waiting forever", async () => {
+    const illarin = mock(() => Response.json({ status: "something_else" }));
+    await expect(pollDeviceRequest(illarin.baseUrl, "device-code", { fetchImpl: illarin.testFetch }))
+      .rejects.toThrow(/unknown connection status/);
+  });
+
   test("surfaces terminal 401 as IllarinUnauthorizedError", async () => {
     const illarin = mock(() => Response.json({ error: "unauthorized" }, { status: 401 }));
     await expect(
@@ -302,7 +329,7 @@ describe("illarin api client", () => {
       throw new Error("expected rejection");
     } catch (err) {
       expect(err).toBeInstanceOf(IllarinApiError);
-      expect((err as IllarinApiError).message).toContain("/api/v1/link/token");
+      expect((err as IllarinApiError).message).toContain("/api/v1/connect/token");
       expect((err as IllarinApiError).message).toContain("500");
       expect((err as IllarinApiError).message).not.toContain("ir1.secret-token");
     }
@@ -319,18 +346,29 @@ describe("illarin api client", () => {
     ).rejects.toThrow(/malformed/);
   });
 
+  test("rejects browser authorization without the manual matching code", async () => {
+    const illarin = mock(() => Response.json({ authorizationUrl: "https://illarin.com/connect/one-use", expiresAt: "2026-08-22T12:00:00Z" }));
+    await expect(createBrowserAuthorization(illarin.baseUrl, {
+      ...DECLARATION,
+      redirectUri: "http://127.0.0.1:49152/illarin/callback",
+      state: "s".repeat(32),
+      codeChallenge: "c".repeat(43),
+      codeChallengeMethod: "S256",
+    }, { fetchImpl: illarin.testFetch })).rejects.toThrow(/malformed authorization/);
+  });
+
   test("normalizes base URLs and requires HTTPS outside injected test transports", async () => {
-    const illarin = mock(() => Response.json({ authorizationUrl: "u", expiresAt: "e" }));
+    const illarin = mock(() => Response.json({ authorizationUrl: "u", userCode: "CODE", expiresAt: "e" }));
     await createBrowserAuthorization(`${illarin.baseUrl}///`, {
       ...DECLARATION,
-      applicationVersion: "1.1.6",
+      appVersion: "1.1.6",
       redirectUri: "http://127.0.0.1:9/x",
       state: "s".repeat(32),
       codeChallenge: "c".repeat(43),
       codeChallengeMethod: "S256",
     }, { fetchImpl: illarin.testFetch });
     expect(illarin.requests.length).toBe(1);
-    expect(illarin.requests[0].url.includes("/api/v1/link/authorizations")).toBe(true);
+    expect(illarin.requests[0].url.includes("/api/v1/connect/authorizations")).toBe(true);
 
     await expect(
       createBrowserAuthorization("ftp://illarin.com", { ...DECLARATION, redirectUri: "", state: "", codeChallenge: "", codeChallengeMethod: "S256" }),

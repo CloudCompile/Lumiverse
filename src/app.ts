@@ -166,7 +166,7 @@ app.use("/api/*", async (c, next) => {
 // sum of all images even though every individual file is well under the cap.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (isLargeUploadBodyLimitExemptPath(path)) {
+  if (isLargeUploadBodyLimitExemptPath(path, c.req.method)) {
     return next();
   }
   return bodyLimit({

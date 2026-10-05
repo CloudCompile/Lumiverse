@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { Plus, Check, Trash2, Globe, Link2, Unlink, GripVertical, ImagePlus, ImageOff } from 'lucide-react'
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import {
-  DndContext,
   MouseSensor,
   TouchSensor,
   KeyboardSensor,
@@ -19,7 +18,7 @@ import {
   useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'

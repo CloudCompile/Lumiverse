@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import * as uploads from "../spindle/uploads";
+import { parseStrictInteger } from "../utils/strict-integer";
 
 const TUS_VERSION = "1.0.0";
 
@@ -32,10 +33,10 @@ app.options("*", () =>
 
 app.post("/", (c) => {
   const userId = c.get("userId");
-  const length = Number(c.req.header("Upload-Length"));
+  const length = parseStrictInteger(c.req.header("Upload-Length"));
   const meta = parseMetadata(c.req.header("Upload-Metadata"));
   const maxBytes = uploads.getMaxUploadBytes(meta.spindle_read_mode === "chunked");
-  if (!Number.isInteger(length) || length < 0 || length > maxBytes) {
+  if (length === undefined || length < 0 || length > maxBytes) {
     return c.json({ error: "invalid Upload-Length" }, 400);
   }
   if (!meta.extension) return c.json({ error: "Upload-Metadata 'extension' is required" }, 400);

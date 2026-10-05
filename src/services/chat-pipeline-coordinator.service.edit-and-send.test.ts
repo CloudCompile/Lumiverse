@@ -201,8 +201,10 @@ describe("chat pipeline coordinator edit-and-send", () => {
     seedChat("chat");
     seedMessage("user-1", "chat", "hello", { index: 0, isUser: true });
     const starts: StartEditAndSendGenerationInput[] = [];
-    setEditAndSendStartGeneration(async (input) => {
+    const startOptions: Array<Record<string, unknown> | undefined> = [];
+    setEditAndSendStartGeneration(async (input, options) => {
       starts.push(input);
+      startOptions.push(options as Record<string, unknown> | undefined);
       return { generationId: input.generationId, status: "streaming" };
     });
 
@@ -226,6 +228,12 @@ describe("chat pipeline coordinator edit-and-send", () => {
         chatId: expect.any(String),
         requestId: "req-1",
         mode: "normal",
+        // Committed edit identity recorded by the producer: the branch copy is
+        // created at revision 1 and the commit bumps it to 2.
+        editAndSendContext: {
+          editedUserMessageId: result.payload.editedMessageId,
+          committedRevision: 2,
+        },
       },
     });
     expect(result.payload.branchChatId).not.toBe("chat");
@@ -257,6 +265,16 @@ describe("chat pipeline coordinator edit-and-send", () => {
       generationId: result.payload.generationCursor.generationId,
       generation_type: "normal",
     }]);
+    // The dispatcher forwards the committed identity read from the request
+    // cursor as the trusted out-of-band second argument.
+    expect(startOptions).toEqual([{
+      origin: "edit_and_send",
+      connectionId: undefined,
+      editAndSendContext: {
+        editedUserMessageId: result.payload.editedMessageId,
+        committedRevision: 2,
+      },
+    }]);
     expect(dispatched).toMatchObject({
       chat_id: "chat",
       branch_chat_id: result.payload.branchChatId,
@@ -275,8 +293,10 @@ describe("chat pipeline coordinator edit-and-send", () => {
     seedMessage("asst-1", "chat", "reply", { index: 2 });
 
     const starts: StartEditAndSendGenerationInput[] = [];
-    setEditAndSendStartGeneration(async (input) => {
+    const startOptions: Array<Record<string, unknown> | undefined> = [];
+    setEditAndSendStartGeneration(async (input, options) => {
       starts.push(input);
+      startOptions.push(options as Record<string, unknown> | undefined);
       return { generationId: input.generationId, status: "streaming" };
     });
 
@@ -298,6 +318,12 @@ describe("chat pipeline coordinator edit-and-send", () => {
         chatId: expect.any(String),
         requestId: "req-swipe",
         mode: "swipe",
+        // Same producer contract: the copied user turn starts at revision 1 and
+        // the commit bumps it to 2.
+        editAndSendContext: {
+          editedUserMessageId: result.payload.editedMessageId,
+          committedRevision: 2,
+        },
       },
     });
     const copiedAssistantId = result.payload.immediateAssistantId;
@@ -371,6 +397,14 @@ describe("chat pipeline coordinator edit-and-send", () => {
       generationId: result.payload.generationCursor.generationId,
       generation_type: "swipe",
       message_id: copiedAssistantId,
+    }]);
+    expect(startOptions).toEqual([{
+      origin: "edit_and_send",
+      connectionId: undefined,
+      editAndSendContext: {
+        editedUserMessageId: result.payload.editedMessageId,
+        committedRevision: 2,
+      },
     }]);
     expect(first).toMatchObject({
       request_id: "req-swipe",

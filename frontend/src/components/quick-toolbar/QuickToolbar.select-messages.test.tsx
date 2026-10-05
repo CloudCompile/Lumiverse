@@ -110,6 +110,7 @@ const settings = {
 }
 
 const storeState = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   messageSelectMode: false,
   drawerOpen: false,
   drawerTab: '',

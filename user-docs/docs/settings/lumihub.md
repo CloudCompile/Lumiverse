@@ -11,10 +11,11 @@ LumiHub is a hub service that lets you browse and install characters and world b
 ## Linking Your Instance
 
 1. Open **Settings > LumiHub**
-2. Optionally customize your **instance name** (how your instance identifies itself)
-3. Click **Link with LumiHub**
-4. A browser window opens for authorization
-5. Once authorized, your instance connects and stays linked
+2. Enter the URL of your custom or self-hosted LumiHub
+3. Optionally customize your **instance name** (how your instance identifies itself)
+4. Click **Link with LumiHub**
+5. A browser window opens for authorization
+6. Once authorized, your instance connects and stays linked
 
 Your instance maintains a persistent connection to LumiHub with automatic reconnection if the connection drops.
 

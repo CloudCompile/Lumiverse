@@ -384,6 +384,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
           terminal = {
             token: "", ...outcome,
             finish_reason: toolCalls && !failed ? "tool_calls" : outcome.finish_reason,
+            stopReceivedAt: Date.now(),
             tool_calls: toolCalls,
             usage: resp.usage ? {
               prompt_tokens: resp.usage.input_tokens || 0,

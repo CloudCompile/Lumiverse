@@ -144,6 +144,13 @@ describe("Property 2 preservation: branch-disabled Edit-and-Send", () => {
           chatId,
           requestId,
           mode: scenario.mode,
+          // In-place commit: the source row is seeded at revision 2 and the
+          // write bumps it to 3, so the producer records the ACTUAL committed
+          // revision (not expectedVersion 2, not 2 + 1 inferred).
+          editAndSendContext: {
+            editedUserMessageId: userMessageId,
+            committedRevision: 3,
+          },
         },
       });
       expect(getMessage(USER_ALPHA, userMessageId)).toMatchObject({
@@ -212,8 +219,10 @@ describe("Property 2 preservation: branch-disabled Edit-and-Send", () => {
       expect(getGenerationOutboxByRequest(USER_ALPHA, "wrong-chat", requestId)).toBeNull();
 
       const starts: StartEditAndSendGenerationInput[] = [];
-      setEditAndSendStartGeneration(async (input) => {
+      const startOptions: Array<Record<string, unknown> | undefined> = [];
+      setEditAndSendStartGeneration(async (input, options) => {
         starts.push(input);
+        startOptions.push(options as Record<string, unknown> | undefined);
         return { generationId: input.generationId, status: "streaming" };
       });
       const dispatched = await dispatchEditAndSendRequest(USER_ALPHA, chatId, requestId);
@@ -231,6 +240,14 @@ describe("Property 2 preservation: branch-disabled Edit-and-Send", () => {
             generationId: result.payload.generationCursor.generationId,
             generation_type: "normal",
           }]);
+      expect(startOptions).toEqual([{
+        origin: "edit_and_send",
+        connectionId: undefined,
+        editAndSendContext: {
+          editedUserMessageId: userMessageId,
+          committedRevision: 3,
+        },
+      }]);
       expect(dispatched).toMatchObject({
         request_id: requestId,
         user_id: USER_ALPHA,

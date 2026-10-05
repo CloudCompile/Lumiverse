@@ -10,6 +10,7 @@ import {
 function entry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   const id = crypto.randomUUID();
   return {
+    folder: "", tags: [],
     id,
     uid: id,
     world_book_id: "book",

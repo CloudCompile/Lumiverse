@@ -1383,7 +1383,6 @@
     "cancel": "取消",
     "dropToImport": "拖放角色文件以導入",
     "dropFileTypes": ".json、.png、.charx、.jpg",
-    "desktopDropReadFailed": "Lumiverse Desktop 無法讀取拖放的檔案。",
     "tagFilter": {
       "label": "標籤",
       "labelWithCount": "標籤 ({{count}})",

@@ -183,6 +183,10 @@ describe("POST /:chatId/edit-and-send", () => {
         chatId: expect.any(String),
         requestId: "req-1",
         mode: "swipe",
+        editAndSendContext: {
+          editedUserMessageId: body.editedMessageId,
+          committedRevision: 2,
+        },
       },
     });
     expect(body.branchChatId).not.toBe("chat-1");
@@ -345,6 +349,10 @@ describe("POST /:chatId/edit-and-send", () => {
         chatId: "chat-1",
         requestId: "req-in-place",
         mode: "swipe",
+        editAndSendContext: {
+          editedUserMessageId: "user-1",
+          committedRevision: 2,
+        },
       },
     });
     expect(started).toEqual([{

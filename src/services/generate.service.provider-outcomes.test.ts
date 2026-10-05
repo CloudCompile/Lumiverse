@@ -5,6 +5,7 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { contextHandlerChain } from '../spindle/context-handler';
 import { interceptorPipeline } from '../spindle/interceptor-pipeline';
+import { INTERNAL_PRESET_METADATA_KEY } from '../spindle/preset-metadata-context';
 import * as chats from "./chats.service";
 import * as connections from "./connections.service";
 import * as secrets from "./secrets.service";
@@ -47,7 +48,7 @@ afterAll(() => {
   secretSpy.mockRestore(); eventSpy.mockRestore(); closeDatabase();
 });
 
-async function run(provider: string, body: object[], options: { responses?: boolean; nonStreaming?: boolean; presetName?: string } = {}) {
+async function run(provider: string, body: object[], options: { responses?: boolean; nonStreaming?: boolean; presetName?: string; presetMetadata?: Record<string, unknown>; chunkDelayMs?: number } = {}) {
   const connection = await connections.createConnection(userId, {
     name: "Mock", provider, model: "test-model", api_url: "https://example.test",
   });
@@ -56,6 +57,7 @@ async function run(provider: string, body: object[], options: { responses?: bool
         name: options.presetName,
         provider,
         prompt_order: [],
+        ...(options.presetMetadata ? { metadata: options.presetMetadata } : {}),
       })
     : null;
   const chat = chats.createChat(userId, {
@@ -66,7 +68,18 @@ async function run(provider: string, body: object[], options: { responses?: bool
   chats.createMessage(chat.id, { is_user: true, name: "User", content: "Hello." }, userId);
   fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async () => options.nonStreaming
     ? Response.json(body[0])
-    : new Response(body.map(e => `data: ${JSON.stringify(e)}\n\n`).join(""))) as unknown as typeof fetch);
+    : options.chunkDelayMs
+      ? new Response(new ReadableStream({
+          async start(controller) {
+            const encoder = new TextEncoder();
+            for (const [index, chunk] of body.entries()) {
+              if (index > 0 && options.chunkDelayMs) await Bun.sleep(options.chunkDelayMs);
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            }
+            controller.close();
+          },
+        }))
+      : new Response(body.map(e => `data: ${JSON.stringify(e)}\n\n`).join(""))) as unknown as typeof fetch);
   const result = await startGeneration({
     userId, chat_id: chat.id, connection_id: connection.id, generation_type: "normal",
     ...(preset ? { preset_id: preset.id } : {}),
@@ -214,6 +227,42 @@ test("generation meta token count uses provider usage without local tokenization
     tokenizerSpy.mockRestore();
   }
 });
+test("non-streaming generation metrics retain identity without TTFT or TPS", async () => {
+  const { generationId } = await run("openai", [{
+    choices: [{ message: { content: "Visible answer." }, finish_reason: "stop" }],
+    usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+  }], { nonStreaming: true });
+  const deadline = Date.now() + 3000;
+  while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+    await Bun.sleep(5);
+  }
+  const metricsEvent = metricsReady.find((event) => event.generationId === generationId);
+  expect(metricsEvent?.generationMetrics).toMatchObject({ wasStreaming: false, model: "test-model" });
+  expect(metricsEvent?.generationMetrics.ttft).toBeUndefined();
+  expect(metricsEvent?.generationMetrics.tps).toBeUndefined();
+  expect(chats.getMessage(userId, metricsEvent.messageId)?.extra.generationMetrics).toEqual(metricsEvent.generationMetrics);
+});
+test("TPS is measured between provider content and stop, before message completion", async () => {
+  const { generationId } = await run("openai", [
+    { choices: [{ delta: { content: "Visible answer." }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+    {
+      choices: [],
+      usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    },
+  ], { chunkDelayMs: 30 });
+  const deadline = Date.now() + 3000;
+  while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+    await Bun.sleep(5);
+  }
+  const entry = pool.getPoolEntry(generationId)!;
+  const metrics = metricsReady.find((event) => event.generationId === generationId)?.generationMetrics;
+  expect(entry.firstTokenAt).toBeGreaterThanOrEqual(entry.streamingStartedAt!);
+  expect(entry.firstContentTokenAt).toBeGreaterThanOrEqual(entry.firstTokenAt!);
+  expect(entry.responseStoppedAt).toBeGreaterThan(entry.firstContentTokenAt!);
+  expect(entry.completedAt! - entry.responseStoppedAt!).toBeGreaterThanOrEqual(15);
+  expect(metrics?.tps).toBe(Math.round(200_000 / (entry.responseStoppedAt! - entry.firstContentTokenAt!)) / 10);
+});
 for (const fixture of [
   { provider: "openai", body: [{ choices: [{ delta: { content: "Hello." }, finish_reason: "stop" }] }] },
   { provider: "google", body: [{ candidates: [{ content: { parts: [{ text: "Hello." }] }, finishReason: "STOP" }] }] },
@@ -248,6 +297,37 @@ test.each(["backend", "http"])("%s prompt previews select the active frontend wi
   ]);
 });
 
+test("live and dry-run interceptors receive the resolved preset id and its internal metadata", async () => {
+  const contexts: any[] = [];
+  const remove = interceptorPipeline.register({ extensionId: "preset-context-test", priority: 200, handler: async (messages, context: any) => {
+    contexts.push({ presetId: context.presetId, metadata: context[INTERNAL_PRESET_METADATA_KEY], shared: context.presetMetadata });
+    return { messages };
+  } });
+  try {
+    const presetMetadata = { lumirealm: { chatRanges: [{ start: -4, end: 0 }] }, other_ext: { secret: "other" } };
+    const { preset } = await run("openai", [{ choices: [{ delta: { content: "Hi." }, finish_reason: "stop" }] }], { presetName: "Ranges", presetMetadata });
+    await run("openai", [{ choices: [{ delta: { content: "Hi." }, finish_reason: "stop" }] }]);
+
+    const connection = await connections.createConnection(userId, { name: "Dry", provider: "openai", model: "test-model", api_url: "https://example.test" });
+    const chat = chats.createChat(userId, { character_id: null, name: "Dry", metadata: { temporary: true } });
+    chats.createMessage(chat.id, { is_user: true, name: "User", content: "Hello." }, userId);
+    // A block preset takes the Loom assembly path; the live preset above has no blocks.
+    const blockPreset = presets.createPreset(userId, { name: "Blocks", provider: "openai", metadata: presetMetadata, prompt_order: [{
+      id: "main", name: "Main", content: "Be brief.", role: "system", enabled: true, position: "pre_history",
+      depth: 0, marker: null, isLocked: false, color: null, injectionTrigger: [], group: null,
+    }] });
+    const input = { userId, chat_id: chat.id, connection_id: connection.id, preset_id: blockPreset.id };
+    expect((await dryRunGeneration(input)).breakdown.some((entry) => entry.name === "Main")).toBe(true);
+    await dryRunGeneration({ ...input, messages: [{ role: "user", content: "Explicit." }] });
+
+    expect(contexts).toEqual([
+      { presetId: preset!.id, metadata: presetMetadata, shared: undefined },
+      { presetId: null, metadata: undefined, shared: undefined },
+      { presetId: blockPreset.id, metadata: presetMetadata, shared: undefined },
+      { presetId: null, metadata: undefined, shared: undefined },
+    ]);
+  } finally { remove(); }
+});
 
 test("takeover and context replacement cannot retarget a generation already started", async () => {
   let removeReplacement: (() => void) | undefined;

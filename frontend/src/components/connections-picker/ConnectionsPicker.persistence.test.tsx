@@ -32,6 +32,7 @@ function profile(id: string, model = 'gpt-4'): ConnectionProfile {
 }
 
 const state = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   connectionsPickerSettings: {
     ...DEFAULT_CONNECTIONS_PICKER_SETTINGS,
     variant: 'split' as const,

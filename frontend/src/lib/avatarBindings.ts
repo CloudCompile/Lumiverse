@@ -32,6 +32,38 @@ export function getAvatarBindings(character?: Character | null): AvatarBindings 
   return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as AvatarBindings : {}
 }
 
+export function setAlternateFieldVariants(
+  extensions: Record<string, any>,
+  field: AvatarBindingField,
+  variants: Array<{ id: string; label: string; content: string }>,
+): Record<string, any> {
+  const alternateFields = { ...(extensions.alternate_fields || {}) }
+  if (variants.length > 0) alternateFields[field] = variants
+  else delete alternateFields[field]
+
+  const next = { ...extensions }
+  if (Object.keys(alternateFields).length > 0) next.alternate_fields = alternateFields
+  else delete next.alternate_fields
+
+  const bindings = extensions.avatar_bindings as AvatarBindings | undefined
+  if (!bindings || typeof bindings !== 'object' || Array.isArray(bindings)) return next
+  const validIds = new Set(variants.map((variant) => variant.id))
+  let updatedBindings: AvatarBindings | undefined
+  for (const [avatarId, binding] of Object.entries(bindings)) {
+    if (!binding || typeof binding[field] !== 'string' || validIds.has(binding[field])) continue
+    updatedBindings ??= { ...bindings }
+    const updatedBinding = { ...binding }
+    delete updatedBinding[field]
+    if (Object.keys(updatedBinding).length > 0) updatedBindings[avatarId] = updatedBinding
+    else delete updatedBindings[avatarId]
+  }
+  if (updatedBindings) {
+    if (Object.keys(updatedBindings).length > 0) next.avatar_bindings = updatedBindings
+    else delete next.avatar_bindings
+  }
+  return next
+}
+
 export function getAvatarImageId(character: Character, avatarEntryId: string): string | null | undefined {
   if (avatarEntryId === PRIMARY_AVATAR_ENTRY_ID) return character.image_id || null
   return getAlternateAvatars(character).find((avatar) => avatar.id === avatarEntryId)?.image_id
@@ -99,7 +131,11 @@ function applyAvatarPreview(character: Character, metadata: Record<string, any>,
   for (const field of AVATAR_BINDING_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(binding, field)) continue
     if (binding[field] === null) delete selections[field]
-    else if (typeof binding[field] === 'string') selections[field] = binding[field]!
+    else {
+      const variants = character.extensions?.alternate_fields?.[field]
+      if (typeof binding[field] === 'string' && Array.isArray(variants)
+        && variants.some((variant) => variant?.id === binding[field])) selections[field] = binding[field]!
+    }
   }
   setScopedValue(
     metadata,

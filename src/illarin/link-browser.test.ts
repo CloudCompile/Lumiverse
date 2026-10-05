@@ -9,7 +9,7 @@ const TOKEN_PAIR: TokenPair = {
   accessToken: "ia1.access",
   accessTokenExpiresAt: "2026-08-22T18:30:00Z",
   refreshToken: "ir1.refresh",
-  instance: { id: "inst-1", scopes: ["asset:receive"] },
+  connectedApp: { id: "inst-1", permissions: ["work:receive"] },
 };
 
 interface MockIllarin {
@@ -31,11 +31,11 @@ function startMockIllarin(tokenResponse: () => Response = () => Response.json(TO
     port: 0,
     async fetch(request) {
       const path = new URL(request.url).pathname;
-      if (path === "/api/v1/link/authorizations") {
+      if (path === "/api/v1/connect/authorizations") {
         authCapture.resolve(await request.text());
-        return Response.json({ authorizationUrl: "https://auth.test/authorize?req=one-use", expiresAt: "2026-08-22T12:05:00Z" });
+        return Response.json({ authorizationUrl: "https://auth.test/authorize?req=one-use", userCode: "BCDF-2345", expiresAt: "2026-08-22T12:05:00Z" });
       }
-      if (path === "/api/v1/link/token") {
+      if (path === "/api/v1/connect/token") {
         tokenCallCount++;
         tokenCapture.resolve(await request.text());
         return tokenResponse();
@@ -69,24 +69,27 @@ describe("illarin loopback browser link", () => {
     outcome: Promise<BrowserLinkOutcome>;
     redirectUri: Promise<string>;
     state: Promise<string>;
+    authorization: Promise<{ authorizationUrl: string; userCode: string }>;
     illarin: MockIllarin;
   }
 
   function drive(overrides?: { timeoutMs?: number; tokenResponse?: () => Response }): Driven {
     const illarin = mock(overrides?.tokenResponse);
     const redirectCapture = Promise.withResolvers<string>();
-    const declaration = buildDeclaration({ instanceName: "test box", scopes: ["asset:receive"] });
+    const authorizationCapture = Promise.withResolvers<{ authorizationUrl: string; userCode: string }>();
+    const declaration = buildDeclaration({ instanceName: "test box", scopes: ["work:receive"] });
     const outcome = runBrowserLink({
       baseUrl: illarin.baseUrl,
       declaration,
       fetchImpl: illarin.testFetch,
-      openUrl: () => {},
+      openAuthorization: authorizationCapture.resolve,
       onListening: redirectCapture.resolve,
       timeoutMs: overrides?.timeoutMs,
     });
     return {
       outcome,
       redirectUri: redirectCapture.promise,
+      authorization: authorizationCapture.promise,
       state: illarin.authBody.then((body) => (JSON.parse(body) as { state: string }).state),
       illarin,
     };
@@ -94,6 +97,10 @@ describe("illarin loopback browser link", () => {
 
   test("links end-to-end: literal loopback redirect, S256 challenge, one exchange", async () => {
     const driven = drive();
+    expect(await driven.authorization).toEqual({
+      authorizationUrl: "https://auth.test/authorize?req=one-use",
+      userCode: "BCDF-2345",
+    });
     const redirectUri = await driven.redirectUri;
     // Byte-for-byte literal loopback form — no localhost, no query, no fragment.
     expect(redirectUri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/illarin\/callback$/);

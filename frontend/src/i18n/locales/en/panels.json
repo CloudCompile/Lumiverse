@@ -1580,7 +1580,6 @@
     "cancel": "Cancel",
     "dropToImport": "Drop character files to import",
     "dropFileTypes": ".json, .png, .charx, .jpg",
-    "desktopDropReadFailed": "Lumiverse Desktop couldn't read the dropped file.",
     "tagFilter": {
       "label": "Tags",
       "labelWithCount": "Tags ({{count}})",
@@ -2254,7 +2253,9 @@
     "enableAllPermissionsConfirmTitle": "Enable all permissions for {{name}}?",
     "enableAllPermissionsConfirmMessage_one": "This will enable the remaining disabled permission for this extension.",
     "enableAllPermissionsConfirmMessage_other": "This will enable the remaining {{count}} disabled permissions for this extension.",
-    "illarinWithheld": "Withheld by Illarin",
+    "illarinWithheld": "Taken down on Illarin",
+    "illarinFirstRunApproval": "Run {{name}} for the first time? It requests these permissions: {{permissions}}. Only approve if you trust this extension.",
+    "illarinNoPermissions": "none",
     "updateAllConfirmTitle_one": "Update {{count}} extension?",
     "updateAllConfirmTitle_other": "Update {{count}} extensions?",
     "updateAllConfirmMessage": "Each extension will be reset to the newest commit on its remote branch and rebuilt. This can take a while. You can keep using the app while it runs, and progress will show in this panel. Any currently-disabled extensions will still be updated but will stay disabled.",
@@ -2832,7 +2833,10 @@
   "viewportDrawer": {
     "hideTabLabels": "Hide tab labels",
     "showTabLabels": "Show tab labels",
-    "configureTabs": "Configure Tabs"
+    "configureTabs": "Configure Tabs",
+    "folderView": "Folder view",
+    "listView": "List view",
+    "gridView": "Grid view"
   },
   "multiChipSelect": {
     "select": "Select...",

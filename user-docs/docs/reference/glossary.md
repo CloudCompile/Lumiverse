@@ -92,7 +92,7 @@ Key terms used throughout Lumiverse and these guides.
 ## I
 
 **Interlink**
-: A live, bidirectional link between two chats' Memory Cortex state. Each chat sees the other's entities and relationships in real time.
+: A live link to another chat's evolving Memory Cortex state, rather than a frozen vault snapshot. Links can be directional or bidirectional and can share entities, relationships, and optionally chunks. See [Vaults & Interlinks](../chatting/memory-cortex.md#vaults-interlinks).
 
 ## L
 

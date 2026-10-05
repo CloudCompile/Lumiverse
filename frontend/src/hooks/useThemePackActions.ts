@@ -10,11 +10,12 @@ export function useThemePackActions() {
   const theme = useStore((s) => s.theme)
   const customCSS = useStore((s) => s.customCSS)
   const componentOverrides = useStore((s) => s.componentOverrides)
+  const savedThemes = useStore((s) => s.savedThemes)
   const applyThemePack = useStore((s) => s.applyThemePack)
   const addSavedTheme = useStore((s) => s.addSavedTheme)
 
   return useMemo(() => createThemePackActions(
-    { theme, customCSS, componentOverrides, applyThemePack, addSavedTheme },
+    { theme, customCSS, componentOverrides, savedThemes, applyThemePack, addSavedTheme },
     { t, themeAssetsApi, toast },
-  ), [theme, customCSS, componentOverrides, applyThemePack, addSavedTheme, t])
+  ), [theme, customCSS, componentOverrides, savedThemes, applyThemePack, addSavedTheme, t])
 }

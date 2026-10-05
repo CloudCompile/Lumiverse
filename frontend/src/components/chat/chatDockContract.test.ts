@@ -300,6 +300,102 @@ describe('P12 chat dock preservation contracts', () => {
     expect(source).toMatch(/syncDockRequest\(\s*chatTopDock\s*,\s*\(\)\s*=>\s*nativeDockRequest\s*,\s*nativeDockRequest\s*,\s*\(request\)\s*=>\s*effectiveQuickToolbarDockRequest\(request,\s*quickToolbarSettings\)\s*\)/)
   })
 
+  test('publishes the measured top-dock height from the shared chat body ref with matching cleanup', async () => {
+    const source = await readSource('ChatView.tsx')
+
+    expect(source).toMatch(/const chatBodyRef = useRef<HTMLDivElement>\(null\)/)
+    expect(source).toMatch(/const chatBody = chatBodyRef\.current/)
+    expect(source).toMatch(/if \(!chatBody \|\| !chatColumnInner \|\| !chatColumnTop \|\| !chatTopDock\) return/)
+    expect(source).toMatch(/<div ref=\{chatBodyRef\} className=\{styles\.body\}/)
+
+    // Publisher and cleanup must both target the body ref, never the inner column.
+    expect(source).toMatch(/chatBody\.style\.setProperty\(\s*["']--lcs-top-dock-height["']/)
+    expect(source).toMatch(/chatBody\.style\.removeProperty\(\s*["']--lcs-top-dock-height["']\s*\)/)
+    expect(source).not.toMatch(/chatColumnInner\.style\.(?:set|remove)Property\(\s*["']--lcs-top-dock-height["']/)
+
+    // The measurement source stays the dock ref itself.
+    expect(source).toMatch(/const syncTopDockHeight = \(\) => \{\s*const height = measureLayoutHeight\(chatTopDock\)/)
+  })
+
+  test('reserves the fixed fill dock strip on the shared body row only, bounded to the viewport', async () => {
+    const css = await readSource('./ChatView.module.css')
+    const fillBodySelector = ".body:has(.chatToolbar [data-component='QuickToolbar'][data-fill-top-dock='1'])"
+
+    const bodyStart = css.indexOf(fillBodySelector)
+    expect(bodyStart).toBeGreaterThan(-1)
+    const bodyRule = css.slice(bodyStart, css.indexOf('}', bodyStart) + 1)
+    expect(bodyRule).toMatch(/box-sizing:\s*border-box;/)
+    expect(bodyRule).toMatch(/height:\s*100%;/)
+    expect(bodyRule).toMatch(/padding-top:\s*var\(--lcs-top-dock-height,\s*41px\);/)
+
+    // The fill-only reservation must not be duplicated on the inner column, and
+    // must not leak onto any non-fill body state.
+    expect(css).not.toMatch(/\n\.chatColumnInner:has\(\.chatToolbar[^{}]*\)\s*\{[^}]*padding-top:\s*var\(--lcs-top-dock-height,\s*41px\);/)
+    expect(css).not.toMatch(/\n\.body:has\([^{}]*\):has\([^{}]*\)\s*\{[^}]*padding-top:\s*var\(--lcs-top-dock-height/)
+    expect(css).not.toMatch(/\n\.body\s*\{[^}]*padding-top:\s*var\(--lcs-top-dock-height/)
+  })
+
+  test('raises the half-editor host above the fill dock strip on desktop only', async () => {
+    const css = await readSource('./ChatView.module.css')
+
+    expect(css).toMatch(
+      /@media \(min-width: 769px\) \{[\s\S]{0,600}?\.body:has\(\.chatToolbar \[data-component='QuickToolbar'\]\[data-fill-top-dock='1'\]\)[\s\S]{0,500}?\[data-spindle-host-surface='lorebook\.half\.workspace'\]\)[\s\S]{0,220}?\[data-component='LorebookHalfScreenEditor'\]\) \{[^}]*z-index:\s*10000;/,
+    )
+
+    // The rung is the fill dock's nearest ceiling, and must stay off the toolbar,
+    // the shared body, and every higher layer that already owns its own numbering.
+    const desktopStart = css.indexOf('@media (min-width: 769px)')
+    const desktopRule = css.slice(desktopStart, css.indexOf('@media (max-width: 600px)', desktopStart))
+    expect(desktopRule).not.toMatch(/\n\.chatToolbar\s*\{[^}]*z-index/)
+    expect(desktopRule).not.toMatch(/\n\.body\s*\{[^}]*z-index/)
+    expect(desktopRule).not.toMatch(/z-index:\s*10001/)
+    expect(desktopRule).not.toMatch(/z-index:\s*10005/)
+    expect(desktopRule).not.toMatch(/z-index:\s*10006/)
+    expect(desktopRule).not.toMatch(/z-index:\s*10010/)
+  })
+
+  test('keeps the fill dock strip and the mobile/floating half-editor rungs unchanged', async () => {
+    const css = await readSource('./ChatView.module.css')
+    const fillStart = css.indexOf(".chatToolbar:has([data-component='QuickToolbar'][data-fill-top-dock='1'])")
+    const fillRule = css.slice(fillStart, css.indexOf('}', fillStart) + 1)
+
+    expect(fillRule).toMatch(/position:\s*fixed !important;/)
+    expect(fillRule).toMatch(/top:\s*0 !important;/)
+    expect(fillRule).toMatch(/left:\s*0 !important;/)
+    expect(fillRule).toMatch(/width:\s*100% !important;/)
+    expect(fillRule).toMatch(/z-index:\s*9999 !important;/)
+
+    const editorCss = await readSource('../world-book-editor/LorebookHalfScreenEditor.module.css')
+    expect(editorCss).toMatch(/\.halfScreenHost\[data-layout='overlay'\]\s*\{/)
+    expect(countMatches(editorCss, /z-index:\s*10006;/g)).toBeGreaterThan(0)
+    expect(editorCss).toMatch(/@media \(max-width: 768px\) \{[\s\S]*?\.halfScreenHost\s*\{[^}]*z-index:\s*10006;/)
+  })
+
+  test('contracts the notice docks against the fixed fill rail instead of consuming the dock height', async () => {
+    const css = await readSource('./ChatView.module.css')
+
+    const desktopStart = css.indexOf('.noticeDock,')
+    const desktopRule = css.slice(desktopStart, css.indexOf('}', desktopStart) + 1)
+    const mobileStart = css.indexOf('@media (max-width: 600px)')
+    const mobileRule = css.slice(css.indexOf('.noticeDock,', mobileStart))
+    const mobileBlock = mobileRule.slice(0, mobileRule.indexOf('}') + 1)
+
+    // Exactly two grouped notice rules, each anchored to its own literal offset.
+    // `\s*` spans the CRLF pairs in this stylesheet, which a literal `\n` would not.
+    expect(countMatches(css, /\.noticeDock,\s*\.cortexNoticeDock\s*\{/g)).toBe(2)
+    expect(desktopRule).toMatch(/top:\s*48px;/)
+    expect(mobileBlock).toMatch(/top:\s*54px;/)
+
+    // Neither may consume the dock height: on the shared body it now resolves there,
+    // so the notice would shift without the fill dock and double-displace with it.
+    expect(desktopRule).not.toContain('--lcs-top-dock-height')
+    expect(mobileBlock).not.toContain('--lcs-top-dock-height')
+
+    // Exactly one dock-height consumer remains anywhere in the stylesheet.
+    expect(countMatches(css, /var\(--lcs-top-dock-height/g)).toBe(1)
+    expect(css).toMatch(/\n\.body:has\(\.chatToolbar [^{}]*\)\s*\{[^}]*padding-top:\s*var\(--lcs-top-dock-height/)
+  })
+
   test('enforces strip dockrail min-height and prevents display:contents on data-dock-request=strip', async () => {
     const chatCss = await readSource('./ChatView.module.css')
 

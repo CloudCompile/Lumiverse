@@ -1,6 +1,7 @@
 import type {
   SpindleManifest,
   WorkerToHost,
+  ImageGenNativeControlWorkerMessage,
   HostToWorker,
   LlmMessageDTO,
   InterceptorBreakdownEntryDTO,
@@ -24,6 +25,8 @@ import type {
   ConnectionDispatchDescriptorDTO,
 } from "lumiverse-spindle-types";
 import { PERMISSION_DENIED_PREFIX, SPINDLE_HOST_CAPABILITIES } from "lumiverse-spindle-types";
+import { WorkerHostDesktopCaptureApi } from "./worker-host-desktop-capture-api";
+import type { DesktopCaptureWorkerMessage } from "./desktop-capture-contract";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { createOAuthState } from "./oauth-state";
 import * as spindleUploads from "./uploads";
@@ -49,6 +52,7 @@ import {
   type WorldInfoInterceptorResultDTO,
 } from "./world-info-interceptor";
 import { projectWorldInfoCaptureContext } from "./world-info-capture";
+import { projectPresetMetadataContext } from "./preset-metadata-context";
 import { toolRegistry } from "./tool-registry";
 import {
   setPromptRegexOwnedChats,
@@ -122,7 +126,7 @@ import { join, resolve, sep } from "path";
 const sharedRpcPermissionScope = new AsyncLocalStorage<string | undefined>();
 
 type ManagedSpindlePermission = Parameters<typeof managerSvc.hasPermission>[1];
-type RuntimeSpindlePermission = ManagedSpindlePermission | "mcp_servers" | "mcp_servers.create";
+type RuntimeSpindlePermission = ManagedSpindlePermission | "mcp_servers" | "mcp_servers.create" | "screen_capture" | "screen_recording";
 type TokenModelSource = "main" | "sidecar" | "explicit";
 
 type ChatAppendGenerationOptions = {
@@ -293,6 +297,7 @@ type BackendProcessRuntimeToHost =
   | { type: "stopped" };
 
 type RuntimeWorkerToHost =
+  | DesktopCaptureWorkerMessage
   | { type: 'context_handler_result'; requestId: string; context: unknown; error?: string }
   | { type: 'frontend_message'; payload: unknown; userId?: string; frontendSessionId?: string }
   | { type: 'runtime_state_read'; requestId: string; chatId: string; characterId: string; userId?: string }
@@ -300,6 +305,7 @@ type RuntimeWorkerToHost =
   | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorMatchDTO; required?: boolean }
   | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string; parameters?: Record<string, unknown>; breakdown?: InterceptorBreakdownEntryDTO[] }
   | WorkerToHost
+  | ImageGenNativeControlWorkerMessage
   | { type: "register_frontend_runtime_capability"; capability: string }
   | { type: "unregister_frontend_runtime_capability"; capability: string }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -323,7 +329,6 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
-  | { type: "image_gen_generate_native"; requestId: string; input: any }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | { type: "user_get_role"; requestId: string; userId?: string }
   | {
@@ -897,6 +902,7 @@ export class WorkerHost {
    * `controller.abort()` to tear down the upstream LLM request.
    */
   private generationAbortControllers = new Map<string, AbortController>();
+  private captureGenerationRequests = new Set<string>();
   private interceptorUnregister: (() => void) | null = null;
   private interceptorRegistrationId: string | null = null;
   private activeInterceptorContexts = new Map<string, Omit<InterceptorContextDTO, "signal">>();
@@ -925,6 +931,7 @@ export class WorkerHost {
   private readonly interactionApi: WorkerHostInteractionApi;
   private readonly presentationApi: WorkerHostPresentationApi;
   private readonly mcpApi: WorkerHostMcpApi;
+  private readonly desktopCaptureApi: WorkerHostDesktopCaptureApi;
   private sharedRpcPermissionScopes = new Map<string, Set<string>>();
 
   constructor(
@@ -1004,6 +1011,18 @@ export class WorkerHost {
     });
     this.mcpApi = new WorkerHostMcpApi({
       hasPermission: (permission) => this.hasPermission(permission),
+      resolveEffectiveUserId: (userId) => this.resolveEffectiveUserId(userId),
+      enforceScopedUser: (userId) => this.enforceScopedUser(userId),
+      postResponse: (message) => this.postToWorker(message),
+    });
+    this.desktopCaptureApi = new WorkerHostDesktopCaptureApi({
+      extensionId, identifier: manifest.identifier, name: manifest.name,
+      declaredPermissions: manifest.permissions ?? [],
+      hasPermission: (permission) => this.hasPermission(permission),
+      authorize: (permissions) => {
+        const scopeId = sharedRpcPermissionScope.getStore();
+        return () => sharedRpcPermissionScope.run(scopeId, () => permissions.every((permission) => this.hasPermission(permission)));
+      },
       resolveEffectiveUserId: (userId) => this.resolveEffectiveUserId(userId),
       enforceScopedUser: (userId) => this.enforceScopedUser(userId),
       postResponse: (message) => this.postToWorker(message),
@@ -1131,6 +1150,7 @@ export class WorkerHost {
   }
 
   async start(): Promise<void> {
+    this.desktopCaptureApi.activate();
     const entryPath = await managerSvc.getBackendEntryPath(this.manifest.identifier);
     if (!entryPath) {
       console.log(
@@ -1231,6 +1251,7 @@ export class WorkerHost {
           "required-context-handlers-v1": 1,
           "required-interceptors-v1": 1,
           "mcp-servers-v1": 1,
+          "desktop-capture-worker-v1": 1,
         }),
         extensionInstallationId: this.extensionId,
       },
@@ -1322,6 +1343,7 @@ export class WorkerHost {
   }
 
   private cleanup(): void {
+    this.desktopCaptureApi.dispose();
     this.stopRuntimeStatsSampling();
     this.processApi.stopAllFrontendProcesses("backend_unloaded");
     this.processApi.stopAllBackendProcesses("backend_unloaded");
@@ -1396,6 +1418,7 @@ export class WorkerHost {
       controller.abort();
     }
     this.generationAbortControllers.clear();
+    this.captureGenerationRequests.clear();
 
     this.runtime = null;
     this.runtimeStopping = false;
@@ -1459,6 +1482,10 @@ export class WorkerHost {
    * no restart needed.
    */
   notifyPermissionChanged(permission: string, granted: boolean, allGranted: string[]): void {
+    if (!granted && ["screen_capture", "screen_recording", "generation"].includes(permission)) {
+      this.desktopCaptureApi.revoke();
+      for (const requestId of this.captureGenerationRequests) this.generationAbortControllers.get(requestId)?.abort();
+    }
     this.postToWorker({
       type: "permission_changed",
       extensionId: this.manifest.identifier,
@@ -1777,6 +1804,11 @@ export class WorkerHost {
         break;
       case "permissions_get_granted":
         this.handlePermissionsGetGranted(msg.requestId);
+        break;
+      case "desktop_capture_devices":
+      case "desktop_capture_request":
+      case "desktop_capture_release":
+        this.desktopCaptureApi.handle(msg);
         break;
       case "rpc_pool_sync":
         this.handleRpcPoolSync(msg.endpoint, msg.value, (msg as any).policy);
@@ -2504,6 +2536,12 @@ export class WorkerHost {
       case "image_gen_generate_native":
         void this.imageGenApi.handleGenerateNative(msg.requestId, msg.input);
         break;
+      case "image_gen_prompt_presets":
+        this.imageGenApi.handlePromptPresets(msg.requestId, msg.userId);
+        break;
+      case "image_gen_cancel_native":
+        this.imageGenApi.handleCancelNative(msg.requestId, msg.jobId, msg.userId);
+        break;
       case "image_gen_providers":
         this.imageGenApi.handleProviders(msg.requestId);
         break;
@@ -2893,6 +2931,7 @@ export class WorkerHost {
       userId: scopedUserId,
       priority: priority ?? 100,
       match,
+      presetMetadataNamespace: this.manifest.identifier,
       resolveTimeoutMs,
       required,
       handler: async (messages, context, signal) => {
@@ -2921,7 +2960,7 @@ export class WorkerHost {
 
         const interceptorContext =
           projectWorldInfoCaptureContext(
-            context,
+            projectPresetMetadataContext(context, this.manifest.identifier),
             this.extensionId,
           ) as unknown as Omit<InterceptorContextDTO, "signal">;
         this.activeInterceptorContexts.set(registrationId, interceptorContext);
@@ -3090,13 +3129,14 @@ export class WorkerHost {
 
   // ─── Generation ──────────────────────────────────────────────────────
 
-  private generationRequestOptions(requestId: string, operation: string, chatId?: string) {
+  private generationRequestOptions(requestId: string, operation: string, chatId?: string, sensitiveMedia = false) {
     return {
       origin: {
         kind: "extension" as const,
         name: this.manifest.name || this.manifest.identifier,
         extensionId: this.extensionId,
         operation,
+        ...(sensitiveMedia ? { sensitiveMedia: true } : {}),
       },
       generationId: requestId,
       chatId,
@@ -3134,18 +3174,20 @@ export class WorkerHost {
 
     try {
       let result: unknown;
+      const prepared = this.desktopCaptureApi.prepareGeneration(input, resolvedUserId);
+      if (prepared.sensitiveMedia) this.captureGenerationRequests.add(requestId);
       switch (input.type) {
         case "raw":
           result = await generateSvc.rawGenerate(resolvedUserId, {
             provider: input.provider || "",
             model: input.model || "",
-            messages: input.messages || [],
+            messages: prepared.messages,
             parameters: input.parameters,
             connection_id: input.connection_id,
             tools: input.tools,
             reasoning: input.reasoning,
             signal: abortController.signal,
-          }, this.generationRequestOptions(requestId, input.type));
+          }, this.generationRequestOptions(requestId, input.type, undefined, prepared.sensitiveMedia));
           break;
         case "quiet":
           result = await generateSvc.quietGenerate(resolvedUserId, {
@@ -3179,6 +3221,7 @@ export class WorkerHost {
       });
     } finally {
       this.generationAbortControllers.delete(requestId);
+      this.captureGenerationRequests.delete(requestId);
     }
   }
 
@@ -3237,18 +3280,20 @@ export class WorkerHost {
 
     try {
       let stream: AsyncGenerator<import("../llm/types").StreamChunk, void, unknown>;
+      const prepared = this.desktopCaptureApi.prepareGeneration(input, resolvedUserId);
+      if (prepared.sensitiveMedia) this.captureGenerationRequests.add(requestId);
       switch (input.type) {
         case "raw":
           stream = await generateSvc.rawGenerateStream(resolvedUserId, {
             provider: input.provider || "",
             model: input.model || "",
-            messages: input.messages || [],
+            messages: prepared.messages,
             parameters: input.parameters,
             connection_id: input.connection_id,
             tools: input.tools,
             reasoning: input.reasoning,
             signal: abortController.signal,
-          }, this.generationRequestOptions(requestId, `${input.type} stream`));
+          }, this.generationRequestOptions(requestId, `${input.type} stream`, undefined, prepared.sensitiveMedia));
           break;
         case "quiet":
           stream = await generateSvc.quietGenerateStream(resolvedUserId, {
@@ -3323,6 +3368,7 @@ export class WorkerHost {
       });
     } finally {
       this.generationAbortControllers.delete(requestId);
+      this.captureGenerationRequests.delete(requestId);
     }
   }
 

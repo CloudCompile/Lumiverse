@@ -34,6 +34,7 @@ import {
 } from '@/lib/connectionsPicker'
 import { DEFAULT_CONNECTIONS_PICKER_SETTINGS } from '@/lib/uiProductivityDefaults'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
+import { LumiverseSuiteGate } from '@/lib/spindle/LumiverseSuiteGate'
 import { useStore } from '@/store'
 import type { ConnectionModelsResult, ConnectionProfile } from '@/types/api'
 import type { ConnectionsPickerVariant, SurfaceRectPrefs } from '@/types/store'
@@ -1053,6 +1054,10 @@ function ConnectionsPickerNative({ open, onClose, anchorElement }: ConnectionsPi
   )
 }
 
-export function ConnectionsPicker(props: ConnectionsPickerProps) {
+function ConnectionsPickerSurface(props: ConnectionsPickerProps) {
   return useSpindleComponentOverride('ConnectionsPicker', ConnectionsPickerNative, props)
+}
+
+export function ConnectionsPicker(props: ConnectionsPickerProps) {
+  return <LumiverseSuiteGate><ConnectionsPickerSurface {...props} /></LumiverseSuiteGate>
 }

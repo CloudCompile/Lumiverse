@@ -6,6 +6,18 @@ const context = { origin: { kind: "chat" as const, name: "Chat", operation: "nor
 const snapshot = (body: unknown, credentials: string[] = []) => ({ body: JSON.stringify(body), provider: "custom", model: "model-1", credentials });
 
 describe("request history retention", () => {
+  test("capture-backed requests retain neither pixels, model output, nor transport error contents", () => {
+    const store = new RequestHistoryStore();
+    const id = store.record("alice", { ...context, origin: { ...context.origin, sensitiveMedia: true } }, snapshot({ image: "private-pixels" }))!;
+    store.completeResponse("alice", id, { body: "private-screen-transcription", bodyBytes: 28, outcome: "failed", error: "private-screen-error" }, []);
+    const row = store.get("alice", id)!;
+    expect(row.bodyJson).toBeNull();
+    expect(row.responseBody).toBeNull();
+    expect(row.responseError).toBeNull();
+    expect(row.redacted).toBe(true);
+    expect(row.response.redacted).toBe(true);
+    expect(JSON.stringify(row)).not.toContain("private-");
+  });
   test("retains exactly the newest 20 dispatches, with separate user buffers and detached results", () => {
     const store = new RequestHistoryStore();
     store.record("alice", context, snapshot({ sequence: 0 }));

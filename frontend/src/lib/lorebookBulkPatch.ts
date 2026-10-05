@@ -1,26 +1,16 @@
 /**
  * Sparse patch builder for the lorebook editor's bulk "set fields" bar.
  *
- * The bar used to hold hard-coded initial values (`'10'` / `'4'` / `'0'` /
- * `'keyword'`) and send all five fields on every Apply. A hard-coded default is
- * indistinguishable from a deliberate choice, so "select two entries, set State
- * to Disable, Apply" also wrote `priority = 10`, `depth = 4`, `position = 0` and
- * `trigger = 'keyword'` over whatever those entries actually had. The trigger
- * write was the worst of it: `src/services/world-books.service.ts` clears
- * `vectorized` and deletes the stored embeddings whenever a trigger arrives, so
- * a "disable" click permanently demoted every semantic entry in the selection to
- * a keyword entry — unrecoverable, and `revision` was bumped so the
- * optimistic-concurrency path could not recover it either.
+ * Only the keys the user actually set are emitted: the server builds its `SET`
+ * clause from the keys it receives, so a control left alone is never written.
+ * The patch shape comes from the API's own `set_fields` input, so a server-side
+ * rename breaks this module at compile time instead of sending a key that the
+ * sparse mapper ignores.
  *
- * The server is innocent: it only builds `SET` clauses from keys it actually
- * receives, and every field on `WorldBookEntryBulkSetFieldsInput` is optional.
- * The fix is therefore entirely on this side — never send a key the user did not
- * set. `''` (the two number inputs) and `'unchanged'` (the three selects) both
- * mean "leave this column alone".
- *
- * Deliberately dependency-free: this module is unit-tested directly and must not
- * drag a React component tree (`EntryTable`, CSS modules) into the test process.
+ * Dependency-free on purpose: this module is unit-tested directly.
  */
+
+import type { WorldBookEntryBulkSetFieldsInput } from '@/types/api'
 
 export const BULK_UNCHANGED = 'unchanged'
 
@@ -30,6 +20,16 @@ export type BulkEnabledSelection = typeof BULK_UNCHANGED | 'enabled' | 'disabled
 /** The position select's value: a stringified position, or the sentinel. */
 export type BulkPositionSelection = typeof BULK_UNCHANGED | string
 
+/**
+ * The authored columns the bulk bar may write. State is `disabled` and Type is
+ * the entry's `constant`/`vectorized` pair — the API has neither `enabled` nor
+ * `trigger`.
+ */
+export type BulkFieldPatch = Pick<
+  WorldBookEntryBulkSetFieldsInput['fields'],
+  'priority' | 'depth' | 'position' | 'disabled' | 'constant' | 'vectorized'
+>
+
 export interface BulkFieldForm {
   /** Free-text number input. `''` means untouched. */
   priority: string
@@ -38,14 +38,6 @@ export interface BulkFieldForm {
   position: BulkPositionSelection
   trigger: BulkTriggerSelection
   enabled: BulkEnabledSelection
-}
-
-export interface BulkFieldPatch {
-  priority?: number
-  depth?: number
-  position?: number
-  trigger?: BulkTriggerType
-  enabled?: boolean
 }
 
 /**
@@ -61,16 +53,37 @@ export const EMPTY_BULK_FIELD_FORM: BulkFieldForm = {
 }
 
 /**
- * `null` when the field carries no instruction. Note `Number('')` is `0`, which
- * is exactly how an empty box used to become a real "set priority to 0" write —
- * so the emptiness test has to happen before the coercion, not after. Garbage is
- * dropped rather than coerced, for the same reason.
+ * Exhaustiveness guard for the selection unions: an unhandled member is a type
+ * error, and a value that escaped the type is refused rather than written.
+ */
+export function assertNever(value: never): never {
+  throw new Error(`Unhandled bulk field selection: ${String(value)}`)
+}
+
+/**
+ * `null` when the field carries no instruction. `Number('')` is `0`, so the
+ * emptiness test has to happen before the coercion; garbage is dropped, not
+ * coerced, for the same reason.
  */
 function readNumericField(raw: string): number | null {
   const trimmed = raw.trim()
   if (trimmed === '' || trimmed === BULK_UNCHANGED) return null
   const value = Number(trimmed)
   return Number.isFinite(value) ? Math.trunc(value) : null
+}
+
+/** Type maps onto the entry's own two flags, as the single-row Type select does. */
+function triggerFields(trigger: BulkTriggerType): Pick<BulkFieldPatch, 'constant' | 'vectorized'> {
+  switch (trigger) {
+    case 'constant':
+      return { constant: true, vectorized: false }
+    case 'keyword':
+      return { constant: false, vectorized: false }
+    case 'vector':
+      return { constant: false, vectorized: true }
+    default:
+      return assertNever(trigger)
+  }
 }
 
 /** Only the fields the user actually set. Never a full patch. */
@@ -81,15 +94,40 @@ export function buildBulkFieldPatch(form: BulkFieldForm): BulkFieldPatch {
   if (priority !== null) patch.priority = priority
 
   const depth = readNumericField(form.depth)
-  // Mirrors the server's own `Math.max(0, ...)` so the UI cannot claim to have
-  // written a negative depth that the column will never hold.
+  // Mirrors the server's `Math.max(0, ...)`: the UI must not claim a negative
+  // depth the column will never hold.
   if (depth !== null) patch.depth = Math.max(0, depth)
 
   const position = readNumericField(form.position)
   if (position !== null) patch.position = position
 
-  if (form.trigger !== BULK_UNCHANGED) patch.trigger = form.trigger
-  if (form.enabled !== BULK_UNCHANGED) patch.enabled = form.enabled === 'enabled'
+  switch (form.trigger) {
+    case BULK_UNCHANGED:
+      break
+    case 'constant':
+    case 'keyword':
+    case 'vector': {
+      const { constant, vectorized } = triggerFields(form.trigger)
+      patch.constant = constant
+      patch.vectorized = vectorized
+      break
+    }
+    default:
+      assertNever(form.trigger)
+  }
+
+  switch (form.enabled) {
+    case BULK_UNCHANGED:
+      break
+    case 'enabled':
+      patch.disabled = false
+      break
+    case 'disabled':
+      patch.disabled = true
+      break
+    default:
+      assertNever(form.enabled)
+  }
 
   return patch
 }
@@ -101,4 +139,38 @@ export function buildBulkFieldPatch(form: BulkFieldForm): BulkFieldPatch {
  */
 export function hasBulkFieldMutation(form: BulkFieldForm): boolean {
   return Object.keys(buildBulkFieldPatch(form)).length > 0
+}
+
+/**
+ * The one action the bulk bar performs. Apply may only run when it would send a
+ * non-empty patch, a book is open, at least one row is selected, no request is
+ * in flight, and nothing is waiting on a reconciling reload.
+ */
+export interface BulkApplyGateInput {
+  bookId: string | null
+  selectedCount: number
+  hasMutation: boolean
+  /** True while a prior write is unconfirmed and the entries have not been re-read. */
+  noticesReconciliation: boolean
+  /** True while a bulk request of this bar is still in flight. */
+  pending: boolean
+}
+
+/**
+ * The inverse is the Apply button's `disabled` state. Keeping the rule in one
+ * place is what stops a live Apply while nothing would be sent — including the
+ * moment between a resolved request and the reload that has to reconcile it.
+ */
+export function isBulkApplyEnabled({
+  bookId,
+  selectedCount,
+  hasMutation,
+  noticesReconciliation,
+  pending,
+}: BulkApplyGateInput): boolean {
+  return bookId !== null
+    && selectedCount > 0
+    && hasMutation
+    && !noticesReconciliation
+    && !pending
 }

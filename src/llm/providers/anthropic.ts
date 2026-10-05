@@ -553,6 +553,7 @@ export class AnthropicProvider implements LlmProvider {
               terminalChunk = {
                 token: "",
                 finish_reason: finishReason,
+                stopReceivedAt: Date.now(),
                 stop_details: data.delta?.stop_details,
                 stop_sequence: data.delta?.stop_sequence,
                 tool_calls: toolCalls,

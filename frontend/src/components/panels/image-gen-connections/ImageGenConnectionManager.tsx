@@ -1,8 +1,8 @@
+import { DndContext } from '@/lib/dndUiScale'
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Plus } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import {
-  DndContext,
   closestCenter,
   type DragEndEvent,
 } from '@dnd-kit/core'
