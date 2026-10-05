@@ -67,6 +67,7 @@ export async function* readGoogleStream(
   res: Response, provider: string, replaySignatures: boolean, signal?: AbortSignal,
 ): AsyncGenerator<StreamChunk> {
   let reason: string | undefined;
+  let stopReceivedAt: number | undefined;
   let details: StreamChunk["stop_details"];
   let usage: StreamChunk["usage"];
   const toolCalls: ToolCallResult[] = [];
@@ -76,6 +77,7 @@ export async function* readGoogleStream(
     // A later success/usage envelope must never overwrite a recorded failure.
     if (chunk.finish_reason && !describeGenerationStop(reason, details)) {
       reason = chunk.finish_reason;
+      stopReceivedAt = Date.now();
       details = chunk.stop_details;
     } else if (chunk.finish_reason === reason && chunk.stop_details) {
       details = {
@@ -94,7 +96,7 @@ export async function* readGoogleStream(
   if (!reason) throw incompleteStream(provider);
   const calls = toolCalls.length && !describeGenerationStop(reason, details) ? toolCalls : undefined;
   yield {
-    token: "", finish_reason: calls ? "tool_calls" : reason,
+    token: "", finish_reason: calls ? "tool_calls" : reason, stopReceivedAt,
     ...(calls ? { tool_calls: calls } : {}),
     ...(details ? { stop_details: details } : {}), usage,
   };

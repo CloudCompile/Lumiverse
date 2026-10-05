@@ -17,13 +17,13 @@ import {
 
 const VALID_INPUT = {
   instanceName: "studio workstation",
-  scopes: ["asset:receive", "library:sync"] as const,
+  scopes: ["work:receive", "library:sync"] as const,
 };
 
 describe("buildDeclaration", () => {
   test("stamps protocol version, namespaced capabilities, and ordered targets", () => {
     const declaration = buildDeclaration(VALID_INPUT);
-    expect(declaration.applicationName).toBe(DEFAULT_APPLICATION_NAME);
+    expect(declaration.appName).toBe(DEFAULT_APPLICATION_NAME);
     expect(declaration.protocolVersion).toBe(ILLARIN_PROTOCOL_VERSION);
     expect(declaration.capabilities).toEqual([
       "chat.lumiverse:character-import",
@@ -31,7 +31,7 @@ describe("buildDeclaration", () => {
       "chat.lumiverse:preset-install",
       "chat.lumiverse:theme-install",
     ]);
-    expect(declaration.acceptedTargets).toEqual([
+    expect(declaration.acceptedFormats).toEqual([
       "charx",
       "chara_card_v3",
       "chara_card_v2",
@@ -53,31 +53,31 @@ describe("buildDeclaration", () => {
 
   test("never declares SillyTavern themes — Lumiverse does not accept them", () => {
     expect(ILLARIN_ACCEPTED_TARGETS).not.toContain("theme_sillytavern");
-    expect(buildDeclaration(VALID_INPUT).acceptedTargets).not.toContain("theme_sillytavern");
+    expect(buildDeclaration(VALID_INPUT).acceptedFormats).not.toContain("theme_sillytavern");
   });
 
   test("sends exactly the documented fields — Illarin rejects unknown fields", () => {
     const withoutVersion = Object.keys(buildDeclaration(VALID_INPUT)).sort();
     expect(withoutVersion).toEqual([
-      "acceptedTargets",
-      "applicationName",
+      "acceptedFormats",
+      "appName",
       "capabilities",
-      "instanceName",
+      "name",
+      "permissions",
       "protocolVersion",
-      "scopes",
     ]);
 
     const withVersion = Object.keys(
       buildDeclaration({ ...VALID_INPUT, applicationVersion: "1.0.0" }),
     ).sort();
     expect(withVersion).toEqual([
-      "acceptedTargets",
-      "applicationName",
-      "applicationVersion",
+      "acceptedFormats",
+      "appName",
+      "appVersion",
       "capabilities",
-      "instanceName",
+      "name",
+      "permissions",
       "protocolVersion",
-      "scopes",
     ]);
   });
 
@@ -86,11 +86,11 @@ describe("buildDeclaration", () => {
       applicationName: "  Lumiverse  ",
       instanceName: "  render box  ",
       applicationVersion: " 1.1.6 ",
-      scopes: ["asset:receive"],
+      scopes: ["work:receive"],
     });
-    expect(declaration.applicationName).toBe("Lumiverse");
-    expect(declaration.instanceName).toBe("render box");
-    expect(declaration.applicationVersion).toBe("1.1.6");
+    expect(declaration.appName).toBe("Lumiverse");
+    expect(declaration.name).toBe("render box");
+    expect(declaration.appVersion).toBe("1.1.6");
   });
 
   test("rejects names that are empty, oversized, or non-printable", () => {
@@ -111,13 +111,13 @@ describe("buildDeclaration", () => {
       instanceName: "y".repeat(DECLARATION_LIMITS.nameMaxChars),
       scopes: [],
     });
-    expect(declaration.instanceName).toHaveLength(DECLARATION_LIMITS.nameMaxChars);
+    expect(declaration.name).toHaveLength(DECLARATION_LIMITS.nameMaxChars);
   });
 
   test("rejects unknown scopes", () => {
     expect(() =>
-      buildDeclaration({ instanceName: "ok", scopes: ["asset:receive", "admin:everything"] as never }),
-    ).toThrow(/scope/);
+      buildDeclaration({ instanceName: "ok", scopes: ["work:receive", "admin:everything"] as never }),
+    ).toThrow(/permission/);
   });
 });
 
@@ -131,12 +131,12 @@ describe("assertDeclarationWireLimits", () => {
     const target = (index: number) =>
       `target${"a".repeat(55)}${String(index).padStart(2, "0")}`;
     return {
-      applicationName: "Lumiverse",
-      instanceName: "bulk",
+      appName: "Lumiverse",
+      name: "bulk",
       protocolVersion: 1,
       capabilities: Array.from({ length: DECLARATION_LIMITS.maxArrayEntries }, (_, i) => capability(i)),
-      acceptedTargets: Array.from({ length: DECLARATION_LIMITS.maxArrayEntries }, (_, i) => target(i)),
-      scopes: ["asset:receive", "library:sync"],
+      acceptedFormats: Array.from({ length: DECLARATION_LIMITS.maxArrayEntries }, (_, i) => target(i)),
+      permissions: ["work:receive", "library:sync"],
     };
   }
 
@@ -146,13 +146,13 @@ describe("assertDeclarationWireLimits", () => {
 
   test("rejects more than 32 array entries", () => {
     const declaration = oversizeDeclaration();
-    declaration.acceptedTargets = Array.from({ length: DECLARATION_LIMITS.maxArrayEntries + 1 }, (_, i) => `t${i}`);
+    declaration.acceptedFormats = Array.from({ length: DECLARATION_LIMITS.maxArrayEntries + 1 }, (_, i) => `t${i}`);
     expect(() => assertDeclarationWireLimits(declaration)).toThrow(/32/);
   });
 
   test("rejects duplicate array entries", () => {
     const declaration = buildDeclaration(VALID_INPUT);
-    declaration.acceptedTargets = [...declaration.acceptedTargets, "chara_card_v3"];
+    declaration.acceptedFormats = [...declaration.acceptedFormats, "chara_card_v3"];
     expect(() => assertDeclarationWireLimits(declaration)).toThrow(/unique/);
   });
 
@@ -164,7 +164,7 @@ describe("assertDeclarationWireLimits", () => {
 
   test("rejects targets that are not lowercase module IDs", () => {
     const declaration = buildDeclaration(VALID_INPUT);
-    declaration.acceptedTargets = ["Chara_Card_V3"];
+    declaration.acceptedFormats = ["Chara_Card_V3"];
     expect(() => assertDeclarationWireLimits(declaration)).toThrow(/lowercase module ID/);
   });
 
@@ -186,20 +186,20 @@ describe("buildDeclarationUpdate", () => {
     const declaration = buildDeclaration({ ...VALID_INPUT, applicationVersion: "1.1.6" });
     const update = buildDeclarationUpdate(declaration);
     expect(Object.keys(update).sort()).toEqual([
-      "acceptedTargets",
-      "applicationVersion",
+      "acceptedFormats",
+      "appVersion",
       "capabilities",
       "protocolVersion",
     ]);
-    expect(update.applicationVersion).toBe("1.1.6");
+    expect(update.appVersion).toBe("1.1.6");
   });
 
   test("returns copies — mutating the update cannot leak into the declaration", () => {
     const declaration = buildDeclaration(VALID_INPUT);
     const update = buildDeclarationUpdate(declaration);
-    update.acceptedTargets.push("raw");
+    update.acceptedFormats.push("raw");
     update.capabilities.push("rogue:capability");
-    expect(declaration.acceptedTargets).toEqual([...ILLARIN_ACCEPTED_TARGETS]);
+    expect(declaration.acceptedFormats).toEqual([...ILLARIN_ACCEPTED_TARGETS]);
     expect(declaration.capabilities).toEqual([...ILLARIN_CAPABILITIES]);
   });
 });

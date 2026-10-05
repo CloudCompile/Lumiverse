@@ -1,5 +1,6 @@
 import { useRef, useEffect, useLayoutEffect, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
+import { getUiScale } from '@/lib/uiScale'
 import clsx from 'clsx'
 import styles from './ContextMenu.module.css'
 
@@ -142,28 +143,31 @@ export default function ContextMenu({ position, items, onClose }: ContextMenuPro
 
   // Clamp to viewport.
   //
-  // Coordinate spaces under `body > * { zoom: var(--lumiverse-ui-scale) }`:
+  // Coordinate spaces under `body { zoom: var(--lumiverse-ui-scale) }`:
   //  - Mouse clientX/Y and window.innerWidth/Height are in raw viewport px.
   //  - CSS `top/left` are interpreted in the zoom's layout space (pre-zoom).
   //  - getBoundingClientRect() returns rendered (post-zoom) coords.
-  // So layout_left × scale = rendered_left, and rect.width is already rendered.
+  // So layout_left × scale = rendered_left.
   // To keep the menu inside the viewport we compute a new layout_left such
   // that its post-zoom right edge ≤ vw - 8.
   useLayoutEffect(() => {
     if (!position || !ref.current) return
     const el = ref.current
-    const uiScale = parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale'),
-    ) || 1
-    const rect = el.getBoundingClientRect()
-    const vw = window.innerWidth
-    const vh = window.innerHeight
-    if (rect.right > vw - 8) {
-      el.style.left = `${(vw - rect.width - 8) / uiScale}px`
+    const clampPosition = () => {
+      const uiScale = getUiScale()
+      // The entrance animation starts at scale(.92). Its bounding rect is
+      // temporarily smaller than the final menu; clamping that rect lets the
+      // menu grow past the edge. Layout dimensions exclude that animation.
+      const width = el.offsetWidth * uiScale
+      const height = el.offsetHeight * uiScale
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      el.style.left = `${Math.max(8, Math.min(position.x, vw - width - 8)) / uiScale}px`
+      el.style.top = `${Math.max(8, Math.min(position.y, vh - height - 8)) / uiScale}px`
     }
-    if (rect.bottom > vh - 8) {
-      el.style.top = `${(vh - rect.height - 8) / uiScale}px`
-    }
+    clampPosition()
+    window.addEventListener('resize', clampPosition)
+    return () => window.removeEventListener('resize', clampPosition)
   }, [position, items])
 
   if (!position) return null
@@ -171,9 +175,7 @@ export default function ContextMenu({ position, items, onClose }: ContextMenuPro
   // Mouse coords are in raw viewport space; CSS `top/left` here are resolved
   // in the zoom's layout space. Divide by ui-scale so the rendered position
   // lines up with the click point at any UI scale.
-  const uiScale = parseFloat(
-    getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale'),
-  ) || 1
+  const uiScale = getUiScale()
 
   return createPortal(
     <div

@@ -48,7 +48,7 @@ function pair(access: string, refresh: string, expiresAt = futureExpiry()): Toke
     accessToken: access,
     accessTokenExpiresAt: expiresAt,
     refreshToken: refresh,
-    instance: { id: `inst-${refresh}`, scopes: ["asset:receive"] },
+    connectedApp: { id: `inst-${refresh}`, permissions: ["work:receive"] },
   };
 }
 
@@ -149,6 +149,15 @@ describe("illarin token lifecycle", () => {
     expect(calls()).toBe(1);
   });
 
+  test("refresh replaces the last granted permissions, including an empty grant", async () => {
+    await seedLinked(USER_A, pair("ia1.old", "ir1.old", futureExpiry(30_000)));
+    const updated = { ...pair("ia1.new", "ir1.new"), connectedApp: { id: "inst-ir1.old", permissions: [] } };
+    const { fetch } = countingFetch(() => Response.json(updated));
+
+    expect(await getValidAccessToken(USER_A, opts(fetch))).toBe("ia1.new");
+    expect((await svc.getIllarinInstance(USER_A))?.scopes).toEqual([]);
+  });
+
   test("terminal 401 removes credentials and emits the link-state event", async () => {
     await seedLinked(USER_A, pair("ia1.old", "ir1.old", futureExpiry(30_000)));
     const { fetch } = countingFetch(() => Response.json({ error: "unauthorized" }, { status: 401 }));
@@ -163,31 +172,17 @@ describe("illarin token lifecycle", () => {
     });
   });
 
-  test("unknown refresh outcome propagates without discarding the stored link", async () => {
+  test("unknown refresh outcome stops the installation without replaying a spent token", async () => {
     await seedLinked(USER_A, pair("ia1.old", "ir1.old", futureExpiry(30_000)));
     const { fetch, calls } = countingFetch(() => {
       throw new TypeError("connection reset");
     });
-    let emitted = false;
-    const off = eventBus.on(EventType.ILLARIN_LINK_STATE_CHANGED, (message) => {
-      if (message.userId === USER_A) emitted = true;
-    });
+    const emitted = nextLinkEvent();
 
-    try {
-      await expect(getValidAccessToken(USER_A, opts(fetch))).rejects.toThrow("network error");
-      await expect(svc.getIllarinInstance(USER_A)).resolves.toMatchObject({
-        accessToken: "ia1.old",
-        refreshToken: "ir1.old",
-      });
-
-      // A later worker cycle may retry; the first transient failure did not
-      // transform the installation into an unlinked state.
-      await expect(getValidAccessToken(USER_A, opts(fetch))).rejects.toThrow("network error");
-      expect(calls()).toBe(2);
-      expect(emitted).toBe(false);
-    } finally {
-      off();
-    }
+    await expect(getValidAccessToken(USER_A, opts(fetch))).resolves.toBeNull();
+    await expect(svc.getIllarinInstance(USER_A)).resolves.toBeNull();
+    expect(calls()).toBe(1);
+    expect(await emitted).toEqual({ userId: USER_A, payload: { linked: false, reason: "refresh_uncertain" } });
   });
 
   test("rate limits propagate without destroying credentials", async () => {
@@ -230,7 +225,7 @@ describe("illarin token lifecycle", () => {
     });
   });
 
-  test("local refresh persistence failure leaves the previous pair intact", async () => {
+  test("local refresh persistence failure discards a now-spent credential pair", async () => {
     await seedLinked(USER_A, pair("ia1.old", "ir1.old", futureExpiry(30_000)));
     getDb().run(`
       CREATE TRIGGER reject_illarin_token_update
@@ -243,10 +238,7 @@ describe("illarin token lifecycle", () => {
 
     await expect(getValidAccessToken(USER_A, opts(fetch))).rejects.toThrow("simulated token write failure");
 
-    await expect(svc.getIllarinInstance(USER_A)).resolves.toMatchObject({
-      accessToken: "ia1.old",
-      refreshToken: "ir1.old",
-    });
+    await expect(svc.getIllarinInstance(USER_A)).resolves.toBeNull();
     const synchronous = getDb().query("PRAGMA synchronous").get() as { synchronous: number };
     expect(synchronous.synchronous).toBe(1);
   });

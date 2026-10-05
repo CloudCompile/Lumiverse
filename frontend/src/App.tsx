@@ -6,6 +6,7 @@ import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { useWebSocket } from '@/ws/useWebSocket'
 import { useStore } from '@/store'
 import { useThemeApplicator } from '@/hooks/useThemeApplicator'
+import { installDesktopViewportZoom } from '@/lib/desktopViewportZoom'
 import { useCharacterTheme } from '@/hooks/useCharacterTheme'
 import { useCustomCSSApplicator } from '@/hooks/useCustomCSSApplicator'
 import { useAppInit } from '@/hooks/useAppInit'
@@ -18,6 +19,7 @@ import CharacterEditorPage from '@/components/panels/character-browser/Character
 import ModalContainer from '@/components/modals/ModalContainer'
 import SpindleUIManager from '@/components/spindle/SpindleUIManager'
 import ToastContainer from '@/components/shared/ToastContainer'
+import WindowFileDropHost from '@/components/shared/WindowFileDropHost'
 import ConnectionLostOverlay from '@/components/shared/ConnectionLostOverlay'
 import ChatHeads from '@/components/chat-heads/ChatHeads'
 import WallpaperLayer from '@/components/shared/WallpaperLayer'
@@ -71,6 +73,8 @@ function Application() {
   const safeTheme = getSafeThemeState()
   useWebSocket()
   useThemeApplicator()
+  const desktopPinchZoomEnabled = useStore((s) => s.desktopPinchZoomEnabled)
+  useEffect(() => desktopPinchZoomEnabled ? installDesktopViewportZoom() : undefined, [desktopPinchZoomEnabled])
   useCharacterTheme()
   useCustomCSSApplicator()
   useAppInit()
@@ -366,6 +370,7 @@ function Application() {
                   <Outlet />
                 </main>
                 <ViewportDrawer />
+                {!isDesktopFloatingWidgetWindow() && <WindowFileDropHost />}
                 {editingCharacterId && <CharacterEditorPage />}
                 <ModalContainer />
                 {customCSSDockOpen && !customCSSDockUnavailable && (

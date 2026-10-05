@@ -1,10 +1,11 @@
 import type { TtsRequest, TtsStreamChunk } from "../types";
 
 /** Gemini text-to-speech models. TTS-only list: no text/generation models. */
-export const GOOGLE_TTS_MODELS = [
-  { id: "gemini-3.1-flash-tts-preview", label: "Gemini 3.1 Flash TTS (latest)" },
+export const GOOGLE_TTS_MODELS: Array<{ id: string; label: string }> = [
+  { id: "gemini-3.1-flash-tts-preview", label: "Gemini 3.1 Flash TTS (legacy)" },
   { id: "gemini-2.5-pro-preview-tts", label: "Gemini 2.5 Pro TTS (high quality)" },
-  { id: "gemini-2.5-flash-preview-tts", label: "Gemini 2.5 Flash TTS (fast)" },
+  { id: "gemini-3.8-flash-lite-tts", label: "Gemini 3.8 Flash Lite TTS (fast)" },
+  { id: "gemini-3.8-flash-tts", label: "Gemini 3.8 Flash TTS (latest)" },
 ];
 
 /** Keep a model ID only when it names a speech/TTS model. */
@@ -95,15 +96,15 @@ function parsePcmRate(mimeType: string | undefined): number {
   return Number.isFinite(rate) && rate > 0 ? rate : 24000;
 }
 
-function base64ToBytes(base64: string): Uint8Array {
+function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
-/** Wrap raw 16-bit mono PCM in a WAV container so browsers can play it. */
-export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
+/** Wrap raw 16-bit PCM in a WAV container so browsers can play it. */
+export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number, channels = 1): ArrayBuffer {
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
   const writeAscii = (offset: number, text: string) => {
@@ -115,10 +116,10 @@ export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
   writeAscii(12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
+  view.setUint16(22, channels, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
+  view.setUint32(28, sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
   view.setUint16(34, 16, true);
   writeAscii(36, "data");
   view.setUint32(40, pcm.length, true);
@@ -128,6 +129,17 @@ export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
   return out.buffer;
 }
 
+function decodeGeminiTtsAudio(base64: string, mimeType: string | undefined): ArrayBuffer {
+  const bytes = base64ToBytes(base64);
+  const mediaType = (mimeType || "").split(";")[0].trim().toLowerCase();
+  const isWav = ["audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"].includes(mediaType)
+    || (bytes.length >= 12
+      && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF"
+      && String.fromCharCode(...bytes.subarray(8, 12)) === "WAVE");
+
+  return isWav ? bytes.buffer : wrapPcmInWav(bytes, parsePcmRate(mimeType));
+}
+
 /** Extract the first inline audio payload from a generateContent response. */
 export function extractGeminiTtsAudio(data: any): { audioData: ArrayBuffer; contentType: string } {
   const parts: any[] = data?.candidates?.[0]?.content?.parts || [];
@@ -135,7 +147,7 @@ export function extractGeminiTtsAudio(data: any): { audioData: ArrayBuffer; cont
     const inline = part?.inlineData || part?.inline_data;
     if (inline?.data) {
       const mimeType: string | undefined = inline.mimeType || inline.mime_type;
-      const audioData = wrapPcmInWav(base64ToBytes(inline.data), parsePcmRate(mimeType));
+      const audioData = decodeGeminiTtsAudio(inline.data, mimeType);
       return { audioData, contentType: "audio/wav" };
     }
   }
@@ -149,7 +161,7 @@ export function* extractGeminiTtsAudioChunks(data: any): Generator<TtsStreamChun
     const inline = part?.inlineData || part?.inline_data;
     if (inline?.data) {
       const mimeType: string | undefined = inline.mimeType || inline.mime_type;
-      const audioData = wrapPcmInWav(base64ToBytes(inline.data), parsePcmRate(mimeType));
+      const audioData = decodeGeminiTtsAudio(inline.data, mimeType);
       yield {
         data: new Uint8Array(audioData),
         done: false,

@@ -1,11 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   currentDesktopPlatform,
+  desktopBuildCommand,
   inspectDesktopToolchain,
   meetsVersion,
   MIN_BUN_VERSION,
   rustInstallRemedy,
 } from "./desktop-toolchain";
+
+test("the Windows build command initializes MSVC instead of invoking Tauri directly", () => {
+  expect(desktopBuildCommand("windows")).toBe(".\\start.ps1 -InstallDesktop");
+  expect(desktopBuildCommand("macos")).toContain("bun run tauri:finalized build");
+});
 
 describe("meetsVersion", () => {
   test("accepts an exact match", () => {

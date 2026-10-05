@@ -81,6 +81,9 @@ mock.module('@dnd-kit/core', () => ({
   DndContext: ({ children }: { children?: ReactNode }) => <>{children}</>,
   closestCenter: () => null,
 }))
+mock.module('@/lib/dndUiScale', () => ({
+  DndContext: ({ children }: { children?: ReactNode }) => <>{children}</>,
+}))
 mock.module('@dnd-kit/sortable', () => ({
   SortableContext: ({ children }: { children?: ReactNode }) => <>{children}</>,
   verticalListSortingStrategy: () => null,

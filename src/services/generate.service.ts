@@ -34,8 +34,12 @@ import {
   type ToolDefinition,
   type ToolCallResult,
   type LlmThinkingBlock,
+  EditAndSendContextError,
+  EDIT_AND_SEND_CONTEXT_ERROR_NAME,
+  type EditAndSendContext,
 } from "../llm/types";
 import { trimIncompleteTrailingWord } from "../utils/trim-incomplete-word";
+import { readMessageRevision } from "../utils/message-revision";
 import { healFormattingArtifacts } from "../utils/format-healing";
 import {
   buildInlineToolContinuation,
@@ -51,6 +55,8 @@ import {
   prepareInlineWebSearchMessagesForProvider,
 } from "./inline-web-search";
 import { getWebSearchSettings } from "./web-search-settings.service";
+import { getCardCreatorRuntimeTools, getCardCreatorToolDefinitions, executeCardCreatorTool, CARD_CREATOR_TOOL_NAMES } from "./card-creator/tools.service";
+import { runWithCardCreatorContext } from "./card-creator/context";
 import type { Message } from "../types/message";
 import type { ConnectionProfile } from "../types/connection-profile";
 import {
@@ -488,6 +494,8 @@ interface SpindleContext {
   cancelGeneration?: boolean;
   activatedWorldInfo?: ActivatedWorldInfoEntry[];
   __spindleWorldInfoCaptures?: Record<string, ActivatedWorldInfoEntry[]>;
+  presetId?: string | null;
+  __spindlePresetMetadata?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
@@ -795,6 +803,20 @@ async function executeInlineCouncilToolCalls(
         }
       }
 
+      if (!isCouncilQualifiedCall && CARD_CREATOR_TOOL_NAMES.has(resolvedQualifiedName!)) {
+        const executed = await executeCardCreatorTool(resolvedQualifiedName!, toolCall.args ?? {});
+        results.push({
+          callId: toolCall.call_id,
+          qualifiedName: resolvedQualifiedName!,
+          toolName: tool.name,
+          toolDisplayName: tool.displayName,
+          result: executed.result,
+          isError: executed.isError,
+          proposalIds: executed.proposalIds,
+        });
+        continue;
+      }
+
       try {
         const requestedCount = typeof toolCall.args?.result_count === "number"
           ? toolCall.args.result_count
@@ -1035,6 +1057,8 @@ async function runPromptPipeline(opts: {
   inputMessages?: LlmMessage[];
   inputParameters?: GenerationParameters;
   excludeMessageId?: string;
+  /** Committed edit identity for assembly validation and history cutoff. */
+  editAndSendContext?: EditAndSendContext;
   rejectedSwipe?: string;
   continueMessageId?: string;
   continuePostfix?: string;
@@ -1101,7 +1125,9 @@ async function runPromptPipeline(opts: {
     | undefined;
   let macroEnv: import("../macros/types").MacroEnv | undefined;
   let trimIncompleteWords = false;
-  let resolvedPreset: { id: string; name: string } | undefined;
+  let resolvedPreset:
+    | { id: string; name: string; metadata?: Record<string, unknown> }
+    | undefined;
 
   let deliberationHandledByMacro = false;
 
@@ -1122,6 +1148,7 @@ async function runPromptPipeline(opts: {
       impersonateInput: opts.impersonateInput,
       userInput: opts.userInput,
       excludeMessageId: opts.excludeMessageId,
+      editAndSendContext: opts.editAndSendContext,
       rejectedSwipe: opts.rejectedSwipe,
       continueMessageId: opts.continueMessageId,
       continuePostfix: opts.continuePostfix,
@@ -1144,6 +1171,8 @@ async function runPromptPipeline(opts: {
         assemblyResult = await assemblePromptInWorker(assemblyCtx);
       } catch (err: any) {
         if (opts.signal?.aborted || err?.name === "AbortError") throw err;
+        // The worker preserves this error name; a rejected edit is terminal.
+        if (err?.name === EDIT_AND_SEND_CONTEXT_ERROR_NAME) throw err;
         console.warn(
           "[generate] Prompt assembly worker failed; falling back to in-process assembly:",
           err?.message || err,
@@ -1202,6 +1231,13 @@ async function runPromptPipeline(opts: {
   delete spindleContext.__spindleWorldInfoCaptures;
   if (spindleWorldInfoCaptures) {
     spindleContext.__spindleWorldInfoCaptures = spindleWorldInfoCaptures;
+  }
+  // Pin the preset assembly resolved for this generation. The full metadata
+  // stays internal; worker hosts expose only each extension's own namespace.
+  spindleContext.presetId = resolvedPreset?.id ?? null;
+  delete spindleContext.__spindlePresetMetadata;
+  if (resolvedPreset?.metadata) {
+    spindleContext.__spindlePresetMetadata = resolvedPreset.metadata;
   }
 
   // Run Spindle interceptor pipeline on assembled messages
@@ -1482,6 +1518,35 @@ export interface StartGenerationOptions {
    * request body by `chatRoute` and therefore forgeable by any client.
    */
   connectionId?: string;
+  /** Trusted cursor identity, kept out of the client-controlled request body. */
+  editAndSendContext?: EditAndSendContext;
+}
+
+/** Recheck the committed user turn and assistant target around async setup. */
+function assertEditAndSendContextTarget(
+  input: GenerateInput,
+  context: EditAndSendContext,
+): void {
+  const edited = chatsSvc.getMessage(input.userId, context.editedUserMessageId);
+  if (!edited || edited.chat_id !== input.chat_id || !edited.is_user) {
+    throw new EditAndSendContextError(
+      "Edit-and-Send target message is not part of this chat",
+    );
+  }
+  if (readMessageRevision(edited) !== context.committedRevision) {
+    throw new EditAndSendContextError(
+      "Edit-and-Send message revision has changed since it was committed",
+    );
+  }
+  // Validate the separate swipe target before staging a write.
+  if (input.message_id) {
+    const target = chatsSvc.getMessage(input.userId, input.message_id);
+    if (!target || target.chat_id !== input.chat_id) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send assistant target is not part of this chat",
+      );
+    }
+  }
 }
 
 export async function startGeneration(
@@ -1493,6 +1558,11 @@ export async function startGeneration(
     typeof input.generationId === "string" ? input.generationId.trim() : "";
   const generationId = resolveStartGenerationId(input);
   let genType = input.generation_type || "normal";
+
+  const editAndSendContext = options?.editAndSendContext;
+  if (editAndSendContext) {
+    assertEditAndSendContextTarget(input, editAndSendContext);
+  }
 
   if (requestedGenerationId) {
     const existing = getActiveGeneration(generationId);
@@ -1595,7 +1665,26 @@ export async function startGeneration(
   let stagedSwipe: Message | null = null;
   let stagedSwipeId: number | undefined;
 
+  const removeEmptyStagedSwipe = () => {
+    if (!stagedSwipeOriginal || stagedSwipeId == null) return;
+    try {
+      const current = chatsSvc.getMessage(input.userId, stagedSwipeOriginal.id);
+      if (current?.swipes[stagedSwipeId] === "") {
+        chatsSvc.deleteSwipe(input.userId, stagedSwipeOriginal.id, stagedSwipeId, {
+          restoreSwipeId: stagedSwipeOriginal.swipe_id,
+        });
+      }
+    } catch {
+      /* best-effort cleanup */
+    }
+  };
+
   try {
+    // Recheck after waiting for a previous generation; failures here must
+    // release this generation's tracking and completion through the catch.
+    if (editAndSendContext) {
+      assertEditAndSendContextTarget(input, editAndSendContext);
+    }
     // Stage a swipe before cancelling background work, resolving secrets, or
     // validating the preset. This is the user-visible part of the action, and
     // it must not wait behind cache-warming HTTP teardown (which is bounded at
@@ -1823,6 +1912,11 @@ export async function startGeneration(
     // live tokens onto them. Distinct from lifecycle.targetSwipeIdx (which also
     // routes the completion write) so we don't perturb normal/continue saving.
     let targetSwipeId: number | undefined;
+
+    // Recheck after credential resolution, before further writes.
+    if (editAndSendContext) {
+      assertEditAndSendContextTarget(input, editAndSendContext);
+    }
 
     if (genType === "regenerate" || genType === "swipe") {
       const targetMsg = targetAssistantMessage;
@@ -2069,8 +2163,34 @@ export async function startGeneration(
               .filter(
                 (m) => m.id !== excludeMessageId && m.id !== stagedMessageId,
               );
+            // Cap council input at the committed turn before hashing or retrieval.
+            const councilEditAndSendContext = editAndSendContext;
+            const councilCappedMessages = councilEditAndSendContext
+              ? (() => {
+                  const at = councilMessages.findIndex(
+                    (m) => m.id === councilEditAndSendContext.editedUserMessageId,
+                  );
+                  if (at < 0) {
+                    throw new EditAndSendContextError(
+                      "Edit-and-Send target message is no longer part of this chat",
+                    );
+                  }
+                  const selected = councilMessages[at];
+                  if (
+                    !selected.is_user ||
+                    selected.chat_id !== input.chat_id ||
+                    readMessageRevision(selected) !== councilEditAndSendContext.committedRevision
+                  ) {
+                    throw new EditAndSendContextError(
+                      "Edit-and-Send message revision has changed since it was committed",
+                    );
+                  }
+                  assertEditAndSendContextTarget(input, councilEditAndSendContext);
+                  return councilMessages.slice(0, at + 1);
+                })()
+              : councilMessages;
             councilContextHash = hashCouncilContextMessages(
-              councilMessages,
+              councilCappedMessages,
               councilSettings.toolsSettings.sidecarContextWindow,
               excludesLatestUserMessage(councilSettings.toolsSettings),
             );
@@ -2179,8 +2299,8 @@ export async function startGeneration(
                 wiEntries.length > 0
                   ? activateWorldInfo({
                       entries: wiEntries,
-                      messages: councilMessages,
-                      chatTurn: councilMessages.length,
+                      messages: councilCappedMessages,
+                      chatTurn: councilCappedMessages.length,
                       wiState: {},
                       settings: councilWorldInfoSettings,
                     }).activatedEntries
@@ -2193,7 +2313,7 @@ export async function startGeneration(
                 input.chat_id,
                 wiBookIds,
                 wiEntries,
-                councilMessages,
+                councilCappedMessages,
                 abortController.signal,
                 councilWorldInfoSettings,
               );
@@ -2210,7 +2330,7 @@ export async function startGeneration(
                 "[generate] Council enrichment: char=%s, persona=%s, messages=%d, wi=%d/%d, vector=%d",
                 fullCharacter?.name ?? "none",
                 resolvedPersona?.name ?? "none",
-                councilMessages.length,
+                councilCappedMessages.length,
                 councilWiActivated.length,
                 wiEntries.length,
                 vectorActivated.length,
@@ -2219,7 +2339,7 @@ export async function startGeneration(
               const councilEnrichment: CouncilEnrichment = {
                 character: fullCharacter,
                 persona: resolvedPersona,
-                messages: councilMessages,
+                messages: councilCappedMessages,
                 activatedWorldInfoEntries: councilWiActivated,
               };
 
@@ -2454,6 +2574,37 @@ export async function startGeneration(
           }
         }
 
+        // ── Card Creator tools ───────────────────────────────────────────
+        // Attached only when the conversation's character is the Card Creator.
+        // Gated on enableFunctionCalling for the same reason council inline
+        // tools are: without native function calling there is no tool loop.
+        if (genType !== "impersonate") {
+          const convCharacterId = targetCharId || chat?.character_id || undefined;
+          const convCharacter = convCharacterId
+            ? charactersSvc.getCharacter(input.userId, convCharacterId)
+            : null;
+          if (charactersSvc.isCardCreator(convCharacter)) {
+            const presetId = input.preset_id || connection.preset_id;
+            const preset = presetId ? presetsSvc.getPreset(input.userId, presetId) : null;
+            const completionSettings = preset?.prompts?.completionSettings;
+            if (completionSettings?.enableFunctionCalling !== false) {
+              if (!inlineTools) inlineTools = [];
+              if (!inlineToolDefsByName) {
+                inlineToolDefsByName = new Map<string, RuntimeCouncilToolDefinition>();
+              }
+              for (const [name, runtimeDef] of getCardCreatorRuntimeTools()) {
+                inlineToolDefsByName.set(name, runtimeDef);
+              }
+              inlineTools.push(...getCardCreatorToolDefinitions());
+            } else {
+              console.warn(
+                "[card-creator] Inline tools skipped: enableFunctionCalling is disabled in preset '%s'",
+                preset?.name,
+              );
+            }
+          }
+        }
+
         // Wire staged message into lifecycle so GENERATION_STARTED includes it as
         // targetMessageId and runGeneration knows to update instead of create.
         if (stagedMessageId) {
@@ -2605,6 +2756,7 @@ export async function startGeneration(
             inputMessages: input.messages,
             inputParameters: input.parameters,
             excludeMessageId,
+            editAndSendContext,
             rejectedSwipe,
             continueMessageId: lifecycle.continueMessageId,
             continuePostfix: lifecycle.continuePostfix,
@@ -2760,6 +2912,9 @@ export async function startGeneration(
         // bail out here instead of emitting GENERATION_STARTED (with breakdown)
         // and then tearing the stream down on the first iter.next() race.
         checkAborted();
+        if (editAndSendContext) {
+          assertEditAndSendContextTarget(input, editAndSendContext);
+        }
 
         await runGeneration(
           generationId,
@@ -2784,6 +2939,9 @@ export async function startGeneration(
           pipeline.macroEnvSeed,
         );
       } catch (err: any) {
+        if (err?.name === EDIT_AND_SEND_CONTEXT_ERROR_NAME) {
+          removeEmptyStagedSwipe();
+        }
         // Clean up tracking maps if setup (council, assembly, etc.) fails or is aborted.
         // Only clear the per-chat mapping if it still points at THIS generation —
         // a newer startGeneration on the same chat may have already taken over the
@@ -2858,19 +3016,8 @@ export async function startGeneration(
         /* best-effort cleanup */
       }
     }
-    // A failure before GENERATION_STARTED has no terminal event for the
-    // frontend to reconcile. Remove the early blank swipe ourselves, but only
-    // when its slot is still the empty value we staged.
-    if (stagedSwipeOriginal && stagedSwipeId != null) {
-      try {
-        const current = chatsSvc.getMessage(input.userId, stagedSwipeOriginal.id);
-        if (current?.swipes[stagedSwipeId] === "") {
-          chatsSvc.deleteSwipe(input.userId, stagedSwipeOriginal.id, stagedSwipeId);
-        }
-      } catch {
-        /* best-effort cleanup */
-      }
-    }
+    // No terminal event is emitted for early setup failures.
+    removeEmptyStagedSwipe();
     removeActiveGeneration(generationId);
     clearActiveChatGeneration(input.userId, input.chat_id, generationId);
     resolveCompletion();
@@ -3186,6 +3333,8 @@ async function runGeneration(
 
   let fullContent = "";
   let fullReasoning = "";
+  const poolEntry = pool.getPoolEntry(generationId);
+  let lastProviderContentAt: number | undefined;
   const trimIncompleteWords = lifecycle.trimIncompleteWords === true;
   let responseBehaviorOptions:
     | {
@@ -3283,15 +3432,21 @@ async function runGeneration(
     queueStreamSegment(text, appended.seq, appended.offset, "reasoning");
   }
 
-  function processContentToken(token: string) {
+  function processContentToken(token: string, receivedAt?: number) {
     const parsed = cotParser.push(token);
     if (parsed.reasoning) emitReasoningToken(parsed.reasoning);
+    if (parsed.content && receivedAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
+      poolEntry.firstContentTokenAt = receivedAt;
+    }
     if (parsed.content) emitContentToken(parsed.content);
   }
 
   function flushCotBuffers() {
     const parsed = cotParser.flush();
     if (parsed.reasoning) emitReasoningToken(parsed.reasoning);
+    if (parsed.content && lastProviderContentAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
+      poolEntry.firstContentTokenAt = lastProviderContentAt;
+    }
     if (parsed.content) emitContentToken(parsed.content);
   }
 
@@ -3479,7 +3634,6 @@ async function runGeneration(
   delete parameters._streaming;
 
   // Record streaming mode on the pool entry for metrics
-  const poolEntry = pool.getPoolEntry(generationId);
   if (poolEntry) poolEntry.wasStreaming = useStreaming;
 
   let emittedStopped = false;
@@ -3498,6 +3652,8 @@ async function runGeneration(
     const interleavedStructured =
       !!tools?.length && provider.capabilities.interleavedThinking === true;
     let inlineWebSearchUsed = false;
+    // Card Creator proposals filed across every tool round of this turn.
+    const inlineCouncilResultsAccumulator: InlineCouncilToolResult[] = [];
 
     for (let inlineRound = 0; inlineRound < INLINE_TOOL_MAX_ROUNDS; inlineRound++) {
       finishReason = undefined;
@@ -3574,8 +3730,12 @@ async function runGeneration(
           }
           throw err;
         }
-        if (result.done) break;
+        if (result.done) {
+          if (poolEntry && !signal.aborted) poolEntry.responseStoppedAt = Date.now();
+          break;
+        }
         const chunk = result.value;
+        const receivedAt = Date.now();
 
         if (signal.aborted) {
           const persisted = await persistPartialContent();
@@ -3600,6 +3760,7 @@ async function runGeneration(
         // are streamed model output and demonstrate the provider is healthy.
         if (chunk.reasoning || chunk.token) {
           touchActiveGeneration(generationId);
+          if (poolEntry && poolEntry.firstTokenAt == null) poolEntry.firstTokenAt = receivedAt;
         }
 
         // Emit reasoning tokens (provider thinking/extended thinking)
@@ -3612,7 +3773,8 @@ async function runGeneration(
         }
 
         if (chunk.token) {
-          processContentToken(chunk.token);
+          lastProviderContentAt = receivedAt;
+          processContentToken(chunk.token, receivedAt);
         }
 
         if (chunk.tool_calls) {
@@ -3651,6 +3813,7 @@ async function runGeneration(
 
         if (chunk.finish_reason) {
           finishReason = chunk.finish_reason;
+          if (poolEntry) poolEntry.responseStoppedAt = Math.max(chunk.stopReceivedAt ?? receivedAt, lastProviderContentAt ?? 0);
           await iter.return?.(undefined);
           break;
         }
@@ -3697,20 +3860,26 @@ async function runGeneration(
 
       const inlineCouncilResults =
         pendingToolCalls?.length && inlineToolDefsByName
-          ? await executeInlineCouncilToolCalls(
-              userId,
-              pendingToolCalls,
-              inlineMcpTimeoutMs,
-              inlineToolDefsByName,
-              inlineMembersByPrefix,
-              inlineContextMessages,
-              inlineWebSearchEnabled && !inlineWebSearchUsed,
+          ? await runWithCardCreatorContext(
+              { userId, chatId },
+              () =>
+                executeInlineCouncilToolCalls(
+                  userId,
+                  pendingToolCalls,
+                  inlineMcpTimeoutMs,
+                  inlineToolDefsByName!,
+                  inlineMembersByPrefix,
+                  inlineContextMessages,
+                  inlineWebSearchEnabled && !inlineWebSearchUsed,
+                ),
             )
           : [];
 
       if (inlineCouncilResults.length === 0) {
         break;
       }
+
+      inlineCouncilResultsAccumulator.push(...inlineCouncilResults);
 
       const inlineWebSearchContexts = inlineCouncilResults
         .flatMap((result) => result.inlineWebSearchContext
@@ -3762,6 +3931,14 @@ async function runGeneration(
           : []),
       ];
     }
+
+    // Proposals filed by Card Creator tools during this turn, attached to the
+    // assistant message so the conversation can render their review cards.
+    const proposalIds = [
+      ...new Set(
+        (inlineCouncilResultsAccumulator ?? []).flatMap((result) => result.proposalIds ?? []),
+      ),
+    ];
 
     // Clean exit after abort — the stream may have returned done:true via
     // readWithAbort without ever re-entering the for-await body, so the
@@ -3882,6 +4059,7 @@ async function runGeneration(
         // Merge with existing extra to preserve character_id etc. set during staging
         const existingStagedExtra =
           chatsSvc.getMessage(userId, lifecycle.stagedMessageId)?.extra || {};
+        if (proposalIds.length > 0) existingStagedExtra.card_creator_proposal_ids = proposalIds;
         const stagedExtra = fullReasoning
           ? { ...existingStagedExtra, reasoning: fullReasoning }
           : Object.keys(existingStagedExtra).length > 0
@@ -3906,6 +4084,7 @@ async function runGeneration(
         if (!isImpersonate && lifecycle.targetCharacterId)
           extra.character_id = lifecycle.targetCharacterId;
         if (fullReasoning) extra.reasoning = fullReasoning;
+        if (proposalIds.length > 0) extra.card_creator_proposal_ids = proposalIds;
 
         const message = chatsSvc.createMessage(
           chatId,
@@ -4066,8 +4245,6 @@ async function runGeneration(
             }
           | undefined;
         if (finalPoolEntry) {
-          // completedAt freezes the response boundary before this deferred
-          // tokenizer/bookkeeping work runs.
           const timingMetrics = calculateGenerationTimingMetrics(
             finalPoolEntry,
             responseTokenCount,

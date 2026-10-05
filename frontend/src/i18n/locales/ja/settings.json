@@ -122,6 +122,7 @@
     "saving": "保存..."
   },
   "display": {
+    "zoom": { "title": "ズーム", "desktopPinchZoom": "デスクトップでピンチズーム" },
     "longMessages": {
       "title": "長いメッセージ",
       "helper": "長いメッセージを、展開するまで読みやすい高さに制限します。",
@@ -621,7 +622,7 @@
     "unlinking": "リンク解除...",
     "unlink": "LumiHub からのリンクを解除",
     "instanceName": "インスタンス名",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "私のルミバース",
     "instanceHint": "LumiHub 上でこのインスタンスを識別するためのラベル (例: 「ホーム PC」、「ラップトップ」)",
     "waitingApproval": "承認待ち...",

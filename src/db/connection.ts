@@ -25,7 +25,7 @@ export function initDatabase(path?: string): Database {
   }
 
   db = new Database(dbPath);
-  applyBaseDatabasePragmas(db);
+  applyBaseDatabasePragmas(db, dbPath);
   _generation++;
   notifyReset();
 

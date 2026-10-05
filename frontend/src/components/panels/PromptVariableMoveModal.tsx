@@ -96,6 +96,7 @@ export default function PromptVariableMoveModal({
       isOpen
       onClose={onClose}
       maxWidth="min(620px, calc(100vw - 24px))"
+      zIndex={10004}
       className={styles.modal}
     >
       <div className={styles.header}>

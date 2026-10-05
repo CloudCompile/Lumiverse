@@ -10,7 +10,7 @@ Lumiverse builds the final image prompt from three things: the **prompt mode** y
 
 ## Prompt Modes
 
-Set the mode under **Image Generation → Prompt Mode**.
+Set **Mode** directly in the **Image Gen** drawer. Select the active main preset there when using Custom or Chat-aware Custom mode. Choose **Edit** to open **Prompt Studio**; Scene mode has a **Prompt Studio…** button instead.
 
 ### Scene tool
 
@@ -47,7 +47,7 @@ For example, a parser instruction like:
 
 ## Picking the Parser LLM
 
-Scene and Chat-aware Custom both need a parser LLM. By default Lumiverse uses the **Council sidecar**, but you can override it under **Prompt Parser**:
+Scene and Chat-aware Custom both need a parser LLM. By default Lumiverse uses the **Council sidecar**, but you can override it in **Prompt Studio → Prompt Parser**:
 
 | Field | Purpose |
 |-------|---------|
@@ -63,15 +63,18 @@ The parser is short-lived per request and only runs for Scene and Chat-aware Cus
 
 ## Prompt Presets
 
-Custom and Chat-aware prompts can be saved as **presets** and reloaded later. Presets come in three kinds:
+Custom and Chat-aware prompts can be saved as **presets** and reloaded later. Presets come in four kinds:
 
 | Kind | Purpose |
 |------|---------|
 | **Main preset** | The full prompt that's actually sent / parsed. There is one active main preset at a time. |
 | **Character preset** | A snippet that fills `{{character_prompt}}` (and `{{character_negative_prompt}}`) in whichever main preset is active. |
 | **Persona preset** | A snippet that fills `{{persona_prompt}}` (and `{{persona_negative_prompt}}`) in the main preset. |
+| **Captioning preset** | Instructions used by **Caption Image** when describing an uploaded image. |
 
-Use the **Editing** picker in the panel to switch which kind you're editing. Save, rename, and delete buttons sit underneath the editor.
+**Prompt Studio** has **Main**, **Character**, **Persona**, and **Captioning** views. Each view lists only its own presets. Edit the prompt and name, then use **Save Changes** to update a loaded preset or **Save As New** to create one. Delete requires confirmation. **Preset Negative Prompt** belongs to the prompt preset; **Provider Negative Prompt** in Generation Settings is a separate connection parameter.
+
+The main prompt draft is saved to settings after a short typing pause and flushed before manual generation. Saving a preset is a separate action. Closing the studio preserves the draft for the current mounted drawer session.
 
 ### Bindings
 
@@ -86,7 +89,7 @@ A small banner under the editor confirms what the current preset is bound to. Bi
 
 When generation runs, Lumiverse resolves the prompt in this order:
 
-1. The **main preset** (or the inline panel text if no preset is loaded) is taken as the template.
+1. The **main preset** (or the current Main draft if no preset is loaded) is taken as the template.
 2. Any `{{character_prompt}}` / `{{character_negative_prompt}}` macro is replaced by the snippet from the character bound to the active chat — if one is bound.
 3. Any `{{persona_prompt}}` / `{{persona_negative_prompt}}` macro is replaced by the snippet from the persona bound to your user — if one is bound.
 4. Standard macros (`{{user}}`, `{{char}}`, etc.) are evaluated.
@@ -131,7 +134,7 @@ Swap to a different persona or character mid-chat and the splices update automat
 ---
 ## LoRA Presets
 
-**Image Generation → LoRA Presets** saves an ordered stack of LoRA filenames, strengths, and optional base tags. Load a preset from **Active LoRA Preset**, then add rows or edit its name before saving. Base tags are prepended to the generated prompt only while that preset is active and not bypassed.
+**LoRA Studio** saves an ordered stack of LoRA filenames, strengths, and optional base tags. Switch **Active LoRA Preset** in the drawer, then choose its **Edit** button to add rows or edit its name in LoRA Studio before saving. Base tags are prepended to the generated prompt only while that preset is active and not bypassed.
 
 When the active connection supports model discovery (**ComfyUI**, **SwarmUI**, or **SD API**), the filename picker offers its available LoRAs. Selecting an option stores its exact provider filename. You can always type a filename manually instead—useful for a new file that has not appeared in a model list yet. A failed lookup remains visible with **Retry** and never locks the manual filename field.
 
@@ -147,7 +150,7 @@ For SwarmUI, the ordered names and model strengths are sent as matching `loras` 
 
 ### Layer Controls
 
-Under **LoRA Controls**:
+In **LoRA Studio → LoRA Controls**:
 
 - **Bypass Character LoRA** skips only the active chat character's configured layer and its base tags; raw provider-supplied LoRAs stay prepended and are not scaled or bypassed.
 - **Bypass Active LoRA Preset** skips only the selected preset's rows and base tags. A bypassed preset's base tags are not applied; raw provider-supplied LoRAs stay prepended and are not scaled or bypassed.
@@ -158,9 +161,9 @@ Under **LoRA Controls**:
 
 ## Prompt Preview
 
-Turn on **Preview prompt before generating** (under **Scene Settings**) to inspect the resolved prompt before the image provider is called.
+Turn on **Preview prompt before generating** (in the drawer’s **Quick Behavior** section) to inspect the resolved prompt before the image provider is called.
 
-When enabled, hitting **Generate** opens the **Prompt Preview** modal showing the final prompt and negative prompt — fully macro-resolved and (for Scene / Chat-aware modes) already passed through the parser LLM. From there you can:
+When enabled, hitting **Generate Now** opens the **Prompt Preview** modal showing the final prompt and negative prompt — fully macro-resolved and (for Scene / Chat-aware modes) already passed through the parser LLM. From there you can:
 
 - **Edit** the prompt and negative prompt directly.
 - **Generate** — sends the (possibly edited) prompt straight to the image provider, skipping the parser this time.
@@ -176,9 +179,9 @@ You can also preview without ever generating an image by setting the **Output** 
 
 | Button | Behaviour |
 |--------|-----------|
-| **Generate** | Generates using the current settings. Respects scene-change detection unless **Ignore Scene Change Detection** is on. |
+| **Generate Now** | Generates using the current settings. Respects scene-change detection unless **Ignore Scene Change Detection** is on. |
 | **Force Generate** | Bypasses scene-change detection for a single shot. |
-| **Auto-Generate On Reply** | When enabled, every new assistant message triggers a Scene-mode generation. Off for manual-only chats. |
+| **Auto-Generate On Reply** | When enabled, every new assistant reply triggers generation using the selected prompt mode. Off for manual-only chats. |
 
 Generation runs cooperatively — a new request for the same chat aborts the in-flight one, so you can change your mind without waiting for the previous image to finish.
 
@@ -192,5 +195,5 @@ Generation runs cooperatively — a new request for the same chat aborts the in-
 !!! tip "Character snippets beat huge main presets"
     A main preset shouldn't describe specific characters — keep it generic and put character details in a bound character snippet. You can then reuse the same main preset across every chat.
 
-!!! tip "Preview is free"
-    Previewing the prompt runs the parser LLM but not the image provider. Use it freely to iterate on parser instructions before you spend a generation credit.
+!!! tip "Inspect prompts before generating"
+    Previewing the prompt runs the parser LLM but not the image provider. Parser calls may still incur LLM costs. Use the prompt preview to iterate before running the image provider. **Output → Preview only** still generates an image; it controls placement of the result.

@@ -161,6 +161,13 @@ export class QdrantStore implements VectorStore {
     });
   }
 
+  async replaceByFilter(collection: CollectionName, filter: VectorFilter, rows: VectorRow[]): Promise<void> {
+    // Qdrant's server serializes writes; delete-then-upsert is equivalent and
+    // avoids relying on a transactional primitive the REST API doesn't offer.
+    await this.deleteByFilter(collection, filter);
+    if (rows.length > 0) await this.upsert(collection, rows);
+  }
+
   async vectorSearch(opts: SearchOptions): Promise<VectorHit[]> {
     if (opts.signal?.aborted) return [];
     const res = await this.request(`/collections/${encodeURIComponent(this.collectionName(opts.collection))}/points/search`, {

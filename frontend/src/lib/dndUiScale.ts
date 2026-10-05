@@ -1,12 +1,71 @@
 import { CSS, type Transform } from '@dnd-kit/utilities'
-import { useCallback, useEffect, useRef } from 'react'
+import { DndContext as BaseDndContext, getClientRect, type DndContextProps } from '@dnd-kit/core'
+import { createElement, useCallback, useEffect, useRef } from 'react'
+import { getUiScale } from './uiScale'
 
-function getUiScale(): number {
-  return (
-    parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale'),
-    ) || 1
-  )
+const computedTransformIncludesZoom = new WeakMap<Document, boolean>()
+
+function transformTranslationScale(element: HTMLElement, uiScale: number): number {
+  const doc = element.ownerDocument
+  let includesZoom = computedTransformIncludesZoom.get(doc)
+  if (includesZoom === undefined) {
+    // Firefox currently serializes zoomed matrix translations; Chromium and
+    // WebKit serialize layout pixels. Feature-detect once, outside body so
+    // the user's current scale does not influence this fixed 2x probe.
+    const probe = doc.createElement('div')
+    probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;width:1px;height:1px;zoom:2;transform:translateX(1px)'
+    doc.documentElement.appendChild(probe)
+    try {
+      includesZoom = new DOMMatrixReadOnly(getComputedStyle(probe).transform).m41 > 1.5
+      computedTransformIncludesZoom.set(doc, includesZoom)
+    } finally {
+      probe.remove()
+    }
+  }
+  const nativeZoom = includesZoom ? Number.parseFloat(getComputedStyle(doc.body).zoom) || 1 : 1
+  return uiScale / nativeZoom
+}
+
+/** dnd-kit's default inverse transform mixes rendered rects with layout lengths. */
+export function measureUiScaledRect(element: HTMLElement) {
+  const scale = getUiScale()
+  if (scale === 1) return getClientRect(element, { ignoreTransform: true })
+
+  const rect = element.getBoundingClientRect()
+  const style = getComputedStyle(element)
+  if (!style.transform || style.transform === 'none') {
+    const { left, top, width, height, right, bottom } = rect
+    return { left, top, width, height, right, bottom }
+  }
+
+  const matrix = new DOMMatrixReadOnly(style.transform)
+  const [originX, originY] = style.transformOrigin.split(' ').map(Number.parseFloat)
+  // Normalize matrix translations before removing the element's transform.
+  // The origin remains in layout pixels in all engines. Body transforms on
+  // Linux also need this conversion even though native CSS zoom is 1.
+  const translationScale = transformTranslationScale(element, scale)
+  const left = rect.left - matrix.m41 * translationScale - (1 - matrix.m11) * originX * scale
+  const top = rect.top - matrix.m42 * translationScale - (1 - matrix.m22) * originY * scale
+  const width = matrix.m11 ? rect.width / matrix.m11 : rect.width
+  const height = matrix.m22 ? rect.height / matrix.m22 : rect.height
+  return { left, top, width, height, right: left + width, bottom: top + height }
+}
+
+const scaledMeasuring = {
+  draggable: { measure: measureUiScaledRect },
+  droppable: { measure: measureUiScaledRect },
+}
+
+/** Use with useScaledSortableStyle so measurement and painting share units. */
+export function DndContext({ measuring, ...props }: DndContextProps) {
+  return createElement(BaseDndContext, {
+    ...props,
+    measuring: measuring ? {
+      ...measuring,
+      draggable: { ...scaledMeasuring.draggable, ...measuring.draggable },
+      droppable: { ...scaledMeasuring.droppable, ...measuring.droppable },
+    } : scaledMeasuring,
+  })
 }
 
 /**
@@ -28,7 +87,7 @@ function getScrollableAncestor(node: Element | null): Element | null {
 
 /**
  * Build a `translate3d` string from a `useSortable` transform, compensating for
- * the CSS `zoom: var(--lumiverse-ui-scale)` applied to `body > *` (see
+ * the CSS `zoom: var(--lumiverse-ui-scale)` applied to body (see
  * theme/reset.css).
  *
  * dnd-kit's transform is the sum of two components measured in *different*

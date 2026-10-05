@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react'
 import { createPortal } from 'react-dom'
+import { getUiScale } from '@/lib/uiScale'
 import { ChevronDown, Search, X } from 'lucide-react'
 import clsx from 'clsx'
 import { useTranslation } from 'react-i18next'
@@ -257,24 +258,25 @@ export default function SearchableSelect(props: SearchableSelectProps) {
 
   const reposition = useCallback(() => {
     if (!triggerRef.current) return
-    // `body > *` carries `zoom: var(--lumiverse-ui-scale)` (see theme/reset.css), so
+    // body carries `zoom: var(--lumiverse-ui-scale)` (see theme/reset.css), so
     // any portaled popover is rendered inside a zoomed layout context. getBoundingClientRect
     // returns post-zoom (rendered) coords, but the inline `top/left` we set are interpreted
     // in pre-zoom (layout) space — without compensating, the popover drifts off the trigger
     // and can slide partly off the viewport at scales >= 1.10.
-    const uiScale = parseFloat(
-      getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale'),
-    ) || 1
+    const uiScale = getUiScale()
     const r = triggerRef.current.getBoundingClientRect()
-    // r.width is rendered; minWidth is specified in design units (pre-zoom).
-    const layoutWidth = Math.max(r.width / uiScale, minWidth ?? 240)
-    const renderedWidth = layoutWidth * uiScale
-    let renderedLeft = align === 'right' ? r.right - renderedWidth : r.left
-    // Clamp horizontally so the popover stays on screen at any UI scale.
     const vw = window.innerWidth
     const vh = window.innerHeight
     const margin = 8
     const gap = 4
+    // r.width is rendered; minWidth is specified in design units (pre-zoom).
+    const layoutWidth = Math.min(
+      Math.max(r.width / uiScale, minWidth ?? 240),
+      Math.max(0, (vw - margin * 2) / uiScale),
+    )
+    const renderedWidth = layoutWidth * uiScale
+    let renderedLeft = align === 'right' ? r.right - renderedWidth : r.left
+    // Clamp horizontally so the popover stays on screen at any UI scale.
     if (renderedLeft + renderedWidth > vw - margin) {
       renderedLeft = vw - margin - renderedWidth
     }

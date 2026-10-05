@@ -127,62 +127,62 @@ export default function WallpaperLibraryModal({
   const actionBusy = applyingId !== null || deletingId !== null
 
   return (
-    <ModalShell isOpen={isOpen} onClose={onClose} maxWidth={1040} maxHeight="86vh" className={styles.modal}>
-      <CloseButton onClick={onClose} variant="solid" position="absolute" className={styles.closeBtnPos} />
+    <ModalShell isOpen={isOpen} onClose={onClose} maxWidth={1040} maxHeight="86vh" className={styles.modal} data-component="WallpaperLibraryModal">
+      <CloseButton onClick={onClose} variant="solid" position="absolute" className={styles.closeBtnPos} data-part="close" />
 
-      <div className={styles.header}>
-        <div>
-          <h3 className={styles.title}>{t('wallpaperLibrary.title')}</h3>
-          <p className={styles.subtitle}>{t('wallpaperLibrary.subtitle', { scope: scopeLabel })}</p>
+      <div className={styles.header} data-part="header">
+        <div className={styles.headerCopy} data-part="header-copy">
+          <h3 className={styles.title} data-part="title">{t('wallpaperLibrary.title')}</h3>
+          <p className={styles.subtitle} data-part="subtitle">{t('wallpaperLibrary.subtitle', { scope: scopeLabel })}</p>
         </div>
-        <span className={styles.count}>{t('wallpaperLibrary.count', { count: total })}</span>
+        <span className={styles.count} data-part="count">{t('wallpaperLibrary.count', { count: total })}</span>
       </div>
 
-      {error && <div className={styles.error}>{error}</div>}
+      {error && <div className={styles.error} data-part="error">{error}</div>}
 
-      <div className={styles.scrollArea}>
+      <div className={styles.scrollArea} data-part="content">
         {loading && items.length === 0 ? (
-          <div className={styles.state}>{t('wallpaperLibrary.loading')}</div>
+          <div className={styles.state} data-part="state" data-state="loading">{t('wallpaperLibrary.loading')}</div>
         ) : items.length === 0 ? (
-          <div className={styles.state}>{t('wallpaperLibrary.empty')}</div>
+          <div className={styles.state} data-part="state" data-state="empty">{t('wallpaperLibrary.empty')}</div>
         ) : (
-          <div className={styles.grid}>
+          <div className={styles.grid} data-part="grid">
             {items.map((item) => {
               const isVideo = item.mime_type.startsWith('video/')
               const isCurrent = item.id === currentImageId
               const thumbUrl = item.has_thumbnail ? imagesApi.smallUrl(item.id) : null
 
               return (
-                <article key={item.id} className={clsx(styles.card, isCurrent && styles.cardCurrent)}>
-                  <div className={styles.thumb}>
+                <article key={item.id} className={clsx(styles.card, isCurrent && styles.cardCurrent)} data-part="card" data-current={isCurrent} data-media-type={isVideo ? 'video' : 'image'}>
+                  <div className={styles.thumb} data-part="preview">
                     {thumbUrl ? (
                       <img
                         src={thumbUrl}
                         alt={item.original_filename || t('wallpaperLibrary.thumbnailAlt')}
-                        className={styles.thumbImage}
+                        className={styles.thumbImage} data-part="preview-image"
                       />
                     ) : (
-                      <div className={styles.thumbPlaceholder}>
+                      <div className={styles.thumbPlaceholder} data-part="preview-placeholder">
                         {isVideo ? <Film size={20} /> : <ImageIcon size={20} />}
-                        <span>{t('wallpaperLibrary.noPreview')}</span>
+                        <span className={styles.placeholderLabel} data-part="placeholder-label">{t('wallpaperLibrary.noPreview')}</span>
                       </div>
                     )}
-                    {isVideo && <span className={styles.badge}>{t('wallpaperPanel.video')}</span>}
+                    {isVideo && <span className={styles.badge} data-part="video-badge">{t('wallpaperPanel.video')}</span>}
                     {isCurrent && (
-                      <span className={styles.currentBadge}>
+                      <span className={styles.currentBadge} data-part="current-badge">
                         <Check size={12} />
                         {t('wallpaperLibrary.current')}
                       </span>
                     )}
                   </div>
 
-                  <div className={styles.meta}>
-                    <div className={styles.filename} title={item.original_filename}>
+                  <div className={styles.meta} data-part="metadata">
+                    <div className={styles.filename} data-part="filename" title={item.original_filename}>
                       {item.original_filename || t('wallpaperLibrary.untitled')}
                     </div>
-                    <div className={styles.metaRow}>
-                      <span>{t('wallpaperLibrary.uploaded')}</span>
-                      <strong>{new Date(item.created_at * 1000).toLocaleString(i18n.language, {
+                    <div className={styles.metaRow} data-part="metadata-row" data-field="uploaded">
+                      <span className={styles.metaLabel} data-part="metadata-label">{t('wallpaperLibrary.uploaded')}</span>
+                      <strong className={styles.metaValue} data-part="metadata-value">{new Date(item.created_at * 1000).toLocaleString(i18n.language, {
                         month: 'short',
                         day: 'numeric',
                         year: 'numeric',
@@ -190,20 +190,20 @@ export default function WallpaperLibraryModal({
                         minute: '2-digit',
                       })}</strong>
                     </div>
-                    <div className={styles.metaRow}>
-                      <span>{t('wallpaperLibrary.size')}</span>
-                      <strong>{formatBytes(item.byte_size, unknownValue)}</strong>
+                    <div className={styles.metaRow} data-part="metadata-row" data-field="size">
+                      <span className={styles.metaLabel} data-part="metadata-label">{t('wallpaperLibrary.size')}</span>
+                      <strong className={styles.metaValue} data-part="metadata-value">{formatBytes(item.byte_size, unknownValue)}</strong>
                     </div>
-                    <div className={styles.metaRow}>
-                      <span>{t('wallpaperLibrary.resolution')}</span>
-                      <strong>{formatResolution(item, unknownValue)}</strong>
+                    <div className={styles.metaRow} data-part="metadata-row" data-field="resolution">
+                      <span className={styles.metaLabel} data-part="metadata-label">{t('wallpaperLibrary.resolution')}</span>
+                      <strong className={styles.metaValue} data-part="metadata-value">{formatResolution(item, unknownValue)}</strong>
                     </div>
                   </div>
 
-                  <div className={styles.cardActions}>
+                  <div className={styles.cardActions} data-part="card-actions">
                     <button
                       type="button"
-                      className={styles.applyBtn}
+                      className={styles.applyBtn} data-part="apply"
                       disabled={actionBusy}
                       onClick={() => handleApply(item)}
                     >
@@ -211,7 +211,7 @@ export default function WallpaperLibraryModal({
                     </button>
                     <button
                       type="button"
-                      className={styles.deleteBtn}
+                      className={styles.deleteBtn} data-part="delete"
                       disabled={actionBusy}
                       onClick={() => setDeleteCandidate(item)}
                       aria-label={t('wallpaperLibrary.delete')}
@@ -228,10 +228,10 @@ export default function WallpaperLibraryModal({
       </div>
 
       {canLoadMore && (
-        <div className={styles.footer}>
+        <div className={styles.footer} data-part="footer">
           <button
             type="button"
-            className={styles.loadMoreBtn}
+            className={styles.loadMoreBtn} data-part="load-more"
             onClick={() => void loadPage(items.length, true)}
             disabled={loadingMore || loading || actionBusy}
           >

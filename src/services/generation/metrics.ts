@@ -2,6 +2,7 @@ export interface GenerationTimingSource {
   streamingStartedAt?: number;
   firstTokenAt?: number;
   firstContentTokenAt?: number;
+  responseStoppedAt?: number;
   completedAt?: number;
   wasStreaming?: boolean;
 }
@@ -45,7 +46,9 @@ export function resolveGenerationTokenCounts(
 /**
  * Calculate response timings. TTFT retains its historical meaning (the first
  * provider token, including reasoning), while TPS starts at the first
- * response-content token and uses the resolved provider-or-local token count.
+ * response-content token and ends at the provider's terminal stop, before
+ * message persistence or deferred token counting. It uses the resolved
+ * provider-or-local token count.
  */
 export function calculateGenerationTimingMetrics(
   source: GenerationTimingSource,
@@ -63,13 +66,13 @@ export function calculateGenerationTimingMetrics(
   let tps: number | undefined;
 
   if (wasStreaming && streamStart) {
-    if (source.firstTokenAt) {
+    if (source.firstTokenAt != null) {
       ttft = Math.max(0, source.firstTokenAt - streamStart);
     }
 
-    if (source.firstContentTokenAt && responseTokenCount && responseTokenCount > 1) {
+    if (source.firstContentTokenAt != null && source.responseStoppedAt != null && responseTokenCount && responseTokenCount > 1) {
       const responseDurationSec =
-        (responseEndedAt - source.firstContentTokenAt) / 1000;
+        (source.responseStoppedAt - source.firstContentTokenAt) / 1000;
       if (responseDurationSec > 0) {
         tps = Math.round((responseTokenCount / responseDurationSec) * 10) / 10;
       }

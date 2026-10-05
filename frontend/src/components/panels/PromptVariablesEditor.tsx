@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
-  DndContext,
   closestCenter,
   KeyboardSensor,
   MouseSensor,
@@ -29,7 +28,7 @@ import {
 import clsx from 'clsx'
 import NumberStepper from '@/components/shared/NumberStepper'
 import { Toggle } from '@/components/shared/Toggle'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { generateUUID } from '@/lib/uuid'
 import type {
   PromptBlockPlacement,

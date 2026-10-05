@@ -294,6 +294,8 @@ export interface UISlice {
   error: string | null
   drawerOpen: boolean
   drawerTab: string | null
+  councilView: import('@/lib/council-navigation').CouncilView
+  setCouncilView: (view: import('@/lib/council-navigation').CouncilView) => void
   settingsModalOpen: boolean
   settingsActiveView: string
   settingsScrollTarget: { extensionId?: string; anchorId?: string; nonce: number } | null
@@ -772,10 +774,13 @@ export interface SettingsSlice {
   saveDraftInput: boolean
   defaultImpersonationMode: ImpersonationPreference
   chatWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
+  centerChatWithSidebar: boolean
   chatContentMaxWidth: number
   modalWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
   modalMaxWidth: number
   portraitPanelSide: 'left' | 'right' | 'none'
+  /** Explicit opt-in for temporary desktop viewport magnification. */
+  desktopPinchZoomEnabled: boolean
   theme: ThemeConfig | null
   characterThemeOverlay: CharacterThemeOverlay | null
   drawerSettings: DrawerSettings
@@ -880,16 +885,54 @@ export type { ThemeConfig } from './theme'
 import type { CharacterThemeOverlay } from './theme'
 export type { CharacterThemeOverlay } from './theme'
 
+export type DrawerCustomIconTag = 'path' | 'circle' | 'rect' | 'line' | 'polyline' | 'polygon' | 'ellipse'
+
+export interface DrawerCustomIconElement {
+  tag: DrawerCustomIconTag
+  attrs: Record<string, string>
+}
+
+/** Sanitized, resource-free SVG data. Never stores raw SVG markup. */
+export interface DrawerCustomIconData {
+  viewBox: string
+  attrs: Record<string, string>
+  elements: DrawerCustomIconElement[]
+}
+
+export type DrawerLayoutItem =
+  | {
+      type: 'tab'
+      tabId: string
+    }
+  | {
+      type: 'divider'
+      id: string
+      label?: string
+    }
+  | {
+      type: 'folder'
+      id: string
+      name: string
+      icon?: string
+      customIcon?: DrawerCustomIconData
+      view?: 'list' | 'grid'
+      children: string[]
+    }
+
 export interface DrawerSettings {
   side: 'left' | 'right'
   verticalPosition: number
   tabSize: 'large' | 'compact'
   panelWidthMode: 'default' | 'custom'
   customPanelWidth: number
+  /** Drag-resized width in layout pixels. Legacy vw widths are used until the first resize. */
+  panelWidthPx?: number
   showTabLabels: boolean
   hiddenTabIds: string[]
-  /** User-defined order of tab IDs. Unknown IDs are ignored; new tabs append in registry order. */
+  /** Legacy flat tab order retained for downgrade compatibility and migration. */
   tabOrder: string[]
+  /** Ordered sidebar layout. Tabs may live at root or inside one-level folders. */
+  layout: DrawerLayoutItem[]
 }
 
 export interface SpindleSettings {
@@ -1280,7 +1323,7 @@ export interface SpindleSlice {
   updateExtension: (id: string) => Promise<void>
   switchBranch: (id: string, branch: string) => Promise<void>
   removeExtension: (id: string) => Promise<void>
-  enableExtension: (id: string) => Promise<void>
+  enableExtension: (id: string, approvedPermissions?: string[]) => Promise<void>
   disableExtension: (id: string) => Promise<void>
   restartExtension: (id: string) => Promise<void>
   grantPermission: (id: string, permission: string) => Promise<void>
@@ -1761,7 +1804,7 @@ export interface SpeechDetectionRules {
 }
 
 export interface VoiceSettings {
-  sttProvider: 'webspeech' | 'connection'
+  sttProvider: 'webspeech' | 'connection' | 'whistle'
   sttLanguage: string
   sttContinuous: boolean
   sttInterimResults: boolean
@@ -2048,6 +2091,41 @@ export interface LeaderboardSlice {
   resetLeaderboard: () => Promise<void>
 }
 
+export interface CardAgentSlice {
+  cardAgentSessions: import('@/api/card-agent').CardAgentSession[]
+  cardAgentActiveSessionId: string | null
+  cardAgentMessages: import('@/api/card-agent').CardAgentMessage[]
+  cardAgentProposals: import('@/api/card-agent').EditProposal[]
+  cardAgentRevisions: Record<string, import('@/api/card-agent').CharacterRevision[]>
+  cardAgentBusy: boolean
+  cardAgentLoading: boolean
+  loadCardAgentSessions: () => Promise<void>
+  createCardAgentSession: (input: {
+    title?: string
+    connectionId?: string | null
+    model?: string | null
+    scopeMode?: import('@/api/card-agent').CardAgentScopeMode
+    scopeCharacterIds?: string[]
+  }) => Promise<import('@/api/card-agent').CardAgentSession>
+  selectCardAgentSession: (sessionId: string | null) => Promise<void>
+  deleteCardAgentSession: (sessionId: string) => Promise<void>
+  sendCardAgentTurn: (message: string) => Promise<void>
+  loadCardAgentProposals: (params?: { sessionId?: string; characterId?: string }) => Promise<void>
+  applyCardAgentProposal: (proposalId: number) => Promise<void>
+  rejectCardAgentProposal: (proposalId: number) => Promise<void>
+  applyCardAgentProposalBatch: (params?: { sessionId?: string; characterIds?: string[] }) => Promise<void>
+  loadCardAgentRevisions: (characterId: string) => Promise<void>
+  revertCardAgentRevision: (characterId: string, revisionId: number) => Promise<void>
+}
+
+export interface CardCreatorSlice {
+  /** Chat id → the proposals filed in that chat, keyed for inline review. */
+  cardCreatorProposals: Record<string, import('@/api/card-creator').CardCreatorProposal[]>
+  loadCardCreatorProposals: (chatId: string) => Promise<void>
+  applyCardCreatorProposal: (chatId: string, proposalId: number) => Promise<void>
+  rejectCardCreatorProposal: (chatId: string, proposalId: number) => Promise<void>
+}
+
 export type AppStore = ChatSlice &
   CharactersSlice &
   PersonasSlice &
@@ -2082,4 +2160,6 @@ export type AppStore = ChatSlice &
   DatabankSlice &
   ConnectionSlice &
   ContainersSlice &
-  LeaderboardSlice
+  LeaderboardSlice &
+  CardAgentSlice &
+  CardCreatorSlice

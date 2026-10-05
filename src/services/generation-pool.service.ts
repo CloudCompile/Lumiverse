@@ -70,6 +70,7 @@ export interface PooledTokensEntry {
   firstTokenAt?: number;
   /** Timestamp (ms) when the first content token arrived (excluding reasoning) */
   firstContentTokenAt?: number;
+  responseStoppedAt?: number;
   /** Whether this generation used streaming mode */
   wasStreaming?: boolean;
 }
@@ -176,8 +177,6 @@ export function appendPoolContent(generationId: string, text: string): PoolAppen
   if (entry.reasoningStartedAt && !entry.reasoningDurationMs) {
     entry.reasoningDurationMs = now - entry.reasoningStartedAt;
   }
-  if (!entry.firstTokenAt) entry.firstTokenAt = now;
-  if (!entry.firstContentTokenAt) entry.firstContentTokenAt = now;
   if (entry.status === "assembling" || entry.status === "council" || entry.status === "waiting" || entry.status === "reasoning") {
     setPoolStatus(generationId, "streaming");
     eventBus.emit(EventType.GENERATION_PHASE_CHANGED, { generationId, chatId: entry.chatId, phase: "streaming" }, entry.userId);
@@ -198,7 +197,6 @@ export function appendPoolReasoning(generationId: string, text: string): PoolApp
   if (!entry) return { seq: 0, offset: 0 };
   const now = Date.now();
   if (!entry.reasoningStartedAt) entry.reasoningStartedAt = now;
-  if (!entry.firstTokenAt) entry.firstTokenAt = now;
   if (entry.status === "assembling" || entry.status === "council" || entry.status === "waiting") {
     setPoolStatus(generationId, "reasoning");
     eventBus.emit(EventType.GENERATION_PHASE_CHANGED, { generationId, chatId: entry.chatId, phase: "reasoning" }, entry.userId);

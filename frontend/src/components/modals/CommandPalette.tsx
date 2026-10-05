@@ -40,6 +40,7 @@ function CommandPaletteNative() {
   const hiddenPlacements = useStore((s) => s.hiddenPlacements)
   const extensionCommands = useStore((s) => s.extensionCommands)
   const extensions = useStore((s) => s.extensions)
+  const settingsTabs = useStore((s) => s.settingsTabs)
   const activeChatId = useStore((s) => s.activeChatId)
   const messageCount = useStore((s) => s.messages.length)
   const streaming = useStore((s) => s.isStreaming)
@@ -88,6 +89,7 @@ function CommandPaletteNative() {
   )
 
   const { grouped, orderedFlat, flatIndexMap } = useMemo(() => {
+    void settingsTabs
     const enabledDrawerTabs = filterEnabledFrontendContributions(drawerTabs, extensions)
     const enabledExtensionCommands = filterEnabledFrontendContributions(extensionCommands, extensions)
     const allCommands = [...buildCommands(userRole), ...extensionTabsToCommands(enabledDrawerTabs), ...extensionCommandsToCommands(enabledExtensionCommands)]
@@ -145,7 +147,7 @@ function CommandPaletteNative() {
     }
 
     return { grouped: groups, orderedFlat: flat, flatIndexMap: idxMap }
-  }, [query, userRole, drawerTabs, extensionCommands, extensions, activeScopes, location.pathname, hiddenTabIds, hiddenPlacementIds])
+  }, [query, userRole, drawerTabs, extensionCommands, extensions, settingsTabs, activeScopes, location.pathname, hiddenTabIds, hiddenPlacementIds])
 
   // Clamp active index when filtered list shrinks
   useEffect(() => {

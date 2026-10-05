@@ -1383,7 +1383,6 @@
     "cancel": "Annuler",
     "dropToImport": "Déposez les fichiers de caractères pour importer",
     "dropFileTypes": ".json, .png, .charx, .jpg",
-    "desktopDropReadFailed": "Lumiverse Desktop n’a pas pu lire le fichier déposé.",
     "tagFilter": {
       "label": "Balises",
       "labelWithCount": "Balises ({{count}})",

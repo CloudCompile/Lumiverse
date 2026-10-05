@@ -1,6 +1,7 @@
 import type {
   SpindleDockPanelOptions as PublishedSpindleDockPanelOptions,
   SpindleFloatWidgetOptions as PublishedSpindleFloatWidgetOptions,
+  SpindleSTTAPI,
 } from 'lumiverse-spindle-types'
 import type {
   FrontendChatsAPI,
@@ -147,6 +148,7 @@ export interface FrontendContextAdditions {
   worldBooks: FrontendWorldBooksAPI
   messages: FrontendMessagesAPI
   tokens: FrontendTokensAPI
+  stt: SpindleSTTAPI
   onTeardown(handler: () => void): () => void
 }
 
@@ -155,13 +157,14 @@ export interface FrontendContextFactoryDependencies<Base extends object> {
   state: StateSelectors
   domain: FrontendDomainAPI
   geometry?: SpindleGeometryAPI
+  stt?: SpindleSTTAPI
   onTeardown(handler: () => void): () => void
 }
 
 /**
  * Composes the domain/state additions onto the already-built host context.
- * Keeping the composition generic lets the package type update land separately
- * from the production loader and keeps this bridge directly unit-testable.
+ * Keeping the composition generic preserves host members and makes this bridge
+ * directly unit-testable.
  */
 export function createFrontendExtensionContext<Base extends {
   chats: object
@@ -188,6 +191,7 @@ export function createFrontendExtensionContext<Base extends {
       ...domain.messages,
     },
     tokens: domain.tokens,
+    stt: dependencies.stt,
     onTeardown: dependencies.onTeardown,
   } as Base & FrontendContextAdditions
 }

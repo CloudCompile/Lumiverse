@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
-import { presetsRoutes } from "./presets.routes";
+import { MAX_PRESET_BODY_BYTES, presetsRoutes } from "./presets.routes";
 
 function initPresetsTestDb(): void {
   closeDatabase();
@@ -56,6 +56,68 @@ app.route("/", presetsRoutes);
 
 beforeEach(initPresetsTestDb);
 afterEach(() => closeDatabase());
+
+describe("preset body size limit", () => {
+  test("allows preset creation requests through 50 MB", async () => {
+    const response = await app.request("http://localhost/", {
+      method: "POST",
+      headers: {
+        "x-test-user": "u1",
+        "content-type": "application/json",
+        "content-length": String(MAX_PRESET_BODY_BYTES),
+      },
+      body: JSON.stringify({ name: "Large preset", provider: "loom" }),
+    });
+
+    expect(response.status).toBe(201);
+  });
+
+  test("rejects preset creation requests over 50 MB", async () => {
+    const response = await app.request("http://localhost/", {
+      method: "POST",
+      headers: {
+        "x-test-user": "u1",
+        "content-type": "application/json",
+        "content-length": String(MAX_PRESET_BODY_BYTES + 1),
+      },
+      body: JSON.stringify({ name: "Too large", provider: "loom" }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "Request body too large" });
+  });
+
+  test("allows preset update requests through 50 MB", async () => {
+    insertPreset("preset-1", "u1", 0);
+    const response = await app.request("http://localhost/preset-1", {
+      method: "PUT",
+      headers: {
+        "x-test-user": "u1",
+        "content-type": "application/json",
+        "content-length": String(MAX_PRESET_BODY_BYTES),
+      },
+      body: JSON.stringify({ name: "Updated preset", expected_cache_revision: 0 }),
+    });
+
+    expect(response.status).toBe(200);
+  });
+
+  test("rejects preset update requests over 50 MB", async () => {
+    insertPreset("preset-1", "u1", 0);
+    const response = await app.request("http://localhost/preset-1", {
+      method: "PUT",
+      headers: {
+        "x-test-user": "u1",
+        "content-type": "application/json",
+        "content-length": String(MAX_PRESET_BODY_BYTES + 1),
+      },
+      body: JSON.stringify({ name: "Too large", expected_cache_revision: 0 }),
+    });
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({ error: "Request body too large" });
+  });
+});
 
 describe("preset cache validators", () => {
   test("scopes empty registry ETags to the authenticated user and varies on cookies", async () => {

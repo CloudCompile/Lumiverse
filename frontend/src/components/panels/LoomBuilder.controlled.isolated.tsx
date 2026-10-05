@@ -394,9 +394,7 @@ function assertReopenedCommittedRole(
 function saveButton(container: HTMLDivElement): HTMLButtonElement {
   const backButton = container.querySelector<HTMLButtonElement>('button[title="blockEditor.backToList"]')
   expect(backButton).not.toBeNull()
-  const toolbar = backButton?.parentElement
-  expect(toolbar).not.toBeNull()
-  const matches = [...toolbar!.querySelectorAll<HTMLButtonElement>('button')].filter((button) => {
+  const matches = [...container.querySelectorAll<HTMLButtonElement>('button')].filter((button) => {
     const accessibleName = button.getAttribute('aria-label')
       ?? button.getAttribute('title')
       ?? button.textContent?.replace(/\s+/g, ' ').trim()

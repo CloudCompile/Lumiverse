@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import * as svc from "../services/presets.service";
 import * as stashSvc from "../services/prompt-stash.service";
 import * as presetExportSvc from "../services/preset-export.service";
@@ -9,6 +10,12 @@ import { REVALIDATE_PRIVATE, ifNoneMatchSatisfies } from "../utils/http-cache";
 
 const app = new Hono();
 const MAX_BULK_PRESET_IDS = 200;
+export const MAX_PRESET_BODY_BYTES = 50 * 1024 * 1024;
+
+const presetBodyLimit = bodyLimit({
+  maxSize: MAX_PRESET_BODY_BYTES,
+  onError: (c) => c.json({ error: "Request body too large" }, 413),
+});
 
 function parseBulkPresetIds(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_PRESET_IDS) return null;
@@ -83,7 +90,7 @@ app.get("/bulk-export/:downloadId", (c) => {
   });
 });
 
-app.post("/", async (c) => {
+app.post("/", presetBodyLimit, async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (!body.name || !body.provider) return c.json({ error: "name and provider are required" }, 400);
@@ -143,7 +150,7 @@ app.get("/:id", (c) => {
   return c.json(preset);
 });
 
-app.put("/:id", async (c) => {
+app.put("/:id", presetBodyLimit, async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
   if (

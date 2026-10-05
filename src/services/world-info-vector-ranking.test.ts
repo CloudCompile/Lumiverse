@@ -11,6 +11,7 @@ let entryCounter = 0;
 function makeEntry(overrides: Partial<WorldBookEntry>): WorldBookEntry {
   entryCounter += 1;
   return {
+    folder: "", tags: [],
     id: overrides.id ?? `entry-${entryCounter}`,
     world_book_id: "book-a",
     uid: overrides.uid ?? `uid-${entryCounter}`,

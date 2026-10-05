@@ -11,6 +11,7 @@ import {
   writeOwnerCredentials,
 } from "../crypto/credentials";
 import { SYSTEM_SECRET_PRINCIPAL_EMAIL } from "../services/secrets.service";
+import { ensureCardCreator, getCardCreator } from "../services/characters.service";
 
 const CONTENT_TABLES = [
   "characters",
@@ -270,6 +271,26 @@ export async function seedOwner(): Promise<void> {
   } else {
     console.error("[Auth] No users exist after seeding — this should never happen");
   }
+}
+
+/**
+ * Give every existing user a Card Creator. Accounts created after this feature
+ * ships get theirs from the signup hook instead.
+ *
+ * Skipped for the reserved system principal, which is not a login account.
+ */
+export function backfillCardCreators(): { usersScanned: number; created: number } {
+  const users = getDb()
+    .query('SELECT id FROM "user" WHERE email IS NULL OR email != ? ORDER BY createdAt ASC')
+    .all(SYSTEM_SECRET_PRINCIPAL_EMAIL) as Array<{ id: string }>;
+
+  let created = 0;
+  for (const user of users) {
+    if (getCardCreator(user.id)) continue;
+    ensureCardCreator(user.id);
+    created += 1;
+  }
+  return { usersScanned: users.length, created };
 }
 
 export function backfillUserIds(): void {

@@ -8,6 +8,8 @@ import {
   type ServerLaunchTransport,
 } from "./server-process-launcher.js";
 import type { ServerOutputStream } from "./server-process-output.js";
+import { configuredBunExecutable, ensureBunRuntime } from "../../src/runtime/bun-runtime.js";
+import { bunCmdForEnv } from "../../src/utils/bun-cmd.js";
 
 export type ServerState = "starting" | "running" | "stopping" | "stopped" | "crashed";
 export interface ServerLogSession {
@@ -72,6 +74,21 @@ function handleServerMessage(message: any): void {
  */
 export function serverLaunchTransport(platform: string = process.platform): ServerLaunchTransport {
   return platform === "win32" ? "socket" : "ipc";
+}
+
+/**
+ * Build the backend launch command without dropping the compatibility wrapper
+ * that started the runner. Desktop/ordinary hosts still use the validated Bun
+ * executable directly; native Termux reuses start.sh's direct/grun/proot chain.
+ */
+export function backendBunCommand(
+  args: string[],
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  if (env.LUMIVERSE_BUN_METHOD && env.LUMIVERSE_BUN_PATH) {
+    return bunCmdForEnv(env, ...args);
+  }
+  return [configuredBunExecutable(env), ...args];
 }
 
 /**
@@ -145,16 +162,19 @@ function frontendDir(): string | undefined {
   return existsSync(join(bundled, "index.html")) ? bundled : undefined;
 }
 
-export function startServer(isDev: boolean): void {
+export async function startServer(isDev: boolean): Promise<void> {
   if (instance?.proc) return;
 
+  // Re-read package.json on every start. An operator update or external pull
+  // may have raised the runtime floor since this long-lived runner launched.
+  await ensureBunRuntime(PROJECT_ROOT);
+
   const smol = smolEnabled() ? ["--smol"] : [];
-  // process.execPath, not bare "bun": under a GUI supervisor (desktop
-  // tray) the environment's PATH may not contain bun at all.
-  const bunBin = process.execPath;
-  const args = isDev
-    ? [bunBin, ...smol, "--watch", ENTRY]
-    : [bunBin, ...smol, ENTRY];
+  // Keep the validated executable for desktop/ordinary hosts, but preserve
+  // start.sh's compatibility wrapper on native Termux.
+  const args = backendBunCommand(
+    isDev ? [...smol, "--watch", ENTRY] : [...smol, ENTRY],
+  );
 
   const restartCount = instance ? instance.restartCount : 0;
   const frontend = isDev ? "" : frontendDir() ?? "";
@@ -240,12 +260,9 @@ export function startServer(isDev: boolean): void {
     instance = { ...instance, proc: null, control: null, finalizeOutput: null };
   });
 
-  // Fallback: assume running after 3s if "ready" IPC not received
-  setTimeout(() => {
-    if (instance?.state === "starting") {
-      setState("running");
-    }
-  }, 3000);
+  // Readiness comes from the backend after Bun.serve has bound its socket.
+  // Importing modules, tokenizers, and extensions can take well over three
+  // seconds; elapsed time alone must not open the desktop browser early.
 }
 
 export async function stopServer(): Promise<void> {
@@ -284,7 +301,7 @@ export async function restartServer(isDev: boolean): Promise<void> {
   const count = instance ? instance.restartCount + 1 : 1;
   console.log(`[${ts()}] [runner] Restarting server (restart #${count})...`);
   await stopServer();
-  startServer(isDev);
+  await startServer(isDev);
   if (instance) instance.restartCount = count;
 }
 

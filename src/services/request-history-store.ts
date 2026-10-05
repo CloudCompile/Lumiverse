@@ -53,6 +53,7 @@ export class RequestHistoryStore {
         name: context.origin.name,
         operation: context.origin.operation,
         extensionId: context.origin.extensionId,
+        ...(context.origin.sensitiveMedia ? { sensitiveMedia: true } : {}),
       },
       chatId: context.chatId,
       generationId: context.generationId,
@@ -65,7 +66,10 @@ export class RequestHistoryStore {
     let bodyJson: string | null = null;
     let bodyUnavailable: RequestHistorySummary["bodyUnavailable"];
     let redacted = false;
-    if (bodyBytes > REQUEST_HISTORY_MAX_BODY_BYTES) {
+    if (context.origin.sensitiveMedia) {
+      bodyUnavailable = "unavailable";
+      redacted = true;
+    } else if (bodyBytes > REQUEST_HISTORY_MAX_BODY_BYTES) {
       bodyUnavailable = "too_large";
     } else {
       try {
@@ -119,10 +123,13 @@ export class RequestHistoryStore {
     let responseBody: string | null = null;
     let responseError: string | null = null;
     try {
-      if (snapshot.error) responseError = (redactRequestValue(snapshot.error, credentials) as string).slice(0, 2000);
+      if (snapshot.error && !entry.origin.sensitiveMedia) responseError = (redactRequestValue(snapshot.error, credentials) as string).slice(0, 2000);
     } catch { /* Never display an unsanitized transport error. */ }
     try {
-      if (snapshot.body !== null && !snapshot.bodyUnavailable) {
+      if (entry.origin.sensitiveMedia) {
+        response.bodyUnavailable = "unavailable";
+        response.redacted = true;
+      } else if (snapshot.body !== null && !snapshot.bodyUnavailable) {
         if (Buffer.byteLength(snapshot.body) > REQUEST_HISTORY_MAX_BODY_BYTES) {
           response.bodyUnavailable = "too_large";
         } else {

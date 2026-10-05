@@ -6,9 +6,13 @@ const QWEN_CUSTOM_VOICE_UPLOAD_RE =
   /^\/api\/v1\/tts-connections\/[^/]+\/qwen\/custom-voices$/;
 const CHARACTER_IMPORT_JOB_FILE_RE =
   /^\/api\/v1\/characters\/import-jobs\/[^/]+\/files\/\d+$/;
+const PRESET_UPDATE_PATH_RE = /^\/api\/v1\/presets\/[^/]+$/;
 
-export function isLargeUploadBodyLimitExemptPath(path: string): boolean {
+export function isLargeUploadBodyLimitExemptPath(path: string, method?: string): boolean {
+  const normalizedMethod = method?.toUpperCase();
   return (
+    (normalizedMethod === "POST" && path === "/api/v1/presets") ||
+    (normalizedMethod === "PUT" && PRESET_UPDATE_PATH_RE.test(path)) ||
     path.startsWith("/api/v1/migrate/") ||
     path === "/api/v1/characters/import-bulk" ||
     path === "/api/v1/characters/import" ||

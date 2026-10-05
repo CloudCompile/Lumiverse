@@ -414,7 +414,7 @@ describe("GoogleProvider streaming", () => {
           thinkingConfig: { thinkingLevel: "high", includeThoughts: true },
         },
       });
-      expect(chunks).toEqual([
+      expect(chunks).toMatchObject([
         {
           token: "",
           usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
@@ -433,6 +433,7 @@ describe("GoogleProvider streaming", () => {
           usage: { prompt_tokens: 9, completion_tokens: 5, total_tokens: 168 },
         },
       ]);
+      expect(typeof chunks.at(-1)?.stopReceivedAt).toBe("number");
     } finally {
       globalThis.fetch = originalFetch;
     }

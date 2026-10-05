@@ -55,5 +55,55 @@ fn stamp_build_revision() {
 
 fn main() {
     stamp_build_revision();
-    tauri_build::build()
+    println!("cargo:rerun-if-changed=src/capture/macos.m");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let mut capture = cc::Build::new();
+        capture
+            .file("src/capture/macos.m")
+            .flag("-fobjc-arc")
+            .flag("-fblocks")
+            .compile("lumiverse_capture");
+        let runtime = capture
+            .get_compiler()
+            .to_command()
+            .arg("--print-file-name=libclang_rt.osx.a")
+            .output()
+            .expect("failed to locate the Clang macOS runtime");
+        assert!(runtime.status.success(), "Clang macOS runtime lookup failed");
+        let runtime_path = PathBuf::from(
+            std::str::from_utf8(&runtime.stdout)
+                .expect("Clang macOS runtime path is not UTF-8")
+                .trim(),
+        );
+        assert!(
+            runtime_path.is_file(),
+            "Clang macOS runtime archive not found: {}",
+            runtime_path.display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            runtime_path.parent().unwrap().display()
+        );
+        println!("cargo:rustc-link-lib=static=clang_rt.osx");
+        for framework in [
+            "Cocoa",
+            "CoreGraphics",
+            "AVFoundation",
+            "AVKit",
+            "VideoToolbox",
+            "CoreMedia",
+            "CoreVideo",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
+    }
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "desktop_capture_connect",
+            "desktop_capture_disconnect",
+            "desktop_capture_status",
+        ]),
+    ))
+    .expect("failed to build desktop permissions")
 }

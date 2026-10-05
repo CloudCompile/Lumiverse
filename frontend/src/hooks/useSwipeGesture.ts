@@ -57,7 +57,10 @@ export default function useSwipeGesture(
 
     const onTouchStart = (e: TouchEvent) => {
       if (!optionsRef.current.enabled) return
-      if (e.touches.length !== 1) return
+      if (e.touches.length !== 1 || Math.abs((window.visualViewport?.scale ?? 1) - 1) > 0.01) {
+        locked = 'vertical'
+        return
+      }
 
       // If a native text selection inside this element is already active,
       // the touch is most likely the user extending that selection — don't
@@ -77,7 +80,10 @@ export default function useSwipeGesture(
 
     const onTouchMove = (e: TouchEvent) => {
       if (!optionsRef.current.enabled) return
-      if (e.touches.length !== 1) return
+      if (e.touches.length !== 1 || Math.abs((window.visualViewport?.scale ?? 1) - 1) > 0.01) {
+        locked = 'vertical'
+        return
+      }
 
       // If a selection became active during this touch (long-press finished
       // mid-drag and the OS started selection-extension), abandon the swipe
@@ -106,8 +112,12 @@ export default function useSwipeGesture(
       currentX = touch.clientX
     }
 
-    const onTouchEnd = () => {
+    const onTouchEnd = (e: TouchEvent) => {
       if (!optionsRef.current.enabled) return
+      if (e.touches.length !== 0) {
+        locked = 'vertical'
+        return
+      }
       if (locked !== 'horizontal') {
         locked = null
         return
@@ -132,12 +142,15 @@ export default function useSwipeGesture(
 
     el.addEventListener('touchstart', onTouchStart, { passive: true })
     el.addEventListener('touchmove', onTouchMove, { passive: false })
+    const onTouchCancel = () => { locked = 'vertical' }
     el.addEventListener('touchend', onTouchEnd, { passive: true })
+    el.addEventListener('touchcancel', onTouchCancel, { passive: true })
 
     return () => {
       el.removeEventListener('touchstart', onTouchStart)
       el.removeEventListener('touchmove', onTouchMove)
       el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchCancel)
     }
   }, [ref])
 }

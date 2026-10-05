@@ -15,6 +15,10 @@
   --app-viewport-height: 100dvh;
   --app-viewport-offset-top: 0px;
   --app-viewport-offset-left: 0px;
+  --app-visual-viewport-width: 100vw;
+  --app-visual-viewport-height: 100dvh;
+  --app-visual-viewport-offset-top: 0px;
+  --app-visual-viewport-offset-left: 0px;
   --app-keyboard-inset-bottom: 0px;
   --app-desktop-titlebar-height: 36px;
   /* Keep native-style window chrome above application and extension-owned
@@ -23,8 +27,10 @@
   --app-window-chrome-z-index: 12000;
   --app-window-controls-overlay-top: 0px;
   --app-interactive-safe-top: env(safe-area-inset-top, 0px);
-  --app-shell-height: var(--app-viewport-height);
-  /* Scale-compensated full-viewport sizes. Inside the `body > *` zoom
+  /* Keep the shell stable when the visual viewport shrinks for a keyboard.
+     This is an unscaled length; only body converts it to layout pixels. */
+  --app-shell-height: 100dvh;
+  /* Scale-compensated full-viewport sizes. Inside the body zoom
      layer (see below), a raw `100vw`/`100vh` refers to the unzoomed
      physical viewport, so a `position: fixed; width: 100vw` overlay
      overflows at `zoom: 1.5`. These vars pre-divide by the current UI
@@ -82,6 +88,14 @@ html[data-tauri-desktop] {
   overflow: hidden;
 }
 
+html[data-tauri-desktop][data-desktop-windows-corners="rounded"] {
+  --desktop-window-corner-radius: 8px;
+}
+
+html[data-tauri-desktop][data-desktop-windows-corners="square"] {
+  --desktop-window-corner-radius: 0px;
+}
+
 html {
   height: 100%;
   /* `overflow: clip` (vs `hidden`) is strictly non-scrollable — it cannot be
@@ -114,9 +128,6 @@ body {
   color: var(--lumiverse-text);
   background: var(--lumiverse-bg-deep);
   line-height: 1.5;
-  /* Prevent double-tap zoom and pinch zoom; still allows pan/scroll.
-     pan-x pan-y (instead of manipulation) explicitly excludes pinch-zoom
-     on real touchscreens, complementing the JS gesture/wheel handlers. */
   touch-action: pan-x pan-y;
 }
 
@@ -261,38 +272,42 @@ input[type="range"]::-moz-range-thumb {
   cursor: pointer;
 }
 
-/* Apply UI zoom to every direct child of body. This covers #root AND any
-   React portals (modals, toasts, context menus) that createPortal to
-   document.body, so the entire UI scales uniformly. */
-body > * {
+/* One scaling boundary for the application, body portals, and extension
+   portal wrappers. Explicit lengths compensate once for zoom; percentage
+   widths on individually zoomed children already account for their parent's
+   zoom, so dividing those percentages again shrinks #root twice. */
+body {
   zoom: var(--lumiverse-ui-scale, 1);
+  width: var(--app-scaled-viewport-width);
+  height: calc(var(--app-shell-height) / var(--lumiverse-ui-scale, 1));
 }
 
 /* WebKitGTK's CSS zoom either is unavailable (on older distro runtimes) or
-   lays out fixed descendants incorrectly below 100%. In both cases the app
-   shell grows to its scale-compensated height without actually shrinking,
-   which puts bottom-pinned controls such as the chat composer off-screen.
-   Tauri's Linux WebView gets the equivalent individual transform instead.
-   Use the `scale` longhand so component-owned `transform` animations on body
-   portals continue to compose normally. */
-html[data-tauri-desktop][data-platform='linux'] body > * {
+   lays out fixed descendants incorrectly below 100%. Transform the same
+   viewport-sized body, so ALL fixed descendants share its containing block.
+   Transforming each portal separately moves right/bottom anchored surfaces
+   off-screen and gives nested portal wrappers a different origin. */
+html[data-tauri-desktop][data-platform='linux'] body {
   zoom: 1;
   scale: var(--lumiverse-ui-scale, 1);
   transform-origin: top left;
 }
 
+@supports not (zoom: 1) {
+  body {
+    scale: var(--lumiverse-ui-scale, 1);
+    transform-origin: top left;
+  }
+}
+
 #root {
-  width: calc(100% / var(--lumiverse-ui-scale, 1));
-  height: calc(100% / var(--lumiverse-ui-scale, 1));
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
 }
 
 html[data-pwa] {
-  width: var(--app-viewport-width);
-  height: var(--app-shell-height);
-}
-html[data-pwa] body {
   width: var(--app-viewport-width);
   height: var(--app-shell-height);
 }

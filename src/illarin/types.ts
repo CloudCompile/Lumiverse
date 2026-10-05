@@ -1,9 +1,7 @@
 /**
- * Illarin linked-instance protocol wire types — protocol version 1.
+ * Illarin connected-app protocol wire types — protocol version 1.
  *
- * Source of truth: the Illarin integration guide; its /openapi.yaml once
- * published ("if this guide and that contract differ, follow OpenAPI and
- * report the mismatch"). Illarin rejects unknown JSON fields, so request
+ * Source of truth: the Illarin app-integration guide. Illarin rejects unknown JSON fields, so request
  * builders whitelist exactly the documented fields — never spread user
  * input into a request body.
  *
@@ -15,19 +13,17 @@
 export const ILLARIN_PROTOCOL_VERSION = 1;
 
 /**
- * Every scope Illarin can grant. Scopes are frozen at link time: a
- * declaration update cannot add or change them, so the link-time choice is
- * permanent until the owner relinks. Keep the vocabulary here complete, but
- * request only scopes backed by features the installation actually uses.
+ * Ask only for permissions this installation uses. The owner can change
+ * grants at any time; a capabilities update cannot change permissions.
  */
-export const ILLARIN_SCOPES = ["asset:receive", "library:sync"] as const;
+export const ILLARIN_SCOPES = ["work:receive", "library:sync"] as const;
 
 export type IllarinScope = (typeof ILLARIN_SCOPES)[number];
 
 /**
- * Export target module IDs documented in the protocol guide as of v1.
+ * Format module IDs supported by this app.
  * The list can grow on the server; unknown IDs grant nothing and cannot
- * select a writer Illarin does not have, so `acceptedTargets` is typed as
+ * select a writer Illarin does not have, so `acceptedFormats` is typed as
  * plain strings with this list as the known vocabulary.
  */
 export const KNOWN_EXPORT_TARGETS = [
@@ -59,16 +55,16 @@ export const DECLARATION_LIMITS = {
 
 /** The declaration every authorization path starts with. */
 export interface IllarinDeclaration {
-  applicationName: string;
-  instanceName: string;
-  applicationVersion?: string;
+  appName: string;
+  name: string;
+  appVersion?: string;
   protocolVersion: number;
   capabilities: string[];
-  acceptedTargets: string[];
-  scopes: IllarinScope[];
+  acceptedFormats: string[];
+  permissions: IllarinScope[];
 }
 
-/** `POST /api/v1/link/authorizations` body — same-device browser flow. */
+/** `POST /api/v1/connect/authorizations` body — same-device browser flow. */
 export interface BrowserAuthorizationRequest extends IllarinDeclaration {
   /** Literal loopback callback: `http://127.0.0.1:<port>/<path>` or `http://[::1]:<port>/<path>`. */
   redirectUri: string;
@@ -79,30 +75,31 @@ export interface BrowserAuthorizationRequest extends IllarinDeclaration {
   codeChallengeMethod: "S256";
 }
 
-/** `POST /api/v1/link/requests` body — headless device fallback. Declaration only. */
+/** `POST /api/v1/connect/requests` body — headless device fallback. Declaration only. */
 export type DeviceAuthorizationRequest = IllarinDeclaration;
 
 /**
- * `PUT /api/v1/instances/me` body. A complete replacement — but names and
- * granted scopes are immutable here; changing either requires relinking.
+ * `PUT /api/v1/connected-apps/me` body. A complete replacement; names and
+ * permissions cannot be changed here.
  */
 export interface DeclarationUpdate {
-  applicationVersion?: string;
+  appVersion?: string;
   protocolVersion: number;
   capabilities: string[];
-  acceptedTargets: string[];
+  acceptedFormats: string[];
 }
 
-/** `POST /api/v1/link/authorizations` response. */
+/** `POST /api/v1/connect/authorizations` response. */
 export interface BrowserAuthorizationResponse {
   /** Contains a one-use request secret — open in the system browser, never fetch or log. */
   authorizationUrl: string;
+  userCode: string;
   expiresAt: string;
 }
 
-export interface LinkedInstance {
+export interface ConnectedApp {
   id: string;
-  scopes: IllarinScope[];
+  permissions: IllarinScope[];
 }
 
 /** Returned by token exchange, device poll success, and refresh. */
@@ -111,10 +108,10 @@ export interface TokenPair {
   /** ISO timestamp; access tokens last 15 minutes. */
   accessTokenExpiresAt: string;
   refreshToken: string;
-  instance: LinkedInstance;
+  connectedApp: ConnectedApp;
 }
 
-/** `POST /api/v1/link/requests` response. */
+/** `POST /api/v1/connect/requests` response. */
 export interface DeviceRequestResponse {
   deviceCode: string;
   userCode: string;
@@ -125,7 +122,7 @@ export interface DeviceRequestResponse {
 }
 
 /**
- * Outcome of one `POST /api/v1/link/poll` call, mapped from the protocol's
+ * Outcome of one `POST /api/v1/connect/poll` call, mapped from the protocol's
  * status/error table. Network failures throw (outcome unknown) — the caller
  * backs off exponentially and never polls before the current interval.
  */
@@ -139,7 +136,7 @@ export type DevicePollResult =
   | { kind: "rate_limited"; retryAfterSeconds: number | null };
 
 export interface DeliveryArtifact {
-  kind: string;
+  type: string;
   url: string;
   mediaId?: string;
   role?: string;
@@ -148,43 +145,43 @@ export interface DeliveryArtifact {
 
 export interface IllarinDelivery {
   id: string;
-  assetId: string;
-  contentGeneration: number;
-  kind: string;
+  workId: string;
+  versionNumber: number;
+  type: string;
   name: string;
   format: string;
   label: string;
   queuedAt: string;
   leaseExpiresAt: string;
-  artifacts: DeliveryArtifact[];
+  files: DeliveryArtifact[];
 }
 
-export interface WithheldNotice {
-  assetId: string;
+export interface TakedownNotice {
+  workId: string;
   name: string;
-  withheldAt: string;
+  takenDownAt: string;
 }
 
 export interface DeliveryWorkList {
-  deliveries: IllarinDelivery[];
-  withheld: WithheldNotice[];
+  sends: IllarinDelivery[];
+  takedowns: TakedownNotice[];
 }
 
 export interface LibrarySyncEntry {
-  assetId: string;
-  contentGeneration?: number;
+  workId: string;
+  versionNumber?: number;
 }
 
 export interface LibrarySyncRequest {
   snapshot: boolean;
-  applicationVersion?: string;
+  appVersion: string;
   entries: LibrarySyncEntry[];
-  removed: string[];
+  removed?: string[];
 }
 
 export interface LibrarySyncResponse {
   accepted: number;
   removed: number;
   ignored: number;
-  withheld: WithheldNotice[];
+  takedowns: TakedownNotice[];
 }

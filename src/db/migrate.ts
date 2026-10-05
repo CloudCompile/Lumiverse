@@ -135,6 +135,8 @@ const BASELINE_MIGRATIONS: readonly string[] = [
   "114_cleanup_stale_message_breakdowns.sql",
   "117_desktop_notification_destinations.sql",
   "118_desktop_oauth_provider.sql",
+  "120_illarin_receipts_per_installation.sql",
+  "122_world_book_entry_organization.sql",
 ];
 
 const BASELINE_SET = new Set(BASELINE_MIGRATIONS);
@@ -228,6 +230,10 @@ function isBaselineDriftAlreadyApplied(db: Database, file: string): boolean {
     const columns = db.query("PRAGMA table_info('chats')").all() as Array<{ name: string; notnull: number }>;
     const characterId = columns.find((column) => column.name === "character_id");
     return !!characterId && characterId.notnull === 0;
+  }
+  if (file === "121_card_creator_character.sql") {
+    const columns = db.query("PRAGMA table_info('characters')").all() as Array<{ name: string }>;
+    return columns.some((column) => column.name === "character_kind");
   }
   return false;
 }

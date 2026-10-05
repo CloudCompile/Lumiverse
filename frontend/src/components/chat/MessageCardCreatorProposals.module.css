@@ -1,0 +1,129 @@
+/* Inline review cards under an assistant bubble. Horizontally padded to line
+   up with the message body the way MessageAttachments does. */
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 24px 0;
+}
+
+.heading {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--lumiverse-text-dim);
+}
+
+.proposal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--lumiverse-border-hover);
+  border-radius: var(--lumiverse-radius-md);
+  background: var(--lumiverse-primary-010);
+}
+
+.proposalStale {
+  border-color: var(--lumiverse-warning-050);
+  background: var(--lumiverse-warning-015);
+}
+
+.proposalHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.proposalName {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--lumiverse-text);
+}
+
+.proposalCount {
+  font-size: 11px;
+  color: var(--lumiverse-text-dim);
+}
+
+.proposalRationale {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--lumiverse-text-muted);
+}
+
+.staleNote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--lumiverse-warning);
+}
+
+.expandBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  align-self: flex-start;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--lumiverse-primary-text);
+  cursor: pointer;
+}
+
+.chevron {
+  transition: transform 160ms ease;
+}
+
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.applyBtn,
+.rejectBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  border-radius: var(--lumiverse-radius-sm);
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.applyBtn {
+  background: var(--lumiverse-success-020);
+  border-color: var(--lumiverse-success-050);
+  color: var(--lumiverse-success);
+}
+
+.rejectBtn {
+  background: var(--lumiverse-secondary);
+  border-color: var(--lumiverse-secondary-border);
+  color: var(--lumiverse-text-muted);
+}
+
+.applyBtn:disabled,
+.rejectBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.applyBtn:not(:disabled):hover {
+  background: var(--lumiverse-success-050);
+}
+
+.rejectBtn:not(:disabled):hover {
+  background: var(--lumiverse-secondary-hover);
+}

@@ -47,7 +47,8 @@ export interface ExtensionUpdateCandidate {
 }
 
 function isManagedPermission(permission: string): permission is SpindlePermission {
-  return isValidPermission(permission) || permission === "mcp_servers" || permission === "mcp_servers.create";
+  return isValidPermission(permission) || permission === "mcp_servers" || permission === "mcp_servers.create"
+    || permission === "screen_capture" || permission === "screen_recording";
 }
 
 type BackendSafetyCheck = {
@@ -847,6 +848,8 @@ function insertExtensionFromManifest(manifest: SpindleManifest): void {
 
 // Permissions that require explicit admin approval before granting
 export const PRIVILEGED_PERMISSIONS = new Set([
+  "screen_capture",
+  "screen_recording",
   "app_manipulation",
   "cors_proxy",
   "generation",
@@ -885,6 +888,14 @@ function grantRequestedPermissionsByDefault(
   }
 }
 
+function hasIllarinSource(metadata: string | null): boolean {
+  try {
+    return Boolean(JSON.parse(metadata || "{}")?.illarin);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Reconcile extension_grants with the current manifest permissions:
  * - Ensure every non-privileged manifest permission has a grant row
@@ -895,7 +906,8 @@ function grantRequestedPermissionsByDefault(
 function syncPermissionGrants(
   identifier: string,
   manifestPermissions: readonly string[],
-  previousPermissions: readonly string[]
+  previousPermissions: readonly string[],
+  autoGrantNonPrivileged = true,
 ): void {
   const manifestSet = new Set(manifestPermissions);
   const previousSet = new Set(previousPermissions);
@@ -913,7 +925,7 @@ function syncPermissionGrants(
       }
       // If it was in previousPermissions but grant is missing, it was
       // intentionally revoked by an admin — don't re-grant
-    } else {
+    } else if (autoGrantNonPrivileged) {
       // Non-privileged: always ensure granted
       grantPermission(identifier, perm);
     }
@@ -921,7 +933,7 @@ function syncPermissionGrants(
 
   // Revoke grants for permissions removed from the manifest
   for (const perm of granted) {
-    if (!manifestSet.has(perm)) {
+    if (autoGrantNonPrivileged && !manifestSet.has(perm)) {
       revokePermission(identifier, perm);
     }
   }
@@ -943,10 +955,10 @@ export async function syncManifestToDb(identifier: string): Promise<void> {
 
   const db = getDb();
   const row = db
-    .query("SELECT name, version, author, description, github, homepage, permissions FROM extensions WHERE identifier = ?")
+    .query("SELECT name, version, author, description, github, homepage, permissions, metadata FROM extensions WHERE identifier = ?")
     .get(identifier) as {
       name: string; version: string; author: string; description: string;
-      github: string; homepage: string; permissions: string;
+      github: string; homepage: string; permissions: string; metadata: string | null;
     } | null;
   if (!row) return;
 
@@ -985,7 +997,7 @@ export async function syncManifestToDb(identifier: string): Promise<void> {
   // Always reconcile grants against the manifest — even when the permissions
   // column hasn't changed, the extension_grants table may be out of sync
   // (e.g. manual DB edits, interrupted previous sync, etc.)
-  syncPermissionGrants(identifier, manifestPermissions, dbPermissions);
+  syncPermissionGrants(identifier, manifestPermissions, dbPermissions, !hasIllarinSource(row.metadata));
 }
 
 function resolveWithin(base: string, requestedPath: string, label: string): string {
@@ -998,7 +1010,7 @@ function resolveWithin(base: string, requestedPath: string, label: string): stri
   return resolved;
 }
 
-function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void {
+function applyStorageSeeds(identifier: string, manifest: SpindleManifest, allowOverwrite = true): void {
   const seeds = Array.isArray(manifest.storage_seed_files)
     ? manifest.storage_seed_files
     : [];
@@ -1013,7 +1025,7 @@ function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void 
     const from = typeof seed.from === "string" ? seed.from.trim() : "";
     if (!from) continue;
     const to = typeof seed.to === "string" && seed.to.trim() ? seed.to.trim() : from;
-    const overwrite = seed.overwrite === true;
+    const overwrite = allowOverwrite && seed.overwrite === true;
     const required = seed.required === true;
 
     const sourcePath = resolveWithin(repo, from, "storage_seed_files.from");
@@ -1582,10 +1594,10 @@ export async function replaceFromFiles(
   }
   rmSync(repoDir(identifier), { recursive: true, force: true });
   moveSync(checkout, repoDir(identifier));
-  return finishUpdate(identifier, await readManifest(identifier));
+  return finishUpdate(identifier, await readManifest(identifier), true);
 }
 
-async function finishUpdate(identifier: string, manifest: SpindleManifest): Promise<ExtensionInfo> {
+async function finishUpdate(identifier: string, manifest: SpindleManifest, fromIllarin = false): Promise<ExtensionInfo> {
   const db = getDb();
   const existing = db
     .query("SELECT permissions FROM extensions WHERE identifier = ?")
@@ -1595,7 +1607,7 @@ async function finishUpdate(identifier: string, manifest: SpindleManifest): Prom
     : [];
 
   await buildExtension(identifier);
-  applyStorageSeeds(identifier, manifest);
+  applyStorageSeeds(identifier, manifest, !fromIllarin);
 
   // Update DB
   db.run(
@@ -1617,7 +1629,8 @@ async function finishUpdate(identifier: string, manifest: SpindleManifest): Prom
   syncPermissionGrants(
     identifier,
     manifest.permissions || [],
-    existingPermissions
+    existingPermissions,
+    !fromIllarin,
   );
 
   return (await getExtensionByIdentifier(identifier))!;
@@ -1653,11 +1666,13 @@ export function enable(identifier: string): void {
 
   // Grant non-privileged requested permissions on first enable
   const row = db
-    .query("SELECT permissions FROM extensions WHERE identifier = ?")
-    .get(identifier) as { permissions: string } | null;
+    .query("SELECT permissions, metadata FROM extensions WHERE identifier = ?")
+    .get(identifier) as { permissions: string; metadata: string | null } | null;
   if (row) {
-    const requested = parsePermissionsSafe<string>(row.permissions);
-    grantRequestedPermissionsByDefault(identifier, requested);
+    if (!hasIllarinSource(row.metadata)) {
+      const requested = parsePermissionsSafe<string>(row.permissions);
+      grantRequestedPermissionsByDefault(identifier, requested);
+    }
   }
 }
 
@@ -1833,7 +1848,7 @@ export function listExtensionUpdateCandidates(): ExtensionUpdateCandidate[] {
     .query(
       `SELECT id, identifier, name, version, branch
        FROM extensions
-       WHERE enabled = 1
+       WHERE enabled = 1 AND json_extract(COALESCE(metadata, '{}'), '$.illarin') IS NULL
        ORDER BY installed_at DESC`
     )
     .all() as Array<{

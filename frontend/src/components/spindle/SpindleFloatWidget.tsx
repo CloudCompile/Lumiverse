@@ -106,8 +106,9 @@ export default function SpindleFloatWidget({ widget }: Props) {
   useEffect(() => () => { dragCleanup.current?.() }, [widget.visible, isFullscreen, widget.root])
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isFullscreen || e.defaultPrevented || e.button !== 0 || (e.pointerType === 'touch' && !e.isPrimary)) return
+    dragCleanup.current?.()
     suppressDragClick.current = false
-    if (isFullscreen || e.defaultPrevented || e.button !== 0 || dragCleanup.current) return
     // Editing/navigation gestures belong to the extension. Buttons and custom
     // click targets can still be dragged, but an ordinary press stays untouched.
     const surface = e.currentTarget

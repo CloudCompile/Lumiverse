@@ -5,6 +5,7 @@ import { flushSync } from 'react-dom'
 import { registerLiveRoot } from './live-root-registry'
 import type {
   PromptBlockDTO,
+  PromptVariableDefDTO,
   SpindleLoomBlockEditorHandle,
   SpindleLoomBlockEditorOptions,
   SpindleLoomBlockEditorValue,
@@ -59,6 +60,7 @@ type ControlledProps = {
   onDraftChange?(blockId: string, updates: Partial<PromptBlockDTO> | null): void
   selectedBlockId?: string | null
   onSelectedBlockChange?(blockId: string | null): void
+  onMoveVariable?(sourceBlockId: string, variable: PromptVariableDefDTO, targetBlockId: string): boolean
   trustedHostFeatures?: boolean
 }
 let controlledProps: ControlledProps | null = null
@@ -95,6 +97,7 @@ mock.module('@/store', () => ({
 
 // Import after mocks so the bridge is tested without the application store or real panel graph.
 const { createComponentsHelper } = await import('./components-helper')
+const { setPresetEditorController } = await import('./preset-editor-helper')
 mock.restore()
 
 function ownedRoot(extensionId: string, id: string): HTMLElement {
@@ -138,9 +141,15 @@ function mount(
   initial: SpindleLoomBlockEditorValue,
   onChange?: (next: SpindleLoomBlockEditorValue) => void,
   options: Omit<SpindleLoomBlockEditorOptions, 'value' | 'onChange'> = {},
+  withPresetPermission = false,
 ): SpindleLoomBlockEditorHandle {
-  const handle = createComponentsHelper(extensionId, extensionId, async () => ({ categories: [] }))
-    .mountLoomBlockEditor(ownedRoot(extensionId, `${extensionId}-target`), { value: initial, onChange, ...options })
+  const handle = createComponentsHelper(
+    extensionId,
+    extensionId,
+    async () => ({ categories: [] }),
+    undefined,
+    withPresetPermission ? { hasPermission: (permission) => permission === 'presets' } : {},
+  ).mountLoomBlockEditor(ownedRoot(extensionId, `${extensionId}-target`), { value: initial, onChange, ...options })
   const destroy = handle.destroy
   handle.destroy = () => {
     destroy()
@@ -164,6 +173,7 @@ afterEach(() => {
   placementState.dockPanels.length = 0
   placementState.appMounts.length = 0
   controlledProps = null
+  setPresetEditorController(null)
 })
 afterAll(async () => {
   try {
@@ -177,6 +187,91 @@ afterAll(async () => {
 })
 
 describe('Loom component bridge state transitions', () => {
+  test('enables native variable moves only for one preset-bound editor with presets permission', async () => {
+    const blocks = [
+      block('one', { variables: [{ id: 'tone-id', name: 'tone', label: 'Tone', type: 'text', defaultValue: '' }] }),
+      block('two', { variables: [] }),
+    ]
+    const moves: Array<[string, string, string]> = []
+    setPresetEditorController({
+      getState: () => ({
+        open: true,
+        presetId: 'preset',
+        activeTabId: 'preset',
+        preset: {
+          id: 'preset',
+          name: 'Preset',
+          blocks,
+          parameters: {},
+          prompts: {},
+          metadata: {},
+          createdAt: 0,
+          updatedAt: 0,
+        },
+      }),
+      getPromptVariableValues: () => ({}),
+      setActiveTab() {},
+      updatePreset() {},
+      movePromptVariable(sourceBlockId, variable, targetBlockId) {
+        moves.push([sourceBlockId, variable.name, targetBlockId])
+        return true
+      },
+      async flush() {},
+    })
+
+    const handle = mount(
+      'loom-native-move',
+      value({ blocks }),
+      undefined,
+      { selectedBlockId: 'one' },
+      true,
+    )
+    await act(async () => {})
+
+    expect(typeof controlledProps?.onMoveVariable).toBe('function')
+    const variable = blocks[0]!.variables![0]!
+    expect(controlledProps!.onMoveVariable!('one', variable, 'two')).toBe(true)
+    expect(moves).toEqual([['one', 'tone', 'two']])
+
+    const noPermission = mount(
+      'loom-native-move-no-permission',
+      value({ blocks }),
+      undefined,
+      { selectedBlockId: 'one' },
+    )
+    await act(async () => {})
+    expect(controlledProps?.onMoveVariable).toBeUndefined()
+    noPermission.destroy()
+
+    const dormantSecond = mount(
+      'loom-native-move',
+      value({ blocks }),
+      undefined,
+      { selectedBlockId: null },
+      true,
+    )
+    await act(async () => {})
+    expect(controlledProps?.onMoveVariable).toBeUndefined()
+
+    handle.update({ selectedBlockId: 'one' })
+    await act(async () => {})
+    expect(typeof controlledProps?.onMoveVariable).toBe('function')
+
+    dormantSecond.update({ selectedBlockId: 'two' })
+    await act(async () => {})
+    expect(controlledProps?.onMoveVariable).toBeUndefined()
+
+    handle.update({ selectedBlockId: 'one' })
+    await act(async () => {})
+    expect(controlledProps?.onMoveVariable).toBeUndefined()
+
+    dormantSecond.update({ selectedBlockId: null })
+    await act(async () => {})
+    handle.update({ selectedBlockId: 'one' })
+    await act(async () => {})
+    expect(typeof controlledProps?.onMoveVariable).toBe('function')
+  })
+
   test('normalizes radio edits before committing and emitting the value', () => {
     const initialBlocks = [
       block('category', { marker: 'category', categoryMode: 'radio' }),

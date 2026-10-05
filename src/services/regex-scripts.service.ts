@@ -97,7 +97,7 @@ const VALID_SCOPES = new Set(["global", "character", "chat"]);
 const VALID_TARGETS = new Set(["prompt", "response", "display"]);
 const VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
 const VALID_MACRO_MODES = new Set(["none", "find", "raw", "escaped", "after"]);
-const MAX_PATTERN_LENGTH = 10_000;
+export const MAX_REGEX_PATTERN_LENGTH = 50_000;
 const MAX_REGEX_ACTIONS = 50;
 const MAX_REGEX_ACTION_FIELD_LENGTH = 10_000;
 const REGEX_ACTION_ID_RE = /^[A-Za-z][A-Za-z0-9_:.-]{0,63}$/;
@@ -547,7 +547,7 @@ function validateRegex(
   substituteMacros: RegexScript["substitute_macros"] = "none",
   activation = false,
 ): string | null {
-  if (pattern.length > MAX_PATTERN_LENGTH) return "find_regex exceeds maximum length";
+  if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return "find_regex exceeds maximum length";
   if (!validateFlags(flags)) return "Invalid flags — allowed: d, g, i, m, s, u, v, y";
   try {
     const compilePattern = activation ? activationPatternForValidation(pattern)
@@ -568,7 +568,7 @@ function validateInput(input: CreateRegexScriptInput | UpdateRegexScriptInput, i
     if (ci.find_regex === undefined || ci.find_regex === null) return "find_regex is required";
   }
 
-  if (input.find_regex !== undefined && input.find_regex.length > MAX_PATTERN_LENGTH) {
+  if (input.find_regex !== undefined && input.find_regex.length > MAX_REGEX_PATTERN_LENGTH) {
     return "find_regex exceeds maximum length";
   }
   if (input.actions !== undefined) {

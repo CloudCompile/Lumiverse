@@ -8,7 +8,7 @@ const TOKENS: TokenPair = {
   accessToken: "ia1.a",
   accessTokenExpiresAt: "2026-08-22T18:30:00Z",
   refreshToken: "ir1.a",
-  instance: { id: "inst-1", scopes: ["asset:receive"] },
+  connectedApp: { id: "inst-1", permissions: ["work:receive"] },
 };
 
 function deviceRequest(interval: number): DeviceRequestResponse {
@@ -80,7 +80,7 @@ describe("illarin device link state machine", () => {
   });
 
   test("reports a link and persists through onLinked", async () => {
-    const harness = makeSession([() => Response.json({ status: "linked", ...TOKENS })]);
+    const harness = makeSession([() => Response.json({ status: "connected", ...TOKENS })]);
     harness.advance(5_000);
 
     const result = await harness.session.pollIfDue();
@@ -142,7 +142,7 @@ describe("illarin device link state machine", () => {
       () => {
         throw new TypeError("reset");
       },
-      () => Response.json({ status: "linked", ...TOKENS }),
+      () => Response.json({ status: "connected", ...TOKENS }),
     ]);
 
     harness.advance(5_000);
@@ -161,7 +161,7 @@ describe("illarin device link state machine", () => {
   test("backend pickup continues without browser-driven status requests", async () => {
     const harness = makeSession([
       () => Response.json({ status: "pending" }),
-      () => Response.json({ status: "linked", ...TOKENS }),
+      () => Response.json({ status: "connected", ...TOKENS }),
     ]);
 
     const result = await runDeviceLinkUntilTerminal(harness.session, {

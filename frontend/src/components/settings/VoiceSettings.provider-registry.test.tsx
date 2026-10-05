@@ -11,7 +11,7 @@ import {
 import { FRONTEND_PROVIDER_SCOPE, type ProviderRegistryChangedPayload } from '@/ws/provider-registry-projection'
 
 const voiceSettings = {
-  sttProvider: 'webspeech' as const,
+  sttProvider: 'webspeech' as 'webspeech' | 'connection' | 'whistle',
   sttLanguage: 'en-US',
   sttContinuous: false,
   sttInterimResults: true,
@@ -141,6 +141,8 @@ describe('VoiceSettings provider registry', () => {
     root = null
     host = null
     resetVoiceProviderProjection()
+    voiceSettings.sttProvider = 'webspeech'
+    voiceSettings.sttLanguage = 'en-US'
   })
 
   function mount() {
@@ -151,6 +153,28 @@ describe('VoiceSettings provider registry', () => {
       root!.render(createElement(VoiceSettings))
     })
   }
+
+  test('offers Whistle without a connection and limits its language choices', async () => {
+    voiceSettings.sttProvider = 'whistle'
+    voiceSettings.sttLanguage = 'ja-JP'
+    mount()
+    await flush()
+    expect(host?.querySelector('option[value="whistle"]')).not.toBeNull()
+    const automatic = host?.querySelector('option[value="auto"]') as HTMLOptionElement
+    expect(automatic.selected).toBe(true)
+    expect(host?.querySelector('option[value="nl"]')).not.toBeNull()
+    expect(host?.querySelector('option[value="pl"]')).not.toBeNull()
+    expect(host?.querySelector('option[value="ja-JP"]')).toBeNull()
+    expect(host?.textContent).toContain('voice.sttWhistleHint')
+    expect(host?.textContent).not.toContain('voice.sttConnectionFallback')
+  })
+
+  test('explains an unavailable microphone even when another provider is selected', async () => {
+    mount()
+    await flush()
+    expect((host?.querySelector('option[value="whistle"]') as HTMLOptionElement).disabled).toBe(true)
+    expect(host?.querySelector('[data-whistle-unavailable="microphone"]')?.textContent).toBe('voice.sttWhistleReasons.microphone')
+  })
 
   test('emits scoped provider_changed add remove and change after registry commit', async () => {
     mount()

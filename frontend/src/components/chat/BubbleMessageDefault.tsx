@@ -11,6 +11,7 @@ import MessageContent from './MessageContent'
 import MessageEditArea from './MessageEditArea'
 import MessageAttachments from './MessageAttachments'
 import MessageAudioSlot from './MessageAudioSlot'
+import MessageCardCreatorProposals from './MessageCardCreatorProposals'
 import SwipeControls from './SwipeControls'
 import VoteButtons from './VoteButtons'
 import GreetingNav from './GreetingNav'
@@ -101,9 +102,9 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
   const { t } = useTranslation('chat')
   const pillRef = useRef<HTMLSpanElement>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
+  const showTimings = generationMetrics?.wasStreaming !== false
   const hasGenerationDetails = !isUser && !!generationMetrics && (
-    generationMetrics.ttft != null
-    || generationMetrics.tps != null
+    (showTimings && (generationMetrics.ttft != null || generationMetrics.tps != null))
     || !!generationMetrics.model
     || !!generationMetrics.provider
     || !!generationMetrics.presetName
@@ -169,13 +170,13 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
               </span>
             </span>
           )}
-          {generationMetrics!.ttft != null && (
+          {showTimings && generationMetrics!.ttft != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.firstToken')}</span>
               <span className={styles.tooltipValue}>{formatMs(generationMetrics!.ttft)}</span>
             </span>
           )}
-          {generationMetrics!.tps != null && (
+          {showTimings && generationMetrics!.tps != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.speed')}</span>
               <span className={styles.tooltipValue}>{t('messageMeta.tokPerSec', { count: generationMetrics!.tps })}</span>
@@ -500,6 +501,13 @@ export default function BubbleMessageDefault({
           <div className={styles.content}>
             <MessageAttachments attachments={message.extra.attachments} isUser={true} chatId={chatId} messageId={message.id} />
           </div>
+        )}
+
+        {!isUser && !isEditing && (message.extra?.card_creator_proposal_ids?.length ?? 0) > 0 && (
+          <MessageCardCreatorProposals
+            chatId={chatId}
+            proposalIds={message.extra.card_creator_proposal_ids}
+          />
         )}
 
         {renderAudioSlot && (

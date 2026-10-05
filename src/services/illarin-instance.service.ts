@@ -54,7 +54,7 @@ export interface SaveInstanceInput {
   pair: TokenPair;
   instanceName: string;
   applicationName: string;
-  /** Full requested declaration as sent to /api/v1/link/* — the version marker. */
+  /** Full requested declaration as sent to /api/v1/connect/* — the version marker. */
   declarationJson: string;
 }
 
@@ -120,7 +120,8 @@ function withDurableTokenWrite<T>(write: (db: Database) => T): T {
 function parseScopes(json: string): string[] {
   try {
     const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string")
+      .map((scope) => scope === "asset:receive" ? "work:receive" : scope) : [];
   } catch {
     return [];
   }
@@ -163,7 +164,19 @@ export async function getIllarinInstance(userId: string): Promise<IllarinInstanc
 /** Get every configured instance for startup warmup. */
 export async function listIllarinInstances(): Promise<IllarinInstance[]> {
   const rows = getDb().query("SELECT * FROM illarin_instance WHERE user_id IS NOT NULL").all() as InstanceRow[];
-  return Promise.all(rows.map(rowToInstance));
+  const settled = await Promise.allSettled(rows.map(rowToInstance));
+  const instances: IllarinInstance[] = [];
+  let failed = 0;
+  for (const result of settled) {
+    if (result.status === "fulfilled") instances.push(result.value);
+    else failed++;
+  }
+  if (failed > 0) {
+    console.warn(
+      `[Illarin] Skipped ${failed} saved connection${failed === 1 ? "" : "s"} because its credentials could not be read.`,
+    );
+  }
+  return instances;
 }
 
 /** Persist a completed link, replacing only that user's row. */
@@ -201,10 +214,10 @@ export async function saveInstance(input: SaveInstanceInput): Promise<void> {
     ).run(
       input.userId,
       input.illarinUrl,
-      input.pair.instance.id,
+      input.pair.connectedApp.id,
       input.instanceName,
       input.applicationName,
-      JSON.stringify(input.pair.instance.scopes ?? []),
+      JSON.stringify(input.pair.connectedApp.permissions),
       accessEnc.encrypted,
       accessEnc.iv,
       accessEnc.tag,
@@ -233,6 +246,7 @@ export async function replaceTokens(userId: string, pair: TokenPair): Promise<vo
          access_token_encrypted = ?, access_token_iv = ?, access_token_tag = ?,
          access_token_expires_at = ?,
          refresh_token_encrypted = ?, refresh_token_iv = ?, refresh_token_tag = ?,
+         scopes_json = ?,
          last_refresh_at = datetime('now')
        WHERE user_id = ?`,
     )
@@ -244,6 +258,7 @@ export async function replaceTokens(userId: string, pair: TokenPair): Promise<vo
       refreshEnc.encrypted,
       refreshEnc.iv,
       refreshEnc.tag,
+      JSON.stringify(pair.connectedApp.permissions),
       userId,
     );
   });
@@ -286,14 +301,14 @@ export function recordDeliveryInstalled(
   userId: string,
   instanceId: string,
   deliveryId: string,
-  assetId: string,
-  contentGeneration: number,
+  workId: string,
+  versionNumber: number,
 ): void {
   getDb().query(
     `INSERT OR IGNORE INTO illarin_delivery_receipt
        (user_id, instance_id, delivery_id, asset_id, content_generation)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(userId, instanceId, deliveryId, assetId, contentGeneration);
+  ).run(userId, instanceId, deliveryId, workId, versionNumber);
 }
 
 /** A repeated delivery is acknowledged again without being reinstalled. */

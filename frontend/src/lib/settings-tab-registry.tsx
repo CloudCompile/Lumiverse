@@ -7,7 +7,8 @@ import {
   Keyboard,
 } from 'lucide-react'
 import { useStore } from '@/store'
-import { joinExtensionSettingsTabs } from '@/lib/spindle/settings-tab-bridge'
+import { getExtensionSettingsTabRegistrations, joinExtensionSettingsTabs } from '@/lib/spindle/settings-tab-bridge'
+import { hasEnabledFrontendExtension, hasEnabledFrontendExtensionId } from '@/lib/spindle/frontend-extension-availability'
 import { translateSettingsField, translateSettingsSectionTitle } from '@/lib/i18n/resolveLabel'
 import type { Command, CommandScope } from '@/lib/commands'
 
@@ -76,8 +77,9 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     tabName: 'Display & Layout',
     tabDescription: 'Panel width, sidebar position, and layout options',
     tabIcon: PanelRight,
-    keywords: ['display', 'layout', 'sidebar', 'drawer', 'width', 'panel', 'position', 'modal', 'chat heads', 'long messages', 'read more'],
+    keywords: ['display', 'layout', 'sidebar', 'drawer', 'width', 'panel', 'position', 'modal', 'chat heads', 'long messages', 'read more', 'pinch', 'zoom'],
     sections: [
+      { key: 'zoom', titleKey: 'display.zoom.title', titleFallback: 'Zoom', keywords: ['pinch', 'zoom', 'desktop', 'trackpad'] },
       { key: 'longMessages', titleKey: 'display.longMessages.title', titleFallback: 'Long Messages', keywords: ['long messages', 'assistant messages', 'collapse', 'read more', 'show less', 'message height'] },
       { key: 'modalWidth', titleKey: 'display.modalWidth.title', titleFallback: 'Modal Width', keywords: ['modal width', 'width', 'max width', 'full', 'comfortable', 'compact', 'custom'] },
       { key: 'drawer', titleKey: 'display.drawer.title', titleFallback: 'Drawer', keywords: ['drawer', 'sidebar', 'side', 'panel width', 'tab position', 'tab size', 'tab labels'] },
@@ -96,7 +98,7 @@ export const SETTINGS_TABS: SettingsTabEntry[] = [
     keywords: ['chat', 'behavior', 'enter to send', 'bubble', 'minimal', 'immersive', 'streaming', 'message'],
     sections: [
       { key: 'general', titleKey: 'chat.title', titleFallback: 'Chat', keywords: ['message display', 'display mode', 'bubble', 'minimal', 'immersive', 'enter to send', 'streaming', 'markdown'] },
-      { key: 'width', titleKey: 'chat.widthTitle', titleFallback: 'Chat Width', keywords: ['chat width', 'content width', 'message width'] },
+      { key: 'width', titleKey: 'chat.widthTitle', titleFallback: 'Chat Width', keywords: ['chat width', 'content width', 'message width', 'center chat', 'sidebar', 'reflow'] },
       { key: 'messagesPerPage', titleKey: 'chat.messagesPerPageTitle', titleFallback: 'Messages Per Page', keywords: ['messages per page', 'pagination', 'page size', 'load more'] },
       { key: 'input', titleKey: 'chat.inputTitle', titleFallback: 'Input', keywords: ['input', 'composer', 'textarea', 'send', 'enter key', 'impersonate', 'impersonation mode', 'default'] },
       { key: 'regen', titleKey: 'chat.regenTitle', titleFallback: 'Regeneration Feedback', keywords: ['regeneration', 'regen', 'feedback', 'swipe regenerate'] },
@@ -349,8 +351,13 @@ export function getVisibleSettingsTabs(userRole?: string, productivityTabPositio
     return false
   })
 
-  const pos = productivityTabPosition ?? (typeof useStore !== 'undefined' ? (useStore.getState() as any)?.productivityTabPosition : undefined) ?? 'after-display'
-  return joinExtensionSettingsTabs(visibleCoreTabs, userRole, SETTINGS_TABS, undefined, pos)
+  const state = useStore.getState()
+  const pos = productivityTabPosition ?? state?.productivityTabPosition ?? 'after-display'
+  const hiddenRegistrationIds = new Set(getExtensionSettingsTabRegistrations()
+    .filter((registration) => !hasEnabledFrontendExtensionId(state?.extensions, registration.extensionId))
+    .map((registration) => registration.registrationId))
+  return joinExtensionSettingsTabs(visibleCoreTabs, userRole, SETTINGS_TABS, hiddenRegistrationIds, pos)
+    .filter((tab) => tab.id !== 'productivity' || hasEnabledFrontendExtension(state?.extensions, 'lumiverse_suite'))
 }
 
 /**
@@ -427,6 +434,10 @@ export function settingsRegistryToCommands(entries: SettingsTabEntry[]): Command
     keywords: entry.keywords,
     group: 'settings',
     scope: entry.scope,
-    run: () => useStore.getState().openSettings(entry.id),
+    run: () => {
+      if (getVisibleSettingsTabs(useStore.getState().user?.role).some((tab) => tab.id === entry.id)) {
+        useStore.getState().openSettings(entry.id)
+      }
+    },
   }))
 }

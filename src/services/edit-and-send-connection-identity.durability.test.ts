@@ -58,6 +58,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE characters (
     id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '', scenario TEXT NOT NULL DEFAULT '', first_mes TEXT NOT NULL DEFAULT '',
@@ -424,7 +429,13 @@ describe("editAndSend records the committed connection on the outbox row", () =>
 describe("the committed connection travels out of band only", () => {
   interface Capture {
     input: StartEditAndSendGenerationInput;
-    options: { origin?: string; connectionId?: string } | undefined;
+    options:
+      | {
+          origin?: string;
+          connectionId?: string;
+          editAndSendContext?: { editedUserMessageId: string; committedRevision: number };
+        }
+      | undefined;
   }
 
   function captureDispatches(): Capture[] {
@@ -477,7 +488,14 @@ describe("the committed connection travels out of band only", () => {
             },
       );
       // ...and the identity arrives in the second positional argument instead.
-      expect(options).toEqual({ origin: "edit_and_send", connectionId: ALPHA_ACTIVE });
+      expect(options).toEqual({
+        origin: "edit_and_send",
+        connectionId: ALPHA_ACTIVE,
+        editAndSendContext: {
+          editedUserMessageId: `${chatId}-user`,
+          committedRevision: 3,
+        },
+      });
     });
   }
 
@@ -502,8 +520,28 @@ describe("the committed connection travels out of band only", () => {
         .map((entry) => ({ userId: entry.input.userId, options: entry.options }))
         .sort((a, b) => a.userId.localeCompare(b.userId)),
     ).toEqual([
-      { userId: USER_ALPHA, options: { origin: "edit_and_send", connectionId: ALPHA_ACTIVE } },
-      { userId: USER_BETA, options: { origin: "edit_and_send", connectionId: BETA_ACTIVE } },
+      {
+        userId: USER_ALPHA,
+        options: {
+          origin: "edit_and_send",
+          connectionId: ALPHA_ACTIVE,
+          editAndSendContext: {
+            editedUserMessageId: `dispatch-${USER_ALPHA}-user`,
+            committedRevision: 3,
+          },
+        },
+      },
+      {
+        userId: USER_BETA,
+        options: {
+          origin: "edit_and_send",
+          connectionId: BETA_ACTIVE,
+          editAndSendContext: {
+            editedUserMessageId: `dispatch-${USER_BETA}-user`,
+            committedRevision: 3,
+          },
+        },
+      },
     ]);
   });
 
@@ -524,7 +562,14 @@ describe("the committed connection travels out of band only", () => {
     await dispatcher.dispatchEditAndSendRequest(USER_ALPHA, chatId, requestId);
 
     expect(captured).toHaveLength(1);
-    expect(captured[0]!.options).toEqual({ origin: "edit_and_send", connectionId: undefined });
+    expect(captured[0]!.options).toEqual({
+      origin: "edit_and_send",
+      connectionId: undefined,
+      editAndSendContext: {
+        editedUserMessageId: `${chatId}-user`,
+        committedRevision: 3,
+      },
+    });
     expect(captured[0]!.options?.connectionId).toBeUndefined();
   });
 });

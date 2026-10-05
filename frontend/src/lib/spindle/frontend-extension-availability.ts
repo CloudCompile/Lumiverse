@@ -44,3 +44,18 @@ export function filterEnabledFrontendContributions<T extends { extensionId: stri
   )
   return contributions.filter((contribution) => enabledIds.has(contribution.extensionId))
 }
+
+/** A retained Suite DOM root cannot keep claiming a native surface after disable/uninstall. */
+export function hasAvailableFrontendSurface(
+  root: ParentNode,
+  selector: string,
+  extensions: readonly FrontendExtensionAvailability[] | null | undefined,
+): boolean {
+  return [...root.querySelectorAll(selector)].some((element) => {
+    const owner = element.closest('[data-spindle-ext-id], [data-spindle-extension-root], [data-spindle-ext]')
+    const identifier = owner?.getAttribute('data-spindle-ext-id')
+    if (identifier) return hasEnabledFrontendExtension(extensions, identifier)
+    const extensionId = owner?.getAttribute('data-spindle-extension-root') ?? owner?.getAttribute('data-spindle-ext')
+    return Boolean(extensionId && hasEnabledFrontendExtensionId(extensions, extensionId))
+  })
+}

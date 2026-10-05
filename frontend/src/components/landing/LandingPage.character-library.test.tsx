@@ -692,6 +692,11 @@ describe('LandingPage character library', () => {
     listRecentGrouped.mockReturnValueOnce(refresh.promise)
 
     await click(buttonMatching(firstHost, /Ava/)!)
+    const leavingSurface = firstHost.querySelector<HTMLElement>('[data-entry-mode="fresh"]')
+    const leavingChats = firstHost.querySelector<HTMLElement>('[data-component="LandingPageChats"]')
+    expect(leavingSurface?.classList.contains('routeLeaving')).toBe(true)
+    expect(leavingSurface?.getAttribute('data-motion-animate')).toBe('{"opacity":0,"y":10,"scale":0.985}')
+    expect(leavingChats?.getAttribute('data-motion-animate')).toBe('visible')
     const storedSnapshot = JSON.parse(domWindow.sessionStorage.getItem('__lumiverse_landing_page_snapshot_v1') || '{}')
     expect(storedSnapshot.snapshot?.imageUrls).toEqual(['/avatar.png'])
 
@@ -1106,6 +1111,33 @@ describe('LandingPage character library', () => {
     expect(host.querySelector('[data-component="LandingPageChatsPanel"]')?.hasAttribute('role')).toBe(false)
     expect(host.textContent).toContain('No recent chats')
     expect(listSummaries).not.toHaveBeenCalled()
+  })
+
+  test('retained Suite landing roots cannot replace native Chats after disable or uninstall', async () => {
+    storeState = createStoreState()
+    listRecentGrouped.mockResolvedValue(page([]))
+    const host = await mountLanding()
+    const characterRoot = appendReadySuiteRoot(host)
+    const chatsRoot = document.createElement('section')
+    chatsRoot.dataset.spindleExtId = 'lumiverse_suite'
+    chatsRoot.dataset.recentChatsReady = 'true'
+    host.querySelector('[data-spindle-mount="landing_chats"]')!.append(chatsRoot)
+    await flush()
+    expect(tab(host, 'Characters')).not.toBeUndefined()
+
+    for (const extensions of [[{ identifier: 'lumiverse_suite', enabled: false, has_frontend: true }], []]) {
+      await act(async () => {
+        storeState = { ...storeState, extensions }
+        notifyStore()
+      })
+      await flush()
+      expect(characterRoot.isConnected).toBe(true)
+      expect(chatsRoot.isConnected).toBe(true)
+      expect(charactersMount(host).hidden).toBe(true)
+      expect(host.querySelector<HTMLElement>('[data-spindle-mount="landing_chats"]')!.hidden).toBe(true)
+      expect(tab(host, 'Characters')).toBeUndefined()
+      expect(host.textContent).toContain('No recent chats')
+    }
   })
 
   test('re-adding the suite root activates once per ready transition and preserves Chats', async () => {

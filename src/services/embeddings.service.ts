@@ -1280,28 +1280,58 @@ function buildVaultChunkEmbeddingRows(
   }));
 }
 
+/**
+ * Replace the vectors for a set of chat chunks. Each chat's delete + insert runs
+ * as ONE provider operation (`replaceByFilter`), so LanceDB holds its
+ * cross-process write lock once instead of twice — halving lock churn and
+ * removing the half-replaced window entirely. The filter is scoped by
+ * owner_id=chatId + source_id∈chunkIds, so other chats, world-book rows, and
+ * Cortex/databank vectors are never touched.
+ */
 async function replaceChatChunkEmbeddingRows(
   userId: string,
   targets: Array<{ chatId: string; chunkId: string }>,
   rows: EmbeddingRow[],
 ): Promise<void> {
-  if (targets.length > 0) {
-    const chunkIdsByChat = new Map<string, string[]>();
-    for (const target of targets) {
-      const bucket = chunkIdsByChat.get(target.chatId);
-      if (bucket) bucket.push(target.chunkId);
-      else chunkIdsByChat.set(target.chatId, [target.chunkId]);
-    }
-    for (const [chatId, chunkIds] of chunkIdsByChat) {
-      await deleteStoreRows("embeddings", andFilter([
-        ownerScope(userId, "chat_chunk", chatId),
-        inSet("source_id", Array.from(new Set(chunkIds))),
-      ]));
-    }
+  if (targets.length === 0) {
+    if (rows.length > 0) await upsertStoreRows("embeddings", rows);
+    return;
   }
-  if (rows.length > 0) {
-    await upsertStoreRows("embeddings", rows);
+
+  const chunkIdsByChat = new Map<string, Set<string>>();
+  for (const target of targets) {
+    let bucket = chunkIdsByChat.get(target.chatId);
+    if (!bucket) {
+      bucket = new Set<string>();
+      chunkIdsByChat.set(target.chatId, bucket);
+    }
+    bucket.add(target.chunkId);
   }
+
+  const rowsByChat = new Map<string, EmbeddingRow[]>();
+  for (const row of rows) {
+    let bucket = rowsByChat.get(row.owner_id);
+    if (!bucket) {
+      bucket = [];
+      rowsByChat.set(row.owner_id, bucket);
+    }
+    bucket.push(row);
+  }
+
+  const store = await getActiveVectorStore();
+  for (const [chatId, chunkIds] of chunkIdsByChat) {
+    const filter = andFilter([
+      ownerScope(userId, "chat_chunk", chatId),
+      inSet("source_id", Array.from(chunkIds)),
+    ]);
+    const chatRows = (rowsByChat.get(chatId) ?? []).filter((row) => chunkIds.has(row.source_id));
+    await store.replaceByFilter("embeddings", filter, chatRows);
+  }
+
+  // Rows for a chat absent from `targets` are not covered by any replace filter;
+  // upsert them so no caller can silently drop vectors.
+  const untargetedRows = rows.filter((row) => !chunkIdsByChat.has(row.owner_id));
+  if (untargetedRows.length > 0) await upsertStoreRows("embeddings", untargetedRows);
 }
 
 async function replaceVaultChunkEmbeddingRows(
@@ -1310,15 +1340,17 @@ async function replaceVaultChunkEmbeddingRows(
   vaultChunkIds: string[],
   rows: EmbeddingRow[],
 ): Promise<void> {
-  if (vaultChunkIds.length > 0) {
-    await deleteStoreRows("embeddings", andFilter([
-      ownerScope(userId, "vault_chunk", vaultId),
-      inSet("source_id", Array.from(new Set(vaultChunkIds))),
-    ]));
+  const uniqueChunkIds = Array.from(new Set(vaultChunkIds));
+  if (uniqueChunkIds.length === 0) {
+    if (rows.length > 0) await upsertStoreRows("embeddings", rows);
+    return;
   }
-  if (rows.length > 0) {
-    await upsertStoreRows("embeddings", rows);
-  }
+  const store = await getActiveVectorStore();
+  const filter = andFilter([
+    ownerScope(userId, "vault_chunk", vaultId),
+    inSet("source_id", uniqueChunkIds),
+  ]);
+  await store.replaceByFilter("embeddings", filter, rows);
 }
 
 function loadChatChunkMessageIds(chunkId: string): string[] {
@@ -4038,6 +4070,51 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
     console.warn("[embeddings] Failed to queue stale chat chunks after vector reset:", err);
   });
   return { deleted, path: location };
+}
+
+/**
+ * Bring the store to a consistent state for ephemeral LanceDB storage.
+ *
+ * When LanceDB lives on local ephemeral disk (see `utils/lancedb-storage.ts`),
+ * its tables are missing on every fresh process even though the SQLite rows
+ * that generated them are still present. This function:
+ *
+ *  - If a non-empty store is already present (same process, or a restarted
+ *    process that reused the temp dir), leaves it alone — no needless rebuild.
+ *  - Otherwise marks every vector-bearing SQLite row stale so the normal
+ *    reconciliation sweeps re-embed only what is actually missing, and clears
+ *    any orphaned on-disk fragments so recreation starts clean.
+ *
+ * It never deletes the vector state when a healthy store exists. Returns
+ * `{ rebuilt }` where `rebuilt` is true when a rebuild was armed.
+ */
+export async function prepareEphemeralVectorStore(): Promise<{ rebuilt: boolean }> {
+  const store = await getActiveVectorStore();
+  // Only the embedded LanceDB provider needs this: it is the one whose on-disk
+  // store lives on ephemeral disk. External providers (Qdrant/Milvus) persist
+  // independently, so leave their collections and SQLite state untouched.
+  if (store.id !== "lancedb") return { rebuilt: false };
+  let existingRows = 0;
+  try {
+    existingRows = await store.countRows("embeddings");
+  } catch (err) {
+    console.warn("[embeddings] Ephemeral LanceDB probe failed; arming rebuild:", err);
+    existingRows = 0;
+  }
+
+  if (existingRows > 0) {
+    return { rebuilt: false };
+  }
+
+  // No queryable vectors: the ephemeral store is empty/new. `reset()` clears any
+  // half-written fragments, marks every vector-bearing SQLite row stale, and
+  // re-queues stale chat chunks so the reconciliation sweeps rebuild from the
+  // durable rows. No extra marking/queueing needed here.
+  await store.reset().catch((err) => {
+    console.warn("[embeddings] Failed to clear empty ephemeral LanceDB store:", err);
+  });
+  console.info("[embeddings] Ephemeral LanceDB store was empty; armed vector rebuild from SQLite.");
+  return { rebuilt: true };
 }
 
 // --- Chat Vectorization ---

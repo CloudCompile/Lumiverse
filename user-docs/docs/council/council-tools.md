@@ -63,6 +63,8 @@ Lumiverse ships with **17 built-in tools** across 5 categories.
 
 Packs can include custom **Loom Tools** that extend the built-in tool set. These work identically to built-in tools but are defined by pack creators.
 
+To create one, use **+ Create tool** in **Council → Setup**, either in Tools Configuration or beside a member's tool assignments. The existing tool editor opens directly. Use **Open Workshop** for broader pack and asset editing.
+
 Each Loom Tool has:
 - **Tool Name** — Technical identifier
 - **Display Name** — What you see in the UI
@@ -76,7 +78,7 @@ Each Loom Tool has:
 
 ## Assigning Tools to Members
 
-1. Open the Council panel
+1. Open **Council → Setup**
 2. Select a member
 3. Check the tools you want them to use
 
@@ -93,7 +95,7 @@ Each assigned member/tool pair can retain a small number of prior successful del
 
 To enable it:
 
-1. Open the **Council** panel
+1. Open **Council → Setup**
 2. Expand a council member
 3. Assign one or more tools
 4. Under the assigned tool list, set **Historical deliberations retained** above `0`
@@ -116,6 +118,8 @@ When history is enabled, Lumiverse sends it as a clearly labeled **historical ba
 ---
 
 ## Tool Results
+
+Open **Council → Feedback** to inspect the latest results, grouped by council member. The middle tab shows a green dot while Council is enabled, a spinner during execution, and a count when tool results are available. Without results, it shows whether Council is waiting for feedback. Use **Setup** to change members or tool assignments; use **OOC** to configure commentary alongside the story.
 
 Tool results are available in the prompt through macros:
 

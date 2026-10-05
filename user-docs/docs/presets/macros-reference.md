@@ -91,7 +91,7 @@ Lumiverse parses SillyTavern-style macro prefixes. The currently user-relevant o
 | `?` | `{{?macro}}` | Parsed for delayed/compatibility-prefixed macros |
 | `~` | `{{~macro}}` | Parsed for reevaluate-style compatibility |
 | `>` | `{{>macro}}` | Parsed for filter-style compatibility |
-| `#` | `{{#trim}}...{{/trim}}` | Preserve whitespace for macros that support it (`trim` is the main built-in example) |
+| `#` | `{{#trim}}...{{/trim}}` | Preserve whitespace for macros that support it (`trim`, and the list loops `foreach`, `map`, `filter`, `some`, `every`) |
 
 Closing scoped macros use `/`, like `{{/if}}`, `{{/trim}}`, or `{{/numbered}}`.
 
@@ -186,7 +186,7 @@ Only include this in group chats.
 
 ### `{{foreach}}`
 
-Repeat a block of content once for each item in a list — the macro equivalent of a JavaScript `forEach`. The list is a single string that is split on a delimiter (`,` by default); each item is trimmed and blank items are dropped.
+Repeat a block of content once for each item in a list — the macro equivalent of a JavaScript `forEach`. The list is a single string that is split on a delimiter (`,` by default); each item is trimmed and blank items are dropped. Write `{{#foreach}}` to keep every item exactly as split, spacing and blank items included.
 
 ```
 {{foreach::apple, banana, cherry}}
@@ -1061,7 +1061,9 @@ Long-term memory and retrieval macros from Lumiverse's memory systems.
 | `{{memories}}` | `{{longTermMemory}}`, `{{chatMemory}}`, `{{ltm}}` | Formatted memory chunks with header | Optional: `{{memories::count}}` to override chunk count |
 | `{{memoriesActive}}` | — | `"yes"` / `"no"` — whether memories were retrieved (condition-compatible) | — |
 | `{{memoriesCount}}` | — | Number of memory chunks retrieved | — |
-| `{{memoriesRaw}}` | — | Raw memory chunks without header formatting | Optional: `{{memoriesRaw::count}}` to override chunk count |
+| `{{memoriesRaw}}` | — | Chunks using Chunk Template and Chunk Separator, without Header Template | Optional: `{{memoriesRaw::count}}` to limit chunk count |
+
+Configure Chat Memory in **Settings → Advanced → Long-Term Chat Memory**, and enable **Vectorise chat messages** in **Settings → Embeddings**. Cortex is optional. `{{memories}}` can return combined Cortex context when available; `{{memoriesCount}}` can be 0 even when graph context is present. Count arguments limit already retrieved chunks; they do not run a new search. See [Long-Term Memory](../chatting/memory.md) for injection strategies and formatting.
 
 ### Databank Retrieval
 
@@ -1084,6 +1086,8 @@ Long-term memory and retrieval macros from Lumiverse's memory systems.
 | `{{cortexActive}}` | `"yes"` / `"no"` — whether Memory Cortex returned results | — |
 | `{{entityCount}}` | Number of active entities in context | — |
 | `{{characterColors}}` | Character speech / thought / narration color instructions | — |
+
+Cortex macros read this prompt's available Cortex context, not all saved records. `{{cortexActive}}` reports content availability rather than the master switch; `{{entityFacts::name}}` looks within retrieved entities. Memory content macros own placement and suppress combined automatic fallback, including when a surrounding condition resolves false. Use `{{memories}}` for combined recall or individual macros for a custom layout; combining both can repeat content. See [Memory Cortex](../chatting/memory-cortex.md#put-cortex-in-the-prompt).
 
 ---
 

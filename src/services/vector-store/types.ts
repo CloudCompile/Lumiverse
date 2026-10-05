@@ -160,6 +160,15 @@ export interface VectorStore {
   deleteByFilter(collection: CollectionName, filter: VectorFilter): Promise<void>;
   deleteByIds(collection: CollectionName, ids: string[]): Promise<void>;
 
+  /**
+   * Replace all rows matching `filter` with `rows` in one logical operation.
+   * Providers backed by a single writer (LanceDB) run the delete and insert
+   * inside ONE write-lock acquisition, halving cross-process lock churn and
+   * eliminating the half-replaced window. Providers whose server serializes
+   * writes for them fall back to delete-then-upsert. `rows` may be empty
+   * (delete-only); `filter` scopes the removal so unrelated rows are untouched. */
+  replaceByFilter(collection: CollectionName, filter: VectorFilter, rows: VectorRow[]): Promise<void>;
+
   /** KNN search. Returned hits carry similarity already normalized to "higher = better". */
   vectorSearch(opts: SearchOptions): Promise<VectorHit[]>;
   /** Lexical/BM25 search. Returns `[]` when `!capabilities.nativeLexical`. */

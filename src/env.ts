@@ -1,5 +1,6 @@
 import { networkInterfaces } from "os";
 import { resolve } from "path";
+import { parseStrictInteger } from "./utils/strict-integer";
 
 /** Returns all non-internal IPv4 addresses on the machine's LAN interfaces. */
 function getLanIPs(): string[] {
@@ -23,6 +24,20 @@ export interface EnvConfig {
   /** @deprecated Use resolveEncryptionKey() instead. Kept for migration only. */
   encryptionKey: string;
   dataDir: string;
+  /**
+   * Explicit LanceDB directory override (`LUMIVERSE_LANCEDB_DIR`), or null when
+   * unset. When null, the store auto-selects `<dataDir>/lancedb` if that
+   * filesystem supports Lance commits, otherwise local ephemeral disk. See
+   * `utils/lancedb-storage.ts`.
+   */
+  lancedbDirOverride: string | null;
+  /**
+   * Ephemeral runtime root (`LUMIVERSE_RUNTIME_DIR`), or null when unset. When
+   * LanceDB must be relocated off an object-storage `DATA_DIR`, its store is
+   * placed under `<runtimeDir>/lancedb`. Defaults to `/app/runtime-data` so a
+   * container never writes vectors back onto the persistent mount.
+   */
+  runtimeDir: string | null;
   /**
    * Default disk warning usage threshold as a 0..1 ratio. The warning fires
    * only when this AND diskWarningMinFreeBytes are both crossed.
@@ -144,8 +159,8 @@ export function loadEnv(): EnvConfig {
   // Validate PORT — out-of-range values used to be silently passed to Bun.serve,
   // which then failed at bind time with a confusing native error.
   const portRaw = process.env.PORT || "7860";
-  const port = parseInt(portRaw, 10);
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+  const port = parseStrictInteger(portRaw);
+  if (port === undefined || port < 1 || port > 65535) {
     throw new Error(`Invalid PORT "${portRaw}": must be an integer in 1..65535`);
   }
 
@@ -154,6 +169,22 @@ export function loadEnv(): EnvConfig {
   // Resolve to absolute path at startup so file operations are immune to
   // CWD changes — critical on Termux where proot/grun wrappers can shift CWD.
   const dataDir = resolve(process.env.DATA_DIR || "./data");
+  // Vectors are derived state: every vector is rebuildable from the durable
+  // SQLite rows in `dataDir`. It nonetheless needs real local-filesystem
+  // semantics (atomic rename) to commit safely, which object-storage mounts
+  // such as HF Storage Buckets / Mountpoint-for-S3 do not provide. When
+  // `DATA_DIR` lives on such a mount, point LanceDB at a genuinely local,
+  // ephemeral directory instead and let the startup rebuild re-create vectors
+  // from SQLite. The location is `<LUMIVERSE_RUNTIME_DIR>/lancedb`, defaulting
+  // to the in-container `/app/runtime-data` or the OS temp dir. Explicit
+  // overrides win so classic local-disk deployments keep vectors under `dataDir`.
+  const lanceDbDirRaw = process.env.LUMIVERSE_LANCEDB_DIR?.trim();
+  const lancedbDirOverride = lanceDbDirRaw ? resolve(lanceDbDirRaw) : null;
+  // Ephemeral runtime root for relocated vectors. `undefined` (unset) lets the
+  // resolver apply its container default (`/app/runtime-data`); an empty string
+  // would otherwise silently collapse to the CWD.
+  const runtimeDirRaw = process.env.LUMIVERSE_RUNTIME_DIR?.trim();
+  const runtimeDir = runtimeDirRaw ? resolve(runtimeDirRaw) : null;
   const diskWarningUsageThreshold = parseRatioOrPercentEnv(
     "LUMIVERSE_DISK_WARNING_USAGE_PERCENT",
     DEFAULT_DISK_WARNING_USAGE_THRESHOLD,
@@ -247,6 +278,8 @@ export function loadEnv(): EnvConfig {
     port,
     encryptionKey,
     dataDir,
+    lancedbDirOverride,
+    runtimeDir,
     diskWarningUsageThreshold,
     diskWarningMinFreeBytes,
     frontendDir,

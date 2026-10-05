@@ -88,6 +88,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE settings (
     key TEXT NOT NULL, value TEXT NOT NULL, user_id TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (key, user_id)

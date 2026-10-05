@@ -48,6 +48,26 @@ function initDispatcherDb(): void {
     -- ALTER TABLE append order.
     connection_id TEXT
   )`);
+  // The dispatcher reads the committed edit identity off this table's stored
+  // cursor before dispatching, so every dispatchable fixture must carry a real
+  // cursor row. Mirrors the production shape (chats.service INSERT).
+  getDb().run(`CREATE TABLE edit_and_send_requests (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL,
+    branch_chat_id TEXT NOT NULL,
+    edited_message_id TEXT NOT NULL,
+    target_message_id TEXT,
+    target_swipe_index INTEGER,
+    generation_id TEXT NOT NULL,
+    response TEXT NOT NULL,
+    cursor TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE (user_id, chat_id, request_id)
+  )`);
   getDb().run(`CREATE TABLE messages (
     id TEXT PRIMARY KEY,
     chat_id TEXT NOT NULL,
@@ -112,6 +132,64 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
     overrides.updated_at as SQLQueryBindings ?? now,
   );
   return id;
+}
+
+/**
+ * Seed the stored request cursor the dispatcher reads before dispatching, shaped
+ * exactly like the production `chats.service.editAndSend` write: the cursor
+ * carries the generation cursor plus the committed edit identity, and its
+ * `chatId` is the chat the generation runs in (the branch chat). By default it
+ * is derived from the matching outbox row so the two can never disagree. Pass
+ * `cursor` to write a deliberately mismatched/absent payload for the
+ * strict-validation cases.
+ */
+function insertRequestCursor(overrides: {
+  user_id?: string;
+  chat_id?: string;
+  request_id: string;
+  branch_chat_id?: string;
+  edited_message_id?: string;
+  generation_id?: string;
+  cursor?: unknown;
+}): void {
+  const userId = overrides.user_id ?? "u1";
+  const chatId = overrides.chat_id ?? "c1";
+  const branchChatId = overrides.branch_chat_id ?? "b1";
+  const editedMessageId = overrides.edited_message_id ?? "m1";
+  const generationId = overrides.generation_id ?? `gen-${overrides.request_id}`;
+  const cursor =
+    overrides.cursor !== undefined
+      ? overrides.cursor
+      : {
+          generationId,
+          chatId: branchChatId,
+          requestId: overrides.request_id,
+          mode: "normal",
+          editAndSendContext: { editedUserMessageId: editedMessageId, committedRevision: 1 },
+        };
+  const now = Date.now();
+  getDb().query(
+    `INSERT INTO edit_and_send_requests (
+      id, user_id, chat_id, request_id, request_fingerprint, branch_chat_id,
+      edited_message_id, target_message_id, target_swipe_index, generation_id,
+      response, cursor, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    crypto.randomUUID(),
+    userId,
+    chatId,
+    overrides.request_id,
+    "fp",
+    branchChatId,
+    editedMessageId,
+    null,
+    null,
+    generationId,
+    "{}",
+    JSON.stringify(cursor),
+    now,
+    now,
+  );
 }
 
 beforeEach(() => {
@@ -179,6 +257,7 @@ describe("edit-and-send dispatcher", () => {
       generation_id: "gen-fail",
       status: "pending",
     });
+    insertRequestCursor({ request_id: "req-fail", generation_id: "gen-fail" });
     const failed = await dispatchEditAndSendRequest("u1", "c1", "req-fail");
     expect(failed?.status).toBe("failed");
     expect(failed?.last_error_code).toBe("provider_down");
@@ -191,6 +270,11 @@ describe("edit-and-send dispatcher", () => {
       mode: "swipe",
       target_message_id: "asst-1",
       target_swipe_index: 1,
+    });
+    insertRequestCursor({
+      request_id: "req-run",
+      generation_id: "gen-run",
+      edited_message_id: "m1",
     });
     const running = await dispatchEditAndSendRequest("u1", "c1", "req-run");
     expect(running?.status).toBe("running");
@@ -371,6 +455,10 @@ describe("edit-and-send dispatcher", () => {
       generation_id: "gen-fresh",
       status: "pending",
     });
+    // Both stale-claim and fresh rows reach dispatch, so each needs a real
+    // cursor keyed to its own request/generation/branch chat.
+    insertRequestCursor({ request_id: "req-stale", generation_id: "gen-stale" });
+    insertRequestCursor({ request_id: "req-fresh", generation_id: "gen-fresh" });
 
     const dispatched = await recoverEditAndSendOutbox();
     expect(dispatched).toBe(2);
@@ -479,5 +567,171 @@ describe("edit-and-send dispatcher", () => {
     expect(row?.terminal_reason).toBe("output_not_verified");
     expect(row?.last_error_code).toBe("output_not_verified");
     expect(row?.lease_owner).toBeNull();
+  });
+
+  test("dispatches the validated committed context to startGeneration", async () => {
+    const observed: Array<{ generationId: string; context?: unknown }> = [];
+    setEditAndSendStartGeneration(async (input, options) => {
+      observed.push({ generationId: input.generationId, context: options?.editAndSendContext });
+      return { generationId: input.generationId, status: "streaming" };
+    });
+
+    insertOutbox({ id: "ctx-row", request_id: "req-ctx", generation_id: "gen-ctx" });
+    insertRequestCursor({
+      request_id: "req-ctx",
+      generation_id: "gen-ctx",
+      edited_message_id: "m1",
+      cursor: {
+        generationId: "gen-ctx",
+        chatId: "b1",
+        requestId: "req-ctx",
+        mode: "normal",
+        editAndSendContext: { editedUserMessageId: "m1", committedRevision: 5 },
+      },
+    });
+
+    const running = await dispatchEditAndSendRequest("u1", "c1", "req-ctx");
+    expect(running?.status).toBe("running");
+    expect(observed).toEqual([
+      { generationId: "gen-ctx", context: { editedUserMessageId: "m1", committedRevision: 5 } },
+    ]);
+  });
+
+  test("invalid or absent committed cursors fail closed terminally without retry", async () => {
+    const started: string[] = [];
+    setEditAndSendStartGeneration(async (input) => {
+      started.push(input.generationId);
+      return { generationId: input.generationId, status: "streaming" };
+    });
+
+    const cases: Array<{ label: string; overrides: Parameters<typeof insertRequestCursor>[0] }> = [
+      {
+        label: "generation mismatch",
+        overrides: {
+          request_id: "req-gen-mismatch",
+          generation_id: "gen-gen-mismatch",
+          cursor: {
+            generationId: "some-other-gen",
+            chatId: "b1",
+            requestId: "req-gen-mismatch",
+            mode: "normal",
+            editAndSendContext: { editedUserMessageId: "m1", committedRevision: 1 },
+          },
+        },
+      },
+      {
+        label: "branch chat mismatch",
+        overrides: {
+          request_id: "req-chat-mismatch",
+          generation_id: "gen-chat-mismatch",
+          cursor: {
+            generationId: "gen-chat-mismatch",
+            chatId: "some-other-chat",
+            requestId: "req-chat-mismatch",
+            mode: "normal",
+            editAndSendContext: { editedUserMessageId: "m1", committedRevision: 1 },
+          },
+        },
+      },
+      {
+        label: "edited message mismatch",
+        overrides: {
+          request_id: "req-edited-mismatch",
+          generation_id: "gen-edited-mismatch",
+          cursor: {
+            generationId: "gen-edited-mismatch",
+            chatId: "b1",
+            requestId: "req-edited-mismatch",
+            mode: "normal",
+            editAndSendContext: { editedUserMessageId: "some-other-message", committedRevision: 1 },
+          },
+        },
+      },
+      {
+        label: "non-integer revision",
+        overrides: {
+          request_id: "req-bad-rev",
+          generation_id: "gen-bad-rev",
+          cursor: {
+            generationId: "gen-bad-rev",
+            chatId: "b1",
+            requestId: "req-bad-rev",
+            mode: "normal",
+            editAndSendContext: { editedUserMessageId: "m1", committedRevision: 0 },
+          },
+        },
+      },
+      {
+        label: "missing editAndSendContext",
+        overrides: {
+          request_id: "req-no-context",
+          generation_id: "gen-no-context",
+          cursor: {
+            generationId: "gen-no-context",
+            chatId: "b1",
+            requestId: "req-no-context",
+            mode: "normal",
+          },
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      const requestId = testCase.overrides.request_id;
+      insertOutbox({
+        id: `row-${requestId}`,
+        request_id: requestId,
+        generation_id: testCase.overrides.generation_id ?? `gen-${requestId}`,
+        status: "pending",
+      });
+      insertRequestCursor(testCase.overrides);
+
+      const result = await dispatchEditAndSendRequest("u1", "c1", requestId);
+      expect(result?.status).toBe("failed");
+      expect(result?.last_error_code).toBe("edit_and_send_context_invalid");
+      expect(result?.terminal_reason).toBe("edit_and_send_context_invalid");
+      expect(result?.next_attempt_at).toBeNull();
+
+      // A second dispatch attempt must not retry: the row is terminal `failed`.
+      const retry = await dispatchEditAndSendRequest("u1", "c1", requestId);
+      expect(retry?.status).toBe("failed");
+      expect(retry?.last_error_code).toBe("edit_and_send_context_invalid");
+    }
+
+    // A row with NO request cursor at all fails closed too.
+    insertOutbox({ id: "row-no-cursor", request_id: "req-no-cursor", generation_id: "gen-no-cursor" });
+    const noCursor = await dispatchEditAndSendRequest("u1", "c1", "req-no-cursor");
+    expect(noCursor?.status).toBe("failed");
+    expect(noCursor?.last_error_code).toBe("edit_and_send_context_invalid");
+
+    expect(started).toEqual([]);
+  });
+
+  test("context validation is scoped per user: another user's request cursor never authorizes this row", async () => {
+    const started: string[] = [];
+    setEditAndSendStartGeneration(async (input) => {
+      started.push(input.generationId);
+      return { generationId: input.generationId, status: "streaming" };
+    });
+
+    // The cursor exists, but for user "alpha" on the same chat/request id.
+    insertOutbox({
+      id: "cross-user-row",
+      request_id: "req-cross-user",
+      user_id: "beta",
+      chat_id: "c1",
+      branch_chat_id: "b1",
+      generation_id: "gen-cross-user",
+    });
+    insertRequestCursor({
+      user_id: "alpha",
+      request_id: "req-cross-user",
+      generation_id: "gen-cross-user",
+    });
+
+    const result = await dispatchEditAndSendRequest("beta", "c1", "req-cross-user");
+    expect(result?.status).toBe("failed");
+    expect(result?.last_error_code).toBe("edit_and_send_context_invalid");
+    expect(started).toEqual([]);
   });
 });

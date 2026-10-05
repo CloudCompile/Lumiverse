@@ -1,3 +1,4 @@
+import { createFrontendSTTAPI } from './stt-api'
 import type { SpindleManifest } from 'lumiverse-spindle-types'
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { JSDOM } from 'jsdom'
@@ -269,6 +270,7 @@ mock.module('./message-interceptors', () => ({
   subscribeTagInterceptorRegistry: () => () => {},
   unregisterTagInterceptorsByExtension() {},
 }))
+const wrappingRevocations: string[] = []
 mock.module('./display-resolver-registry', () => ({
   getDisplayOwnerIdentifier: () => null,
   getDisplayResolverForChat: () => null,
@@ -278,6 +280,7 @@ mock.module('./display-resolver-registry', () => ({
     return () => {}
   },
   unregisterDisplayResolver() {},
+  revokeInlineCardWrappingOptOut: (identifier: string) => { wrappingRevocations.push(identifier) },
 }))
 mock.module('@/hooks/useDisplayRegex', () => ({
   invalidateDisplayRegexCache() {},
@@ -332,6 +335,17 @@ mock.module('./browser-scheduler', () => ({ yieldToBrowser: async () => {}, sche
 // lifecycle test exercises the loader boundary, so keep that compile-time-only
 // module graph behind its adapter rather than weakening the production macros.
 mock.module('./theme-authoring-native', () => ({ createNativeThemeAuthoringAPI: () => ({}) }))
+mock.module('./stt-native', () => ({ createNativeSTTAPI: (deps: Parameters<typeof createFrontendSTTAPI>[0]) => createFrontendSTTAPI({
+  ...deps,
+  getConfig: () => ({ provider: 'whistle', language: 'en', continuous: false, interimResults: true }),
+  listProviders: () => [{ id: 'whistle', name: 'Whistle', onDevice: true, available: true, supportsAudioTranscription: true }],
+  prepare: async () => {},
+  transcribe: async () => ({ text: 'hello', provider: 'whistle' }),
+  createEngine: () => ({
+    start() {}, stop() {}, destroy() {}, isListening: () => true,
+    onResult() {}, onError() {}, onStop() {}, onAudioFrame() {},
+  }),
+}) }))
 
 // These factories intentionally load after the narrow store and visual-component
 // mocks; the real production helpers retain the mocked boundary references.
@@ -1492,4 +1506,65 @@ describe('retained non-UI context lifecycle', () => {
       loaderGlobals.__characterCalls = undefined
     }
   })
+})
+
+
+test('wrapper opt-out requires app manipulation and is revoked without removing the resolver', async () => {
+  const id = 'wrapper-opt-out'
+  const manifest = placementManifest(id)
+  const globals = globalThis as typeof globalThis & Record<string, any>
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__wrappingContext')
+  try {
+    mockedGrantedPermissions = []
+    await loadPlacementBundle(id, manifest, 'export function setup(ctx) { globalThis.__wrappingContext = ctx }')
+    const ctx = globals.__wrappingContext
+    const resolver = { ready: () => true, resolveBody: async () => null, resolveTemplates: async () => null, applyScripts: async () => null }
+    expect(() => ctx.display.registerResolver(resolver)).not.toThrow()
+    const count = displayRegistrations
+    expect(() => ctx.display.registerResolver({ ...resolver, skipInlineCardWrapping: true })).toThrow('PERMISSION_DENIED:app_manipulation')
+    expect(displayRegistrations).toBe(count)
+    const handlers = loaderWsHandlers.get('SPINDLE_PERMISSION_CHANGED') ?? []
+    expect(handlers).toHaveLength(1)
+    for (const handler of handlers) handler({ extensionId: id, allGranted: ['app_manipulation'] })
+    expect(() => ctx.display.registerResolver({ ...resolver, skipInlineCardWrapping: true })).not.toThrow()
+    wrappingRevocations.length = 0
+    for (const handler of handlers) handler({ extensionId: id, allGranted: [] })
+    expect(wrappingRevocations).toEqual([manifest.identifier])
+    expect(() => ctx.display.registerResolver({ ...resolver, skipInlineCardWrapping: true })).toThrow('PERMISSION_DENIED:app_manipulation')
+    expect(() => ctx.display.registerResolver(resolver)).not.toThrow()
+  } finally {
+    await unloadFrontendExtension(id)
+    restoreGlobalProperty('__wrappingContext', descriptor)
+  }
+})
+
+test('speech is exposed with its capability and cancels on media revoke and unload', async () => {
+  const id = 'speech-lifecycle'
+  const manifest = { ...placementManifest(id), permissions: ['media'] as SpindleManifest['permissions'] }
+  const globals = globalThis as typeof globalThis & Record<string, any>
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__speechContext')
+  try {
+    mockedGrantedPermissions = ['media']
+    await loadPlacementBundle(id, manifest, 'export function setup(ctx) { globalThis.__speechContext = ctx }')
+    const ctx = globals.__speechContext
+    expect(ctx.host.capabilities['speech-to-text-v1']).toBe(1)
+    expect(ctx.stt.listProviders()[0].id).toBe('whistle')
+    const session = ctx.stt.start({ provider: 'whistle' })
+    await session.ready
+    for (const handler of loaderWsHandlers.get('SPINDLE_PERMISSION_CHANGED') ?? []) {
+      handler({ extensionId: id, allGranted: [] })
+    }
+    await expect(session.result).rejects.toMatchObject({ name: 'AbortError' })
+    expect(() => ctx.stt.start()).toThrow('PERMISSION_DENIED:media')
+    for (const handler of loaderWsHandlers.get('SPINDLE_PERMISSION_CHANGED') ?? []) {
+      handler({ extensionId: id, allGranted: ['media'] })
+    }
+    const next = ctx.stt.start()
+    await unloadFrontendExtension(id)
+    await expect(next.result).rejects.toMatchObject({ name: 'AbortError' })
+    expect(() => ctx.stt.start()).toThrow('SPINDLE_FRONTEND_INACTIVE')
+  } finally {
+    await unloadFrontendExtension(id)
+    restoreGlobalProperty('__speechContext', descriptor)
+  }
 })

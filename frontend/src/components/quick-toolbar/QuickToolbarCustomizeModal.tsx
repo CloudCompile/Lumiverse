@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { GripVertical, RotateCcw, Search } from 'lucide-react'
 import {
-  DndContext,
   closestCenter,
   KeyboardSensor,
   MouseSensor,
@@ -20,7 +19,7 @@ import {
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { Toggle } from '@/components/shared/Toggle'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { filterActionIds, filterActions } from '@/lib/toolbarActionSearch'
 import {
   isAutoFitToolbarBounds,

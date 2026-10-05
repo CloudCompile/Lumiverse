@@ -5,7 +5,6 @@ import { persistKey } from '@/store/slices/settings'
 import { DEFAULT_HOMEPAGE_CHARACTER_LIBRARY_SETTINGS, DEFAULT_QUICK_TOOLBAR_BACKDROP_COLOR, PRODUCTIVITY_DEFAULTS, isMobileViewportOrDevice } from '@/lib/uiProductivityDefaults'
 import { ChevronDown, ChevronUp, GripVertical, Plus, Search, Trash2 } from 'lucide-react'
 import {
-  DndContext,
   closestCenter,
   KeyboardSensor,
   MouseSensor,
@@ -34,7 +33,7 @@ import {
 } from '@/components/quick-toolbar/quickToolbarDock'
 import { keepDockEnabledWhenFloating } from '@/lib/uiProductivityDefaults'
 import { canMoveWithinFiltered, filterActionIds, moveWithinFiltered } from '@/lib/toolbarActionSearch'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { connectionsApi } from '@/api/connections'
 import { getConnectionProfileTagIds } from '@/lib/connectionsPicker'
 import { useTokenizerAvailability } from '@/hooks/useTokenCounts'

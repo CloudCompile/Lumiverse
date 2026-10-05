@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Toggle } from '@/components/shared/Toggle'
+import { MIN_UI_SCALE, MAX_UI_SCALE, normalizeUiScale } from '@/lib/uiScale'
 import type { DesktopBackground, RenderingMode } from '@/types/theme'
 import styles from './DepthControls.module.css'
 
@@ -131,11 +132,11 @@ export default function DepthControls({
   // This gives visual feedback during drag without triggering expensive
   // theme recalculations on every step.
   const [localFontScale, setLocalFontScale] = useState(fontScale)
-  const [localUiScale, setLocalUiScale] = useState(uiScale)
+  const [localUiScale, setLocalUiScale] = useState(() => normalizeUiScale(uiScale))
   const resolvedDesktopBackground = parseDesktopBackground(desktopBackground?.color)
 
   useEffect(() => { setLocalFontScale(fontScale) }, [fontScale])
-  useEffect(() => { setLocalUiScale(uiScale) }, [uiScale])
+  useEffect(() => { setLocalUiScale(normalizeUiScale(uiScale)) }, [uiScale])
 
   return (
     <div className={styles.controls}>
@@ -178,15 +179,15 @@ export default function DepthControls({
         <span className={styles.label}>{t('uiScale')}</span>
         <input
           type="range"
-          min={0.8}
-          max={1.5}
+          min={MIN_UI_SCALE}
+          max={MAX_UI_SCALE}
           step={0.05}
           value={localUiScale}
           onChange={(e) => setLocalUiScale(Number(e.target.value))}
           onPointerUp={(e) => commitFromInput(e, onUiScaleChange)}
           onKeyUp={(e) => commitFromInput(e, onUiScaleChange)}
           className={styles.slider}
-          style={trackFill(localUiScale, 0.8, 1.5)}
+          style={trackFill(localUiScale, MIN_UI_SCALE, MAX_UI_SCALE)}
         />
         <span className={styles.value}>{localUiScale.toFixed(2)}x</span>
       </label>

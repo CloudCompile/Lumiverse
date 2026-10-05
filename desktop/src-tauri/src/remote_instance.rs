@@ -35,6 +35,16 @@ pub struct RemoteInstanceState {
     sessions: Mutex<HashMap<String, RemoteOAuthSession>>,
 }
 
+impl RemoteInstanceState {
+    pub(crate) fn capture_access_token(&self, origin: &str) -> Option<String> {
+        self.sessions
+            .lock().ok()?
+            .get(origin)
+            .filter(|session| session.access_expires_at > Instant::now() + Duration::from_secs(20))
+            .map(|session| session.access_token.clone())
+    }
+}
+
 #[derive(Clone)]
 struct RemoteOAuthSession {
     access_token: String,
@@ -109,6 +119,10 @@ pub struct RemoteInstanceSnapshot {
 }
 
 impl RemoteInstanceSnapshot {
+    pub(crate) fn capture_account(&self) -> Option<(&str, &str)> {
+        self.account.as_ref().map(|account| (account.id.as_str(), account.name.as_str()))
+    }
+
     fn empty(origin: &str, state: RemoteConnectionPhase, error: Option<String>) -> Self {
         Self {
             state,
@@ -653,7 +667,7 @@ pub async fn remote_instance_connect(
         })
 }
 
-async fn poll_remote_instance(
+pub(crate) async fn poll_remote_instance(
     state: &RemoteInstanceState,
     origin: String,
 ) -> RemoteInstanceSnapshot {
@@ -832,11 +846,13 @@ pub async fn remote_instance_poll(
 
 #[tauri::command]
 pub async fn remote_instance_disconnect(
+    app: AppHandle,
     state: State<'_, RemoteInstanceState>,
     origin: String,
 ) -> Result<(), String> {
     let origin = normalize_origin(&origin)?;
     let canonical_origin = origin.as_str().trim_end_matches('/').to_string();
+    crate::capture::stop(&app, Some(&canonical_origin));
     state.sessions.lock().unwrap().remove(&canonical_origin);
     delete_refresh_token(canonical_origin).await
 }

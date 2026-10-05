@@ -235,6 +235,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     const toolCallBuffer: { id: string; name: string; argsJson: string }[] = [];
     const reasoningDetails = new ReasoningDetailsAccumulator();
     let finishReason: string | undefined;
+    let stopReceivedAt: number | undefined;
     let nativeReason: string | undefined;
     let refusal = "";
     let finalUsage: StreamChunk["usage"];
@@ -243,7 +244,10 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       throwIfProviderError(parsed, this.displayName, STREAM_OPERATION);
       const choice = parsed.choices?.[0];
       const delta = choice?.delta;
-      if (choice?.finish_reason && !describeGenerationStop(finishReason)) finishReason = choice.finish_reason;
+      if (choice?.finish_reason && !describeGenerationStop(finishReason)) {
+        finishReason = choice.finish_reason;
+        stopReceivedAt = Date.now();
+      }
       if (choice?.native_finish_reason) nativeReason = choice.native_finish_reason;
       if (typeof delta?.refusal === "string") refusal += delta.refusal;
 
@@ -291,6 +295,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
     yield {
       token: "",
       finish_reason: toolCalls && ["stop", "tool_calls", "function_call"].includes(finishReason) ? "tool_calls" : finishReason,
+      stopReceivedAt,
       ...(stopDetails ? { stop_details: stopDetails } : {}),
       tool_calls: toolCalls, reasoning_details: reasoningDetails.finalize(), usage: finalUsage,
     };

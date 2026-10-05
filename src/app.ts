@@ -70,6 +70,8 @@ import { bootstrapRoutes } from "./routes/bootstrap.routes";
 import { signupRoutes } from "./routes/signup.routes";
 import { userDataRoutes } from "./routes/user-data.routes";
 import { leaderboardRoutes } from "./routes/leaderboard.routes";
+import { cardAgentRoutes } from "./routes/card-agent.routes";
+import { cardCreatorRoutes } from "./routes/card-creator.routes";
 import { streamDeckIntegrationRoutes, streamDeckManagementRoutes } from "./routes/stream-deck.routes";
 import { wsHandler } from "./ws/handler";
 import { issueTicket } from "./ws/tickets";
@@ -164,7 +166,7 @@ app.use("/api/*", async (c, next) => {
 // sum of all images even though every individual file is well under the cap.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (isLargeUploadBodyLimitExemptPath(path)) {
+  if (isLargeUploadBodyLimitExemptPath(path, c.req.method)) {
     return next();
   }
   return bodyLimit({
@@ -567,6 +569,8 @@ app.route("/api/v1/global-addons", globalAddonsRoutes);
 app.route("/api/v1/bootstrap", bootstrapRoutes);
 app.route("/api/v1/user-data", userDataRoutes);
 app.route("/api/v1/leaderboard", leaderboardRoutes);
+app.route("/api/v1/card-agent", cardAgentRoutes);
+app.route("/api/v1/card-creator", cardCreatorRoutes);
 app.route("/api/v1/stream-deck", streamDeckManagementRoutes);
 
 // Issue single-use WS tickets (behind auth middleware)

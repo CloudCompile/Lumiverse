@@ -1,12 +1,12 @@
 import type { TFunction } from 'i18next'
-import type { SettingsSlice } from '@/types/store'
+import type { SavedTheme, SettingsSlice } from '@/types/store'
 import type { themeAssetsApi } from '@/api/theme-assets'
 import type { toast } from '@/lib/toast'
 import { createThemePack, exportThemePack, importThemePack, packSummary, type ThemePackAsset } from './themePack'
 import { disableImportedThemePackTsx } from './componentOverrideSecurity'
 import { generateUUID } from './uuid'
 
-type ThemePackState = Pick<SettingsSlice, 'theme' | 'customCSS' | 'componentOverrides' | 'applyThemePack' | 'addSavedTheme'>
+type ThemePackState = Pick<SettingsSlice, 'theme' | 'customCSS' | 'componentOverrides' | 'savedThemes' | 'applyThemePack' | 'addSavedTheme'>
 
 interface ThemePackServices {
   t: TFunction<'modals', 'customCss'>
@@ -28,9 +28,15 @@ function base64ToFile(dataBase64: string, filename: string, mimeType: string): F
   return new File([bytes], filename, { type: mimeType })
 }
 
+function activeSavedThemeName(savedThemes: SavedTheme[], bundleId: string | null): string | null {
+  if (!bundleId) return null
+  const active = savedThemes.find((entry) => entry.kind === 'pack' && entry.pack.bundleId === bundleId)
+  return active?.name.trim() || null
+}
+
 /** Shared bundle actions for Settings and the Theme Editor. */
 export function createThemePackActions(
-  { theme, customCSS, componentOverrides, applyThemePack, addSavedTheme }: ThemePackState,
+  { theme, customCSS, componentOverrides, savedThemes, applyThemePack, addSavedTheme }: ThemePackState,
   { t, themeAssetsApi, toast }: ThemePackServices,
 ) {
   const buildPackAssets = async (): Promise<ThemePackAsset[]> => {
@@ -54,7 +60,7 @@ export function createThemePackActions(
     try {
       const assets = await buildPackAssets()
       const pack = createThemePack(theme, customCSS, componentOverrides, assets, {
-        name: theme?.name || t('customThemeName'),
+        name: activeSavedThemeName(savedThemes, customCSS.bundleId) || theme?.name || t('customThemeName'),
       })
       exportThemePack(pack)
       toast.success(t('exportSuccess'))
@@ -76,7 +82,11 @@ export function createThemePackActions(
     const imported = disableImportedThemePackTsx(result.pack)
     const pack = imported.pack
     const localBundleId = generateUUID()
-    const localizedPack = { ...pack, bundleId: localBundleId }
+    const localizedPack = {
+      ...pack,
+      bundleId: localBundleId,
+      theme: pack.theme ? { ...pack.theme, name: pack.name } : null,
+    }
     try {
       for (const asset of localizedPack.assets) {
         const file = base64ToFile(asset.dataBase64, asset.originalFilename, asset.mimeType)

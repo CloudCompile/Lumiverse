@@ -19,6 +19,7 @@ import {
   importCharacterBoundRegexScripts,
   installLumiHubPresetRegexScripts,
   importPresetBoundRegexScripts,
+  MAX_REGEX_PATTERN_LENGTH,
   resolveLumiHubPresetRegexInstallFolder,
   retireLumiHubPresetRegexScriptsForUpdate,
   reportRegexScriptPerformance,
@@ -1236,6 +1237,22 @@ describe("regex performance reporting", () => {
       flags: "gg",
     });
     expect(typeof result).toBe("string");
+  });
+
+  test("accepts bounded large patterns and rejects patterns over 50k", () => {
+    const accepted = createRegexScript(USER_ID, {
+      name: "Large imported pattern",
+      find_regex: "a".repeat(27_302),
+      flags: "g",
+    });
+    expect(typeof accepted).not.toBe("string");
+
+    const rejected = createRegexScript(USER_ID, {
+      name: "Oversized pattern",
+      find_regex: "a".repeat(MAX_REGEX_PATTERN_LENGTH + 1),
+      flags: "g",
+    });
+    expect(rejected).toBe("find_regex exceeds maximum length");
   });
 });
 

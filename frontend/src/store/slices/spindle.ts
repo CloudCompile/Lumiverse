@@ -207,8 +207,8 @@ export const createSpindleSlice: StateCreator<SpindleSlice> = (set, get) => ({
     })
   },
 
-  enableExtension: async (id: string) => {
-    await spindleApi.enable(id)
+  enableExtension: async (id: string, approvedPermissions?: string[]) => {
+    await spindleApi.enable(id, approvedPermissions)
     set((state) => ({
       extensions: state.extensions.map((e) =>
         e.id === id ? { ...e, enabled: true, status: 'running' as const } : e

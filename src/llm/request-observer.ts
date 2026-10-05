@@ -1,4 +1,5 @@
 export interface RequestOrigin {
+  sensitiveMedia?: boolean;
   kind: "chat" | "sidecar" | "extension" | "api";
   name: string;
   operation?: string;

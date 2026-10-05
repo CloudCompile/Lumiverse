@@ -26,6 +26,7 @@ export interface SpawnAsyncOptions {
   /** Kill the subprocess after this many ms. Returns timedOut: true. */
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
+  windowsVerbatimArguments?: boolean;
   /** Discard stdout instead of capturing. */
   ignoreStdout?: boolean;
   /** Observe output as it arrives while retaining the bounded error snapshot. */
@@ -108,6 +109,7 @@ export async function spawnAsync(
     cmd,
     cwd: opts.cwd,
     env: opts.env,
+    windowsVerbatimArguments: opts.windowsVerbatimArguments,
     stdin: "ignore",
     stdout: opts.ignoreStdout ? "ignore" : "pipe",
     stderr: "pipe",

@@ -9,7 +9,7 @@ describe('Linux desktop UI scale contract', () => {
   test('tags Linux runtimes and uses composable scaling instead of WebKitGTK zoom', () => {
     expect(mainSource).toMatch(/\^Linux[\s\S]*setAttribute\('data-platform', 'linux'\)/)
     expect(resetCss).toMatch(
-      /html\[data-tauri-desktop\]\[data-platform='linux'\] body > \*\s*\{[\s\S]*?zoom:\s*1;[\s\S]*?scale:\s*var\(--lumiverse-ui-scale, 1\);[\s\S]*?transform-origin:\s*top left;/,
+      /html\[data-tauri-desktop\]\[data-platform='linux'\] body\s*\{[\s\S]*?zoom:\s*1;[\s\S]*?scale:\s*var\(--lumiverse-ui-scale, 1\);[\s\S]*?transform-origin:\s*top left;/,
     )
   })
 })

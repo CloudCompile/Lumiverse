@@ -1,6 +1,15 @@
 /** Homepage/library ownership scope for a character. */
 export type CharacterLibraryScope = "mine" | "shared";
 
+/**
+ * Distinguishes the ordinary library cards from the single seeded Card Creator.
+ *
+ * The creator is a real character so the normal chat path can resolve it — a
+ * chat with it works like any RP card. The flag exists so listing, deletion, and
+ * duplication can treat it specially.
+ */
+export type CharacterKind = "standard" | "card_creator";
+
 export interface Character {
   id: string;
   name: string;
@@ -20,6 +29,7 @@ export interface Character {
   alternate_greetings: string[];
   extensions: Record<string, any>;
   library_scope?: CharacterLibraryScope;
+  kind?: CharacterKind;
   created_at: number;
   updated_at: number;
 }

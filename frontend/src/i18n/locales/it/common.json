@@ -6,6 +6,14 @@
     "server": "La modalità tema sicuro è attiva per questo server. Il CSS personalizzato e gli override dei componenti sono temporaneamente disattivati; rimuovi LUMIVERSE_SAFE_THEME e riavvia per ripristinarli.",
     "both": "La modalità tema sicuro è attiva sia dall’URL sia dal server. Il CSS personalizzato e gli override dei componenti sono temporaneamente disattivati."
   },
+  "windowFileDrop": {
+    "dropToImport": "Trascina i file qui per importarli",
+    "chooseDestination": "Dove vuoi importare questi file?",
+    "unsupported": "Nessun file supportato è stato trascinato.",
+    "characters": "Importa personaggi",
+    "presets": "Importa preset",
+    "worldBooks": "Importa libri del mondo"
+  },
   "actions": {
     "save": "Salva",
     "cancel": "Annulla",

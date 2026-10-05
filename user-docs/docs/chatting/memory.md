@@ -4,119 +4,128 @@ title: Long-Term Memory
 
 # Long-Term Memory
 
-Long-term memory gives the AI the ability to recall relevant moments from earlier in the conversation — even if those moments have long since scrolled out of the context window. It works by chunking your chat history into vectors and retrieving the most relevant pieces on each generation.
+**Chat Memory**, **Long-Term Chat Memory**, and **LTM** refer to the same chat-history recall system. It stores earlier passages as chunks and retrieves context for later replies. **Memory Cortex is optional**: basic Chat Memory works with Cortex disabled.
 
----
+## Which Memory System Am I Using?
 
-## How It Works
+| System | What it supplies | Where to configure it | Prompt macro |
+|--------|------------------|-----------------------|--------------|
+| **Summary / Loom Summary** | One saved, editable story overview, updated manually or by an LLM | Sidebar **Summary** panel | `{{loomSummary}}` |
+| **Chat Memory** | Retrieved passages from earlier messages | **Settings → Advanced → Long-Term Chat Memory**; enable vectorization in **Settings → Embeddings** | `{{memories}}` |
+| **Memory Cortex** | Recall ranked using narrative signals, plus entity facts, relationships, and scene/arc consolidations | **Settings → Memory Cortex**; inspect this chat in sidebar **Memory** | `{{memories}}` for combined context, or individual Cortex macros |
 
-1. Your chat history is split into **chunks** (groups of messages)
-2. Each chunk is converted to a vector embedding (a numerical representation of its meaning)
-3. When you generate a new message, recent context is used as a search query
-4. The most semantically similar chunks are retrieved and injected into the prompt
-5. The AI "remembers" relevant past events, even from hundreds of messages ago
+[Summary](loom-summary.md) is independent and does not require embeddings. Cortex adds analysis to chat chunks; it does not replace the Summary panel's saved summary. See [Memory Cortex](memory-cortex.md) for its setup.
 
-!!! note "Requires Embeddings"
-    Long-term memory requires the [Embeddings](../settings/embeddings.md) system to be configured. Without an embedding provider, memory cannot vectorize or search your chat history.
+### Stored Chunks Versus Vectorized Chunks
 
----
+A **memory chunk** is stored text from your conversation. A **vectorized chunk** also has an embedding, which lets Lumiverse search by meaning. Sidebar **Memory → Stats → Memory chunks** shows the total and how many are vectorized. These are stages of the same system, not separate memory features.
 
-## Quick Presets
+Basic recall normally searches the vector index. While chunks await vectorization, or when an embedding/search request fails, the background refresh can fall back to recent eligible stored chunks. This **recency fallback** does not mean those passages were semantically relevant. Basic recall still requires **Enable embeddings** and **Vectorise chat messages**; switching vectorization off is not a separate non-vector memory mode.
 
-Choose a preset to auto-configure all memory parameters:
+## Set Up Chat Memory Without Cortex
 
-| Preset | Target Tokens | Max Tokens | Overlap | Exclusion Window | Best For |
-|--------|:---:|:---:|:---:|:---:|------------|
-| **Conservative** | 600 | 1,200 | 100 | 30 messages | Tight token budgets, focused recall |
-| **Balanced** | 800 | 1,600 | 120 | 20 messages | General use (recommended) |
-| **Aggressive** | 1,000 | 2,000 | 200 | 15 messages | Long stories where history matters |
-| **Manual** | Custom | Custom | Custom | Custom | Full control over every parameter |
+1. Create an embedding connection in **Connections → Embedding Models**. In **Settings → Embeddings**, enable embeddings, select that connection and model, and run **Test API**. See [Embeddings](../settings/embeddings.md).
+2. In the Embeddings tab, enable **Vectorise chat messages**.
+3. Open **Settings → Advanced → Long-Term Chat Memory**. Choose **Memory Mode → Balanced**. Conservative, Balanced, Aggressive, and Manual live here; these are separate from Cortex's Simple, Standard, and Advanced modes.
+4. Leave **Injection Strategy** at **Macro only**, and add `{{memories}}` to an enabled system prompt block in your active preset, usually before Chat History.
+5. Open your chat and use **Recompile Memories** in the chat input bar's quick menu to prepare existing history. This works with Cortex disabled. Wait for processing before checking the prompt.
 
----
+**Warm Long-Term Chat Memory when opening a chat** in the Advanced tab enables automatic preparation on chat open. Warmup is opt-in; manual recompilation works while it is off.
 
-## Chunking Parameters
+Retrieval reads a background-maintained cache. A cold cache can return no memories while a refresh is scheduled, so the first prompt after opening or changing a chat may have no recall. Short chats may also have no eligible old passages because of the exclusion window.
 
-These control how your chat history is divided into pieces:
+## Memory Mode and Chunking
 
-| Parameter | Description |
-|-----------|-------------|
-| **Target Tokens** | The ideal size for each chunk. The system aims for this length. |
-| **Max Tokens** | Hard ceiling — no chunk exceeds this size. |
-| **Overlap Tokens** | How many tokens of context are shared between adjacent chunks. Prevents information from being lost at chunk boundaries. |
-| **Max Messages / Chunk** | Cap on messages per chunk (0 = unlimited). |
-| **Time Gap Split** | Split chunks when there's a gap of N+ minutes between messages (0 = disabled). |
-| **Split on Scene Breaks** | Automatically split at `---`, `***`, `===` markers. |
+All settings below are in **Settings → Advanced → Long-Term Chat Memory** and save automatically.
 
-**Example:** With target 800 and overlap 120, a long conversation might produce chunks of ~800 tokens each, where the last ~120 tokens of Chunk 1 also appear at the start of Chunk 2. This overlap ensures the AI can follow context across chunk boundaries.
+| Memory Mode | Target Tokens | Max Tokens | Overlap Tokens | Exclusion Window |
+|-------------|:-------------:|:----------:|:--------------:|:----------------:|
+| **Conservative** | 600 | 1,200 | 100 | 30 messages |
+| **Balanced** | 800 | 1,600 | 120 | 20 messages |
+| **Aggressive** | 1,000 | 2,000 | 200 | 15 messages |
+| **Manual** | Custom | Custom | Custom | Custom |
 
----
+Quick modes set these four values. They do **not** set a similarity threshold or change Top-K. Choose **Manual** to edit chunk sizes and the exclusion window yourself.
 
-## Retrieval Parameters
+| Chunking setting | Meaning |
+|------------------|---------|
+| **Target Tokens / Max Tokens** | Desired chunk size and maximum size used when splitting text |
+| **Overlap Tokens** | Text shared across neighboring chunks to preserve boundary context |
+| **Max Messages / Chunk** | Message cap per chunk; 0 removes the cap |
+| **Time Gap Split (min)** | Split after an idle gap; 0 disables this rule |
+| **Split on scene breaks** | Split at recognized scene markers such as `---`, `***`, and `===` |
 
-These control what gets pulled from memory on each generation:
+Use **Recompile Memories** after changing chunking or the embedding model to prepare the current chat's history again. Retrieval and formatting changes do not require rechunking.
 
-| Parameter | Description |
-|-----------|-------------|
-| **Top-K Results** | How many chunks to retrieve (e.g., 4-8). More = broader recall, more tokens used. |
-| **Exclusion Window** | Don't retrieve chunks from the last N messages. These messages are already in the direct context — no need to duplicate them. |
-| **Similarity Threshold** | Minimum relevance score. Chunks below this threshold are excluded even if they're in the top-K. Set to 0 to disable filtering. |
+## Retrieval and Query
 
----
+| Setting | Meaning |
+|---------|---------|
+| **Top-K Results** | Maximum number of retrieved passages; default 4 |
+| **Exclusion Window** | Exclude chunks touching the last N visible, nonempty messages; default 20. Avoids repeating recent history, but does not automatically match your actual context limit. |
+| **Similarity Threshold** | Maximum vector distance allowed. **Lower positive values are stricter**; 0 disables filtering. Keyword-only hits have no vector distance and are excluded when filtering is active. |
+| **Query Context Size** | Recent messages used to form the search query; default 6 |
+| **Query Max Tokens** | Caps text used as the **search query**, not the retrieved memory section's token budget |
 
-## Query Strategy
+**Query Strategy** controls how search text is built:
 
-Controls how the search query is built:
+- **Recent Messages** uses the last Query Context Size messages.
+- **Last User Message** uses the most recent user message.
+- **Weighted Recent** uses recent messages and repeats the newest one to emphasize it.
 
-| Strategy | Description |
-|----------|-------------|
-| **Recent Messages** | Uses the last N messages as the query — casts a broad net |
-| **Last User Message** | Uses only your most recent message — very focused recall |
-| **Weighted Recent** | Gives more weight to the most recent messages in the query |
+Cortex uses shared chunk/query settings and adds its own ranking and **Context Token Budget**. See [Cortex controls](memory-cortex.md#formatting-and-retrieval-controls).
 
-**Query Context Size** determines how many messages feed into the query (for strategies that use multiple messages).
+## Put Memories in the Prompt
 
-**Query Max Tokens** caps the total token budget for retrieved memories in the assembled prompt.
+The simplest enabled system block is:
 
----
+```text
+{{memories}}
+```
 
-## Memory Macros
+It is empty when no recall is available. An optional conditional wrapper is:
 
-Retrieved memories are available in your preset through macros:
+```text
+{{if {{memoriesActive}} = yes}}
+{{memories}}
+{{/if}}
+```
 
 | Macro | Returns |
 |-------|---------|
-| `{{memories}}` | Formatted memory chunks with header template |
-| `{{memoriesRaw}}` | Raw chunks without formatting |
-| `{{memoriesActive}}` | `"yes"` or `"no"` — for conditional blocks |
-| `{{memoriesCount}}` | Number of chunks retrieved |
+| `{{memories}}` | Formatted recall. A usable Cortex result can include graph and arc context too. Aliases: `{{chatMemory}}`, `{{longTermMemory}}`, `{{ltm}}`. |
+| `{{memoriesRaw}}` | Chunks using Chunk Template and Chunk Separator, **without Header Template**. Not unformatted source text or the full Cortex section. |
+| `{{memoriesActive}}` | `yes` when recall is enabled and has chunks or formatted context; otherwise `no` |
+| `{{memoriesCount}}` | Retrieved chunk count; Cortex can supply graph context even when this is 0 |
 
-!!! important "The macro controls *placement*, not *whether* memory injects"
-    Long-term memory injects automatically whenever it is enabled under **Settings → Embeddings → Vectorise chat messages**. The `{{memories}}` macro only controls **where** the retrieved context appears:
+`{{memories::2}}` and `{{memoriesRaw::2}}` limit the chunk list to two when more are available; they do not request another search. A reduced `{{memories::2}}` is reformatted from chunks. Use plain `{{memories}}` for the complete Cortex section.
 
-    - **With** `{{memories}}` in an enabled preset block → memories render at that exact spot, formatted by your templates.
-    - **Without** the macro → memories are still injected, as a system message inserted just before the chat history (a built-in fallback).
+### Injection Strategy
 
-    Removing the macro therefore does **not** stop injection — it only changes the placement. To stop memories from being injected at all, **disable "Vectorise chat messages"** (or turn off [Memory Cortex](memory-cortex.md) if that's your source). You can confirm which path is active in the prompt breakdown / dry-run, which reports the injection method as `macro`, `fallback`, or `disabled`.
+| Strategy | Behavior |
+|----------|----------|
+| **Macro only** (default) | Basic Chat Memory appears only where a memory content macro is used. |
+| **Automatic fallback** | Without a memory content macro in applicable enabled blocks, insert the section as a system message before Chat History. |
+| **Disabled** | Suppress the combined memory section and `{{memories}}` output. |
 
----
+**Cortex exception:** usable Cortex or linked memory context can still receive automatic fallback under **Macro only**. A content macro such as `{{memories}}`, `{{entities}}`, `{{relationships}}`, `{{arc}}`, or `{{characterColors}}` owns placement and prevents that combined fallback. Status/count macros alone do not own placement. See [Cortex prompt placement](memory-cortex.md#put-cortex-in-the-prompt).
 
-## Formatting Templates
+Disabled does not disable standalone Cortex macros. To stop all Cortex output, turn Cortex off globally or for this chat as well. To stop basic recall, turn **Vectorise chat messages** off. Removing a macro alone does not stop every injection path.
 
-Customize how memories appear in the prompt:
+### Formatting Templates
 
-- **Header Template** — Wraps the entire memory section (e.g., `"Relevant past events:\n{{memories}}"`)
-- **Chunk Template** — Formats each individual chunk
-- **Chunk Separator** — Divider between chunks
+Under **Formatting** in the Advanced tab:
 
----
+- **Header Template** wraps the section; `{{memories}}` is replaced with joined chunks.
+- **Chunk Template** formats each hit; supports `{{content}}`, `{{score}}`, `{{startIndex}}`, and `{{endIndex}}`.
+- **Chunk Separator** separates hits.
 
-## Tips
+For example, use a Header Template containing a heading followed by `{{memories}}`, and a Chunk Template of `{{content}}` for simple labeled passages. A recency or keyword-only hit has no vector score and renders `{{score}}` as `n/a`.
 
-!!! tip "Start with Balanced"
-    The Balanced preset works well for most conversations. Switch to Aggressive for epic-length stories, or Conservative if you're running tight on tokens.
+Cortex's **Use Long-Term Chat Memory formatting** preserves these templates for raw retrieved chunks. Cortex's formatter still handles consolidations, entities, relationships, and arcs.
 
-!!! tip "Set a reasonable exclusion window"
-    The exclusion window prevents the system from "remembering" things that are already visible in the current context. A window of 20 means the last 20 messages won't appear as memories (they're already there as chat history).
+## Check What the AI Actually Received
 
-!!! tip "Pair with Loom Summary"
-    Memory and [Loom Summary](loom-summary.md) complement each other. Memory retrieves specific relevant moments; the summary provides a structured overview of the whole story. Use both for the best long-term coherence.
+Inspect the resolved prompt in the prompt breakdown / dry-run. Diagnostics report placement as `macro`, `fallback`, or `disabled`; inspect actual text too, especially with conditions.
+
+If `{{memories}}` is empty, check embeddings and chat vectorization, run **Recompile Memories**, wait for background work, and check whether the exclusion window leaves older passages. Turning Cortex off switches retrieval to basic Chat Memory; it does not show that Cortex is required for LTM. See [Troubleshooting Cortex](memory-cortex.md#troubleshooting-cortex) for Cortex-specific checks.

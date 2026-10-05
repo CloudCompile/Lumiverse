@@ -146,8 +146,22 @@ rebuild_bun_termux_wrapper() {
 }
 
 upgrade_bun_termux() {
-  info "Updating the Bun runtime and bun-termux wrapper..."
-  update_bun_termux_components all
+  local before="$1"
+
+  info "Updating the Bun runtime..."
+  update_bun_termux_components bun || return 1
+
+  _resolve_bun || true
+  local after
+  after="$(_bun --version 2>/dev/null || echo unknown)"
+
+  if [[ "$after" == "$before" ]]; then
+    info "Termux wrapper unchanged because the Bun version did not change"
+    return 0
+  fi
+
+  info "Bun changed: $before -> $after; rebuilding bun-termux wrapper..."
+  update_bun_termux_components wrapper
 }
 
 verify_termux_bun_install_path() {
@@ -568,9 +582,11 @@ ensure_bun() {
 # at $BUN_INSTALL/bin/bun. On native Termux we cannot use `bun upgrade` —
 # Bun's built-in updater probes for `ld` and aborts ("unsupported on systems
 # without ld") because Termux uses bionic, not glibc. Instead we use the
-# bun-termux manager, which atomically replaces both the underlying `buno`
-# runtime and its wrapper. Atomic replacement is required because Android will
-# not allow `cp` to truncate an executable that is currently mapped.
+# bun-termux manager, which atomically replaces the underlying `buno` runtime.
+# The wrapper is rebuilt only when that update changes the Bun version; a no-op
+# stable update leaves the already-working wrapper alone. Atomic replacement is
+# required because Android will not allow `cp` to truncate an executable that is
+# currently mapped.
 upgrade_bun_channel() {
   local channel="$1"
   local before
@@ -589,8 +605,8 @@ upgrade_bun_channel() {
     fi
 
     info "Updating Bun to latest Termux stable (current: $before)..."
-    if ! upgrade_bun_termux; then
-      err "bun-termux upgrade failed. Continuing with the existing $before binary."
+    if ! upgrade_bun_termux "$before"; then
+      err "bun-termux upgrade failed. Continuing with the available Bun runtime."
       return 0
     fi
 
@@ -599,7 +615,11 @@ upgrade_bun_channel() {
 
     local after
     after="$(_bun --version 2>/dev/null || echo unknown)"
-    ok "Bun upgraded via bun-termux: $before -> $after"
+    if [[ "$after" == "$before" ]]; then
+      ok "Bun $after is already up to date"
+    else
+      ok "Bun upgraded via bun-termux: $before -> $after"
+    fi
     return 0
   fi
 
@@ -799,14 +819,16 @@ run_bun_dependency_install() {
 
 verify_backend_dependencies() {
   local dir="$1"
-  (cd "$dir" && _bun -e "await import('better-auth'); await import('@better-auth/oauth-provider')")
+  # glibc-runner/grun currently word-splits argv containing spaces on Termux.
+  # Keep eval probes whitespace-free so fallback runtimes receive one intact -e arg.
+  (cd "$dir" && _bun -e "await(import('better-auth'));await(import('@better-auth/oauth-provider'))")
 }
 
 verify_frontend_dependencies() {
   local dir="$1"
   # Exercise the browser-facing import that reaches Better Auth's transitive
   # core files. Direct-package checks do not catch a partially extracted core.
-  (cd "$dir" && _bun -e "await import('@better-auth/oauth-provider/client')")
+  (cd "$dir" && _bun -e "await(import('@better-auth/oauth-provider/client'))")
 }
 
 verify_dependencies() {
@@ -883,7 +905,15 @@ build_frontend() {
   install_deps "$FRONTEND_DIR" "frontend"
 
   info "Building frontend..."
-  (cd "$FRONTEND_DIR" && _bun run build)
+  (
+    cd "$FRONTEND_DIR"
+    # Keep every Bun hop behind _bun on Termux. Package-script aliases such as
+    # `bun run build` recurse through a shell and can resolve the raw glibc Bun
+    # binary, bypassing grun/proot and failing with "required file not found".
+    _bun run scripts/extract-props.ts
+    _bun run scripts/extract-css-vars.ts
+    _bun run scripts/build-frontend.ts
+  )
   ok "Frontend built -> $FRONTEND_DIR/dist"
 }
 

@@ -22,5 +22,7 @@ export function isExtensionComposerActionId(id: string): boolean {
     || id.startsWith('input-action:')
     || id.startsWith('ext-cmd-')
     || id.startsWith('ext-tab-')
+    || id.startsWith('ext-action:')
+    || id.startsWith('ext-runtime:')
     || id.startsWith('lumiverse_suite.')
 }

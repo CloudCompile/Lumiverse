@@ -7,14 +7,15 @@ import { charactersApi } from '@/api/characters'
 import { worldBooksApi } from '@/api/world-books'
 import { toast } from '@/lib/toast'
 import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
-import { filesFromDesktopDrop, isSupportedCharacterDropPath } from '@/lib/desktop-file-drop'
-import { getCurrentWebview } from '@tauri-apps/api/webview'
+import { characterFilesFromDrop } from '@/lib/character-file-drop'
+import { subscribeWindowFileImport } from '@/lib/window-file-import'
 import { useStore } from '@/store'
 import CharacterToolbar from './character-browser/CharacterToolbar'
 import ChubExpressionBackfillBanner from './character-browser/ChubExpressionBackfillBanner'
 import TagFilter from './character-browser/TagFilter'
 import BatchBar from './character-browser/BatchBar'
 import FavoritesSlider from './character-browser/FavoritesSlider'
+import CardCreatorBanner from './character-browser/CardCreatorBanner'
 import CharacterGrid from './character-browser/CharacterGrid'
 import CharacterList from './character-browser/CharacterList'
 import ImportUrlModal from './character-browser/ImportUrlModal'
@@ -245,55 +246,13 @@ export default function CharacterBrowser() {
   const dragCounterRef = useRef(0)
   const importDroppedFiles = browser.importFiles
 
-  // Tauri owns OS file-drop events and reports paths instead of populating the
-  // browser DataTransfer. Read only those one-use native drop grants, convert
-  // them to File objects, and reuse the browser/PWA importer unchanged.
-  useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window)) return
-    let disposed = false
-    let unlisten: (() => void) | undefined
-
-    void getCurrentWebview().onDragDropEvent(({ payload }) => {
-      if (payload.type === 'enter') {
-        setDragging(payload.paths.some(isSupportedCharacterDropPath))
-        return
-      }
-      if (payload.type === 'leave') {
-        setDragging(false)
-        return
-      }
-      if (payload.type !== 'drop') return
-
-      setDragging(false)
-      const supportedPaths = payload.paths.filter(isSupportedCharacterDropPath)
-      if (supportedPaths.length === 0) return
-      void filesFromDesktopDrop(supportedPaths)
-        .then((files) => {
-          if (!disposed && files.length > 0) void importDroppedFiles(files)
-        })
-        .catch((error) => {
-          if (disposed) return
-          console.error('[CharacterBrowser] Failed to read native dropped files:', error)
-          toast.error(t('characterBrowser.desktopDropReadFailed'))
-        })
-    }).then((stop) => {
-      if (disposed) stop()
-      else unlisten = stop
-    }).catch((error) => {
-      console.warn('[CharacterBrowser] Native file-drop listener unavailable:', error)
-    })
-
-    return () => {
-      disposed = true
-      unlisten?.()
-    }
-  }, [importDroppedFiles, t])
+  useEffect(() => subscribeWindowFileImport('character', (files) => importDroppedFiles(files)), [importDroppedFiles])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current++
-    if (e.dataTransfer.types.includes('Files')) {
+    if (e.dataTransfer.types.length === 0 || e.dataTransfer.types.includes('Files')) {
       setDragging(true)
     }
   }, [])
@@ -315,9 +274,7 @@ export default function CharacterBrowser() {
       e.preventDefault()
       dragCounterRef.current = 0
       setDragging(false)
-      const files = Array.from(e.dataTransfer.files).filter((f) =>
-        /\.(json|png|charx|jpe?g)$/i.test(f.name)
-      )
+      const files = characterFilesFromDrop(e.dataTransfer.files)
       if (files.length > 0) {
         browser.importFiles(files)
       }
@@ -472,6 +429,10 @@ export default function CharacterBrowser() {
         <GroupChatsPanel viewMode={browser.viewMode} />
       ) : (
         <>
+          {!browser.batchMode && browser.filterTab === 'characters' && (
+            <CardCreatorBanner onOpen={browser.openChat} />
+          )}
+
           {!browser.batchMode && browser.favoriteCharacters.length > 0 && (
             <FavoritesSlider
               characters={browser.favoriteCharacters}

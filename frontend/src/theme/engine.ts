@@ -1,5 +1,6 @@
 import type { ThemeConfig, ResolvedMode } from '@/types/theme'
 import { DEFAULT_THEME } from '@/theme/presets'
+import { normalizeUiScale } from '@/lib/uiScale'
 
 // ── Color helpers ──
 
@@ -362,7 +363,7 @@ export function generateThemeVariables(
   vars['--lumiverse-font-scale'] = `${fs}`
 
   // UI scale: CSS zoom on body for full UI magnification.
-  const us = config.uiScale ?? 1
+  const us = normalizeUiScale(config.uiScale)
   vars['--lumiverse-ui-scale'] = `${us}`
 
   // ── Chat Shell glass tokens ──

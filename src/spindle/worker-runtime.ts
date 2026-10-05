@@ -82,6 +82,10 @@ import type {
   ConnectionDispatchDescriptorDTO,
   ImageGenStreamEventDTO,
   ImageGenStreamRequestDTO,
+  ImageGenNativeRequestDTO,
+  ImageGenNativeResultDTO,
+  ImageGenPromptPresetsResultDTO,
+  ImageGenNativeControlWorkerMessage,
   InterceptorContextDTO,
   InterceptorDisposer,
   InterceptorHandler,
@@ -101,6 +105,7 @@ import type {
   MediaTransformResultDTO,
 } from "../services/media.service";
 import { initializeSandbox } from "./worker-runtime-sandbox";
+import type { DesktopCaptureWorkerMessage, SpindleDesktopAPI, DesktopCaptureDevice, CapturedMediaRef } from "./desktop-capture-contract";
 import { deserializeWorkerResponseError } from "./worker-response-error";
 import { deriveCharacterOverlay } from "../utils/color-engine";
 import {
@@ -298,6 +303,7 @@ type ChatAppendMessageOptions =
 type SpindleUserRole = "operator" | "admin" | "user";
 
 type RuntimeWorkerToHost =
+  | DesktopCaptureWorkerMessage
   | { type: 'context_handler_result'; requestId: string; context: unknown; error?: string }
   | { type: 'frontend_message'; payload: unknown; userId?: string; frontendSessionId?: string }
   | { type: 'runtime_state_read'; requestId: string; chatId: string; characterId: string; userId?: string }
@@ -305,6 +311,7 @@ type RuntimeWorkerToHost =
   | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorRegistrationMatchOptions['match']; required?: boolean }
   | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string }
   | WorkerToHost
+  | ImageGenNativeControlWorkerMessage
   | { type: "register_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "unregister_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -339,7 +346,6 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
-  | { type: "image_gen_generate_native"; requestId: string; input: any }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -710,7 +716,8 @@ type RuntimeWorldBooksAPI = Omit<SpindleAPI["world_books"], "entries"> & {
 // PromptBlock type also carries host-only sealed-block provenance. Keeping the
 // runtime CRUD surface on the native type avoids narrowing data returned by
 // newer hosts when the installed public type package lags a release.
-type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books" | "runtimeState"> & {
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop"> & {
+  desktop: SpindleDesktopAPI;
   runtimeState: {
     read(chatId: string, characterId: string, userId?: string): Promise<unknown>;
     write(chatId: string, command: import('./runtime-state').RuntimeStateCommand, userId?: string, mutationId?: string): Promise<unknown>;
@@ -738,16 +745,6 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books"
   ): Promise<SpindleBatchResult[]>;
   world_books: RuntimeWorldBooksAPI;
   entityExtensions: RuntimeEntityExtensionsAPI;
-  imageGen: SpindleAPI["imageGen"] & {
-    /** Native Lumiverse image pipeline; public types are released separately. */
-    generateNative(input: any): Promise<any>;
-    /**
-     * Generate through a provider that explicitly supports WebSocket preview
-     * images and status updates. The terminal `done` event contains the saved
-     * image result. Breaking out of the iterator aborts the upstream job.
-     */
-    generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void>;
-  };
   mcp: {
     servers: {
       list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: SpindleMcpServerDTO[]; total: number }>;
@@ -1512,6 +1509,21 @@ function requestImageGenStream(input: ImageGenStreamInput): AsyncGenerator<Image
 // ─── Spindle API (exposed to extensions as globalThis.spindle) ───────────
 
 const spindleApi: RuntimeSpindleAPI = {
+  desktop: {
+    capture: {
+      async listDevices(options) {
+        return await request({ type: "desktop_capture_devices", requestId: crypto.randomUUID(), userId: options?.userId }) as DesktopCaptureDevice[];
+      },
+      async request(input) {
+        assertMutationAllowed("spindle.desktop.capture.request()");
+        return await request({ type: "desktop_capture_request", requestId: crypto.randomUUID(), input }) as CapturedMediaRef;
+      },
+      async release(assetId, options) {
+        assertMutationAllowed("spindle.desktop.capture.release()");
+        await request({ type: "desktop_capture_release", requestId: crypto.randomUUID(), assetId, userId: options?.userId });
+      },
+    },
+  },
   runtimeState: {
     read(chatId, characterId, userId) { return request({ type: 'runtime_state_read', requestId: crypto.randomUUID(), chatId, characterId, userId }); },
     write(chatId, command, userId, mutationId) {
@@ -2415,13 +2427,19 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   imageGen: {
+    async getPromptPresets(userId?: string): Promise<ImageGenPromptPresetsResultDTO> {
+      return await request({ type: "image_gen_prompt_presets", requestId: crypto.randomUUID(), userId }) as ImageGenPromptPresetsResultDTO;
+    },
+    async cancelNative(jobId: string, userId?: string) {
+      return await request({ type: "image_gen_cancel_native", requestId: crypto.randomUUID(), jobId, userId }) as boolean;
+    },
     async generate(input: any): Promise<any> {
       const requestId = crypto.randomUUID();
       return request({ type: "image_gen_generate", requestId, input });
     },
-    async generateNative(input: any): Promise<any> {
+    async generateNative(input: ImageGenNativeRequestDTO): Promise<ImageGenNativeResultDTO> {
       const requestId = crypto.randomUUID();
-      return request({ type: "image_gen_generate_native", requestId, input });
+      return await request({ type: "image_gen_generate_native", requestId, input }) as ImageGenNativeResultDTO;
     },
     generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void> {
       return requestImageGenStream(input);

@@ -4,6 +4,7 @@ import { totalmem } from "node:os";
 import { dirname } from "node:path";
 import { isMainThread } from "node:worker_threads";
 import { env } from "../env";
+import { resolveSqliteJournalMode, readFilesystemType, type SqliteJournalMode } from "./sqlite-filesystem-safety";
 
 const MiB = 1024 * 1024;
 const DEFAULT_DB_PATH = `${env.dataDir}/lumiverse.db`;
@@ -51,6 +52,7 @@ export interface DatabaseStats {
   cacheBytesApprox: number;
   walAutocheckpoint: number;
   journalSizeLimit: number;
+  filesystemType: string;
   filesystemTotalBytes: number | null;
   filesystemFreeBytes: number | null;
   vacuumEstimatedRequiredBytes: number;
@@ -319,16 +321,41 @@ function mmapEnabled(): boolean {
   return env.sqliteMmapEnabled && isMainThread && process.platform !== "win32";
 }
 
-export function applyBaseDatabasePragmas(db: Database): void {
-  db.run("PRAGMA journal_mode = WAL");
+export function applyBaseDatabasePragmas(db: Database, dbPath?: string): SqliteJournalMode {
+  const journalMode = resolveJournalModeForPath(dbPath);
+  if (journalMode.mode === "WAL") {
+    db.run("PRAGMA journal_mode = WAL");
+  } else {
+    // Network/object-storage mounts cannot provide coherent cross-process WAL
+    // locking, which corrupts the database at runtime. The rollback journal
+    // leans only on the primary file's advisory lock, which they do honor.
+    db.run("PRAGMA journal_mode = DELETE");
+  }
+  if (journalMode.reason) {
+    console.warn(
+      `[db] SQLite journal mode set to ${journalMode.mode}: ${journalMode.reason}.`,
+    );
+  }
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA busy_timeout = 5000");
   db.run("PRAGMA synchronous = NORMAL");
   db.run(`PRAGMA cache_size = ${-Math.floor(DEFAULT_CACHE_BYTES / 1024)}`);
   db.run("PRAGMA temp_store = MEMORY");
   db.run(`PRAGMA mmap_size = ${mmapEnabled() ? MIN_MMAP_BYTES : 0}`);
-  db.run("PRAGMA wal_autocheckpoint = 500");
-  db.run(`PRAGMA journal_size_limit = ${DEFAULT_JOURNAL_SIZE_LIMIT_BYTES}`);
+  if (journalMode.mode === "WAL") {
+    db.run("PRAGMA wal_autocheckpoint = 500");
+    db.run(`PRAGMA journal_size_limit = ${DEFAULT_JOURNAL_SIZE_LIMIT_BYTES}`);
+  }
+  return journalMode.mode;
+}
+
+/** Resolve the journal mode for the directory backing `dbPath`. */
+function resolveJournalModeForPath(dbPath?: string) {
+  const path = getDatabasePathFallback(dbPath);
+  return resolveSqliteJournalMode({
+    dir: dirname(path),
+    override: process.env.LUMIVERSE_SQLITE_JOURNAL_MODE,
+  });
 }
 
 /** Ask SQLite to release unused page-cache and connection allocations. */
@@ -382,6 +409,7 @@ export function collectDatabaseStats(db: Database, dbPath?: string): DatabaseSta
   const shmBytes = readFileSize(`${path}-shm`);
   const usedPageCount = Math.max(pageCount - freelistCount, 0);
   const filesystem = readFilesystemBytes(path);
+  const fsType = readFilesystemType(dirname(path));
   const vacuumEstimatedRequiredBytes = estimateVacuumRequiredBytes({
     fileBytes,
     walBytes,
@@ -411,6 +439,7 @@ export function collectDatabaseStats(db: Database, dbPath?: string): DatabaseSta
     cacheBytesApprox,
     walAutocheckpoint: Number(getPragmaValue<number>(db, "wal_autocheckpoint")) || 0,
     journalSizeLimit: Number(getPragmaValue<number>(db, "journal_size_limit")) || 0,
+    filesystemType: fsType?.name ?? "unknown",
     filesystemTotalBytes: filesystem.totalBytes,
     filesystemFreeBytes: filesystem.freeBytes,
     vacuumEstimatedRequiredBytes,
@@ -520,6 +549,8 @@ export function logDatabaseStats(label: string, stats: DatabaseStats, tuning?: A
     `freelist=${stats.freelistCount}`,
     `cache~=${(stats.cacheBytesApprox / MiB).toFixed(1)}MiB`,
     `mmap=${(stats.mmapSize / MiB).toFixed(1)}MiB`,
+    `journal=${stats.journalMode}`,
+    `fs=${stats.filesystemType}`,
   ];
   if (tuning) {
     parts.push(`cache_source=${tuning.cacheSource}`);

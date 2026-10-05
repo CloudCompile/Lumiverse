@@ -313,14 +313,16 @@ export function createThemePack(
     }
   }
 
+  const name = meta.name?.trim() || theme?.name?.trim() || 'Untitled Theme'
+
   return {
     format: 2,
-    name: meta.name || 'Untitled Theme',
+    name,
     author: meta.author || '',
     description: meta.description || '',
     createdAt: Math.floor(Date.now() / 1000),
     bundleId: customCSS.bundleId || generateUUID(),
-    theme,
+    theme: theme ? { ...theme, name } : null,
     globalCSS: customCSS.css || '',
     components,
     assets,

@@ -1,4 +1,5 @@
 import { Hono, type Context, type Next } from "hono";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { isInsufficientScopeError } from "better-auth/oauth2";
 import type { JWTPayload } from "jose";
 import { oauthProviderResourceClient } from "@better-auth/oauth-provider/resource-client";
@@ -13,6 +14,7 @@ import {
 } from "../auth/desktop-oauth";
 import { resolveDesktopRequestOrigin } from "../auth/request-origin";
 import { isConnectionFromExplicitTrustedProxy } from "../utils/client-ip";
+import { desktopCaptureBroker, DesktopCaptureBroker, DesktopCaptureError } from "../spindle/desktop-capture-broker";
 
 export interface DesktopPrincipal {
   id: string;
@@ -30,6 +32,7 @@ declare module "hono" {
 }
 
 export interface DesktopApiDependencies {
+  captureBroker?: DesktopCaptureBroker;
   verify: (request: Request, issuer: string) => Promise<JWTPayload>;
   loadPrincipal: (userId: string) => DesktopPrincipal | null;
   getStatus: () => Promise<unknown>;
@@ -88,6 +91,7 @@ export function createDesktopApiRoutes(
   dependencies: DesktopApiDependencies = defaultDependencies,
 ) {
   const app = new Hono();
+  const captureBroker = dependencies.captureBroker ?? desktopCaptureBroker;
 
   async function requireDesktopToken(c: Context, next: Next) {
     const origin = resolveDesktopRequestOrigin(
@@ -132,6 +136,63 @@ export function createDesktopApiRoutes(
     await next();
     c.header("Cache-Control", "no-store");
   });
+
+  async function readCaptureBody(context: Context, maxBytes: number, signal?: AbortSignal): Promise<unknown> {
+    const reader = context.req.raw.body?.getReader();
+    if (!reader) throw new DesktopCaptureError("INVALID_CAPTURE_REQUEST");
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    let bytes = 0;
+    let chunks = 0;
+    let body = "";
+    const abort = () => { void reader.cancel().catch(() => {}); };
+    signal?.addEventListener("abort", abort, { once: true });
+    context.req.raw.signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (signal?.aborted || context.req.raw.signal.aborted) throw new DesktopCaptureError("CAPTURE_CANCELLED");
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        bytes += next.value.byteLength;
+        chunks += 1;
+        if (bytes > maxBytes || chunks > 8192) throw new DesktopCaptureError("CAPTURE_PAYLOAD_TOO_LARGE", 413);
+        body += decoder.decode(next.value, { stream: true });
+      }
+      body += decoder.decode();
+      if (signal?.aborted || context.req.raw.signal.aborted) throw new DesktopCaptureError("CAPTURE_CANCELLED");
+      return JSON.parse(body);
+    } finally {
+      signal?.removeEventListener("abort", abort);
+      context.req.raw.signal.removeEventListener("abort", abort);
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+
+  async function captureResponse(context: Context, operation: () => unknown | Promise<unknown>) {
+    try { return context.json(await operation()); }
+    catch (error) {
+      if (error instanceof DesktopCaptureError) return context.json({ error: error.code, code: error.code }, error.status as ContentfulStatusCode);
+      return context.json({ error: "Invalid desktop capture request", code: "INVALID_CAPTURE_REQUEST" }, 400);
+    }
+  }
+
+  app.post("/capture/devices", (context) => captureResponse(context, async () =>
+    captureBroker.register(context.get("desktopPrincipal").id, await readCaptureBody(context, 1024))));
+
+  app.get("/capture/devices/:deviceId/commands", (context) => captureResponse(context, () => ({
+    commands: captureBroker.poll(context.get("desktopPrincipal").id, context.req.param("deviceId"), context.req.header("X-Lumiverse-Capture-Lease") ?? ""),
+  })));
+
+  app.post("/capture/devices/:deviceId/responses", (context) => captureResponse(context, async () => {
+    await captureBroker.receive(context.get("desktopPrincipal").id, context.req.param("deviceId"),
+      context.req.header("X-Lumiverse-Capture-Lease") ?? "", (maxBytes, signal) => readCaptureBody(context, maxBytes, signal));
+    return { ok: true };
+  }));
+
+  app.delete("/capture/devices/:deviceId", (context) => captureResponse(context, () => {
+    captureBroker.unregister(context.get("desktopPrincipal").id, context.req.param("deviceId"), context.req.header("X-Lumiverse-Capture-Lease") ?? "");
+    return { ok: true };
+  }));
 
   app.get("/me", (c) => {
     const principal = c.get("desktopPrincipal");

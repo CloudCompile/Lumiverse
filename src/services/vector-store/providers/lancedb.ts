@@ -19,14 +19,20 @@
  * embeddings.service.ts.
  */
 import { connect, Index, type Connection, type Table } from "@lancedb/lancedb";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export type { Table } from "@lancedb/lancedb";
-import { dirname, join } from "path";
+import { basename, dirname, join } from "path";
 import { mkdirSync, readdirSync, renameSync, rmdirSync, rmSync, existsSync, readFileSync, statSync, writeFileSync, type Dirent } from "fs";
 import { env } from "../../../env";
 import { getDb } from "../../../db/connection";
 import { embeddingCache } from "../../embedding-cache";
 import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../../../utils/lancedb-path";
+import {
+  isUnsupportedLanceCommitError,
+  resolveLanceDbStorageDir,
+  type LanceDbStorageResolution,
+} from "../../../utils/lancedb-storage";
 import { repairMixedLanceManifestPaths } from "../../../utils/lancedb-manifests";
 import type { WorldBookVectorIndexStatus } from "../../../types/world-book";
 import { LANCEDB_CAPABILITIES } from "../capabilities";
@@ -45,7 +51,24 @@ import type {
   VectorStoreProviderId,
 } from "../types";
 
-export const LANCEDB_PATH = join(env.dataDir, "lancedb");
+// LanceDB needs real local-filesystem semantics (atomic rename) to commit
+// safely. When DATA_DIR is an object-storage mount (e.g. an HF Storage Bucket
+// backed by Mountpoint-for-S3) the store is relocated to local ephemeral disk
+// and rebuilt from SQLite at startup — see utils/lancedb-storage.ts.
+const LANCEDB_STORAGE: LanceDbStorageResolution = resolveLanceDbStorageDir({
+  dataDir: env.dataDir,
+  configuredDir: env.lancedbDirOverride,
+  runtimeDir: env.runtimeDir,
+});
+export const LANCEDB_PATH = LANCEDB_STORAGE.dir;
+export const LANCEDB_EPHEMERAL = LANCEDB_STORAGE.ephemeral;
+export const LANCEDB_EPHEMERAL_REASON = LANCEDB_STORAGE.reason ?? null;
+export const LANCEDB_STORAGE_DETAIL = LANCEDB_STORAGE.storageDetail;
+/** True while the backing directory cannot commit Lance transactions. Set once
+ *  a commit fails with the unsupported-filesystem error so recovery loops stop
+ *  deleting/recreating tables that can never commit. */
+let lanceCommitUnsupported = false;
+export function isLanceCommitUnsupported(): boolean { return lanceCommitUnsupported; }
 export const LANCEDB_URI = resolveLanceDbConnectUri(LANCEDB_PATH);
 export const EMBEDDINGS_TABLE = "embeddings";
 export const WORLD_BOOK_EMBEDDINGS_TABLE = "embeddings_world_books";
@@ -238,10 +261,23 @@ function sweepTableEmptyIndexDirs(tableName: string): void {
 // ---------------------------------------------------------------------------
 const WRITE_LOCK_WAIT_TIMEOUT_MS = 120_000; // 120s max wait to acquire the lock
 const MAX_WRITE_LOCK_QUEUE = 50;           // reject if more than 50 waiters queued
-const CROSS_PROCESS_WRITE_LOCK_DIR = join(env.dataDir, ".lancedb-write-lock");
+// A write-lock critical section longer than this indicates a slow/hung mutation
+// (or an embedded vs. cross-process stall). Warn once so the operator can see
+// which reason held it, without logging on the common fast path.
+const CROSS_PROCESS_WRITE_LOCK_LONG_HOLD_MS = 10_000;
+// The lock protects a specific store directory, so it lives beside that store.
+// Naming it after the store's own directory keeps the historical
+// `<dataDir>/.lancedb-write-lock` path for the default `<dataDir>/lancedb`
+// layout while still being unambiguous when the store was relocated.
+const CROSS_PROCESS_WRITE_LOCK_DIR = join(dirname(LANCEDB_PATH), `.${basename(LANCEDB_PATH)}-write-lock`);
 const CROSS_PROCESS_WRITE_LOCK_INFO = join(CROSS_PROCESS_WRITE_LOCK_DIR, "owner.json");
 const CROSS_PROCESS_WRITE_LOCK_POLL_MS = 250;
 const CROSS_PROCESS_WRITE_LOCK_STALE_MS = 5 * 60_000;
+// A lock file left by this still-running process (no live owner) is reclaimed
+// after this short grace period, rather than waiting out the 120s acquisition
+// timeout. The grace exceeds the poll interval so a concurrent acquisition by
+// another task is never mistaken for an orphan.
+const OWN_PROCESS_LOCK_RECLAIM_GRACE_MS = 2_000;
 const CROSS_PROCESS_WRITE_LOCK_ENABLED = shouldUseCrossProcessWriteLock();
 const RETRYABLE_LANCE_WRITE_CONFLICT_MAX_ATTEMPTS = 4;
 const RETRYABLE_LANCE_WRITE_CONFLICT_BASE_BACKOFF_MS = 100;
@@ -251,6 +287,28 @@ const RETRYABLE_LANCE_WRITE_CONFLICT_BASE_BACKOFF_MS = 100;
 const PROCESS_STARTED_AT = Date.now() - Math.floor(process.uptime() * 1_000);
 const _writeLockQueue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];
 let _writeLockHeld = false;
+/**
+ * True only while THIS process actually owns the on-disk cross-process lock.
+ * Set on successful acquisition and cleared on release, so it distinguishes
+ * "another task in this process is mid-acquire" from "this process holds it".
+ */
+let _crossProcessLockHeld = false;
+/**
+ * Tracks whether the *current async call chain* is already inside a write-lock
+ * critical section. The in-process mutex (`_writeLockHeld`) serializes separate
+ * tasks, but a single task can legitimately nest lock-taking calls (a
+ * world-book commit that deletes rows, a replacement that reopens a table).
+ * Those nested calls must run inline under the caller's already-held lock
+ * rather than queueing behind it and dead-locking on the cross-process lock.
+ */
+const _writeLockAls = new AsyncLocalStorage<{ depth: number }>();
+/** Human label for the op currently inside the write critical section, for the
+ *  long-hold diagnostic. Only ever read from the holder's own critical section. */
+let _activeWriteLockReason: string | null = null;
+
+function describeCurrentWriteLockReason(): string {
+  return _activeWriteLockReason ?? "(unspecified)";
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -270,14 +328,21 @@ function tryWriteCrossProcessLockInfo(): void {
   } catch {}
 }
 
-function readCrossProcessLockInfo(): { pid?: number; acquiredAt?: number } | null {
+interface CrossProcessLockInfo {
+  pid?: number;
+  acquiredAt?: number;
+  cwd?: string;
+}
+
+function readCrossProcessLockInfo(): CrossProcessLockInfo | null {
   try {
     if (!existsSync(CROSS_PROCESS_WRITE_LOCK_INFO)) return null;
     const raw = readFileSync(CROSS_PROCESS_WRITE_LOCK_INFO, "utf8");
-    const parsed = JSON.parse(raw) as { pid?: unknown; acquiredAt?: unknown };
+    const parsed = JSON.parse(raw) as { pid?: unknown; acquiredAt?: unknown; cwd?: unknown };
     return {
       pid: typeof parsed.pid === "number" && Number.isFinite(parsed.pid) ? parsed.pid : undefined,
       acquiredAt: typeof parsed.acquiredAt === "number" && Number.isFinite(parsed.acquiredAt) ? parsed.acquiredAt : undefined,
+      cwd: typeof parsed.cwd === "string" && parsed.cwd.length > 0 ? parsed.cwd : undefined,
     };
   } catch {
     return null;
@@ -308,6 +373,21 @@ export function isCrossProcessLockFromPriorProcessInstance(
     && info.acquiredAt < processStartedAt;
 }
 
+/**
+ * A lock left on disk by THIS still-running process that no live critical
+ * section owns. Reclaimed only after the caller has already waited a short
+ * grace period, so a concurrent in-flight acquisition by another task (which
+ * holds the in-process mutex) is never mistaken for an orphan.
+ */
+function shouldReclaimOwnProcessCrossProcessLock(waitStartedAt: number): boolean {
+  if (Date.now() - waitStartedAt < OWN_PROCESS_LOCK_RECLAIM_GRACE_MS) return false;
+  const info = readCrossProcessLockInfo();
+  if (!info || info.pid !== process.pid) return false;
+  // Written by an earlier process instance reusing our PID? Then it is not ours.
+  if (isCrossProcessLockFromPriorProcessInstance(info)) return false;
+  return true;
+}
+
 function shouldBreakStaleCrossProcessLock(): boolean {
   if (!existsSync(CROSS_PROCESS_WRITE_LOCK_DIR)) return false;
 
@@ -327,21 +407,74 @@ function shouldBreakStaleCrossProcessLock(): boolean {
   return true;
 }
 
+/**
+ * Build the multi-line owner report for a lock that would not yield. Never
+ * includes environment/secrets — only the fields already persisted in
+ * `owner.json` (pid/acquiredAt/cwd) plus liveness of that pid.
+ */
+function describeCrossProcessLockOwner(now = Date.now()): string {
+  const info = readCrossProcessLockInfo();
+  const fallbackAcquiredAt = (() => {
+    try {
+      return statSync(CROSS_PROCESS_WRITE_LOCK_DIR).mtimeMs;
+    } catch {
+      return undefined;
+    }
+  })();
+  const acquiredAt = info?.acquiredAt ?? fallbackAcquiredAt;
+  const ownerAlive = info?.pid ? isProcessAlive(info.pid) : undefined;
+  return [
+    `lock=${CROSS_PROCESS_WRITE_LOCK_DIR}`,
+    `ownerPid=${info?.pid ?? "(unknown)"}`,
+    `ownerAlive=${ownerAlive === undefined ? "(unknown)" : ownerAlive}`,
+    `lockAgeMs=${acquiredAt ? now - acquiredAt : "(unknown)"}`,
+    `ownerCwd=${info?.cwd ?? "(unknown)"}`,
+    `currentPid=${process.pid}`,
+  ].join("\n");
+}
+
 async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | null> {
   if (!CROSS_PROCESS_WRITE_LOCK_ENABLED) return null;
 
   const startedAt = Date.now();
+  let aliasWarned = false;
   while (true) {
     try {
       mkdirSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: false });
+      _crossProcessLockHeld = true;
       tryWriteCrossProcessLockInfo();
       return () => {
+        _crossProcessLockHeld = false;
         try {
           rmSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: true, force: true });
         } catch {}
       };
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
+
+      // A leftover lock can exist in two shapes:
+      //  (1) from an earlier process instance whose PID we now reuse (after a
+      //      container restart) — the existing stale check handles this; or
+      //  (2) from THIS still-running process, left behind when a critical
+      //      section did not clean up (a crash between mkdir and release, or a
+      //      rejected nested acquisition). Nobody legitimately owns it: a
+      //      reentrant caller never reaches this function, and any concurrent
+      //      task that does is itself queued on the in-process mutex. Reclaim it
+      //      after a short grace period instead of spinning for two minutes.
+      if (!_crossProcessLockHeld && shouldReclaimOwnProcessCrossProcessLock(startedAt)) {
+        if (!aliasWarned) {
+          aliasWarned = true;
+          console.warn(
+            `[embeddings] Reclaiming a LanceDB write lock left by this still-running process `
+            + `(pid=${process.pid}) at ${CROSS_PROCESS_WRITE_LOCK_DIR}. `
+            + `\n${describeCrossProcessLockOwner()}`,
+          );
+        }
+        try {
+          rmSync(CROSS_PROCESS_WRITE_LOCK_DIR, { recursive: true, force: true });
+          continue;
+        } catch {}
+      }
 
       if (shouldBreakStaleCrossProcessLock()) {
         try {
@@ -354,7 +487,8 @@ async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | nu
       const waitedMs = Date.now() - startedAt;
       if (waitedMs >= WRITE_LOCK_WAIT_TIMEOUT_MS) {
         throw new Error(
-          `[embeddings] Cross-process LanceDB write lock acquisition timed out after ${WRITE_LOCK_WAIT_TIMEOUT_MS}ms (${CROSS_PROCESS_WRITE_LOCK_DIR})`,
+          `[embeddings] Cross-process LanceDB write lock acquisition timed out after ${WRITE_LOCK_WAIT_TIMEOUT_MS}ms.\n`
+          + describeCrossProcessLockOwner(),
         );
       }
 
@@ -363,7 +497,29 @@ async function acquireCrossProcessWriteLockIfNeeded(): Promise<(() => void) | nu
   }
 }
 
-export async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+export async function withWriteLock<T>(fn: () => Promise<T>, reason?: string): Promise<T> {
+  // Reentrancy guard. A write-critical section can call back into another public
+  // method that also takes the write lock (e.g. world-book deletion inside an
+  // existing world-book commit). The in-process mutex serializes *tasks*, not
+  // call frames, so without this the nested call would queue behind its own
+  // caller — and the cross-process lock below would be re-acquired by a process
+  // that already owns it, which is the same-PID deadlock:
+  //
+  //   Cross-process LanceDB write lock acquisition timed out after 120000ms.
+  //   ownerPid=26 ... currentPid=26
+  //
+  // AsyncLocalStorage tracks the holder per async call chain, so a nested call
+  // on the holder's own chain runs inline and never touches the lock again.
+  const held = _writeLockAls.getStore();
+  if (held) {
+    held.depth += 1;
+    try {
+      return await fn();
+    } finally {
+      held.depth -= 1;
+    }
+  }
+
   // A child maintenance process asks the serving process to close this gate
   // before it starts mutating Lance files. Writers need to honor the same
   // gate as readers; the cross-process write lock alone cannot protect a
@@ -391,10 +547,26 @@ export async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
     });
   }
   let releaseCrossProcessLock: (() => void) | null = null;
+  let criticalSectionStartedAt = 0;
   try {
     releaseCrossProcessLock = await acquireCrossProcessWriteLockIfNeeded();
-    return await fn();
+    _activeWriteLockReason = reason ?? null;
+    // Time only the mutation itself, not time spent waiting for the lock.
+    criticalSectionStartedAt = Date.now();
+    // Scope the reentrancy context to this critical section. Every await inside
+    // `fn` inherits it, so any nested withWriteLock() runs inline instead of
+    // re-acquiring the cross-process lock the process already holds.
+    return await _writeLockAls.run({ depth: 1 }, fn);
   } finally {
+    if (criticalSectionStartedAt > 0) {
+      const heldMs = Date.now() - criticalSectionStartedAt;
+      if (heldMs >= CROSS_PROCESS_WRITE_LOCK_LONG_HOLD_MS) {
+        console.warn(
+          `[lancedb] Long write lock detected: duration=${heldMs}ms; pid=${process.pid}; reason=${describeCurrentWriteLockReason()}`,
+        );
+      }
+    }
+    _activeWriteLockReason = null;
     releaseCrossProcessLock?.();
     const next = _writeLockQueue.shift();
     if (next) next.resolve();
@@ -692,10 +864,31 @@ function retryableLanceWriteConflictBackoffMs(attempt: number): number {
 }
 
 function logLanceDbPathDiagnostics(): void {
-  if (lancedbPathDiagnosticsLogged || !LANCEDB_TERMUX_LIKE) return;
+  if (lancedbPathDiagnosticsLogged) return;
   lancedbPathDiagnosticsLogged = true;
+  // Always report the resolved store + lock location once at startup. This is
+  // the single line that tells an operator (or a bug report) exactly where
+  // vectors and the cross-process lock live, so a misresolved path is visible
+  // without digging through stack traces.
   console.info(
-    `[embeddings] LanceDB path config: path=${LANCEDB_PATH}; uri=${LANCEDB_URI}; cwd=${process.cwd()}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
+    `[embeddings] LanceDB storage resolved: path=${LANCEDB_PATH}; lock=${CROSS_PROCESS_WRITE_LOCK_DIR}; `
+    + `ephemeral=${LANCEDB_EPHEMERAL}; fs=${LANCEDB_STORAGE_DETAIL}; dataDir=${env.dataDir}; cwd=${process.cwd()}`,
+  );
+  if (LANCEDB_EPHEMERAL) {
+    console.warn(
+      `[embeddings] LanceDB relocated to ephemeral local storage: path=${LANCEDB_PATH}; `
+      + `reason=${LANCEDB_EPHEMERAL_REASON ?? "(unspecified)"}. Vectors are rebuilt from SQLite and `
+      + `do NOT persist across restarts. Set LUMIVERSE_LANCEDB_DIR to override.`,
+    );
+  } else if (LANCEDB_EPHEMERAL_REASON) {
+    console.error(
+      `[embeddings] LanceDB storage problem: ${LANCEDB_EPHEMERAL_REASON}. Commits will fail until the `
+      + `path (LUMIVERSE_LANCEDB_DIR=${LANCEDB_PATH}) supports atomic rename.`,
+    );
+  }
+  if (!LANCEDB_TERMUX_LIKE) return;
+  console.info(
+    `[embeddings] LanceDB path config: uri=${LANCEDB_URI}; tmpdir=${process.env.TMPDIR || "(unset)"}`,
   );
   if (process.cwd() === "/") {
     console.warn(
@@ -821,13 +1014,24 @@ function performBrokenEmbeddingsTableRecovery(reason: string, err: unknown): voi
 
 async function recoverBrokenEmbeddingsTable(tableName: string, reason: string, err: unknown, lockHeld = false): Promise<boolean> {
   if (!isIncompleteEmbeddingsTableError(err, tableName)) return false;
+  // When the filesystem cannot commit Lance transactions, the "incomplete
+  // dataset" is a symptom, not a fixable defect. Deleting the store here would
+  // destroy healthy sibling tables too, then recreate them only for the next
+  // commit to fail again — an endless create/delete loop. Stop instead.
+  if (lanceCommitUnsupported) {
+    console.error(
+      `[embeddings] Not recovering LanceDB table '${tableName}' (${reason}): the backing filesystem `
+      + `cannot commit Lance transactions, so recreate/delete would loop. Data at ${LANCEDB_PATH} left intact.`,
+    );
+    return false;
+  }
   if (lockHeld) {
     performBrokenEmbeddingsTableRecovery(reason, err);
     return true;
   }
   await withWriteLock(async () => {
     performBrokenEmbeddingsTableRecovery(reason, err);
-  });
+  }, `${tableName}: broken-table recovery`);
   return true;
 }
 
@@ -868,24 +1072,85 @@ function tableNameForRows(rows: EmbeddingRow[]): string {
   return EMBEDDINGS_TABLE;
 }
 
+/**
+ * Merge-insert `rows` into `tableName`. MUST be called while already holding the
+ * write lock — it never acquires one itself, so callers can compose it with a
+ * delete inside a single critical section (see {@link replaceRowsUnderWriteLock}).
+ */
+async function mergeInsertRowsUnderWriteLock(
+  tableName: string,
+  rows: EmbeddingRow[],
+  reason: string,
+): Promise<void> {
+  let table = await getOrCreateTable(tableName, rows, true);
+  table = await ensureVectorIndex(tableName, table);
+  table = await ensureScalarIndexes(tableName, table);
+  table = await ensureFtsIndex(tableName, table);
+  await withRetryableLanceWriteConflictRetry(`${reason}: mergeInsert`, tableName, async () => {
+    table = await reopenTableForWrite(tableName, rows);
+    await table
+      .mergeInsert("id")
+      .whenMatchedUpdateAll()
+      .whenNotMatchedInsertAll()
+      .execute(asLanceRows(rows));
+  });
+}
+
 export async function upsertEmbeddingRows(rows: EmbeddingRow[], reason: string): Promise<void> {
   if (rows.length === 0) return;
   const tableName = tableNameForRows(rows);
   await retryAfterSchemaDriftReset(reason, async () => {
-    await withWriteLock(async () => {
-      let table = await getOrCreateTable(tableName, rows, true);
-      table = await ensureVectorIndex(tableName, table);
-      table = await ensureScalarIndexes(tableName, table);
-      table = await ensureFtsIndex(tableName, table);
-      await withRetryableLanceWriteConflictRetry(`${reason}: mergeInsert`, tableName, async () => {
-        table = await reopenTableForWrite(tableName, rows);
-        await table
-          .mergeInsert("id")
-          .whenMatchedUpdateAll()
-          .whenNotMatchedInsertAll()
-          .execute(asLanceRows(rows));
-      });
+    await withWriteLock(() => mergeInsertRowsUnderWriteLock(tableName, rows, reason), reason);
+  });
+}
+
+/**
+ * Delete rows matching `filter`, then merge-insert `rows`, under a SINGLE write
+ * lock acquisition. This is the chat/vault replacement primitive: doing delete
+ * and upsert as two locked operations doubles the cross-process lock churn (and
+ * widens the window where a concurrent reader sees a half-replaced set).
+ *
+ * The delete is scoped by the caller's structured filter, so only the intended
+ * chat/conversation/source rows are removed — never the whole table.
+ */
+async function replaceRowsUnderWriteLock(
+  tableName: string,
+  filter: VectorFilter,
+  rows: EmbeddingRow[],
+  reason: string,
+): Promise<void> {
+  let table = await getTableIfExists(tableName, true);
+  if (table) {
+    await withRetryableLanceWriteConflictRetry(`${reason}: replace delete`, tableName, async () => {
+      table = await reopenTableForWrite(tableName);
+      await safeTableDelete(table, translateFilter(filter), optimizeReasonFor(tableName));
     });
+  }
+  if (rows.length > 0) {
+    await mergeInsertRowsUnderWriteLock(tableName, rows, reason);
+  }
+}
+
+/** Map a physical table to the optimize-reason bucket the delete should schedule. */
+function optimizeReasonFor(tableName: string): "general" | "chat_chunk" | "world_book" {
+  if (tableName === WORLD_BOOK_EMBEDDINGS_TABLE) return "world_book";
+  return "general";
+}
+
+/**
+ * Atomic replace entry point. Deletes everything matching `filter` and inserts
+ * `rows` within one write-lock acquisition. `rows` may be empty (delete-only),
+ * matching a chat whose replacement content produced no vectors.
+ */
+export async function replaceEmbeddingRows(
+  collection: CollectionName,
+  filter: VectorFilter,
+  rows: EmbeddingRow[],
+  reason: string,
+): Promise<void> {
+  const tableName = collectionToTable(collection);
+  await retryAfterSchemaDriftReset(reason, async () => {
+    await withWriteLock(() => replaceRowsUnderWriteLock(tableName, filter, rows, reason), reason);
   });
 }
 
@@ -1103,6 +1368,21 @@ async function withRetryableLanceWriteConflictRetry<T>(
     try {
       return await fn();
     } catch (err) {
+      // An unsupported filesystem will never commit on retry — fail fast and
+      // remember it so table recovery stops deleting/recreating in a loop.
+      if (isUnsupportedLanceCommitError(err)) {
+        if (!lanceCommitUnsupported) {
+          lanceCommitUnsupported = true;
+          console.error(
+            `[embeddings] LanceDB cannot commit on ${LANCEDB_PATH}: the filesystem does not support an `
+            + "operation required for safe Lance commits (atomic rename). Object-storage mounts such as "
+            + "Hugging Face Storage Buckets / Mountpoint-for-S3 are not supported. Set "
+            + "LUMIVERSE_LANCEDB_DIR to a genuinely local directory (or remove the mount from DATA_DIR) "
+            + "so vectors can persist. Vector writes will keep failing until then.",
+          );
+        }
+        throw err;
+      }
       if (!isRetryableLanceWriteConflict(err) || attempt >= RETRYABLE_LANCE_WRITE_CONFLICT_MAX_ATTEMPTS) {
         throw err;
       }
@@ -1455,7 +1735,7 @@ async function checkAndRebuildIndexes(tableName: string, table: Table): Promise<
         state.lastIndexRebuildAt = Date.now();
         state.unindexedRowEstimate = 0;
         console.info(`[embeddings] Index repair completed for ${tableName} (${rowCount} rows)`);
-      });
+      }, `${tableName}: index repair`);
     }
   } catch (err) {
     // Non-fatal — index health checks are best-effort
@@ -1563,7 +1843,7 @@ export async function runStartupVectorMaintenance(): Promise<void> {
         console.warn(`[embeddings] Startup maintenance failed for ${tableName}:`, err);
       }
     }
-  });
+  }, "startup vector maintenance");
 
   if (maintenanceStateChanged) {
     persistStartupMaintenanceState(maintenanceState);
@@ -1599,7 +1879,7 @@ export async function optimizeTable(tableNames?: string[]): Promise<void> {
         console.warn(`[embeddings] Optimize failed for ${tableName}:`, err);
       }
     }
-  });
+  }, `optimize ${targets.join(",")}`);
 }
 
 export interface CombinedVectorStoreHealth {
@@ -1662,7 +1942,7 @@ async function readTableHealth(tableName: string): Promise<SingleTableHealth> {
           const repaired = await ensureScalarIndexes(tableName, t, true);
           await ensureFtsIndex(tableName, repaired, true);
         }
-      });
+      }, `${tableName}: health index repair`);
       const refreshedTable = await getTableIfExists(tableName);
       indices = refreshedTable ? await refreshedTable.listIndices() : [];
     } catch {
@@ -1722,6 +2002,34 @@ export async function getVectorStoreHealth(): Promise<CombinedVectorStoreHealth>
   };
 }
 
+/**
+ * Marks that embedding persistence is actively in progress, so the background
+ * optimize timer yields to it instead of fighting for the same cross-process
+ * write lock (which is the contention the logs show: vectorization and deferred
+ * optimization both waiting on `/app/data/.lancedb-write-lock`). Vectorization
+ * always takes priority; optimize only runs once a quiet gap appears. The hold
+ * is time-bounded so a crashed/hung vectorization job can never starve optimize
+ * forever.
+ */
+let _vectorizationActiveUntil = 0;
+const VECTORIZATION_ACTIVITY_QUIET_MS = 5_000;
+const VECTORIZATION_ACTIVITY_MAX_HOLD_MS = 60_000;
+let _vectorizationActivityStartedAt = 0;
+
+export function markVectorizationActive(): void {
+  const now = Date.now();
+  if (now - _vectorizationActivityStartedAt > VECTORIZATION_ACTIVITY_MAX_HOLD_MS) {
+    _vectorizationActivityStartedAt = now;
+  }
+  _vectorizationActiveUntil = now + VECTORIZATION_ACTIVITY_QUIET_MS;
+}
+
+function isVectorizationActive(now = Date.now()): boolean {
+  if (_vectorizationActiveUntil === 0) return false;
+  if (now - _vectorizationActivityStartedAt > VECTORIZATION_ACTIVITY_MAX_HOLD_MS) return false;
+  return now < _vectorizationActiveUntil;
+}
+
 export function scheduleOptimize(reason: "general" | "chat_chunk" | "world_book" = "general"): void {
   const now = Date.now();
   if (reason === "chat_chunk") {
@@ -1750,15 +2058,29 @@ export function scheduleOptimize(reason: "general" | "chat_chunk" | "world_book"
     : Math.min(OPTIMIZE_DEBOUNCE_MS, OPTIMIZE_MAX_WAIT_MS - elapsed);
   optimizeTimer = setTimeout(async () => {
     optimizeTimer = null;
-    optimizeQueuedAt = null;
-    try {
-      const includeWorldBooks = optimizeWorldBooksQueued;
-      optimizeWorldBooksQueued = false;
-      await optimizeTable(includeWorldBooks ? undefined : [EMBEDDINGS_TABLE]);
-    } catch (err) {
-      console.warn("[embeddings] Deferred optimize failed:", err);
+    // Background optimize yields to in-flight vectorization: both compete for the
+    // same cross-process write lock, and chat/world-book persistence must win.
+    if (isVectorizationActive()) {
+      optimizeTimer = setTimeout(() => {
+        optimizeTimer = null;
+        optimizeQueuedAt = null;
+        void runScheduledOptimize();
+      }, VECTORIZATION_ACTIVITY_QUIET_MS);
+      return;
     }
+    optimizeQueuedAt = null;
+    await runScheduledOptimize();
   }, delay);
+}
+
+async function runScheduledOptimize(): Promise<void> {
+  try {
+    const includeWorldBooks = optimizeWorldBooksQueued;
+    optimizeWorldBooksQueued = false;
+    await optimizeTable(includeWorldBooks ? undefined : [EMBEDDINGS_TABLE]);
+  } catch (err) {
+    console.warn("[embeddings] Deferred optimize failed:", err);
+  }
 }
 
 /**
@@ -1862,7 +2184,7 @@ async function migrateWorldBookRowsToDedicatedTable(): Promise<{ migratedRows: n
     }
 
     console.info(`[embeddings] Migrated ${migratedRows.length} world-book embedding row(s) into ${WORLD_BOOK_EMBEDDINGS_TABLE}`);
-  });
+  }, "world-book table migration");
 
   if (migratedRowsCount > 0) {
     return { migratedRows: migratedRowsCount, legacyRowsFound: true };
@@ -2008,7 +2330,7 @@ export async function forceResetLanceDB(): Promise<{ deleted: boolean; path: str
 
     console.info("[embeddings] LanceDB force reset complete. Vector store will reinitialize on next use.");
     return { deleted, path: LANCEDB_PATH };
-  });
+  }, "force reset");
 }
 
 // ---------------------------------------------------------------------------
@@ -2109,6 +2431,10 @@ export class LanceDbStore implements VectorStore {
     })).filter((row) => row.vector.length > 0);
   }
 
+  async replaceByFilter(collection: CollectionName, filter: VectorFilter, rows: VectorRow[]): Promise<void> {
+    await replaceEmbeddingRows(collection, filter, rows, `${collection}: replace by filter`);
+  }
+
   async deleteByFilter(collection: CollectionName, filter: VectorFilter): Promise<void> {
     const tableName = collectionToTable(collection);
     await withWriteLock(async () => {
@@ -2116,9 +2442,9 @@ export class LanceDbStore implements VectorStore {
       if (!table) return;
       await withRetryableLanceWriteConflictRetry(`${tableName}: delete by filter`, tableName, async () => {
         table = await reopenTableForWrite(tableName);
-        await safeTableDelete(table, translateFilter(filter), "general");
+        await safeTableDelete(table, translateFilter(filter), optimizeReasonFor(tableName));
       });
-    });
+    }, `${tableName}: delete by filter`);
     scheduleOptimize("general");
   }
 
@@ -2134,10 +2460,10 @@ export class LanceDbStore implements VectorStore {
         const filter = `id IN (${batch.map((id) => sqlValue(id)).join(", ")})`;
         await withRetryableLanceWriteConflictRetry(`${tableName}: delete batch`, tableName, async () => {
           table = await reopenTableForWrite(tableName);
-          await safeTableDelete(table, filter, "general");
+          await safeTableDelete(table, filter, optimizeReasonFor(tableName));
         });
       }
-    });
+    }, `${tableName}: delete by ids`);
     scheduleOptimize("general");
   }
 

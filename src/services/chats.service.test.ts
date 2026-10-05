@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
+import { env } from "../env";
 import { eventBus } from "../ws/bus";
 import { EventType, type EventMessage } from "../ws/events";
 import {
@@ -27,6 +31,7 @@ import {
   listRecentChats,
   listRecentChatsGrouped,
   patchMessageExtra,
+  removeMessageAttachment,
   removeGroupMember,
   searchMessages,
   setGroupMemberAlternateFields,
@@ -178,6 +183,30 @@ function seedBreakdown(
   getDb()
     .query("INSERT INTO message_breakdowns (message_id, chat_id, user_id, data) VALUES (?, ?, ?, ?)")
     .run(messageId, chatId, userId, JSON.stringify(data));
+}
+
+function seedStoredImageWithFiles(imageId: string): string[] {
+  getDb().run(`CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    filename TEXT NOT NULL,
+    owner_extension_identifier TEXT
+  )`);
+
+  const filename = `${imageId}.png`;
+  getDb()
+    .query("INSERT INTO images (id, user_id, filename) VALUES (?, ?, ?)")
+    .run(imageId, "u1", filename);
+
+  const imagesDir = join(env.dataDir, "images");
+  mkdirSync(imagesDir, { recursive: true });
+  const paths = [
+    join(imagesDir, filename),
+    join(imagesDir, `${imageId}_thumb_sm_v2.webp`),
+    join(imagesDir, `${imageId}_thumb_lg_v2.webp`),
+  ];
+  for (const path of paths) writeFileSync(path, "fixture");
+  return paths;
 }
 
 beforeEach(() => {
@@ -901,6 +930,66 @@ describe("message breakdown deletion", () => {
   });
 });
 
+describe("message image attachment cleanup", () => {
+  test("deletes the image row, original, and thumbnails with the owning message", () => {
+    const originalDataDir = env.dataDir;
+    const testDataDir = mkdtempSync(join(tmpdir(), "lumiverse-message-image-cleanup-"));
+    env.dataDir = testDataDir;
+
+    try {
+      const imageId = "message-image";
+      const attachment = {
+        type: "image",
+        image_id: imageId,
+        mime_type: "image/png",
+        original_filename: "attached.png",
+      };
+      seedChat("image-chat", "c1", "Images", "{}", 100);
+      seedMessage("image-message", "image-chat", "Attached", { attachments: [attachment] });
+      const paths = seedStoredImageWithFiles(imageId);
+
+      expect(deleteMessage("u1", "image-message")).toBe(true);
+
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).toBeNull();
+      expect(paths.every((path) => !existsSync(path))).toBe(true);
+    } finally {
+      env.dataDir = originalDataDir;
+      rmSync(testDataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retains a shared image until its final message attachment is removed", () => {
+    const originalDataDir = env.dataDir;
+    const testDataDir = mkdtempSync(join(tmpdir(), "lumiverse-shared-message-image-"));
+    env.dataDir = testDataDir;
+
+    try {
+      const imageId = "shared-message-image";
+      const attachment = {
+        type: "image",
+        image_id: imageId,
+        mime_type: "image/png",
+        original_filename: "shared.png",
+      };
+      seedChat("shared-image-chat", "c1", "Shared Images", "{}", 100);
+      seedMessage("first-image-message", "shared-image-chat", "First", { attachments: [attachment] }, { index: 0 });
+      seedMessage("second-image-message", "shared-image-chat", "Second", { attachments: [attachment] }, { index: 1 });
+      const paths = seedStoredImageWithFiles(imageId);
+
+      expect(deleteMessage("u1", "first-image-message")).toBe(true);
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).not.toBeNull();
+      expect(paths.every(existsSync)).toBe(true);
+
+      expect(removeMessageAttachment("u1", "second-image-message", imageId)).not.toBeNull();
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).toBeNull();
+      expect(paths.every((path) => !existsSync(path))).toBe(true);
+    } finally {
+      env.dataDir = originalDataDir;
+      rmSync(testDataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("group member alternate fields", () => {
   test("merges selections for one member without clobbering other members", () => {
     const extensions = {
@@ -1010,6 +1099,30 @@ describe("avatar-bound appearance", () => {
 
     expect(result?.chat.metadata.active_avatar_id).toBe("winter-image");
     expect(result?.chat.metadata.alternate_field_selections.personality).toBe("warm");
+  });
+
+  test("a deleted variant left in an old avatar binding does not block appearance changes", () => {
+    seedCharacterWithExtensions("char1", {
+      ...appearanceExtensions,
+      alternate_fields: { personality: appearanceExtensions.alternate_fields.personality },
+    });
+    getDb().query("UPDATE characters SET alternate_greetings = ? WHERE id = ?")
+      .run(JSON.stringify(["Winter hello"]), "char1");
+    seedChat("chat1", "char1", "Chat", "{}", 1);
+
+    const selectedField = applyChatAppearance("u1", "chat1", {
+      type: "field", field: "personality", variant_id: "warm",
+    });
+    expect(selectedField?.chat.metadata.active_avatar_id).toBe("winter-image");
+    expect(selectedField?.chat.metadata.alternate_field_selections).toEqual({ personality: "warm" });
+
+    const selectedAvatar = applyChatAppearance("u1", "chat1", {
+      type: "avatar", avatar_entry_id: "winter-avatar",
+    });
+    expect(selectedAvatar?.chat.metadata.alternate_field_selections).toEqual({ personality: "warm" });
+    expect(applyChatAppearance("u1", "chat1", {
+      type: "field", field: "description", variant_id: "winter-desc",
+    })).toBeNull();
   });
 
   test("an unbound field change does not rewrite an edited greeting", () => {

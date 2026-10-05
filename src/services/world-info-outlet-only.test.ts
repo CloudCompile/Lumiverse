@@ -21,6 +21,7 @@ import { resolveWorldInfoOutlets } from "./prompt-assembly.service";
 
 function makeEntry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: overrides.id ?? crypto.randomUUID(),
     world_book_id: "book-a",
     uid: overrides.uid ?? crypto.randomUUID(),
