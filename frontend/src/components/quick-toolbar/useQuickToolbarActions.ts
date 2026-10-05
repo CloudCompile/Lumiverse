@@ -17,8 +17,10 @@ import {
   isExtensionActionOrderPermutation,
   mergeExtensionActionOrder,
   normalizeToolbarExtensionActions,
+  resolveSuiteExtensionId,
   setToolbarExtensionActionVisible,
   type ExtensionActionCatalog,
+  type ExtensionActionKind,
 } from '@/lib/extensionActionPreferences'
 import { resolveToolbarIntent, type ToolbarSurface, type ToolbarUiState } from '@/lib/quickToolbarToggle'
 import { moveWithinFiltered } from '@/lib/toolbarActionSearch'
@@ -32,7 +34,6 @@ import { nextToolbarIconOrder } from './toolbarPointerHold'
 import {
   filterEnabledFrontendContributions,
   hasEnabledFrontendExtension,
-  hasEnabledFrontendExtensionId,
 } from '@/lib/spindle/frontend-extension-availability'
 import { isExtensionComposerActionId } from '@/components/chat/composerActionOwnership'
 
@@ -193,7 +194,7 @@ function buildToolbarExtensionCatalogState(state: ToolbarExtensionActionState): 
       contributionId: tab.contributionId,
       runtimeId: tab.id,
     })),
-  ])
+  ], resolveSuiteExtensionId(state.extensions))
   const catalogInputKeys = new Map<string, string>()
   const catalogDrawerKeys = new Map<string, string>()
   for (const entry of catalog.entries) {
@@ -241,10 +242,15 @@ export function buildToolbarExtensionCatalog(state: ToolbarExtensionActionState)
     eligibleDrawerRuntimeIds,
   } = buildToolbarExtensionCatalogState(state)
   const inputActionKeys = new Map<string, string>()
+  const drawerTabKeys = new Map<string, string>()
+  // The raw catalog still preserves identity and saved preferences while the
+  // Suite is off, but its actions cannot render or occupy reorderable slots.
+  if (!hasEnabledFrontendExtension(state.extensions, 'lumiverse_suite')) {
+    return { catalog, inputActionKeys, drawerTabKeys }
+  }
   for (const [runtimeId, key] of catalogInputKeys) {
     if (eligibleInputRuntimeIds.has(runtimeId)) inputActionKeys.set(runtimeId, key)
   }
-  const drawerTabKeys = new Map<string, string>()
   for (const [runtimeId, key] of catalogDrawerKeys) {
     if (eligibleDrawerRuntimeIds.has(runtimeId)) drawerTabKeys.set(runtimeId, key)
   }
@@ -356,13 +362,16 @@ function resolvedToolbarCatalogIds(
 }
 
 /** Stable persisted key for one input action (bare Suite keys, namespaced otherwise). */
-export function quickToolbarInputActionId(action: QuickToolbarInputAction): string {
+export function quickToolbarInputActionId(
+  action: QuickToolbarInputAction,
+  suiteExtensionId = resolveSuiteExtensionId(useStore.getState().extensions),
+): string {
   return extensionActionIdentity({
     kind: 'input',
     extensionId: action.extensionId,
     contributionId: action.contributionId,
     runtimeId: action.id,
-  }).key
+  }, suiteExtensionId).key
 }
 
 /** The suite owns the meaning of these two named editor actions, so it owns their glyph mapping too. */
@@ -460,6 +469,21 @@ export function useQuickToolbarActions() {
     [extensionDrawerTabs, extensions, inputBarActions],
   )
 
+  const runExtensionAction = useCallback((
+    kind: ExtensionActionKind,
+    runtimeId: string,
+    key: string,
+    run: (state: ReturnType<typeof useStore.getState>) => void,
+  ) => {
+    const state = useStore.getState()
+    const live = buildToolbarExtensionCatalog(state)
+    const keys = kind === 'input' ? live.inputActionKeys : live.drawerTabKeys
+    // A captured action cannot outlive its registration, eligibility or unique
+    // logical identity, even before React has committed the updated catalog.
+    if (keys.get(runtimeId) !== key) return
+    run(state)
+  }, [])
+
   const actionCatalog = useMemo(() => {
     void settingsTabs
     const enabledDrawerTabs = filterEnabledFrontendContributions(extensionDrawerTabs, extensions)
@@ -467,7 +491,7 @@ export function useQuickToolbarActions() {
     const enabledInputBarActions = filterEnabledFrontendContributions(inputBarActions, extensions)
     const councilTab = DRAWER_TABS.find((tab) => tab.id === 'council')
     const legacyCouncilTabs = councilTab ? Object.entries(COUNCIL_TAB_ALIASES).map(([id, view]) => ({ ...councilTab, id, tabName: `Council · ${view === 'ooc' ? 'OOC' : view[0].toUpperCase() + view.slice(1)}` })) : []
-    const toDrawerAction = (tab: DrawerTabEntry, id: string): ToolbarAction => {
+    const toDrawerAction = (tab: DrawerTabEntry, id: string, extension = false): ToolbarAction => {
       const surface: ToolbarSurface = { kind: 'drawer', tabId: tab.id }
       return {
         id,
@@ -476,7 +500,9 @@ export function useQuickToolbarActions() {
         keywords: tab.keywords,
         icon: tab.tabIcon,
         surface,
-        run: () => runSurface(surface),
+        run: extension
+          ? () => runExtensionAction('drawer', tab.id, id, () => runSurface(surface))
+          : () => runSurface(surface),
       }
     }
     const drawerActions: ToolbarAction[] = [
@@ -486,7 +512,7 @@ export function useQuickToolbarActions() {
       // one registration remains; `surface.tabId` stays the runtime handle.
       ...adaptExtensionTabs(enabledDrawerTabs).flatMap((tab) => {
         const id = liveExtension.drawerTabKeys.get(tab.id)
-        return id ? [toDrawerAction(tab, id)] : []
+        return id ? [toDrawerAction(tab, id, true)] : []
       }),
     ]
     const settingsActions: ToolbarAction[] = getVisibleSettingsTabs(userRole).map((tab) => {
@@ -538,13 +564,10 @@ export function useQuickToolbarActions() {
           keywords: ['extension', 'input action', action.extensionName, action.extensionId],
           icon: quickToolbarInputActionIcon(action),
           surface: { kind: 'command' } as const,
-          run: () => runSurface(
-            { kind: 'command' },
-            () => {
-              if (!hasEnabledFrontendExtensionId(useStore.getState().extensions, action.extensionId)) return
-              action.clickHandlers.forEach((handler) => handler(undefined))
-            },
-          ),
+          run: () => runExtensionAction('input', action.id, id, (state) => {
+            const current = state.inputBarActions.find((entry) => entry.id === action.id)
+            current?.clickHandlers.forEach((handler) => handler(undefined))
+          }),
         }]
       })
     const owners = chatDockerActionOwners
@@ -620,6 +643,7 @@ export function useQuickToolbarActions() {
     liveExtension,
     messageSelectMode,
     openModal,
+    runExtensionAction,
     runSurface,
     userRole,
   ])

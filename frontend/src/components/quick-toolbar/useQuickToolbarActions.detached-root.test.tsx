@@ -42,8 +42,7 @@ const SUBSET_LAST = 'chat.prompt-variables'
 /**
  * Owner-enabled slice, shaped exactly as the store supplies it. Both owners that
  * register actions here are enabled, so the live unique maps and the rendered
- * catalog both admit their registrations; `filterEnabledFrontendContributions`
- * matches on `identifier ?? id`.
+ * catalog both admit their registrations; contribution ownership matches on id.
  */
 const INITIAL_EXTENSIONS = [
   { id: 'lumiverse_suite', identifier: 'lumiverse_suite', enabled: true, has_frontend: true },
@@ -113,7 +112,7 @@ const state = {
   drawerTab: '',
   settingsModalOpen: false,
   settingsActiveView: '',
-  openDrawer: () => undefined,
+  openDrawer: (tabId?: string) => { drawerOpens.push(tabId ?? '') },
   closeDrawer: () => undefined,
   setDrawerTab: () => undefined,
   openSettings: () => undefined,
@@ -124,6 +123,7 @@ const state = {
   },
 }
 const settingWrites: Array<{ key: string; value: unknown }> = []
+const drawerOpens: string[] = []
 const useStore = ((selector: (value: typeof state) => unknown) => selector(state)) as typeof import('@/store').useStore
 useStore.getState = () => state as unknown as ReturnType<typeof useStore.getState>
 
@@ -152,9 +152,6 @@ mock.module('@/lib/drawer-tab-registry', () => ({
   extensionCommandsToCommands: () => [],
 }))
 mock.module('@/lib/settings-tab-registry', () => ({ getVisibleSettingsTabs: () => [] }))
-mock.module('@/lib/quickToolbarToggle', () => ({
-  resolveToolbarIntent: () => ({ type: 'run-command' }),
-}))
 mock.module('@/lib/toolbarActionSearch', () => ({
   // Real filtered-move semantics, inlined so the mock cannot recurse through the
   // module it replaces (an imported binding here would be the mock itself).
@@ -229,6 +226,8 @@ function Probe() {
     <button data-testid="run-by-key" type="button" onClick={() => actions[0]?.run()}>run first</button>
     <button data-testid="move-settings-up" type="button" onClick={() => moveAction('settings', -1)}>move settings up</button>
     <button data-testid="pin-settings" type="button" onClick={() => pinAction('settings')}>pin settings</button>
+    <button data-testid="pin-home" type="button" onClick={() => pinAction('command:action-home')}>pin home</button>
+    <button data-testid="pin-foreign" type="button" onClick={() => pinAction(FOREIGN_KEY)}>pin foreign</button>
     <button data-testid="pin-first" type="button" onClick={() => { const first = orderedIds[0]; if (first) pinAction(first) }}>pin first</button>
     <button data-testid="reorder-reverse" type="button" onClick={() => reorderActions([...orderedIds].reverse())}>reverse</button>
     <button data-testid="reorder-stale" type="button" onClick={() => reorderActions(['command:action-home', 'ghost:absent'])}>stale</button>
@@ -265,6 +264,7 @@ beforeAll(async () => {
 afterEach(() => {
   document.body.replaceChildren()
   settingWrites.length = 0
+  drawerOpens.length = 0
   nativeDrawerTabs.length = 0
   state.drawerTabs = []
   state.inputBarActions = []
@@ -278,6 +278,139 @@ afterEach(() => {
 })
 
 describe('useQuickToolbarActions detached host root', () => {
+  test('retains all reserved Suite actions with a real installation UUID', async () => {
+    const suiteId = '8c778c95-b0b8-40cc-8187-23de0a3a0d3c'
+    const ids = [HALF_CONTRIBUTION, 'lumiverse_suite.lorebook.open_enhanced', 'lumiverse_suite.connections_picker.open']
+    let opens = 0
+    state.extensions = [{ id: suiteId, identifier: 'lumiverse_suite', enabled: true, has_frontend: true }]
+    state.inputBarActions = ids.map((contributionId, index) => ({
+      ...suiteHalfAction(index + 1),
+      id: `spindle:${suiteId}:action:${contributionId}:${index + 1}`,
+      extensionId: suiteId,
+      contributionId,
+      clickHandlers: new Set([() => { opens += 1 }]),
+    }))
+    state.quickToolbarSettings = { ...state.quickToolbarSettings, visibleTabIds: ids, iconOrder: ids }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => root.render(<Probe />))
+      for (const id of ids) expect(hasActionId(host, id)).toBe(true)
+      expect(state.inputBarActions.map((action) => quickToolbarInputActionId(action))).toEqual(ids)
+      expect(host.querySelector('[data-testid="ordered-ids"]')?.textContent).toBe(ids.join('|'))
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="run-connections"]')?.click())
+      expect(opens).toBe(1)
+      expect(settingWrites).toEqual([])
+    } finally {
+      await act(async () => root.unmount())
+    }
+  })
+
+  test('preserves gated extension slots while pinning and dragging native actions with Suite disabled', async () => {
+    state.extensions = [{ ...INITIAL_EXTENSIONS[0], enabled: false }, INITIAL_EXTENSIONS[1]]
+    state.inputBarActions = [foreignOwnerInputAction(1)]
+    const drawer = extensionDrawerTab('settings-page', 1)
+    const drawerKey = 'ext-action:["drawer","ext_owner","settings-page"]'
+    state.drawerTabs = [drawer]
+    const initialOrder = [FOREIGN_KEY, 'chat.new', drawerKey, 'command:action-home']
+    state.quickToolbarSettings = { ...state.quickToolbarSettings, visibleTabIds: initialOrder, iconOrder: initialOrder }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => root.render(<Probe />))
+      expect(host.querySelector('[data-testid="visible-ids"]')?.textContent).toBe('chat.new|command:action-home')
+      expect(host.querySelector('[data-testid="ordered-ids"]')?.textContent).toBe('chat.new|command:action-home')
+      expect(hasActionId(host, FOREIGN_KEY)).toBe(false)
+      expect(hasActionId(host, drawerKey)).toBe(false)
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="pin-home"]')?.click())
+      expect(state.quickToolbarSettings.iconOrder).toEqual([FOREIGN_KEY, 'command:action-home', drawerKey, 'chat.new'])
+      await act(async () => root.render(<Probe />))
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="reorder-reverse"]')?.click())
+      expect(state.quickToolbarSettings.iconOrder).toEqual(initialOrder)
+      expect(state.quickToolbarSettings.visibleTabIds).toEqual(initialOrder)
+    } finally {
+      await act(async () => root.unmount())
+    }
+  })
+
+  test('rejects captured extension pin and drag requests after Suite disables before rerender', async () => {
+    state.inputBarActions = [foreignOwnerInputAction(1)]
+    const initialOrder = ['command:action-home', 'ghost:absent', FOREIGN_KEY]
+    state.quickToolbarSettings = {
+      ...state.quickToolbarSettings,
+      visibleTabIds: ['command:action-home', FOREIGN_KEY],
+      iconOrder: initialOrder,
+    }
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => root.render(<Probe />))
+      state.extensions = [{ ...INITIAL_EXTENSIONS[0], enabled: false }, INITIAL_EXTENSIONS[1]]
+      await act(async () => {
+        host.querySelector<HTMLButtonElement>('[data-testid="pin-foreign"]')?.click()
+        host.querySelector<HTMLButtonElement>('[data-testid="reorder-reverse"]')?.click()
+      })
+      expect(settingWrites).toEqual([])
+      expect(state.quickToolbarSettings.iconOrder).toEqual(initialOrder)
+    } finally {
+      await act(async () => root.unmount())
+    }
+  })
+
+  test.each(['duplicate', 'unregistered', 'reloaded', 'ineligible', 'owner-disabled'] as const)(
+    'blocks a captured input callback when its registration becomes %s', async (change) => {
+      let opens = 0
+      const action = foreignOwnerInputAction(1, () => { opens += 1 })
+      state.inputBarActions = [action]
+      state.quickToolbarSettings = { ...state.quickToolbarSettings, visibleTabIds: [FOREIGN_KEY], iconOrder: [FOREIGN_KEY] }
+      const host = document.createElement('div')
+      document.body.append(host)
+      const root = createRoot(host)
+      try {
+        await act(async () => root.render(<Probe />))
+        await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="run-foreign"]')?.click())
+        expect(opens).toBe(1)
+        if (change === 'duplicate') state.inputBarActions = [action, foreignOwnerInputAction(2)]
+        if (change === 'unregistered') state.inputBarActions = []
+        if (change === 'reloaded') state.inputBarActions = [foreignOwnerInputAction(2, () => { opens += 10 })]
+        if (change === 'ineligible') state.inputBarActions = [{ ...action, placement: 'world_book.entry_toolbar' }]
+        if (change === 'owner-disabled') state.extensions = [INITIAL_EXTENSIONS[0], { ...INITIAL_EXTENSIONS[1], enabled: false }]
+        await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="run-foreign"]')?.click())
+        expect(opens).toBe(1)
+      } finally {
+        await act(async () => root.unmount())
+      }
+    },
+  )
+
+  test.each(['duplicate', 'unregistered', 'reloaded', 'owner-disabled'] as const)(
+    'blocks a captured drawer launch when its registration becomes %s', async (change) => {
+      const tab = extensionDrawerTab('settings-page', 1)
+      const key = 'ext-action:["drawer","ext_owner","settings-page"]'
+      state.drawerTabs = [tab]
+      state.quickToolbarSettings = { ...state.quickToolbarSettings, visibleTabIds: [key], iconOrder: [key] }
+      const host = document.createElement('div')
+      document.body.append(host)
+      const root = createRoot(host)
+      try {
+        await act(async () => root.render(<Probe />))
+        await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="run-by-key"]')?.click())
+        expect(drawerOpens).toEqual([tab.id])
+        if (change === 'duplicate') state.drawerTabs = [tab, extensionDrawerTab('settings-page', 2)]
+        if (change === 'unregistered') state.drawerTabs = []
+        if (change === 'reloaded') state.drawerTabs = [extensionDrawerTab('settings-page', 2)]
+        if (change === 'owner-disabled') state.extensions = [INITIAL_EXTENSIONS[0], { ...INITIAL_EXTENSIONS[1], enabled: false }]
+        await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="run-by-key"]')?.click())
+        expect(drawerOpens).toEqual([tab.id])
+      } finally {
+        await act(async () => root.unmount())
+      }
+    },
+  )
+
   test('renders its action catalog without a Router provider', async () => {
     const host = document.createElement('div')
     document.body.append(host)

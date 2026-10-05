@@ -26,6 +26,7 @@ import {
   applyComposerExtensionActionOrder,
   buildExtensionActionCatalog,
   normalizeComposerExtensionActions,
+  resolveSuiteExtensionId,
   setComposerExtensionActionVisible,
   type ExtensionActionCatalog,
 } from '@/lib/extensionActionPreferences'
@@ -179,19 +180,20 @@ function extensionActionCatalogFor(state: ComposerExtensionActionState): Extensi
       contributionId: tab.contributionId,
       runtimeId: tab.id,
     })),
-  ])
+  ], resolveSuiteExtensionId(state.extensions))
 }
 
 /** The mandatory store slices extension identity is derived from. */
 export interface ComposerExtensionActionState {
   inputBarActions: readonly InputBarActionState[]
   drawerTabs: readonly DrawerTabState[]
+  extensions: readonly { id?: unknown; identifier?: unknown }[] | null | undefined
 }
 
 /** Reads those slices synchronously, so a mutation never acts on a render-time catalog. */
 function readComposerExtensionActionState(): ComposerExtensionActionState {
   const state = useStore.getState()
-  return { inputBarActions: state.inputBarActions, drawerTabs: state.drawerTabs }
+  return { inputBarActions: state.inputBarActions, drawerTabs: state.drawerTabs, extensions: state.extensions }
 }
 
 function currentExtensionActionCatalog(): ExtensionActionCatalog {
@@ -307,6 +309,7 @@ export function useComposerActionBar() {
   /** Live registrations; these slices change on extension registration churn. */
   const inputBarActions = useStore((store) => store.inputBarActions)
   const drawerTabs = useStore((store) => store.drawerTabs)
+  const extensions = useStore((store) => store.extensions)
   /**
    * Committed-state reference, advanced synchronously by `persist` so the second
    * of two handlers in the same tick cannot read a stale snapshot. It is
@@ -333,9 +336,9 @@ export function useComposerActionBar() {
    */
   const projected = useMemo(
     () => pruneCoreOwnedComposerAliases(
-      normalizeComposerExtensionActions(state, extensionActionCatalogFor({ inputBarActions, drawerTabs })),
+      normalizeComposerExtensionActions(state, extensionActionCatalogFor({ inputBarActions, drawerTabs, extensions })),
     ),
-    [drawerTabs, inputBarActions, state],
+    [drawerTabs, extensions, inputBarActions, state],
   )
 
   const hiddenSet = useMemo(() => new Set(projected.hidden), [projected.hidden])

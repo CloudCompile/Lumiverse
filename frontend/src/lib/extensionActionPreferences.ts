@@ -7,13 +7,21 @@
 
 export type ExtensionActionKind = 'input' | 'drawer'
 
-/** Owner whose input actions keep the bare contribution key they shipped with. */
-export const SUITE_EXTENSION_ID = 'lumiverse_suite'
+/** Manifest identifier whose input actions keep their original bare keys. */
+export const SUITE_EXTENSION_IDENTIFIER = 'lumiverse_suite'
+
+/** Resolve the Suite's installation UUID from host-provided extension metadata. */
+export function resolveSuiteExtensionId(
+  extensions: readonly { id?: unknown; identifier?: unknown }[] | null | undefined,
+): string | undefined {
+  const suite = extensions?.find((extension) => extension.identifier === SUITE_EXTENSION_IDENTIFIER)
+  return typeof suite?.id === 'string' ? suite.id : undefined
+}
 
 /**
  * The three first-party Suite input actions that predate stable keys. Re-keying
  * them would drop an existing selection, so the bare ids stay reserved to
- * `SUITE_EXTENSION_ID`; another owner reusing a name gets the namespaced key.
+ * the installed Suite owner; another owner reusing a name gets the namespaced key.
  */
 export const SUITE_BARE_INPUT_ACTION_IDS = [
   'lumiverse_suite.lorebook.open_half',
@@ -57,8 +65,9 @@ export function extensionActionKey(
   kind: ExtensionActionKind,
   extensionId: string,
   contributionId: string,
+  suiteExtensionId?: string,
 ): string {
-  if (kind === 'input' && extensionId === SUITE_EXTENSION_ID && SUITE_BARE_INPUT_ACTION_ID_SET.has(contributionId)) {
+  if (kind === 'input' && extensionId === suiteExtensionId && SUITE_BARE_INPUT_ACTION_ID_SET.has(contributionId)) {
     return contributionId
   }
   return `ext-action:${JSON.stringify([kind, extensionId, contributionId])}`
@@ -74,12 +83,15 @@ export function extensionRuntimeKey(
 }
 
 /** Stable key when the contribution metadata is usable, ephemeral otherwise. */
-export function extensionActionIdentity(registration: ExtensionActionRegistration): ExtensionActionIdentity {
+export function extensionActionIdentity(
+  registration: ExtensionActionRegistration,
+  suiteExtensionId?: string,
+): ExtensionActionIdentity {
   const { kind, extensionId, contributionId, runtimeId } = registration
   if (!isUsableContributionId(contributionId)) {
     return { key: extensionRuntimeKey(kind, extensionId, runtimeId), runtime: true }
   }
-  return { key: extensionActionKey(kind, extensionId, contributionId), runtime: false }
+  return { key: extensionActionKey(kind, extensionId, contributionId, suiteExtensionId), runtime: false }
 }
 
 /** One live registration, keyed and classified. */
@@ -106,9 +118,10 @@ export interface ExtensionActionCatalog {
 /** Keys live registrations; duplicate logical tuples are marked `ambiguous`. */
 export function buildExtensionActionCatalog(
   registrations: readonly ExtensionActionRegistration[],
+  suiteExtensionId?: string,
 ): ExtensionActionCatalog {
   const entries: ExtensionActionCatalogEntry[] = registrations.map((registration) => {
-    const identity = extensionActionIdentity(registration)
+    const identity = extensionActionIdentity(registration, suiteExtensionId)
     return {
       kind: registration.kind,
       extensionId: registration.extensionId,
@@ -175,6 +188,11 @@ export function resolveStoredExtensionActionKey(
 ): string | null {
   for (const entry of catalog.entries) {
     if (entry.key === stored) return stored
+    // A build that confused the Suite identifier with its UUID may have saved
+    // these reserved actions under namespaced keys. Restore the original key
+    // only for the known, unique Suite registration.
+    if (!entry.ambiguous && entry.kind === 'input' && SUITE_BARE_INPUT_ACTION_ID_SET.has(entry.key)
+      && stored === extensionActionKey('input', entry.extensionId, entry.key)) return entry.key
   }
   // Ambiguous entries must still contribute their logical prefix, otherwise a
   // duplicate-withheld owner would be silently discarded and the surviving

@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   SUITE_BARE_INPUT_ACTION_IDS,
-  SUITE_EXTENSION_ID,
+  SUITE_EXTENSION_IDENTIFIER,
   applyComposerExtensionActionOrder,
   buildExtensionActionCatalog,
   extensionActionIdentity,
@@ -14,6 +14,7 @@ import {
   normalizeToolbarExtensionActions,
   pinExtensionActionToFirstSlot,
   resolveStoredExtensionActionKey,
+  resolveSuiteExtensionId,
   setComposerExtensionActionVisible,
   setToolbarExtensionActionVisible,
   type ExtensionActionRegistration,
@@ -26,6 +27,7 @@ import {
 const SUITE_HALF = 'lumiverse_suite.lorebook.open_half'
 const SUITE_ENHANCED = 'lumiverse_suite.lorebook.open_enhanced'
 const SUITE_CONNECTIONS = 'lumiverse_suite.connections_picker.open'
+const SUITE_UUID = '8c778c95-b0b8-40cc-8187-23de0a3a0d3c'
 
 const KEY_INPUT = 'ext-action:["input","owner","contrib"]'
 const KEY_DRAWER = 'ext-action:["drawer","owner","settings"]'
@@ -86,31 +88,59 @@ describe('extension action keys', () => {
       'lumiverse_suite.lorebook.open_enhanced',
       'lumiverse_suite.connections_picker.open',
     ])
-    expect(SUITE_EXTENSION_ID).toBe('lumiverse_suite')
-    expect(extensionActionKey('input', SUITE_EXTENSION_ID, SUITE_HALF)).toBe('lumiverse_suite.lorebook.open_half')
-    expect(extensionActionKey('input', SUITE_EXTENSION_ID, SUITE_ENHANCED)).toBe('lumiverse_suite.lorebook.open_enhanced')
-    expect(extensionActionKey('input', SUITE_EXTENSION_ID, SUITE_CONNECTIONS)).toBe('lumiverse_suite.connections_picker.open')
+    expect(SUITE_EXTENSION_IDENTIFIER).toBe('lumiverse_suite')
+    expect(extensionActionKey('input', SUITE_UUID, SUITE_HALF, SUITE_UUID)).toBe('lumiverse_suite.lorebook.open_half')
+    expect(extensionActionKey('input', SUITE_UUID, SUITE_ENHANCED, SUITE_UUID)).toBe('lumiverse_suite.lorebook.open_enhanced')
+    expect(extensionActionKey('input', SUITE_UUID, SUITE_CONNECTIONS, SUITE_UUID)).toBe('lumiverse_suite.connections_picker.open')
 
     const suiteCatalog = buildExtensionActionCatalog([
-      inputAction(SUITE_EXTENSION_ID, SUITE_HALF, 'spindle:lumiverse_suite:action:lumiverse_suite.lorebook.open_half:4'),
-    ])
+      inputAction(SUITE_UUID, SUITE_HALF, `spindle:${SUITE_UUID}:action:${SUITE_HALF}:4`),
+    ], SUITE_UUID)
     expect(suiteCatalog.entries[0].key).toBe('lumiverse_suite.lorebook.open_half')
     expect(resolveStoredExtensionActionKey(
-      'input-action:lumiverse_suite:spindle:lumiverse_suite:action:lumiverse_suite.lorebook.open_half:6',
+      `input-action:${SUITE_UUID}:spindle:${SUITE_UUID}:action:${SUITE_HALF}:6`,
       suiteCatalog,
     )).toBe('lumiverse_suite.lorebook.open_half')
   })
 
   test('namespaces the same contribution for another owner or kind', () => {
-    expect(extensionActionKey('input', 'other_owner', SUITE_HALF))
+    expect(extensionActionKey('input', 'other_owner', SUITE_HALF, SUITE_UUID))
       .toBe('ext-action:["input","other_owner","lumiverse_suite.lorebook.open_half"]')
-    expect(extensionActionKey('drawer', SUITE_EXTENSION_ID, SUITE_HALF))
-      .toBe('ext-action:["drawer","lumiverse_suite","lumiverse_suite.lorebook.open_half"]')
+    expect(extensionActionKey('drawer', SUITE_UUID, SUITE_HALF, SUITE_UUID))
+      .toBe(`ext-action:["drawer","${SUITE_UUID}","lumiverse_suite.lorebook.open_half"]`)
+    expect(extensionActionKey('input', 'lumiverse_suite', SUITE_HALF, SUITE_UUID))
+      .toBe('ext-action:["input","lumiverse_suite","lumiverse_suite.lorebook.open_half"]')
 
-    const foreign = buildExtensionActionCatalog([inputAction('other_owner', SUITE_HALF, 'runtime-foreign')])
+    const foreign = buildExtensionActionCatalog([inputAction('other_owner', SUITE_HALF, 'runtime-foreign')], SUITE_UUID)
     expect(foreign.entries[0].key).toBe('ext-action:["input","other_owner","lumiverse_suite.lorebook.open_half"]')
     // The bare Suite key never resolves against another owner.
     expect(resolveStoredExtensionActionKey(SUITE_HALF, foreign)).toBeNull()
+  })
+
+  test('resolves Suite ownership from its manifest identifier rather than its installation id', () => {
+    expect(resolveSuiteExtensionId([
+      { id: 'lumiverse_suite', identifier: 'unrelated' },
+      { id: SUITE_UUID, identifier: 'lumiverse_suite' },
+    ])).toBe(SUITE_UUID)
+    expect(resolveSuiteExtensionId([{ id: 'lumiverse_suite', identifier: 'unrelated' }])).toBeUndefined()
+    expect(resolveSuiteExtensionId(undefined)).toBeUndefined()
+  })
+
+  test('restores namespaced Suite preferences without adopting another owner or a duplicate', () => {
+    const namespaced = `ext-action:["input","${SUITE_UUID}","${SUITE_HALF}"]`
+    const suite = inputAction(SUITE_UUID, SUITE_HALF, 'suite-runtime')
+    const foreign = inputAction('other_owner', SUITE_HALF, 'foreign-runtime')
+    const foreignKey = 'ext-action:["input","other_owner","lumiverse_suite.lorebook.open_half"]'
+    const catalog = buildExtensionActionCatalog([suite, foreign], SUITE_UUID)
+    expect(normalizeComposerExtensionActions({
+      order: [namespaced, SUITE_HALF, foreignKey],
+      hidden: [namespaced],
+    }, catalog)).toEqual({ order: [SUITE_HALF, foreignKey], hidden: [SUITE_HALF] })
+    expect(normalizeToolbarExtensionActions({ visibleIds: [namespaced], iconOrder: [namespaced] }, catalog))
+      .toEqual({ visibleIds: [SUITE_HALF], iconOrder: [SUITE_HALF] })
+    expect(resolveStoredExtensionActionKey(namespaced, buildExtensionActionCatalog([
+      suite, { ...suite, runtimeId: 'second-runtime' },
+    ], SUITE_UUID))).toBeNull()
   })
 
   test('falls back to an ephemeral runtime key for unusable contribution metadata', () => {
