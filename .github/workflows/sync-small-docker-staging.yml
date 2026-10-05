@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out protected branch
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           ref: small-docker-staging
           fetch-depth: 0
@@ -27,7 +27,7 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream "$UPSTREAM_REPO"
+          git remote get-url upstream >/dev/null 2>&1 || git remote add upstream "$UPSTREAM_REPO"
           git fetch upstream staging
 
           protected_dir="$RUNNER_TEMP/small-docker-protected"
