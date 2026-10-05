@@ -5,6 +5,7 @@ import { act } from 'react'
 import type { Root, createRoot as CreateRoot } from 'react-dom/client'
 import { JSDOM } from 'jsdom'
 import { QUICK_TOOLBAR_POINTER_HOLD_MS } from '@/components/quick-toolbar/quickToolbarDock'
+import type { DrawerTabState, InputBarActionState } from '@/store/slices/spindle-placement'
 import { isCoreOwnedComposerActionId, isExtensionComposerActionId } from './composerActionOwnership'
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
@@ -45,6 +46,10 @@ mock.module('@/store', () => {
     messageSelectMode: false,
     selectedMessageIds: [] as string[],
     enableToolbarIconReorder: true,
+    /** Live extension registrations the composer projection reads. */
+    inputBarActions: [] as InputBarActionState[],
+    drawerTabs: [] as DrawerTabState[],
+    extensions: [] as Array<{ id: string; identifier: string; enabled: boolean; has_frontend: boolean }>,
     setMessageSelectMode(enabled: boolean) {
       this.messageSelectMode = enabled
       this.selectedMessageIds = []
@@ -60,48 +65,90 @@ let ComposerActionBarLive: typeof import('./InputAreaComposerBar').ComposerActio
 let useComposerActionBar: typeof import('./InputAreaCustomizeModal').useComposerActionBar
 let COMPOSER_ACTION_BAR_STORAGE_KEY: typeof import('./InputAreaCustomizeModal').COMPOSER_ACTION_BAR_STORAGE_KEY
 let saveComposerActionBar: typeof import('./InputAreaCustomizeModal').saveComposerActionBar
+let normalizeComposerActionBarState: typeof import('./InputAreaCustomizeModal').normalizeComposerActionBarState
+let COMPOSER_ACTION_IDS: typeof import('./InputAreaCustomizeModal').COMPOSER_ACTION_IDS
+let useStore: typeof import('@/store').useStore
 
 const clicks: string[] = []
+
+const FOREIGN_CONTRIBUTION = 'widget'
+const FOREIGN_RUNTIME_ID = 'ext_owner:action:widget:9'
+const FOREIGN_KEY = 'ext-action:["input","ext_owner","widget"]'
+const LEGACY_FOREIGN_KEY = 'input-action:ext_owner:spindle:ext_owner:action:widget:7'
+const SUITE_HALF = 'lumiverse_suite.lorebook.open_half'
+const SUITE_PICKER = 'lumiverse_suite.connections_picker.open'
+
+function foreignInputAction(): InputBarActionState {
+  return {
+    id: FOREIGN_RUNTIME_ID,
+    contributionId: FOREIGN_CONTRIBUTION,
+    extensionId: 'ext_owner',
+    extensionName: 'Ext Owner',
+    label: 'Widget',
+    enabled: true,
+    clickHandlers: new Set(),
+  }
+}
 
 function Probe() {
   const bar = useComposerActionBar()
   return (
-    <ComposerActionBarLive
-      order={bar.order}
-      isVisible={bar.isVisible}
-      reorder={bar.reorder}
-      enableReorder
-      renderUnit={(id) => {
-        if (id === 'home') {
-          return (
-            <>
-              <button type="button" data-testid="home-btn" onClick={() => clicks.push('home')}>Home</button>
-              <span data-testid="home-divider" />
-            </>
-          )
-        }
-        if (id === 'regen') {
-          return <button type="button" data-testid="regen-btn" onClick={() => clicks.push('regen')}>Regen</button>
-        }
-        if (id === 'continue') {
-          return <button type="button" data-testid="continue-btn" onClick={() => clicks.push('continue')}>Continue</button>
-        }
-        return <button type="button" data-testid={`${id}-btn`}>{id}</button>
-      }}
-    >
-      <span data-spindle-mount="chat_actions" data-testid="spindle-slot" />
-      <button type="button" aria-label="Customize composer" data-testid="customize-gear">gear</button>
-    </ComposerActionBarLive>
+    <>
+      <output data-testid="composer-order">{bar.order.join('|')}</output>
+      <output data-testid="composer-hidden">{bar.hidden.join('|')}</output>
+      <button data-testid="toggle-foreign" type="button" onClick={() => bar.toggle(FOREIGN_KEY)}>toggle foreign</button>
+      <button data-testid="toggle-suite" type="button" onClick={() => bar.toggle(SUITE_HALF)}>toggle Suite</button>
+      <button
+        data-testid="two-edits"
+        type="button"
+        onClick={() => {
+          bar.toggle(FOREIGN_KEY)
+          bar.toggle('regen')
+        }}
+      >
+        two edits
+      </button>
+      <button data-testid="stale-reorder" type="button" onClick={() => bar.reorder(['ghost:id', 'home'])}>stale reorder</button>
+      <ComposerActionBarLive
+        order={bar.order}
+        isVisible={bar.isVisible}
+        reorder={bar.reorder}
+        enableReorder
+        renderUnit={(id) => {
+          if (id === 'home') {
+            return (
+              <>
+                <button type="button" data-testid="home-btn" onClick={() => clicks.push('home')}>Home</button>
+                <span data-testid="home-divider" />
+              </>
+            )
+          }
+          if (id === 'regen') {
+            return <button type="button" data-testid="regen-btn" onClick={() => clicks.push('regen')}>Regen</button>
+          }
+          if (id === 'continue') {
+            return <button type="button" data-testid="continue-btn" onClick={() => clicks.push('continue')}>Continue</button>
+          }
+          return <button type="button" data-testid={`${id}-btn`}>{id}</button>
+        }}
+      >
+        <span data-spindle-mount="chat_actions" data-testid="spindle-slot" />
+        <button type="button" aria-label="Customize composer" data-testid="customize-gear">gear</button>
+      </ComposerActionBarLive>
+    </>
   )
 }
 
 beforeAll(async () => {
+  ;({ useStore } = await import('@/store'))
   ;({ createRoot } = await import('react-dom/client'))
   ;({ ComposerActionBarLive } = await import('./InputAreaComposerBar'))
   ;({
     useComposerActionBar,
     COMPOSER_ACTION_BAR_STORAGE_KEY,
     saveComposerActionBar,
+    normalizeComposerActionBarState,
+    COMPOSER_ACTION_IDS,
   } = await import('./InputAreaCustomizeModal'))
 })
 
@@ -109,6 +156,10 @@ afterEach(() => {
   document.body.replaceChildren()
   clicks.length = 0
   localStorage.removeItem(COMPOSER_ACTION_BAR_STORAGE_KEY)
+  const state = useStore.getState()
+  state.inputBarActions = []
+  state.drawerTabs = []
+  state.extensions = []
 })
 
 function installHoldClock() {
@@ -138,6 +189,43 @@ function installHoldClock() {
 }
 
 describe('InputArea action bar live reorder', () => {
+  test('projects reserved Suite keys when UUID metadata arrives and persists the next edit coherently', async () => {
+    const suiteId = '8c778c95-b0b8-40cc-8187-23de0a3a0d3c'
+    const namespacedHalf = `ext-action:["input","${suiteId}","${SUITE_HALF}"]`
+    const namespacedPicker = `ext-action:["input","${suiteId}","${SUITE_PICKER}"]`
+    const store = useStore.getState()
+    store.inputBarActions = [SUITE_HALF, SUITE_PICKER].map((contributionId, index) => ({
+      ...foreignInputAction(),
+      id: `spindle:${suiteId}:action:${contributionId}:${index + 1}`,
+      contributionId,
+      extensionId: suiteId,
+    }))
+    const saved = JSON.stringify({
+      order: [...COMPOSER_ACTION_IDS, namespacedHalf, namespacedPicker],
+      hidden: [namespacedHalf],
+    })
+    localStorage.setItem(COMPOSER_ACTION_BAR_STORAGE_KEY, saved)
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    try {
+      await act(async () => root.render(<Probe />))
+      expect(host.querySelector('[data-testid="composer-order"]')?.textContent).toContain(namespacedPicker)
+      store.extensions = [{ id: suiteId, identifier: 'lumiverse_suite', enabled: true, has_frontend: true }] as typeof store.extensions
+      await act(async () => root.render(<Probe />))
+      expect(host.querySelector('[data-testid="composer-order"]')?.textContent)
+        .toBe([...COMPOSER_ACTION_IDS, SUITE_HALF, SUITE_PICKER].join('|'))
+      expect(host.querySelector('[data-testid="composer-hidden"]')?.textContent).toBe(SUITE_HALF)
+      expect(localStorage.getItem(COMPOSER_ACTION_BAR_STORAGE_KEY)).toBe(saved)
+      await act(async () => host.querySelector<HTMLButtonElement>('[data-testid="toggle-suite"]')?.click())
+      const persisted = JSON.parse(localStorage.getItem(COMPOSER_ACTION_BAR_STORAGE_KEY) ?? '{}')
+      expect(persisted.order).toEqual([...COMPOSER_ACTION_IDS, SUITE_HALF, SUITE_PICKER])
+      expect(persisted.hidden).toEqual([])
+    } finally {
+      await act(async () => root.unmount())
+    }
+  })
+
   test('hold completes before reorder, clicks work before hold, and wrappers stay exclusive', async () => {
     expect(QUICK_TOOLBAR_POINTER_HOLD_MS).toBe(500)
     saveComposerActionBar({
@@ -248,6 +336,13 @@ describe('InputArea action bar live reorder', () => {
     expect(isExtensionComposerActionId('spindle:lumiverse_suite:open')).toBe(true)
     expect(isExtensionComposerActionId('promptVariables')).toBe(false)
     expect(isExtensionComposerActionId('continue')).toBe(false)
+    // PR stable and ephemeral extension keys are extension-owned; native Council
+    // tab/view aliases and the core composer stay native.
+    expect(isExtensionComposerActionId(FOREIGN_KEY)).toBe(true)
+    expect(isExtensionComposerActionId('ext-runtime:["input","ext_owner","ext_owner:action:widget:9"]')).toBe(true)
+    expect(isExtensionComposerActionId('council')).toBe(false)
+    expect(isExtensionComposerActionId('ooc')).toBe(false)
+    expect(isExtensionComposerActionId('feedback')).toBe(false)
   })
 
   test('InputArea drops persisted Suite-owned extras while retaining native extras when Suite is off', async () => {
