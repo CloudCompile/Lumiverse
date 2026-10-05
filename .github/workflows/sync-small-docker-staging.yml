@@ -1,0 +1,63 @@
+name: Sync Small Docker Branch
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out protected branch
+        uses: actions/checkout@v7
+        with:
+          ref: small-docker-staging
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge upstream staging and preserve Docker contract
+        env:
+          BRANCH: small-docker-staging
+          UPSTREAM_REPO: https://github.com/prolix-oc/Lumiverse.git
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream "$UPSTREAM_REPO"
+          git fetch upstream staging
+
+          protected_dir="$RUNNER_TEMP/small-docker-protected"
+          mkdir -p "$protected_dir/tests"
+          cp Dockerfile "$protected_dir/Dockerfile"
+          cp .dockerignore "$protected_dir/.dockerignore"
+          cp tests/dockerfile-runtime-layout.test.ts "$protected_dir/tests/dockerfile-runtime-layout.test.ts"
+
+          if ! git merge --no-edit -X theirs upstream/staging; then
+            conflicts=$(git diff --name-only --diff-filter=U)
+            if [ -n "$conflicts" ]; then
+              printf '%s\n' "$conflicts" | xargs git checkout --theirs --
+              printf '%s\n' "$conflicts" | xargs git add --
+              git commit --no-edit
+            else
+              git merge --abort
+              exit 1
+            fi
+          fi
+
+          cp "$protected_dir/Dockerfile" Dockerfile
+          cp "$protected_dir/.dockerignore" .dockerignore
+          cp "$protected_dir/tests/dockerfile-runtime-layout.test.ts" tests/dockerfile-runtime-layout.test.ts
+          git add Dockerfile .dockerignore tests/dockerfile-runtime-layout.test.ts
+          if ! git diff --cached --quiet; then
+            git commit -m "Preserve Small-container Docker build after staging sync"
+          fi
+
+          test "$(wc -c < Dockerfile)" -le 3000
+          test "$(grep -c '^FROM ' Dockerfile)" -eq 1
+          ! git grep -n -E '^(<<<<<<<|=======|>>>>>>>)' -- Dockerfile .dockerignore tests/dockerfile-runtime-layout.test.ts
+          docker build --check .
+          git push origin "HEAD:$BRANCH"
