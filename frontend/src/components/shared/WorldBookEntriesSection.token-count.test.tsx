@@ -481,6 +481,32 @@ describe('native organization server pagination', () => {
 
 
 describe('native workspace presentation', () => {
+  for (const presentation of [undefined, 'workspace'] as const) {
+    test('folderless books open directly; first/last folder changes restore contextual navigation: ' + (presentation ?? 'sidebar'), async () => {
+      const first = entry('entry-1'), second = entry('entry-2')
+      const { root, host } = await render([first, second], presentation)
+      try {
+        expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
+        expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+        expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
+        expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+        listEntriesResult = { data: [{ ...first, folder: 'Characters' }, second], total: 2 }
+        act(() => wsHandlers.get('world-book-changed')?.({ id: book.id }))
+        await wait(300)
+        expect(host.querySelector('[aria-label="Entry folders"]')).not.toBeNull()
+        clickByText(host, 'Characters'); await wait(10)
+        expect(host.querySelector('[data-entry-id="entry-2"]')).toBeNull()
+        listEntriesResult = { data: [first, second], total: 2 }
+        act(() => wsHandlers.get('world-book-changed')?.({ id: book.id }))
+        await wait(300)
+        expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
+        expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+        expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
+        expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+        expect(organizationQueries.at(-1)?.folder).toBeUndefined()
+      } finally { unmount(root) }
+    })
+  }
   test('tabs preserve drafts across folders; split and closing tabs never delete entries', async () => {
     const first = { ...entry('entry-1'), folder: 'Characters' }
     const second = { ...entry('entry-2'), folder: 'Plot' }
@@ -531,7 +557,8 @@ describe('native workspace presentation', () => {
       try { clickByText(host, '‹ Entries') } finally { window.requestAnimationFrame = previousRaf }
       expect(host.querySelector('[aria-label="Entry detail"]')?.closest('[hidden]')).not.toBeNull()
       expect(host.querySelector('[data-entry-id="entry-1"]')?.closest('[hidden]')).toBeNull()
-      expect(host.querySelector('strong')?.textContent).toBe('All entries')
+      expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+      expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
     } finally { unmount(root) }
   })
   test('closing an off-page tab does not cancel its queued revision-guarded save', async () => {

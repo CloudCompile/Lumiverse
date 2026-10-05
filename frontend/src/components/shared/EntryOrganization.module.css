@@ -33,6 +33,7 @@
 .fields legend { float: left; width: 100%; grid-column: 1 / -1; padding: 0 0 6px; }
 
 .controls { margin-bottom: 12px; }
+.controls[hidden] { display: none; }
 .navigatorHeader { display: flex; align-items: center; gap: 8px; min-width: 0; padding-bottom: 10px; border-bottom: 1px solid var(--lumiverse-border); }
 .navigatorHeader strong { min-width: 0; overflow-wrap: anywhere; font-size: calc(12px * var(--lumiverse-font-scale, 1)); }
 .controls button { min-height: 30px; padding: 4px 8px; font-size: calc(12px * var(--lumiverse-font-scale, 1)); }

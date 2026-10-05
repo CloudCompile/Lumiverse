@@ -758,6 +758,7 @@ export default function WorldBookEntriesSection({
   const [entryTags, setEntryTags] = useState<string[]>([])
   const [folderRoot, setFolderRoot] = useState(!pendingWorldBookEditEntryId)
   const [organization, setOrganization] = useState<WorldBookEntryOrganizationSummary | null>(null)
+  const showFolderRoot = folderRoot && !!organization?.folders.length
   const [entriesError, setEntriesError] = useState('')
   const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null)
   const [entryPage, setEntryPage] = useState(1)
@@ -1306,6 +1307,13 @@ export default function WorldBookEntriesSection({
   useEffect(() => { if (splitEntryId && !openIds.includes(splitEntryId)) setSplitEntryId(null) }, [openIds, splitEntryId])
 
   useEffect(() => { if (organization) onEntryCount?.(organization.total) }, [organization, onEntryCount])
+  useEffect(() => {
+    if (organization && !organization.folders.length && entryFolder !== undefined) {
+      setEntryFolder(undefined)
+      setEntryPage(1)
+      setSelectedIds([])
+    }
+  }, [organization, entryFolder])
 
   const refetchCurrentPage = useCallback(async () => {
     await loadEntries(selectedBookId, { force: true })
@@ -1892,13 +1900,13 @@ export default function WorldBookEntriesSection({
       {presentation === 'workspace' && isMobile && openSwitcher && <nav className={styles.openSwitcher} aria-label="Open entry switcher">{tabs.map(entry => <div key={entry.id}><button type="button" onClick={() => activateTab(entry.id)}>{entry.comment || '(unnamed)'}</button><button type="button" aria-label={`Close tab ${entry.comment || '(unnamed)'}`} onClick={() => closeTab(entry.id)}>×</button></div>)}</nav>}
       <div className={presentation === 'workspace' ? styles.workspaceBody : undefined}>
       <div ref={listViewportRef} className={presentation === 'workspace' ? styles.workspaceList : undefined} style={presentation === 'workspace' && !isMobile ? { flexBasis: navigatorWidth } : undefined} hidden={presentation === 'workspace' && (isMobile ? !!detailEntry && !mobileBrowsing : navigatorCollapsed)}>
-      {selectedBookId && <EntryOrganizationControls ref={organizationControlsRef} key={selectedBookId} bookId={selectedBookId} books={books} summary={organization} folder={entryFolder} root={folderRoot} tags={entryTags} entries={allKnownEntries} selectedIds={selectedIds} busy={pendingAction || loadingEntries} hideFilters={isMobile && !mobileListOptionsOpen} hideSelectionActions
+      {selectedBookId && <EntryOrganizationControls ref={organizationControlsRef} key={selectedBookId} bookId={selectedBookId} books={books} summary={organization} folder={entryFolder} root={showFolderRoot} tags={entryTags} entries={allKnownEntries} selectedIds={selectedIds} busy={pendingAction || loadingEntries} hideFilters={isMobile && !mobileListOptionsOpen} hideSelectionActions
         onRoot={() => { setFolderRoot(true); setSelectedIds([]) }}
         onTags={tags => { setEntryTags(tags); setEntryPage(1); setSelectedIds([]) }}
         onFolderChanged={value => { setEntryFolder(value); setFolderRoot(value === undefined); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }}
         onReload={() => loadEntries(selectedBookId, { force: true })} />}
       {entriesError && <div role="alert">{entriesError}<button type="button" onClick={() => void loadEntries(selectedBookId, { force: true }).catch(() => {})}>Retry Refresh</button></div>}
-      {folderRoot ? <div className={clsx(styles.entryScroll, usesSharedScroll && styles.entryScrollShared)}><EntryFolderList summary={organization} onOpen={value => { setEntryFolder(value); setFolderRoot(false); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }} /></div> : <>
+      {showFolderRoot ? <div className={clsx(styles.entryScroll, usesSharedScroll && styles.entryScrollShared)}><EntryFolderList summary={organization} onOpen={value => { setEntryFolder(value); setFolderRoot(false); setEntryTags([]); setEntryPage(1); setSelectedIds([]) }} /></div> : <>
       <label className={styles.displayOption} hidden={isMobile && !mobileListOptionsOpen}><input type="checkbox" checked={showTokens} onChange={event => setShowTokens(event.target.checked)} /> Show token counts</label>
       <div className={clsx(styles.entryListHeader, isMobile && styles.entryListHeaderMobile)}>
         <span className={styles.entryListTitle}>{te('entriesTitle', { count: entryTotal })}</span>
