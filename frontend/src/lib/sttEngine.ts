@@ -394,6 +394,8 @@ class WebSpeechEngine implements STTEngine {
 // ── OpenAI STT (MediaRecorder → backend proxy) ─────────────────────
 
 class OpenAISTTEngine implements STTEngine {
+  private destroyed = false
+  private abort = new AbortController()
   private resultCb: ((r: STTResult) => void) | null = null
   private errorCb: ((e: Error) => void) | null = null
   private stopCb: (() => void) | null = null
@@ -527,6 +529,7 @@ class OpenAISTTEngine implements STTEngine {
   }
 
   async start(): Promise<void> {
+    if (this.destroyed) return
     const audioFormat = getSupportedSTTAudioFormat()
     if (!audioFormat) {
       this.errorCb?.(new Error('Audio recording is not supported in this browser'))
@@ -534,8 +537,11 @@ class OpenAISTTEngine implements STTEngine {
     }
 
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      if (this.destroyed) { stream.getTracks().forEach((track) => track.stop()); return }
+      this.stream = stream
     } catch (err) {
+      if (this.destroyed) return
       this.errorCb?.(new Error('Microphone permission denied'))
       return
     }
@@ -554,6 +560,7 @@ class OpenAISTTEngine implements STTEngine {
     }
 
     this.mediaRecorder.onstop = async () => {
+      if (this.destroyed) return
       if (this.chunks.length === 0) {
         this.cleanupStream()
         this.cleanupRecorder()
@@ -564,15 +571,19 @@ class OpenAISTTEngine implements STTEngine {
 
       const blob = new Blob(this.chunks, { type: this.audioFormat?.mimeType || 'audio/webm' })
       this.chunks = []
+      if (!this.listening) this.cleanupStream()
 
       try {
         const result = await sttApi.transcribe(blob, {
           language: this.config.language,
           connectionId: this.config.connectionId || undefined,
           fileName: this.audioFormat?.fileName,
+          signal: this.abort.signal,
         })
+        if (this.destroyed) return
         this.resultCb?.({ text: result.text, isFinal: true })
       } catch (err) {
+        if (this.destroyed) return
         this.errorCb?.(err instanceof Error ? err : new Error(String(err)))
       }
 
@@ -631,6 +642,8 @@ class OpenAISTTEngine implements STTEngine {
   }
 
   destroy(): void {
+    this.destroyed = true
+    this.abort.abort()
     this.listening = false
     this.stopSilenceMonitor()
     if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {

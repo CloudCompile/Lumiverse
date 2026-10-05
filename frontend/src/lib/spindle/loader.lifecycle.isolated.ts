@@ -1,3 +1,4 @@
+import { createFrontendSTTAPI } from './stt-api'
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test'
 import { JSDOM } from 'jsdom'
 import type { SpindleManifest } from 'lumiverse-spindle-types'
@@ -409,6 +410,17 @@ mock.module('./browser-scheduler', () => ({ scheduleSpindleDomTask: () => () => 
 // lifecycle test exercises the loader boundary, so keep that compile-time-only
 // module graph behind its adapter rather than weakening the production macros.
 mock.module('./theme-authoring-native', () => ({ createNativeThemeAuthoringAPI: () => ({}) }))
+mock.module('./stt-native', () => ({ createNativeSTTAPI: (deps: Parameters<typeof createFrontendSTTAPI>[0]) => createFrontendSTTAPI({
+  ...deps,
+  getConfig: () => ({ provider: 'whistle', language: 'en', continuous: false, interimResults: true }),
+  listProviders: () => [{ id: 'whistle', name: 'Whistle', onDevice: true, available: true, supportsAudioTranscription: true }],
+  prepare: async () => {},
+  transcribe: async () => ({ text: 'hello', provider: 'whistle' }),
+  createEngine: () => ({
+    start() {}, stop() {}, destroy() {}, isListening: () => true,
+    onResult() {}, onError() {}, onStop() {}, onAudioFrame() {},
+  }),
+}) }))
 
 const lifecycleModuleSource = `
   export function teardown() {

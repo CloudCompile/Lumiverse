@@ -23,12 +23,19 @@ export function whistleLanguage(locale: string): string | undefined {
 
 export type WhistleUnavailableReason = 'secureContext' | 'worker' | 'wasm' | 'crypto' | 'microphone' | 'audioCapture'
 
-/** Check actual APIs rather than a browser name: embedded webviews vary with the OS. */
-export function getWhistleUnavailableReason(): WhistleUnavailableReason | undefined {
+/** Runtime prerequisites also apply to supplied audio, which needs no microphone. */
+export function getWhistleRuntimeUnavailableReason(): WhistleUnavailableReason | undefined {
   if (typeof window === 'undefined' || window.isSecureContext === false) return 'secureContext'
   if (typeof Worker === 'undefined') return 'worker'
   if (typeof WebAssembly === 'undefined' || typeof BigInt === 'undefined') return 'wasm'
   if (!globalThis.crypto?.subtle) return 'crypto'
+  return undefined
+}
+
+/** Check actual APIs rather than a browser name: embedded webviews vary with the OS. */
+export function getWhistleUnavailableReason(): WhistleUnavailableReason | undefined {
+  const runtimeReason = getWhistleRuntimeUnavailableReason()
+  if (runtimeReason) return runtimeReason
   if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) return 'microphone'
   const Context = window.AudioContext || (window as any).webkitAudioContext
   if (!Context || (typeof AudioWorkletNode === 'undefined' && typeof Context.prototype?.createScriptProcessor !== 'function')) {
