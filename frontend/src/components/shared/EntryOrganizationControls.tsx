@@ -29,6 +29,7 @@ export default function EntryOrganizationControls({ bookId, books, summary, fold
   onFolderChanged?: (folder?: string) => void
   onRoot: () => void; onTags: (tags: string[]) => void; onReload: () => Promise<void>
 }) {
+  const hasFolders = !!summary?.folders.length
   const id = useId()
   const [action, setAction] = useState<Action | null>(null)
   const [targetBook, setTargetBook] = useState(bookId)
@@ -120,12 +121,12 @@ export default function EntryOrganizationControls({ bookId, books, summary, fold
   const tagAction = action === 'add_tags' || action === 'remove_tags'
   const moveAction = action === 'move' || action === 'move_folder'
   return <>
-    <div className={styles.controls}>
+    <div className={styles.controls} hidden={!hasFolders && !summary?.tags.length && !tags.length && !needsReload && (hideSelectionActions || !selectedIds.length)}>
       {needsReload && !action && <div role="alert">{error}<button type="button" disabled={pending} onClick={() => void reload()}>Reload entries</button></div>}
-      {root && <strong>Folders</strong>}
-      {!root && <div className={styles.navigatorHeader}><button type="button" onClick={onRoot}>‹ Folders</button><strong>{folder === undefined ? 'All entries' : folder || 'Unfiled'}</strong></div>}
+      {hasFolders && root && <strong>Folders</strong>}
+      {hasFolders && !root && <div className={styles.navigatorHeader}><button type="button" onClick={onRoot}>‹ Folders</button><strong>{folder === undefined ? 'All entries' : folder || 'Unfiled'}</strong></div>}
       {!root && <>
-        <div hidden={hideFilters}>
+        <div hidden={hideFilters || (!summary?.tags.length && !tags.length)}>
         <label className={styles.tagFilter}>Tags <span className={styles.filterHint}>(match all)</span>
           <select aria-label="Filter entry tags" value="" onChange={event => { if (event.target.value) onTags([...new Set([...tags, event.target.value])]) }}>
             <option value="">Choose tag…</option>{summary?.tags.filter(item => !tags.includes(item.name)).map(item => <option key={item.name} value={item.name}>{item.name} ({item.count})</option>)}

@@ -21,8 +21,9 @@ export const Trans = () => null
 const t = (key: string, values?: any) => values?.count !== undefined ? `${key} (${values.count})` : key
 export const useTranslation = () => ({ t, i18n: { language: 'en' } })
 const books = [1, 0, 44, 50, 137].map((count, i) => ({ id: `b${i + 1}`, name: `Fixture book ${count}`, description: '', folder: '', entry_count: count, created_at: 0, updated_at: 0, metadata: {} }))
+const flatBook = new URLSearchParams(location.search).has('flatBook')
 const rows: WorldBookEntry[] = books.flatMap(book => Array.from({ length: book.entry_count }, (_, index) => ({
-  id: `${book.id}-e${index}`, world_book_id: book.id, uid: String(index), key: [], keysecondary: [], comment: `Fixture entry ${index}`, content: 'Controlled fixture content', folder: index % 2 ? 'Characters' : '', tags: index % 2 ? ['a,b', 'Villain'] : ['a,b'], revision: 1,
+  id: `${book.id}-e${index}`, world_book_id: book.id, uid: String(index), key: [], keysecondary: [], comment: `Fixture entry ${index}`, content: 'Controlled fixture content', folder: !flatBook && index % 2 ? 'Characters' : '', tags: flatBook ? [] : index % 2 ? ['a,b', 'Villain'] : ['a,b'], revision: 1,
   position: 0, depth: 4, role: null, order_value: index, priority: index, selective: false, constant: false, disabled: false, group_name: '', group_override: false, group_weight: 100, probability: 100, scan_depth: null, case_sensitive: false, match_whole_words: false, automation_id: null, use_regex: false, prevent_recursion: false, exclude_recursion: false, delay_until_recursion: false, sticky: 0, cooldown: 0, delay: 0, selective_logic: 0, use_probability: false, vectorized: false, vector_index_status: 'not_enabled', vector_indexed_at: null, vector_index_error: null, extensions: {}, created_at: 0, updated_at: 0, outlet_name: null, wi_marker: null, wi_marker_side: null,
 })))
 export const worldBooksApi = {
@@ -30,7 +31,7 @@ export const worldBooksApi = {
   update: async (id: string, value: any) => Object.assign(books.find(book => book.id === id)!, value),
   getVectorSummary: async (id: string) => ({ enabled: id === 'b5' ? 2 : 0, enabled_non_empty: 0, non_empty: 0, indexed: 0, pending: id === 'b5' ? 1 : 0, error: id === 'b5' ? 1 : 0 }),
   listEntries: async (id: string, input: any) => { const data = rows.filter(row => row.world_book_id === id && (input.folder === undefined || row.folder === input.folder) && (input.tag ?? []).every((tag: string) => row.tags.includes(tag)) && (!input.search || row.comment.includes(input.search))); return { data: data.slice(input.offset, input.offset + input.limit), total: data.length } },
-  getEntryOrganization: async (id: string) => { const data = rows.filter(row => row.world_book_id === id); return { total: data.length, unfiled: data.filter(row => !row.folder).length, folders: data.some(row => row.folder) ? [{ name: 'Characters', count: data.filter(row => row.folder).length }] : [], tags: [{ name: 'a,b', count: data.length }, { name: 'Villain', count: data.filter(row => row.tags.includes('Villain')).length }] } },
+  getEntryOrganization: async (id: string) => { const data = rows.filter(row => row.world_book_id === id); return { total: data.length, unfiled: data.filter(row => !row.folder).length, folders: data.some(row => row.folder) ? [{ name: 'Characters', count: data.filter(row => row.folder).length }] : [], tags: flatBook ? [] : [{ name: 'a,b', count: data.length }, { name: 'Villain', count: data.filter(row => row.tags.includes('Villain')).length }] } },
   getEntry: async (_id: string, entryId: string) => rows.find(row => row.id === entryId),
   updateEntry: async (_id: string, entryId: string, value: any) => { const row = rows.find(row => row.id === entryId)!; Object.assign(row, value); row.revision++; return { ...row } },
   setEntryExtensionNamespace: async () => ({}),

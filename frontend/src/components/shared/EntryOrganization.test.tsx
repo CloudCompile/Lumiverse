@@ -60,12 +60,28 @@ describe('native entry organization interactions', () => {
     expect(selected).toEqual([undefined, '', 'Characters'])
     expect(host.textContent).toContain('100')
   })
+  test('empty organization chrome is hidden but moving an entry can still create the first folder', async () => {
+    const ref = createRef<import('./EntryOrganizationControls').EntryOrganizationHandle>()
+    await render(controls({ ref, summary: { total: 1, unfiled: 1, folders: [], tags: [] }, folder: undefined, root: false, hideSelectionActions: true }))
+    expect(host.querySelector<HTMLElement>('.controls')!.hidden).toBe(true)
+    expect(host.querySelector('.navigatorHeader')).toBeNull()
+    await act(async () => { ref.current!.openMove(['e1'], '') })
+    await input('Destination folder', 'Characters'); await click('Move')
+    expect(calls[0]!.input).toMatchObject({ action: 'move', target_folder: 'Characters', entry_ids: ['e1'] })
+  })
   test('tag filter preserves comma spelling and appends to all-of selection', async () => {
     const selected: string[][] = []
     await render(controls({ tags: ['Villain'], onTags: (value: string[]) => selected.push(value) }))
     const select = document.querySelector<HTMLSelectElement>('select[aria-label="Filter entry tags"]')!
     await act(async () => { select.value = 'a,b'; select.dispatchEvent(new dom.window.Event('change', { bubbles: true })) })
     expect(selected).toEqual([['Villain', 'a,b']])
+  })
+  test('a removed tag remains clearable in a folderless book', async () => {
+    const selected: string[][] = []
+    await render(controls({ summary: { total: 1, unfiled: 1, folders: [], tags: [] }, folder: undefined, tags: ['Villain'], hideSelectionActions: true, onTags: (value: string[]) => selected.push(value) }))
+    expect(host.querySelector<HTMLElement>('.controls')!.hidden).toBe(false)
+    await click('Villain ×')
+    expect(selected).toEqual([[]])
   })
   test('same-book move sends an explicit Unfiled folder and expected entry revision', async () => {
     await render(controls()); await click('Move selected…'); await input('Destination folder', '   '); await click('Move')
