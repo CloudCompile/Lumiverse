@@ -38,8 +38,11 @@ export function registerChatUtilsMacros(): void {
     handler: (ctx) => {
       const messages = getMessages(ctx.env.extra);
       const name = (ctx.args[0] ?? "").trim();
-      const count = parseInt(ctx.args[1], 10) || 3;
+      const rawCount = ctx.args[1]?.trim();
+      const parsedCount = rawCount ? Number.parseInt(rawCount, 10) : 3;
+      const count = Number.isFinite(parsedCount) ? parsedCount : 3;
       if (!name || !messages.length) return "";
+      if (count <= 0) return "";
       const matches: string[] = [];
       for (let i = messages.length - 1; i >= 0 && matches.length < count; i--) {
         if (messages[i].name === name) {

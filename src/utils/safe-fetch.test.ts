@@ -31,6 +31,13 @@ describe("validateHost loopback allowance", () => {
     await expect(validateHost("10.0.0.5", { allowLoopback: true })).rejects.toBeInstanceOf(SSRFError);
     await expect(validateHost("169.254.169.254", { allowLoopback: true })).rejects.toBeInstanceOf(SSRFError);
   });
+
+  test("blocks private IPv4-mapped IPv6 literals", async () => {
+    await expect(validateHost("::ffff:7f00:1")).rejects.toBeInstanceOf(SSRFError);
+    await expect(validateHost("::ffff:7f00:1", { allowLoopback: true })).resolves.toBeUndefined();
+    await expect(validateHost("::ffff:192.168.1.10")).rejects.toBeInstanceOf(SSRFError);
+    await expect(validateHost("::ffff:a9fe:a9fe")).rejects.toBeInstanceOf(SSRFError);
+  });
 });
 
 describe("validateHost hostname normalization", () => {
@@ -121,6 +128,20 @@ describe("safeFetch SSRF protections", () => {
 });
 
 describe("safeFetch User-Agent", () => {
+  test("enforces maxBytes against actual streamed response bytes", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response("x".repeat(100), {
+      headers: { "content-length": "1" },
+    })) as typeof fetch;
+
+    try {
+      const response = await safeFetch("http://93.184.216.34/large", { maxBytes: 10 });
+      await expect(response.text()).rejects.toBeInstanceOf(SSRFError);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   test("propagates caller cancellation after response headers have arrived", async () => {
     const originalFetch = globalThis.fetch;
     const controller = new AbortController();
