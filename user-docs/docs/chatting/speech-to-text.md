@@ -4,7 +4,7 @@ title: Speech-to-Text
 
 # Speech-to-Text
 
-Speech-to-Text (STT) lets you dictate a chat message from the input bar instead of typing it. Lumiverse supports the browser's built-in Web Speech API and OpenAI-compatible transcription connections such as Whisper.
+Speech-to-Text (STT) lets you dictate a chat message from the input bar instead of typing it. Lumiverse supports the browser's built-in Web Speech API, local Whistle transcription, and OpenAI-compatible transcription connections such as Whisper.
 
 ---
 
@@ -15,6 +15,7 @@ Open **Settings → Voice & Speech → Speech-to-Text** and choose a provider.
 | Provider | Best For | Notes |
 |----------|----------|-------|
 | **Web Speech API** | Fast browser-native dictation | Availability depends on your browser. Chrome and Edge usually work best. The option is greyed out (with "Unavailable") when your browser doesn't support it. |
+| **Whistle (on this device)** | Private local dictation without an API key | Prepares automatically from files included with Lumiverse. Audio stays on your device. Supports English, German, French, Spanish, Italian, Dutch, and Polish. |
 | **STT Connection** | Whisper and OpenAI-compatible transcription models | Requires an STT connection with an API key and transcription model. |
 | **Spindle extension provider** | Extension-specific transcription services | Appears when an enabled extension registers an STT provider and its privileged provider permission has been approved. |
 
@@ -31,6 +32,22 @@ For an STT connection:
 
 Extension-provided STT options may expose different models or requirements. See the extension's own instructions and [Extension-Provided AI Providers](../extensions/index.md#extension-provided-ai-providers).
 
+### Using Whistle
+
+Select **Whistle (on this device)** in Voice & Speech and start dictating with the usual microphone button. There are no keys, accounts, connection profiles, or additional programs to install. Lumiverse prepares Whistle automatically and shows progress. Its roughly 18 MB of files come from your Lumiverse instance and are cached on that device for later use.
+
+Preparation runs in the background while you use the chat. You can speak as soon as the microphone shows **Recording**, even if Whistle is still preparing. Your opening words are retained locally; the completed transcript may take longer to arrive on first use. Microphone permission and device startup must still finish before recording begins.
+
+Choose a supported language or **Detect automatically**. If your previous provider used an unsupported language, Whistle switches to automatic detection. Longer recordings are handled automatically; you can keep speaking past 30 seconds.
+
+Whistle returns completed transcripts instead of live partial words. **Continuous recognition** keeps the mic running across pauses and adds each completed utterance to your dictation. **Auto-submit after silence** ends the session after confirmed speech followed by a sustained pause. You can also click the mic to finish manually, or cancel while Whistle is preparing or processing.
+
+Cached transcription works without downloading the model again. Browser storage limits or clearing site data can remove the cached files; Lumiverse will prepare them again automatically. The local option requires a modern browser with microphone and WebAssembly support, through HTTPS or localhost. Lumiverse automatically uses an alternative audio capture method when the webview cannot use AudioWorklets. Sending the resulting chat message still uses your normal Lumiverse connection.
+
+In Lumiverse Desktop, allow microphone access when prompted. macOS requires the desktop application's microphone usage declaration and audio-input entitlement, and Linux requires its WebKitGTK media settings and permission prompt. Those are included in the desktop shell; an older installed shell must be rebuilt or updated and fully restarted to receive them. Reloading the hosted frontend cannot update native app configuration. Windows uses WebView2's microphone permission prompt and Windows microphone privacy settings.
+
+If Whistle is greyed out, Voice & Speech shows which required capability is missing, even when another STT provider is selected. A microphone capability message means that browser capture is unavailable; it does not mean the model has failed to download.
+
 ---
 
 ## Voice & Speech Panel Options
@@ -39,9 +56,9 @@ The Speech-to-Text section of **Voice & Speech** has several toggles that affect
 
 | Setting | What it does |
 |---------|--------------|
-| **Language** | Recognition language. Eleven locales are built in: English (US/UK), Japanese, Mandarin (Simplified), Spanish, French, German, Italian, Brazilian Portuguese, Korean, and Russian. For STT-connection providers, Lumiverse also normalizes the locale to the ISO country code Whisper expects. |
+| **Language** | Recognition language. Whistle offers its seven supported languages and automatic detection. Other providers offer browser locales, including Dutch and Polish. STT connections normalize those locales to the ISO language code Whisper expects. |
 | **Continuous recognition** | When on, recognition keeps running across silences instead of stopping at the first pause. Useful for long dictation sessions; pair with the **auto-submit** option below if you want hands-free finishing. |
-| **Show interim results** | Displays partial transcriptions in the input bar as you speak. Web Speech only — Whisper-style connections only return the final transcript. |
+| **Show interim results** | Displays partial transcriptions in the input bar as you speak. Web Speech only — Whistle and Whisper-style connections return completed transcripts. |
 | **Auto-submit after silence** | Decides the recording is finished after a sustained pause and either dispatches it (Web Speech) or sends it for transcription (STT connections). See [Auto-Submit After Silence](#auto-submit-after-silence) below. |
 | **Show mic button in input bar** | Toggles the microphone shortcut shown next to the message input. Turn it off if you only use the keyboard. |
 
@@ -65,7 +82,7 @@ By default, a completed STT transcript is queued as a user message. If you want 
 
 ## Auto-Submit After Silence
 
-For STT connections, enable **Auto-submit after silence** if you want Lumiverse to stop recording automatically after you finish speaking.
+For Whistle or STT connections, enable **Auto-submit after silence** if you want Lumiverse to stop recording automatically after you finish speaking.
 
 This is useful for Whisper-style providers because they do not stream interim words back to the browser. Lumiverse listens for confirmed speech, then waits for a sustained pause before sending the audio to transcription.
 
@@ -138,6 +155,9 @@ Thought markers nest. The first `thought start` inserts `*`; a second nested tho
 |---------|-------------|
 | The microphone button is disabled | Check browser microphone permissions and make sure your selected STT provider is available. |
 | Web Speech is unavailable | Switch to an STT connection, or use a browser with Web Speech support. |
+| Whistle preparation fails | Check your connection to Lumiverse and choose **Try again**, or click the mic again. No external service setup is needed. |
+| Whistle is unavailable | Read the reason shown in Voice & Speech. Use HTTPS or localhost, and update/restart an older desktop shell when microphone or browser capabilities are missing. |
+| Whistle uses the wrong language | Select your language explicitly instead of automatic detection. Use another provider for languages outside Whistle's seven supported languages. |
 | Whisper transcription fails | Verify the STT connection API key, API URL, and model name. |
 | Recording stops too soon | Enable **Auto-submit after silence**, or wait a moment after finishing your sentence before stopping manually. |
 | Auto-submit never stops | Check for background noise, move closer to the mic, or stop manually. |

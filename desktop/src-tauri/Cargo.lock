@@ -2293,6 +2293,7 @@ dependencies = [
  "uuid",
  "wayland-client",
  "wayland-protocols",
+ "webkit2gtk",
  "window-vibrancy",
  "windows",
  "windows-future",

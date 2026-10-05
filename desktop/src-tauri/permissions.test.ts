@@ -187,6 +187,9 @@ describe("native capture boundary", () => {
     const plist = readFileSync(join(HERE, "Info.plist"), "utf8");
     expect(plist.match(/<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(config.identifier);
     expect(plist.match(/<key>CFBundleDisplayName<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(config.productName);
+    expect(plist.match(/<key>NSMicrophoneUsageDescription<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBeTruthy();
+    const entitlements = readFileSync(join(HERE, config.bundle.macOS.entitlements), "utf8");
+    expect(entitlements).toMatch(/<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\s*\/>/);
   });
 
   test("macOS explicitly offers other-app windows and entire displays through the system picker", () => {

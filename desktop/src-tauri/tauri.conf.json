@@ -42,6 +42,9 @@
     "resources": {
       "../../LICENSE.md": "LICENSE.md"
     },
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
     "linux": {
       "appimage": {
         "bundleMediaFramework": true

@@ -1804,7 +1804,7 @@ export interface SpeechDetectionRules {
 }
 
 export interface VoiceSettings {
-  sttProvider: 'webspeech' | 'connection'
+  sttProvider: 'webspeech' | 'connection' | 'whistle'
   sttLanguage: string
   sttContinuous: boolean
   sttInterimResults: boolean

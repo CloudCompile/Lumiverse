@@ -3,6 +3,8 @@ mod frontend;
 mod notifications;
 mod remote_instance;
 mod runner;
+#[cfg(any(target_os = "linux", test))]
+mod webview_media;
 #[cfg(target_os = "linux")]
 mod wayland_background_effect;
 

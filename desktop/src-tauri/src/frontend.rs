@@ -776,6 +776,8 @@ pub fn show_frontend(
     }
 
     let window = builder.build().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    crate::webview_media::configure_frontend_microphone(&window)?;
     // Applying this again after construction keeps a hot-reloaded frontend
     // from inheriting caption buttons from a previously decorated platform
     // window. A full desktop-process restart is still required to replace an

@@ -6,5 +6,7 @@
     <string>chat.lumiverse.tray</string>
     <key>CFBundleDisplayName</key>
     <string>Lumiverse Desktop</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Lumiverse uses the microphone when you dictate a chat message.</string>
 </dict>
 </plist>

@@ -1,4 +1,10 @@
 import { sttApi } from '@/api/stt'
+import { WhistleSTTEngine } from './whistle/WhistleSTTEngine'
+
+export interface STTEngineStatus {
+  phase: 'loading' | 'listening' | 'processing'
+  progress?: number
+}
 
 export interface STTResult {
   text: string
@@ -23,12 +29,13 @@ export interface STTEngine {
   onError(cb: (err: Error) => void): void
   onStop(cb: () => void): void
   onAudioFrame(cb: (frame: STTAudioFrame) => void): void
+  onStatus?(cb: (status: STTEngineStatus) => void): void
   isListening(): boolean
   destroy(): void
 }
 
 export interface STTConfig {
-  provider: 'webspeech' | 'connection'
+  provider: 'webspeech' | 'connection' | 'whistle'
   language: string
   continuous: boolean
   interimResults: boolean
@@ -139,6 +146,7 @@ export function createSTTEngine(config: STTConfig): STTEngine {
   if (config.provider === 'webspeech') {
     return new WebSpeechEngine(config)
   }
+  if (config.provider === 'whistle') return new WhistleSTTEngine(config)
   return new OpenAISTTEngine(config)
 }
 
