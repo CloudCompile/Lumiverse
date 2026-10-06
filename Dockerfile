@@ -6,7 +6,7 @@ ARG FRONTEND_REFRESH=unset
 RUN echo "ca-refresh: ${CA_REFRESH}" \
     && apt-get update \
     && apt-get install --no-install-recommends --no-install-suggests -y \
-       git ca-certificates smartmontools rclone \
+         git ca-certificates smartmontools \
     && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
@@ -32,8 +32,8 @@ RUN echo "frontend-refresh: ${FRONTEND_REFRESH}" \
 COPY src/ ./src/
 COPY user-docs/ ./user-docs/
 
-RUN mkdir -p /app/data /app/runtime-data \
-    && chown -R bun:bun /app/data /app/runtime-data
+RUN mkdir -p /app/data \
+    && chown -R bun:bun /app/data
 
 LABEL org.opencontainers.image.title="Lumiverse" \
       org.opencontainers.image.description="AI chat application server" \
@@ -42,7 +42,6 @@ LABEL org.opencontainers.image.title="Lumiverse" \
 ENV NODE_ENV=production \
     PORT=7860 \
     DATA_DIR=/app/data \
-    LUMIVERSE_RUNTIME_DIR=/app/runtime-data \
     FRONTEND_DIR=/app/frontend/dist \
     TRUST_ANY_ORIGIN=true
 

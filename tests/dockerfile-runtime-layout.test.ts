@@ -19,14 +19,13 @@ describe("Docker runtime image", () => {
 
     expect(Buffer.byteLength(dockerfile)).toBeLessThanOrEqual(3000);
     expect(dockerfile.match(/^FROM /gm)).toHaveLength(1);
-    expect(dockerfile).toMatch(/rclone/);
   });
 
-  test("provisions a writable ephemeral runtime dir for relocated LanceDB", async () => {
+  test("provisions a writable persistent data dir", async () => {
     const dockerfile = await readDockerfile();
 
-    expect(dockerfile).toMatch(/mkdir -p \/app\/data \/app\/runtime-data/);
-    expect(dockerfile).toMatch(/LUMIVERSE_RUNTIME_DIR=\/app\/runtime-data/);
-    expect(dockerfile).not.toMatch(/VOLUME[^\n]*\/app\/runtime-data/);
+    expect(dockerfile).toMatch(/mkdir -p \/app\/data/);
+    expect(dockerfile).toMatch(/DATA_DIR=\/app\/data/);
+    expect(dockerfile).toMatch(/VOLUME \/app\/data/);
   });
 });
