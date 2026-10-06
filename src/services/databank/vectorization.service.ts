@@ -59,6 +59,10 @@ export async function processDocument(userId: string, docId: string): Promise<vo
     return;
   }
 
+  // A reprocess request supersedes any older run for this document. Without
+  // this guard, the runs can replace chunks and vectors in whichever order
+  // their embedding requests happen to finish.
+  abortDocumentProcessing(docId);
   const controller = new AbortController();
   const activeRun = { databankId: doc.databankId, controller };
   trackActiveDocument(docId, activeRun);

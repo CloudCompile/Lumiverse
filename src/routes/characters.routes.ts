@@ -582,6 +582,9 @@ app.get("/tags", (c) => {
 app.post("/bulk-tags", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
+  if (!Array.isArray(body?.ids) || body.ids.length === 0 || body.ids.length > 1000) {
+    return c.json({ error: "ids must be a non-empty array with at most 1000 items" }, 400);
+  }
   try {
     const result = svc.bulkUpdateCharacterTags(userId, {
       ids: Array.isArray(body?.ids) ? body.ids : [],

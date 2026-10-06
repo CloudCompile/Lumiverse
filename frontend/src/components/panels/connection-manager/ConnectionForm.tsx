@@ -85,6 +85,7 @@ const BEDROCK_ENDPOINTS = [
 
 export default function ConnectionForm({ providers, profile, initialProvider, onSave, onCancel, onOAuthCreated }: ConnectionFormProps) {
   const { t } = useTranslation('panels')
+  const oauthCleanupRef = useRef<(() => void) | null>(null)
   const anthropicCacheTtlOptions = [
     { value: '5m', label: t('connectionForm.fiveMinutes') },
     { value: '1h', label: t('connectionForm.oneHour') },
@@ -360,13 +361,17 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
       const popup = window.open(auth_url, 'nanogpt_auth', 'width=600,height=700,scrollbars=yes')
 
       let handled = false
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null
       const cleanup = () => {
         if (handled) return
         handled = true
         window.removeEventListener('message', onMessage)
         clearInterval(checkClosed)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        oauthCleanupRef.current = null
         setNanoGptOauthLoading(false)
       }
+      oauthCleanupRef.current = cleanup
 
       const onMessage = async (event: MessageEvent) => {
         if (event.data?.type !== 'nanogpt_oauth_code' || !event.data.code || event.data.state !== session_token) return
@@ -396,12 +401,16 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
         }
       }, 500)
 
-      setTimeout(cleanup, 5 * 60 * 1000)
+      timeoutTimer = setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err: any) {
       setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptStartFailed')))
       setNanoGptOauthLoading(false)
     }
   }, [name, onOAuthCreated, profile?.id, t])
+
+  useEffect(() => () => {
+    oauthCleanupRef.current?.()
+  }, [])
 
   // Handle service account JSON file upload
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {

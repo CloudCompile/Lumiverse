@@ -24,6 +24,21 @@ describe("chunkDocument", () => {
     }
   });
 
+  test("clamps overlap below the target so chunks always make progress", () => {
+    const text = Array.from({ length: 40 }, (_, i) => `paragraph-${i}`).join("\n\n");
+    const chunks = chunkDocument(text, { targetTokens: 4, maxTokens: 8, overlapTokens: 8 });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(new Set(chunks.map((chunk) => chunk.content)).size).toBe(chunks.length);
+  });
+
+  test("normalizes an impractically small max token limit", () => {
+    const chunks = chunkDocument("one two three", { targetTokens: 1, maxTokens: 1, overlapTokens: 1 });
+
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks.every((chunk) => chunk.tokenCount <= 2)).toBe(true);
+  });
+
   test("does not carry stale overlap across an overlong sentence", () => {
     const sentence = `${"word ".repeat(1500).trim()}.`;
     const text = `Intro sentence. ${sentence} Final sentence.`;

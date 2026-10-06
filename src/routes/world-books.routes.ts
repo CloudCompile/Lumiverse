@@ -25,10 +25,11 @@ import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/cha
 import { loadWorldBookVectorSettings } from "../services/world-book-vector-settings.service";
 
 const MAX_IMPORT_RESPONSE_BYTES = 100 * 1024 * 1024; // 100 MB
+const MAX_BULK_WORLD_BOOKS = 1000;
 const WORLD_BOOK_EXPORT_FORMATS: svc.WorldBookExportFormat[] = ["lumiverse", "character_book", "sillytavern"];
 
 function parseBulkWorldBookIds(value: unknown): string[] | null {
-  if (!Array.isArray(value) || value.length === 0) return null;
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_BULK_WORLD_BOOKS) return null;
   return value.every((id) => typeof id === "string") ? value : null;
 }
 

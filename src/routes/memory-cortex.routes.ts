@@ -1549,7 +1549,7 @@ app.post("/chats/:chatId/entities/merge", async (c) => {
   memoryCortex.mergeEntitiesInternal(sourceId, targetId);
 
   const now = Math.floor(Date.now() / 1000);
-  getDb().query("UPDATE memory_entities SET user_edited_at = ? WHERE id = ?").run(now, targetId);
+  getDb().query("UPDATE memory_entities SET user_edited_at = ? WHERE id = ? AND chat_id = ?").run(now, targetId, chatId);
 
   const merged = memoryCortex.getEntities(chatId).find((e) => e.id === targetId);
   return c.json(merged);

@@ -162,22 +162,30 @@ export default function DatabankPanel() {
   // Load character databank bindings
   useEffect(() => {
     if (!activeCharacterId) { setCharDatabankIds([]); setCharExtensions({}); return }
-    charactersApi.get(activeCharacterId).then((c: any) => {
+    let cancelled = false
+    const requestCharacterId = activeCharacterId
+    charactersApi.get(requestCharacterId).then((c: any) => {
+      if (cancelled) return
       const ext = c.extensions || {}
       setCharExtensions(ext)
       const ids = Array.isArray(ext.databank_ids) ? ext.databank_ids.filter((id: unknown) => typeof id === 'string') : []
       setCharDatabankIds(ids)
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [activeCharacterId])
 
   // Load chat databank bindings
   useEffect(() => {
     if (!activeChatId) { setChatDatabankIds([]); setChatMetadata({}); return }
-    chatsApi.get(activeChatId).then((chat: any) => {
+    let cancelled = false
+    const requestChatId = activeChatId
+    chatsApi.get(requestChatId).then((chat: any) => {
+      if (cancelled) return
       const meta = chat.metadata || {}
       setChatMetadata(meta)
       setChatDatabankIds((meta.chat_databank_ids as string[]) ?? [])
     }).catch(() => {})
+    return () => { cancelled = true }
   }, [activeChatId])
 
   const toggleCharBank = useCallback((id: string) => {
@@ -262,9 +270,11 @@ export default function DatabankPanel() {
   useEffect(() => {
     const hasProcessing = databankDocuments.some((d) => d.status === 'pending' || d.status === 'processing')
     if (hasProcessing && selectedDatabankId) {
+      const requestBankId = selectedDatabankId
       pollRef.current = setInterval(async () => {
         try {
-          const result = await databankApi.listDocuments(selectedDatabankId, { limit: 1000 })
+          const result = await databankApi.listDocuments(requestBankId, { limit: 1000 })
+          if (requestBankId !== selectedDatabankId) return
           setDatabankDocuments(result.data)
           const stillProcessing = result.data.some((d) => d.status === 'pending' || d.status === 'processing')
           if (!stillProcessing && pollRef.current) {

@@ -133,10 +133,12 @@ export function useChunkedMessages(messages: Message[], chatId?: string | null) 
     }
 
     setLoadingOlder(true)
+    const requestChatId = chatId
     let didProgress = false
     messagesApi
       .list(chatId, { limit: request.limit, offset: request.offset })
       .then((result) => {
+        if (prevChatIdRef.current !== requestChatId) return
         prefetchedBatchRef.current = null
         didProgress = applyOlderBatch(result.data)
       })

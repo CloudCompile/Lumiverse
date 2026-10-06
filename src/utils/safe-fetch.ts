@@ -405,7 +405,11 @@ export async function safeFetch(
     pinDnsCache(parsed.hostname, port);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
     let response: Response;
     try {
@@ -426,12 +430,11 @@ export async function safeFetch(
         throw new SSRFError(`Request timed out after ${timeoutMs}ms`);
       }
       throw err;
-    } finally {
-      clearTimeout(timer);
     }
 
     // Handle redirects manually so we can re-validate each hop
     if (response.status >= 300 && response.status < 400) {
+      clearTimeout(timer);
       const location = response.headers.get("location");
       if (!location) {
         throw new SSRFError(`Redirect with no Location header (status ${response.status})`);
@@ -458,32 +461,41 @@ export async function safeFetch(
     // omit or understate Content-Length (including on chunked responses).
     const contentLength = response.headers.get("content-length");
     if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
+      clearTimeout(timer);
       throw new SSRFError(`Response too large: ${contentLength} bytes (max ${maxBytes})`);
     }
-    if (!response.body) return response;
+    if (!response.body) {
+      clearTimeout(timer);
+      return response;
+    }
     const reader = response.body.getReader();
     let received = 0;
+    const clearBodyTimer = () => clearTimeout(timer);
     const limitedBody = new ReadableStream<Uint8Array>({
       async pull(controller) {
         try {
           const { done, value } = await reader.read();
           if (done) {
+            clearBodyTimer();
             controller.close();
             reader.releaseLock();
             return;
           }
           received += value.byteLength;
           if (received > maxBytes) {
+            clearBodyTimer();
             await reader.cancel();
             controller.error(new SSRFError(`Response too large: more than ${maxBytes} bytes`));
             return;
           }
           controller.enqueue(value);
         } catch (error) {
-          controller.error(error);
+          clearBodyTimer();
+          controller.error(timedOut ? new SSRFError(`Request timed out after ${timeoutMs}ms`) : error);
         }
       },
       async cancel(reason) {
+        clearBodyTimer();
         await reader.cancel(reason);
       },
     });

@@ -39,9 +39,9 @@ function approxTokens(text: string): number {
  * Split document text into chunks suitable for embedding.
  */
 export function chunkDocument(text: string, options?: ChunkOptions): ChunkResult[] {
-  const max = Math.max(1, options?.maxTokens ?? DEFAULT_MAX);
+  const max = Math.max(2, options?.maxTokens ?? DEFAULT_MAX);
   const target = Math.min(max, Math.max(1, options?.targetTokens ?? DEFAULT_TARGET));
-  const overlap = Math.min(max, Math.max(0, options?.overlapTokens ?? DEFAULT_OVERLAP));
+  const overlap = Math.min(max, Math.max(0, Math.min(target - 1, options?.overlapTokens ?? DEFAULT_OVERLAP)));
 
   if (!text.trim()) return [];
 
