@@ -17,6 +17,7 @@ import VoicePicker from '@/components/shared/VoicePicker'
 import { speak, speakSegments, stop, setTTSVolume, setTTSSpeed, isSpeaking } from '@/lib/ttsAudio'
 import { formatTtsConnectionVoiceLabel } from '@/lib/qwenTts'
 import { synthesizeTtsSegments } from '@/lib/ttsSynthesis'
+import { resolveTtsConnectionId } from '@/lib/voiceResolution'
 import { isWebSpeechAvailable } from '@/lib/sttEngine'
 import { getWhistleUnavailableReason, isWhistleAvailable, whistleLanguage } from '@/lib/whistle/config'
 import { whistleClient } from '@/lib/whistle/client'
@@ -117,9 +118,10 @@ export default function VoiceSettings() {
     [sttProfiles, voiceSettings.sttConnectionId],
   )
 
+  const connectionId = resolveTtsConnectionId(voiceSettings, ttsProfiles)
   const activeConnection = useMemo(
-    () => ttsProfiles.find((p) => p.id === voiceSettings.ttsConnectionId) || null,
-    [ttsProfiles, voiceSettings.ttsConnectionId]
+    () => ttsProfiles.find((p) => p.id === connectionId) || null,
+    [ttsProfiles, connectionId]
   )
   const activeVoiceLabel = useMemo(
     () => (activeConnection ? formatTtsConnectionVoiceLabel(activeConnection) : ''),
@@ -127,7 +129,7 @@ export default function VoiceSettings() {
   )
 
   const handleTestTTS = async () => {
-    if (!voiceSettings.ttsConnectionId) {
+    if (!connectionId) {
       addToast({ type: 'warning', message: t('voice.selectTtsFirst') })
       return
     }
@@ -140,7 +142,7 @@ export default function VoiceSettings() {
       setTTSVolume(voiceSettings.ttsVolume)
       setTTSSpeed(voiceSettings.ttsSpeed)
       const segments = await synthesizeTtsSegments(
-        voiceSettings.ttsConnectionId,
+        connectionId,
         t('voice.ttsTestPhrase'),
         { profile: activeConnection },
       )
@@ -176,7 +178,7 @@ export default function VoiceSettings() {
             <button
               className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
               onClick={handleTestTTS}
-              disabled={testing || !voiceSettings.ttsConnectionId}
+              disabled={testing || !connectionId}
             >
               <Play size={12} />
               {testing ? t('voice.speaking') : isSpeaking() ? t('voice.stop') : t('voice.test')}
@@ -305,7 +307,7 @@ export default function VoiceSettings() {
             onChange={(v) =>
               setVoiceSettings({
                 narrationVoice: v
-                  ? { connectionId: voiceSettings.ttsConnectionId ?? '', voice: '' }
+                  ? { connectionId: connectionId ?? '', voice: '' }
                   : null,
               })
             }

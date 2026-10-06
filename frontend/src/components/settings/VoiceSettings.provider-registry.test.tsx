@@ -9,6 +9,7 @@ import {
   resetVoiceProviderProjection,
 } from '@/api/voice'
 import { FRONTEND_PROVIDER_SCOPE, type ProviderRegistryChangedPayload } from '@/ws/provider-registry-projection'
+import type { TtsConnectionProfile } from '@/types/api'
 
 const voiceSettings = {
   sttProvider: 'webspeech' as 'webspeech' | 'connection' | 'whistle',
@@ -38,7 +39,7 @@ const storeState = {
   },
   sttProfiles: [],
   setSttProviders: () => undefined,
-  ttsProfiles: [],
+  ttsProfiles: [] as TtsConnectionProfile[],
   setTtsProviders: () => undefined,
   addToast: () => undefined,
   openDrawer: () => undefined,
@@ -93,8 +94,12 @@ mock.module('@/lib/ttsAudio', () => ({
 mock.module('@/lib/qwenTts', () => ({
   formatTtsConnectionVoiceLabel: () => '',
 }))
+const synthesisRequests: string[] = []
 mock.module('@/lib/ttsSynthesis', () => ({
-  synthesizeTtsSegments: async () => [],
+  synthesizeTtsSegments: async (connectionId: string) => {
+    synthesisRequests.push(connectionId)
+    return [{ data: new ArrayBuffer(1), mime: 'audio/mpeg' }]
+  },
 }))
 mock.module('@/lib/sttEngine', () => ({
   isWebSpeechAvailable: () => true,
@@ -143,6 +148,9 @@ describe('VoiceSettings provider registry', () => {
     resetVoiceProviderProjection()
     voiceSettings.sttProvider = 'webspeech'
     voiceSettings.sttLanguage = 'en-US'
+    voiceSettings.ttsConnectionId = null
+    storeState.ttsProfiles = []
+    synthesisRequests.length = 0
   })
 
   function mount() {
@@ -153,6 +161,21 @@ describe('VoiceSettings provider registry', () => {
       root!.render(createElement(VoiceSettings))
     })
   }
+
+  test.each(['default', 'selected'])('tests the %s TTS connection without chat overrides', async (selection) => {
+    const profile: TtsConnectionProfile = {
+      id: 'default', name: 'Default', provider: 'openai_tts', voice: 'alloy', model: 'tts-1', api_url: '',
+      is_default: true, has_api_key: true, default_parameters: {}, metadata: {}, created_at: 1, updated_at: 1,
+    }
+    storeState.ttsProfiles = [profile, { ...profile, id: 'selected', is_default: false }]
+    voiceSettings.ttsConnectionId = selection === 'selected' ? 'selected' : null
+    mount()
+    await flush()
+    const button = Array.from(host!.querySelectorAll('button')).find((candidate) => candidate.textContent === 'voice.test')!
+    expect(button.disabled).toBe(false)
+    await act(async () => button.click())
+    expect(synthesisRequests).toEqual([selection])
+  })
 
   test('offers Whistle without a connection and limits its language choices', async () => {
     voiceSettings.sttProvider = 'whistle'

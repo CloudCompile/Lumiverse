@@ -11,6 +11,7 @@ import {
 } from '@/lib/ttsMessagePlayback'
 import { clearRegenerating, markRegenerating } from '@/lib/ttsPersistence'
 import { messagesApi } from '@/api/chats'
+import { resolveMessageVoices } from '@/lib/voiceResolution'
 
 /**
  * Subscribes to the shared TTS pipeline's "active message id" so a component
@@ -90,8 +91,19 @@ export function useMessagePlayback(
   name: string,
   isUser: boolean,
 ): UseMessagePlaybackResult {
-  const ttsEnabled = useStore((s) => s.voiceSettings.ttsEnabled)
-  const connectionId = useStore((s) => s.voiceSettings.ttsConnectionId)
+  const canPlay = useStore((s) => {
+    if (!s.voiceSettings.ttsEnabled) return false
+    const voices = resolveMessageVoices({
+      message: { name, is_user: isUser },
+      characters: s.characters,
+      groupMemberIds: s.isGroupChat ? s.groupCharacterIds : null,
+      fallbackCharacterId: s.activeCharacterId,
+      chatMetadata: s.activeChatMetadata,
+      voiceSettings: s.voiceSettings,
+      ttsProfiles: s.ttsProfiles,
+    })
+    return Boolean(voices.speech || voices.narration)
+  })
   const isPlaying = useIsMessagePlaying(messageId)
   // Watch the message in the store so we react when persistAfterPlayback or
   // a WS MESSAGE_EDITED event lands the audio attachment. Selector returns
@@ -113,11 +125,6 @@ export function useMessagePlayback(
       a && a.type === 'audio' && (a.swipe_id === undefined || a.swipe_id === msg.swipe_id),
     )
   })
-  // canPlay is permissive — a character or chat-level override can supply a
-  // voice even when no global default is configured. The actual decision
-  // lives in the resolver; the button just stays enabled when TTS is on.
-  const canPlay = Boolean(ttsEnabled && connectionId)
-
   const [regenModalMessageId, setRegenModalMessageId] = useState<string | null>(null)
   const regenModalOpen = regenModalMessageId === messageId
   const [isGenerating, setIsGenerating] = useState(false)

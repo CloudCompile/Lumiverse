@@ -18,7 +18,7 @@ Lumiverse can speak assistant replies aloud using a configurable text-to-speech 
 6. Optionally adjust provider-specific parameters (stability, style, output format, …).
 7. Save, then click **Test** to confirm the connection.
 
-Once a connection exists, open **Settings → Voice & Speech**, turn on **Enable text-to-speech**, and select your connection from the dropdown.
+Once a connection exists, open **Settings → Voice & Speech** and turn on **Enable text-to-speech**. Playback uses the TTS connection marked as default unless you select another connection from the dropdown. Narration and speech use that connection's saved voice unless you set a narrator, character, or chat voice override.
 
 ---
 
@@ -171,7 +171,7 @@ The segments tagged _Skip_ are dropped before the request hits the provider, whi
 
 | Problem | What to try |
 |---------|-------------|
-| **Test button is disabled** | Pick a TTS connection in **Voice & Speech** first. |
+| **Test button is disabled** | Mark a TTS connection as default or pick one in **Voice & Speech**. |
 | **"TTS error 401" on test** | API key is missing or invalid for that provider's connection. |
 | **Auto-play fires but no sound** | Volume slider is at 0%, the OS is muted, or the browser has tab audio blocked. |
 | **Kokoro returns 5xx** | The local server is unreachable — confirm the API URL and that the container is running. |
