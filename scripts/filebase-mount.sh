@@ -7,7 +7,7 @@ set -euo pipefail
 # Required env vars:
 #   LUMIVERSE_FILEBASE_ENABLED=true
 #   LUMIVERSE_FILEBASE_BUCKET=lumiverse-data
-#   LUMIVERSE_FILEBASE_ENDPOINT=https://s3.filebase.com
+#   LUMIVERSE_FILEBASE_ENDPOINT=https://s3.filebase.io
 #   LUMIVERSE_FILEBASE_ACCESS_KEY_ID=...
 #   LUMIVERSE_FILEBASE_SECRET_ACCESS_KEY=...
 #
@@ -50,7 +50,7 @@ provider = Other
 access_key_id = ${LUMIVERSE_FILEBASE_ACCESS_KEY_ID}
 secret_access_key = ${LUMIVERSE_FILEBASE_SECRET_ACCESS_KEY}
 endpoint = ${LUMIVERSE_FILEBASE_ENDPOINT}
-region = us-east-1
+region = auto
 acl = private
 storage_class = STANDARD
 EOF
