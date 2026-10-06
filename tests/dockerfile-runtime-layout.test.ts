@@ -19,6 +19,7 @@ describe("Docker runtime image", () => {
 
     expect(Buffer.byteLength(dockerfile)).toBeLessThanOrEqual(3000);
     expect(dockerfile.match(/^FROM /gm)).toHaveLength(1);
+    expect(dockerfile).toMatch(/rclone/);
   });
 
   test("provisions a writable ephemeral runtime dir for relocated LanceDB", async () => {

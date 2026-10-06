@@ -917,6 +917,29 @@ build_frontend() {
   ok "Frontend built -> $FRONTEND_DIR/dist"
 }
 
+# ─── Cloudflare R2 mount for sleeping free-tier containers ───────────────
+
+ensure_cloudflare_r2_mount() {
+  if [[ "${LUMIVERSE_CLOUDFLARE_R2_ENABLED:-false}" != "true" ]]; then
+    return 0
+  fi
+
+  local mount_script="$BACKEND_DIR/scripts/cloudflare-r2-mount.sh"
+  if [[ ! -f "$mount_script" ]]; then
+    err "Cloudflare R2 mount script not found at: $mount_script"
+    return 1
+  fi
+
+  info "Preparing Cloudflare R2-backed DATA_DIR..."
+  (cd "$BACKEND_DIR" && bash "$mount_script")
+
+  if [[ -n "${DATA_DIR:-}" ]]; then
+    export DATA_DIR="$DATA_DIR"
+  else
+    export DATA_DIR="${LUMIVERSE_CLOUDFLARE_R2_MOUNT_PATH:-/mnt/lumiverse-r2}"
+  fi
+}
+
 # ─── Start backend ──────────────────────────────────────────────────────────
 
 start_backend() {
@@ -1052,6 +1075,7 @@ export_termux_bun_env
 
 case "$MODE" in
   all)
+    ensure_cloudflare_r2_mount
     run_setup_if_needed
     if [[ "$FORCE_BUILD" == true ]]; then
       build_frontend
@@ -1062,10 +1086,12 @@ case "$MODE" in
     build_frontend
     ;;
   backend-only)
+    ensure_cloudflare_r2_mount
     run_setup_if_needed
     start_backend
     ;;
   dev)
+    ensure_cloudflare_r2_mount
     run_setup_if_needed
     start_backend
     ;;

@@ -6,7 +6,7 @@ ARG FRONTEND_REFRESH=unset
 RUN echo "ca-refresh: ${CA_REFRESH}" \
     && apt-get update \
     && apt-get install --no-install-recommends --no-install-suggests -y \
-       git ca-certificates smartmontools \
+       git ca-certificates smartmontools rclone \
     && update-ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
