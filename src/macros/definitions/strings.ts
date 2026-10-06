@@ -260,7 +260,12 @@ export function registerStringMacros(): void {
     ],
     handler: (ctx) => {
       const text = ctx.isScoped ? ctx.body : (ctx.args[0] ?? "");
-      const maxTokens = parseInt(ctx.isScoped ? ctx.args[0] : ctx.args[1], 10) || 100;
+      const rawMaxTokens = ctx.isScoped ? ctx.args[0] : ctx.args[1];
+      const parsedMaxTokens = rawMaxTokens === undefined || rawMaxTokens.trim() === ""
+        ? 100
+        : Number.parseInt(rawMaxTokens, 10);
+      const maxTokens = Number.isFinite(parsedMaxTokens) ? Math.max(0, parsedMaxTokens) : 100;
+      if (maxTokens === 0) return "";
       const maxChars = maxTokens * 4;
       if (text.length <= maxChars) return text;
       // Truncate at nearest word boundary

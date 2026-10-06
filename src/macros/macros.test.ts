@@ -952,6 +952,10 @@ Test String
     expect(await ev("{{truncate::hello::100}}")).toBe("hello");
   });
 
+  test("truncate with zero tokens returns empty text", async () => {
+    expect(await ev("{{truncate::hello world::0}}")).toBe("");
+  });
+
   test("truncate long text", async () => {
     const longText = "word ".repeat(100).trim(); // 499 chars
     const result = await ev(`{{truncate::${longText}::10}}`); // 10 tokens ≈ 40 chars
@@ -999,6 +1003,12 @@ describe("Math macros", () => {
 
   test("calc empty expression", async () => {
     expect(await ev("{{calc::}}")).toBe("0");
+  });
+
+  test("calc rejects trailing or incomplete expressions", async () => {
+    expect(await ev("{{calc::2 + 3xyz}}")).toBe("0");
+    expect(await ev("{{calc::2(3)}}")).toBe("0");
+    expect(await ev("{{calc::(2 + 3}}")).toBe("0");
   });
 
   test("calc with nested macro", async () => {
@@ -1295,6 +1305,11 @@ describe("Chat Utils macros", () => {
   test("messagesBy name with 1 result", async () => {
     const result = await ev("{{messagesBy::Bob::1}}");
     expect(result).toBe("The forest is dark.");
+  });
+
+  test("messagesBy zero or negative count returns no messages", async () => {
+    expect(await ev("{{messagesBy::Bob::0}}")).toBe("");
+    expect(await ev("{{messagesBy::Bob::-1}}")).toBe("");
   });
 
   test("chatAge returns a duration string", async () => {
@@ -2450,6 +2465,11 @@ describe("foreachMessage macro", () => {
     expect(await ev("{{foreachMessage::2::m}}{{.m}};{{/foreachMessage}}")).toBe(
       "The forest is dark.;I draw my sword.;",
     );
+  });
+
+  test("zero count returns nothing and negative count selects the last N", async () => {
+    expect(await ev("{{foreachMessage::0}}x{{/foreachMessage}}")).toBe("");
+    expect(await ev("{{foreachMessage::-2}}[{{.msg_name}}]{{/foreachMessage}}")).toBe("[Bob][Alice]");
   });
 
   test("non-numeric first arg is the loop variable name", async () => {

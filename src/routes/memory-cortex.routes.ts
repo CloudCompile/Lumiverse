@@ -18,6 +18,7 @@ import { enqueueChatPipelineTask, getChatPipelineStatus } from "../services/chat
 import * as connectionsSvc from "../services/connections.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as memoryCortex from "../services/memory-cortex";
+import { parsePagination } from "../services/pagination";
 import * as vectorizationQueue from "../services/vectorization-queue.service";
 import { ChatLinkError } from "../services/memory-cortex/vault";
 import { getCharacter } from "../services/characters.service";
@@ -1982,8 +1983,8 @@ app.get("/chats/:chatId/chunks", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const { limit: requestedLimit, offset } = parsePagination(c.req.query("limit"), c.req.query("offset"));
+  const limit = Math.min(requestedLimit, 200);
 
   const { getDb } = require("../db/connection");
   const db = getDb();
@@ -2019,8 +2020,8 @@ app.get("/chats/:chatId/salience", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const { limit: requestedLimit, offset } = parsePagination(c.req.query("limit"), c.req.query("offset"));
+  const limit = Math.min(requestedLimit, 200);
 
   const { getDb } = require("../db/connection");
   const db = getDb();
