@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import * as databank from "../services/databank";
+import { getChat } from "../services/chats.service";
 import { parsePagination } from "../services/pagination";
 import * as filesSvc from "../services/files.service";
 import type { DatabankScope } from "../services/databank/types";
@@ -76,6 +77,8 @@ app.put("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const userId = c.get("userId");
   const id = c.req.param("id");
+
+  if (!databank.getDatabank(userId, id)) return c.json({ error: "Not found" }, 404);
 
   databank.abortDatabankProcessing(id);
 
@@ -271,6 +274,8 @@ app.delete("/:id/documents/:docId", async (c) => {
   const userId = c.get("userId");
   const docId = c.req.param("docId");
 
+  if (!databank.getDocument(userId, docId)) return c.json({ error: "Not found" }, 404);
+
   databank.abortDocumentProcessing(docId);
 
   // Delete vectors from LanceDB
@@ -343,6 +348,8 @@ app.post("/:id/documents/:docId/reprocess", async (c) => {
   const doc = databank.getDocument(userId, docId);
   if (!doc) return c.json({ error: "Not found" }, 404);
 
+  databank.abortDocumentProcessing(docId);
+
   // Delete old vectors
   await databank.deleteDocumentVectors(userId, docId);
 
@@ -367,6 +374,7 @@ app.post("/attach-to-chat", async (c) => {
 
   if (!file) return c.json({ error: "No file provided" }, 400);
   if (!chatId) return c.json({ error: "chat_id is required" }, 400);
+  if (!getChat(userId, chatId)) return c.json({ error: "Chat not found" }, 404);
 
   if (!databank.isSupportedFormat(file.name)) {
     return c.json({ error: `Unsupported file format. Supported: ${databank.getSupportedExtensions().join(", ")}` }, 400);

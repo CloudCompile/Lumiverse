@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ExternalLink, RefreshCw, LogIn, Zap, Settings2, ChevronRight } from 'lucide-react'
 import { FormField, Select, Button } from '@/components/shared/FormComponents'
@@ -27,7 +27,12 @@ const QUANTIZATION_OPTIONS = [
 
 export default function OpenRouterSettings({ connectionId, connectionName, hasApiKey, settings, onChange, onApiKeySet, onConnectionCreated }: OpenRouterSettingsProps) {
   const { t } = useTranslation('panels')
+  const oauthCleanupRef = useRef<(() => void) | null>(null)
   const [credits, setCredits] = useState<OpenRouterCreditsInfo | null>(null)
+
+  useEffect(() => () => {
+    oauthCleanupRef.current?.()
+  }, [])
   const [creditsLoading, setCreditsLoading] = useState(false)
   const [oauthLoading, setOauthLoading] = useState(false)
   const [routingOpen, setRoutingOpen] = useState(false)
@@ -128,16 +133,20 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
       const popup = window.open(auth_url, 'openrouter_auth', 'width=600,height=700,scrollbars=yes')
 
       let handled = false
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null
       const cleanup = () => {
         if (handled) return
         handled = true
         window.removeEventListener('message', onMessage)
         clearInterval(checkClosed)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        oauthCleanupRef.current = null
         setOauthLoading(false)
       }
+      oauthCleanupRef.current = cleanup
 
       const onMessage = async (event: MessageEvent) => {
-        if (event.data?.type !== 'openrouter_oauth_code' || !event.data.code) return
+        if (event.data?.type !== 'openrouter_oauth_code' || !event.data.code || event.data.state !== session_token) return
         window.removeEventListener('message', onMessage)
         clearInterval(checkClosed)
 
@@ -164,7 +173,7 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
         }
       }, 500)
 
-      setTimeout(cleanup, 5 * 60 * 1000)
+      timeoutTimer = setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err) {
       console.error('[OpenRouter] OAuth init failed:', err)
       setOauthLoading(false)

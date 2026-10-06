@@ -75,6 +75,7 @@ export default function ConnectionItem({
 }: ConnectionItemProps) {
 
   const { t } = useTranslation('panels')
+  const oauthCleanupRef = useRef<(() => void) | null>(null)
   const [editing, setEditing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -194,19 +195,23 @@ export default function ConnectionItem({
       const popup = window.open(auth_url, isNanoGptOAuth ? 'nanogpt_auth' : 'openrouter_auth', 'width=600,height=700,scrollbars=yes')
 
       let handled = false
+      let timeoutTimer: ReturnType<typeof setTimeout> | null = null
       const cleanup = () => {
         if (handled) return
         handled = true
         window.removeEventListener('message', onMessage)
         clearInterval(checkClosed)
+        if (timeoutTimer) clearTimeout(timeoutTimer)
+        oauthCleanupRef.current = null
         setOauthLoading(false)
       }
+      oauthCleanupRef.current = cleanup
 
       // Landing page sends us the code via postMessage
       const onMessage = async (event: MessageEvent) => {
         const expectedType = isNanoGptOAuth ? 'nanogpt_oauth_code' : 'openrouter_oauth_code'
         if (event.data?.type !== expectedType || !event.data.code) return
-        if (isNanoGptOAuth && event.data.state !== session_token) return
+        if (event.data.state !== session_token) return
         window.removeEventListener('message', onMessage)
         clearInterval(checkClosed)
 
@@ -234,12 +239,16 @@ export default function ConnectionItem({
         }
       }, 500)
 
-      setTimeout(cleanup, 5 * 60 * 1000)
+      timeoutTimer = setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err) {
       console.error('[ConnectionItem] OAuth init failed:', err)
       setOauthLoading(false)
     }
   }, [profile.id, profile.provider, onUpdate])
+
+  useEffect(() => () => {
+    oauthCleanupRef.current?.()
+  }, [])
 
   const boundReasoning = profile.metadata?.reasoningBindings?.settings
   const boundPromptBias = profile.metadata?.reasoningBindings?.promptBias
