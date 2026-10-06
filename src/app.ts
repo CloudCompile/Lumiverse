@@ -7,6 +7,7 @@ import { websocket } from "hono/bun";
 import { env } from "./env";
 import { auth } from "./auth";
 import { rewriteLegacySsoCallbackPath } from "./auth/callback-compat";
+import { renderProviderOAuthLanding } from "./auth/provider-oauth-landing";
 import { requireAuth } from "./auth/middleware";
 import { settingsRoutes } from "./routes/settings.routes";
 import { charactersRoutes } from "./routes/characters.routes";
@@ -347,117 +348,17 @@ app.route("/api/spindle-oauth", spindleOAuthRoutes);
 // LumiHub callback — unauthenticated (PKCE code proves authorization)
 app.route("/api/v1/lumihub", lumihubCallbackRoute);
 
-// OpenRouter OAuth landing — unauthenticated (popup redirect from OpenRouter)
-// OpenRouter redirects here with ?code=<auth_code>. We relay the code back
-// to the opener window via postMessage so it can call our exchange endpoint.
-app.get("/api/v1/openrouter/oauth-landing", async (c) => {
-  const rawCode = c.req.query("code") || "";
-  const rawState = c.req.query("state") || "";
-  const rawOpenerOrigin = c.req.query("opener_origin") || "";
-  // Whitelist the OAuth code character set. OpenRouter codes are URL-safe
-  // base64-style strings; rejecting anything outside that set blocks the
-  // </script> XSS payload entirely. JSON.stringify alone does NOT HTML-encode
-  // < or >, so a value like </script><script>alert(1)</script> would otherwise
-  // break out of the inline script context.
-  const code = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawCode) ? rawCode : "";
-  const state = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawState) ? rawState : "";
-  let openerOrigin = "";
-  try {
-    const parsed = new URL(rawOpenerOrigin);
-    if (parsed.origin === rawOpenerOrigin && isOriginAllowed(parsed.origin)) {
-      openerOrigin = parsed.origin;
-    }
-  } catch {
-    openerOrigin = "";
-  }
-  // Pass the code to the inline script via a data attribute. dataset reads it
-  // from the DOM as a plain string with no HTML/JS interpretation.
-  const codeAttr = code
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  const openerOriginAttr = openerOrigin
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return c.html(`<!DOCTYPE html>
-<html><head><title>OpenRouter Authorization</title>
-<style>body{background:#1c1826;color:rgba(255,255,255,.8);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
-<body>
-<div id="s" data-code="${codeAttr}" data-state="${state}" data-opener-origin="${openerOriginAttr}">Completing authorization...</div>
-<script>
-var el = document.getElementById('s');
-var code = el.dataset.code || '';
-var state = el.dataset.state || '';
-var targetOrigin = el.dataset.openerOrigin || window.location.origin;
-if (code && state && window.opener) {
-  // Restrict postMessage to the known Lumiverse opener origin.
-  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code, state: state }, targetOrigin);
-  el.textContent = 'Authorized! Closing...';
-  setTimeout(function(){ window.close(); }, 500);
-} else if (!code) {
-  el.textContent = 'No authorization code received.';
-} else if (!state) {
-  el.textContent = 'No authorization state received.';
-} else {
-  el.textContent = 'Could not reach parent window. Copy this code: ' + code;
+// Provider callbacks are unauthenticated. Relay their PKCE codes to the
+// initiating frontend, which performs the authenticated key exchange.
+for (const provider of ["openrouter", "nanogpt"] as const) {
+  app.get(`/api/v1/${provider}/oauth-landing`, (c) => c.html(renderProviderOAuthLanding({
+    provider,
+    code: c.req.query("code"),
+    state: c.req.query("state"),
+    error: c.req.query("error"),
+    openerOrigin: c.req.query("opener_origin"),
+  }, isOriginAllowed)));
 }
-</script>
-</body></html>`);
-});
-
-// NanoGPT OAuth landing — unauthenticated (popup redirect from NanoGPT)
-app.get("/api/v1/nanogpt/oauth-landing", async (c) => {
-  const rawCode = c.req.query("code") || "";
-  const rawState = c.req.query("state") || "";
-  const rawError = c.req.query("error") || "";
-  const rawOpenerOrigin = c.req.query("opener_origin") || "";
-  const code = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawCode) ? rawCode : "";
-  const state = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawState) ? rawState : "";
-  const error = /^[A-Za-z0-9._~+/=-]{1,128}$/.test(rawError) ? rawError : "";
-  let openerOrigin = "";
-  try {
-    const parsed = new URL(rawOpenerOrigin);
-    if (parsed.origin === rawOpenerOrigin && isOriginAllowed(parsed.origin)) {
-      openerOrigin = parsed.origin;
-    }
-  } catch {
-    openerOrigin = "";
-  }
-  const htmlAttr = (value: string) => value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return c.html(`<!DOCTYPE html>
-<html><head><title>NanoGPT Authorization</title>
-<style>body{background:#10151e;color:rgba(255,255,255,.82);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
-<body>
-<div id="s" data-code="${htmlAttr(code)}" data-state="${htmlAttr(state)}" data-error="${htmlAttr(error)}" data-opener-origin="${htmlAttr(openerOrigin)}">Completing authorization...</div>
-<script>
-var el = document.getElementById('s');
-var code = el.dataset.code || '';
-var state = el.dataset.state || '';
-var error = el.dataset.error || '';
-var targetOrigin = el.dataset.openerOrigin || window.location.origin;
-if (error) {
-  el.textContent = 'Authorization failed: ' + error;
-} else if (code && state && window.opener) {
-  window.opener.postMessage({ type: 'nanogpt_oauth_code', code: code, state: state }, targetOrigin);
-  el.textContent = 'Authorized! Closing...';
-  setTimeout(function(){ window.close(); }, 500);
-} else if (!code) {
-  el.textContent = 'No authorization code received.';
-} else if (!state) {
-  el.textContent = 'No authorization state received.';
-} else {
-  el.textContent = 'Could not reach parent window. Copy this code: ' + code;
-}
-</script>
-</body></html>`);
-});
 
 // Image gen results — unauthenticated, public access for push notifications and embeds
 app.get("/api/v1/image-gen/results/:id", async (c) => {

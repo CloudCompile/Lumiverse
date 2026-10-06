@@ -8,8 +8,8 @@
     "urls": [
       "http://127.0.0.1:*",
       "http://localhost:*",
-      "http://*",
-      "https://*"
+      "http://*:*",
+      "https://*:*"
     ]
   },
   "permissions": ["desktop-sso-popup-close"]

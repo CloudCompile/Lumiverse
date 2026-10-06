@@ -410,8 +410,10 @@ fn save_frontend_startup_appearance<R: tauri::Runtime>(
 fn frontend_startup_shell_script(
     appearance: &FrontendStartupAppearance,
     windows_corners: &str,
+    frontend_origin: &str,
 ) -> String {
     let snapshot = serde_json::to_string(appearance).unwrap_or_else(|_| "{}".into());
+    let frontend_origin = serde_json::to_string(frontend_origin).unwrap();
     let titlebar_height = FRONTEND_TITLEBAR_HEIGHT;
     let corner_radius = match windows_corners {
         "rounded" => FRONTEND_WINDOWS_CORNER_RADIUS,
@@ -420,6 +422,11 @@ fn frontend_startup_shell_script(
     };
     format!(
         r#"(() => {{
+  // WKWebView popup configurations inherit the opener's user scripts. Keep
+  // the app's custom chrome out of native popups and external provider pages.
+  const windowLabel = window.__TAURI_INTERNALS__?.metadata?.currentWindow?.label;
+  if (window.opener || (windowLabel && windowLabel !== 'frontend') ||
+      (!windowLabel && window.location.origin !== {frontend_origin})) return;
   const snapshot = {snapshot};
   const root = document.documentElement;
   const set = (name, value) => {{ if (typeof value === 'string') root.style.setProperty(name, value); }};
@@ -441,19 +448,17 @@ fn frontend_startup_shell_script(
     style.textContent = '#lumiverse-startup-shell{{position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:var(--lumiverse-startup-background,#0a0812);color:var(--lumiverse-startup-text-muted,rgba(255,255,255,.64));font:600 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:.02em}}.lumiverse-startup-titlebar{{position:relative;height:{titlebar_height}px;box-sizing:border-box;border-radius:{corner_radius}px {corner_radius}px 0 0;overflow:hidden;border-bottom:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.08));background:color-mix(in srgb,var(--lumiverse-startup-background,#0a0812) 86%,transparent)}}.lumiverse-startup-drag{{position:absolute;inset:1px 1px 0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:auto;cursor:grab;user-select:none;-webkit-user-select:none}}.lumiverse-startup-dot{{width:8px;height:8px;border-radius:999px;background:var(--lumiverse-startup-primary,#9370db);box-shadow:0 0 0 3px color-mix(in srgb,var(--lumiverse-startup-primary,#9370db) 12%,transparent)}}.lumiverse-startup-controls{{position:absolute;top:50%;right:12px;display:flex;gap:7px;transform:translateY(-50%)}}.lumiverse-startup-controls i{{display:block;width:11px;height:11px;border-radius:999px;border:1px solid var(--lumiverse-startup-border,rgba(255,255,255,.12))}}.lumiverse-startup-pulse{{position:absolute;top:50%;left:50%;width:42px;height:42px;margin:-21px;border-radius:50%;border:2px solid var(--lumiverse-startup-primary,#9370db);border-left-color:transparent;opacity:.55;animation:lumiverse-startup-spin .9s linear infinite}}@keyframes lumiverse-startup-spin{{to{{transform:rotate(360deg)}}}}';
     document.head.appendChild(style);
     document.body.appendChild(shell);
-    // The shell must lift on every route the frontend can land on, not just
-    // the authenticated one. /login, /sso-complete and the Stream Deck
-    // handoff render as siblings of <App> in the router, so they never
-    // produce [data-app-root] — waiting on it alone leaves an opaque overlay
-    // over a working login form forever. Any mounted React root means the
-    // page is up: the app commits its first render in one pass, so this
-    // cannot uncover a half-drawn tree. Keep a wall-clock failsafe as well,
-    // so no future route can trap the window again.
+    // React routes are ready after their first commit. Plain HTML callbacks
+    // and other documents without a React root are ready once parsed.
     const mounted = () =>
       !!document.querySelector('[data-app-root]') ||
-      (document.getElementById('root')?.childElementCount ?? 0) > 0;
+      (document.getElementById('root')?.childElementCount ?? 0) > 0 ||
+      (!document.getElementById('root') && document.readyState !== 'loading');
+    let timeout;
     const dismiss = () => {{
       shell.remove(); style.remove(); root.removeAttribute('data-lumiverse-startup-shell'); observer.disconnect();
+      document.removeEventListener('DOMContentLoaded', remove);
+      clearTimeout(timeout);
     }};
     const remove = () => {{
       if (!mounted()) return false;
@@ -461,8 +466,10 @@ fn frontend_startup_shell_script(
     }};
     const observer = new MutationObserver(remove);
     observer.observe(document.documentElement, {{ childList: true, subtree: true }});
+    document.addEventListener('DOMContentLoaded', remove, {{ once: true }});
     requestAnimationFrame(remove);
-    setTimeout(dismiss, 15000);
+    // Only a failsafe for a broken page; normal dismissal follows readiness.
+    timeout = setTimeout(dismiss, 15000);
   }};
   if (document.body) mount(); else document.addEventListener('DOMContentLoaded', mount, {{ once: true }});
 }})();"#
@@ -682,6 +689,7 @@ pub fn show_frontend(
         tauri::webview::Color(red, green, blue, 255)
     };
     let popup_app = app.clone();
+    let frontend_origin = url.origin().ascii_serialization();
     let mut builder = WebviewWindowBuilder::new(&app, FRONTEND_LABEL, WebviewUrl::External(url))
         .title(FRONTEND_TITLE)
         .disable_drag_drop_handler()
@@ -709,6 +717,7 @@ pub fn show_frontend(
         .initialization_script(frontend_startup_shell_script(
             &startup_appearance,
             windows_corners,
+            &frontend_origin,
         ))
         // Embedded WebViews do not provide a browser download shelf. Publish
         // the native lifecycle so the frontend can show immediate feedback.
@@ -1421,8 +1430,9 @@ mod tests {
         assert!(supports_windows_rounded_corners(22_000));
 
         let appearance = FrontendStartupAppearance::default();
-        let rounded = frontend_startup_shell_script(&appearance, "rounded");
-        let square = frontend_startup_shell_script(&appearance, "square");
+        let rounded =
+            frontend_startup_shell_script(&appearance, "rounded", "http://localhost:3000");
+        let square = frontend_startup_shell_script(&appearance, "square", "http://localhost:3000");
         assert!(rounded.contains("border-radius:8px 8px 0 0;overflow:hidden"));
         assert!(square.contains("border-radius:0px 0px 0 0;overflow:hidden"));
     }

@@ -5,6 +5,7 @@ import { Toggle } from '@/components/shared/Toggle'
 import { useTranslation } from 'react-i18next'
 import { connectionsApi } from '@/api/connections'
 import { buildNanoGptOAuthCallbackUrl, nanoGptApi } from '@/api/nanogpt'
+import { startProviderOAuthPopup } from '@/lib/providerOAuthPopup'
 import { useStore } from '@/store'
 import {
   areReasoningSettingsEqual,
@@ -353,57 +354,31 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
     setNanoGptOauthLoading(true)
     try {
       const callbackUrl = buildNanoGptOAuthCallbackUrl()
-      const { auth_url, session_token } = await nanoGptApi.initiateAuth(callbackUrl, profile?.id
-        ? { connectionId: profile.id }
-        : { connectionName: name.trim() }
-      )
-
-      const popup = window.open(auth_url, 'nanogpt_auth', 'width=600,height=700,scrollbars=yes')
-
-      let handled = false
-      let timeoutTimer: ReturnType<typeof setTimeout> | null = null
-      const cleanup = () => {
-        if (handled) return
-        handled = true
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-        if (timeoutTimer) clearTimeout(timeoutTimer)
-        oauthCleanupRef.current = null
-        setNanoGptOauthLoading(false)
-      }
-      oauthCleanupRef.current = cleanup
-
-      const onMessage = async (event: MessageEvent) => {
-        if (event.data?.type !== 'nanogpt_oauth_code' || !event.data.code || event.data.state !== session_token) return
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-
-        try {
-          const result = await nanoGptApi.completeAuth(session_token, event.data.code)
-          if (result.created && result.profile) {
-            onOAuthCreated?.(result.profile)
-          } else {
-            setApiKey('')
-            setNanoGptOauthStatus(t('connectionForm.nanoGptSaved'))
-          }
-        } catch (err: any) {
-          setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptExchangeFailed')))
+      const flow = startProviderOAuthPopup({
+        provider: 'nanogpt',
+        callbackUrl,
+        initiate: () => nanoGptApi.initiateAuth(callbackUrl, profile?.id
+          ? { connectionId: profile.id }
+          : { connectionName: name.trim() }),
+      })
+      oauthCleanupRef.current = flow.cancel
+      const authorization = await flow.result
+      if (!authorization) return
+      try {
+        const result = await nanoGptApi.completeAuth(authorization.sessionToken, authorization.code)
+        if (result.created && result.profile) {
+          onOAuthCreated?.(result.profile)
+        } else {
+          setApiKey('')
+          setNanoGptOauthStatus(t('connectionForm.nanoGptSaved'))
         }
-        handled = true
-        setNanoGptOauthLoading(false)
+      } catch (err: any) {
+        setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptExchangeFailed')))
       }
-      window.addEventListener('message', onMessage)
-
-      const checkClosed = setInterval(() => {
-        if (!popup || popup.closed) {
-          clearInterval(checkClosed)
-          setTimeout(cleanup, 1500)
-        }
-      }, 500)
-
-      timeoutTimer = setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err: any) {
       setNanoGptOauthStatus(String(err?.message || t('connectionForm.nanoGptStartFailed')))
+    } finally {
+      oauthCleanupRef.current = null
       setNanoGptOauthLoading(false)
     }
   }, [name, onOAuthCreated, profile?.id, t])

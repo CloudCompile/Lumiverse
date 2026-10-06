@@ -30,3 +30,24 @@ describe("frontend titlebar remote origins", () => {
     expect(allows(url)).toBe(false);
   });
 });
+
+const popupCapability = await Bun.file(
+  new URL("../src-tauri/capabilities/frontend-sso-popup.json", import.meta.url),
+).json();
+const popupPatterns = popupCapability.remote.urls.map((url: string) => new URLPattern(url));
+
+describe("frontend sign-in popup remote origins", () => {
+  test.each([
+    "https://lumiverse.example:8444/api/v1/openrouter/oauth-landing",
+    "http://192.168.1.20:7860/api/v1/nanogpt/oauth-landing",
+    "http://localhost:3000/sso-complete",
+    "https://lumiverse.example/sso-complete",
+  ])("allows native popup close for %s", (url) => {
+    expect(popupPatterns.some((pattern: URLPattern) => pattern.test(url))).toBe(true);
+  });
+  test("only grants popup close to native frontend popups", () => {
+    expect(popupCapability.windows).toEqual(["frontend-popup-*"]);
+    expect(popupCapability.permissions).toEqual(["desktop-sso-popup-close"]);
+    expect(popupPatterns.some((pattern: URLPattern) => pattern.test('file:///tmp/callback.html'))).toBe(false);
+  });
+});
