@@ -25,13 +25,14 @@ export interface ChunkOptions {
 const DEFAULT_TARGET = 800;
 const DEFAULT_MAX = 1600;
 const DEFAULT_OVERLAP = 120;
+const TOKENS_PER_WORD = 1.33;
 
 /** Approximate token count: ~1 token per 0.75 words. Fast and synchronous. */
 function approxTokens(text: string): number {
   if (!text) return 0;
   // Count whitespace-separated words, approximate at ~1.33 tokens per word
   const words = text.split(/\s+/).filter(Boolean).length;
-  return Math.ceil(words * 1.33);
+  return Math.ceil(words * TOKENS_PER_WORD);
 }
 
 /**
@@ -206,7 +207,8 @@ function splitLargeParagraph(
     const raw = text.slice(sentenceStart, separatorStart);
     const leading = raw.length - raw.trimStart().length;
     const content = raw.trim();
-    if (content) sentences.push({ content, start: baseOffset + sentenceStart + leading, end: baseOffset + separatorStart });
+    const start = baseOffset + sentenceStart + leading;
+    if (content) sentences.push({ content, start, end: start + content.length });
     sentenceStart = separatorStart + match[0].length;
   }
   const tail = text.slice(sentenceStart);
@@ -251,16 +253,22 @@ function splitLargeParagraph(
     // Split overlong sentences at word boundaries so every chunk stays within max.
     if (st > max) {
       flush();
+      // Separately emitted chunks break the span covered by retained overlap.
+      current = [];
+      currentTokens = 0;
       const words = [...sentence.content.matchAll(/\S+/g)];
-      let startWord = 0;
-      while (startWord < words.length) {
-        let endWord = startWord + 1;
-        while (endWord < words.length && approxTokens(sentence.content.slice(words[startWord].index!, words[endWord].index! + words[endWord][0].length)) <= max) endWord++;
+      const maxWords = Math.max(1, Math.floor(max / TOKENS_PER_WORD));
+      for (let startWord = 0; startWord < words.length; startWord += maxWords) {
+        const endWord = Math.min(words.length, startWord + maxWords);
         const start = words[startWord].index!;
         const end = words[endWord - 1].index! + words[endWord - 1][0].length;
         const content = sentence.content.slice(start, end);
-        chunks.push({ index: chunks.length, content, tokenCount: approxTokens(content), metadata: { startOffset: sentence.start + start, endOffset: sentence.start + end, sectionHeader } });
-        startWord = endWord;
+        chunks.push({
+          index: chunks.length,
+          content,
+          tokenCount: Math.ceil((endWord - startWord) * TOKENS_PER_WORD),
+          metadata: { startOffset: sentence.start + start, endOffset: sentence.start + end, sectionHeader },
+        });
       }
       continue;
     }

@@ -132,7 +132,7 @@ describe("safeFetch User-Agent", () => {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = (async () => new Response("x".repeat(100), {
       headers: { "content-length": "1" },
-    })) as typeof fetch;
+    })) as unknown as typeof fetch;
 
     try {
       const response = await safeFetch("http://93.184.216.34/large", { maxBytes: 10 });
