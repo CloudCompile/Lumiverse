@@ -23,6 +23,7 @@ class DocumentProcessingAbortedError extends Error {
 interface ActiveDocumentProcessing {
   databankId: string;
   controller: AbortController;
+  completion: Promise<void>;
 }
 
 const activeDocuments = new Map<string, Set<ActiveDocumentProcessing>>();
@@ -53,21 +54,33 @@ export function abortDatabankProcessing(databankId: string): void {
  * Updates document status via events throughout the lifecycle.
  */
 export async function processDocument(userId: string, docId: string): Promise<void> {
-  const doc = crud.getDocument(userId, docId);
-  if (!doc) {
+  const initialDoc = crud.getDocument(userId, docId);
+  if (!initialDoc) {
     console.warn(`[databank] Document ${docId} not found for processing`);
     return;
   }
+  let doc = initialDoc;
 
-  // A reprocess request supersedes any older run for this document. Without
-  // this guard, the runs can replace chunks and vectors in whichever order
-  // their embedding requests happen to finish.
+  const previousRuns = [...(activeDocuments.get(docId) ?? [])];
   abortDocumentProcessing(docId);
   const controller = new AbortController();
-  const activeRun = { databankId: doc.databankId, controller };
+  let finish!: () => void;
+  const completion = new Promise<void>((resolve) => { finish = resolve; });
+  const activeRun = { databankId: doc.databankId, controller, completion };
   trackActiveDocument(docId, activeRun);
 
   try {
+    // Vector-store writes already in progress cannot be cancelled. Let older
+    // runs settle before this run replaces their chunks and vectors.
+    if (previousRuns.length > 0) {
+      await Promise.all(previousRuns.map((run) => run.completion));
+    }
+    if (isProcessingAborted(docId, controller.signal)) return;
+    const currentDoc = crud.getDocument(userId, docId);
+    if (!currentDoc) return;
+    doc = currentDoc;
+    activeRun.databankId = doc.databankId;
+
     // Mark as processing
     crud.updateDocumentStatus(docId, "processing");
     emitStatus(userId, doc, "processing");
@@ -101,6 +114,7 @@ export async function processDocument(userId: string, docId: string): Promise<vo
     // Reprocessing generates new chunk IDs, so deleting SQLite rows first would
     // orphan the previous Lance rows and make disk usage grow without bound.
     await deleteDocumentVectors(userId, docId);
+    if (isProcessingAborted(docId, controller.signal)) return;
 
     // 4. Delete old chunks (for reprocessing)
     crud.deleteChunksForDocument(docId);
@@ -149,7 +163,7 @@ export async function processDocument(userId: string, docId: string): Promise<vo
 
     console.info(`[databank] Processed document "${doc.name}" — ${chunkRows.length} chunks vectorized`);
   } catch (err: any) {
-    if (isProcessingAbortError(err)) {
+    if (controller.signal.aborted || isProcessingAbortError(err)) {
       console.info(`[databank] Document ${docId} deleted during processing; aborting cleanly`);
       return;
     }
@@ -163,6 +177,7 @@ export async function processDocument(userId: string, docId: string): Promise<vo
     emitStatus(userId, doc, "error", safeMessage);
   } finally {
     untrackActiveDocument(docId, activeRun);
+    finish();
   }
 }
 

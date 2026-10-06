@@ -71,17 +71,22 @@ export async function initiateOAuthAsync(
   const codeVerifier = generateCodeVerifier();
   const sessionToken = crypto.randomUUID();
   const codeChallenge = await computeCodeChallenge(codeVerifier);
+  // OpenRouter returns the code on callback_url; carry our correlation token
+  // in that URL so the landing page can relay it to the opener.
+  const callback = new URL(callbackUrl);
+  callback.searchParams.set("state", sessionToken);
+  const callbackUrlWithState = callback.toString();
 
   pendingOAuth.set(sessionToken, {
     connectionId: opts.connectionId,
     connectionName: opts.connectionName,
     codeVerifier,
-    callbackUrl,
+    callbackUrl: callbackUrlWithState,
     createdAt: Date.now(),
   });
 
   const params = new URLSearchParams({
-    callback_url: callbackUrl,
+    callback_url: callbackUrlWithState,
     code_challenge: codeChallenge,
     code_challenge_method: "S256",
   });

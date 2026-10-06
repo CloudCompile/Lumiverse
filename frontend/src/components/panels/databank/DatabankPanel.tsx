@@ -78,7 +78,6 @@ export default function DatabankPanel() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const banksRequestRef = useRef(0)
   const docsRequestRef = useRef(0)
 
@@ -269,23 +268,21 @@ export default function DatabankPanel() {
   // ── Poll for document status updates ──
   useEffect(() => {
     const hasProcessing = databankDocuments.some((d) => d.status === 'pending' || d.status === 'processing')
-    if (hasProcessing && selectedDatabankId) {
-      const requestBankId = selectedDatabankId
-      pollRef.current = setInterval(async () => {
-        try {
-          const result = await databankApi.listDocuments(requestBankId, { limit: 1000 })
-          if (requestBankId !== selectedDatabankId) return
-          setDatabankDocuments(result.data)
-          const stillProcessing = result.data.some((d) => d.status === 'pending' || d.status === 'processing')
-          if (!stillProcessing && pollRef.current) {
-            clearInterval(pollRef.current)
-            pollRef.current = null
-          }
-        } catch { /* ignore */ }
-      }, 3000)
-    }
+    if (!hasProcessing || !selectedDatabankId) return
+    const requestBankId = selectedDatabankId
+    let cancelled = false
+    const timer = setInterval(async () => {
+      try {
+        const result = await databankApi.listDocuments(requestBankId, { limit: 1000 })
+        if (cancelled) return
+        setDatabankDocuments(result.data)
+        const stillProcessing = result.data.some((d) => d.status === 'pending' || d.status === 'processing')
+        if (!stillProcessing) clearInterval(timer)
+      } catch { /* ignore */ }
+    }, 3000)
     return () => {
-      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
+      cancelled = true
+      clearInterval(timer)
     }
   }, [databankDocuments, selectedDatabankId, setDatabankDocuments])
 
