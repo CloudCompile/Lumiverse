@@ -750,10 +750,9 @@ async function executeInlineCouncilToolCalls(
         timeoutMs,
       );
     } else if (execution === "extension") {
-      // Resolve the extension tool registration. For extension inline tools,
-      // the qualified name uses __ instead of : (sanitized for LLM function names).
-      const extQualified = resolvedQualifiedName!.replace(/__/g, ":");
-      const extToolReg = getExtensionToolRegistration(extQualified);
+      // The dispatch map retains the original qualified registration name.
+      // Provider aliases are not reversible (prefixes and __ may be added).
+      const extToolReg = getExtensionToolRegistration(tool.name);
       if (!extToolReg) continue;
 
       let memberContext: import("lumiverse-spindle-types").CouncilMemberContext | undefined;
@@ -2499,9 +2498,12 @@ export async function startGeneration(
 
             for (const extTool of extensionInlineTools) {
               const qualifiedName = toolRegistry.getQualifiedName(extTool);
-              // Sanitize the qualified name for LLM function calling —
-              // some providers reject colons in function names.
-              const safeName = qualifiedName.replace(/:/g, "__");
+              // Some providers reject colons or a leading digit in function
+              // names. Installation IDs are UUIDs, so they may start with a digit.
+              const sanitizedName = qualifiedName.replace(/:/g, "__");
+              const safeName = /^[a-zA-Z_]/.test(sanitizedName)
+                ? sanitizedName
+                : `_${sanitizedName}`;
 
               // Wrap as RuntimeCouncilToolDefinition for the dispatch lookup
               const runtimeDef: RuntimeCouncilToolDefinition = {
