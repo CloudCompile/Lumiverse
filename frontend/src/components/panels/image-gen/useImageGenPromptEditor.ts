@@ -11,6 +11,8 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activePersonaId = useStore((s) => s.activePersonaId)
   const [presetName, setPresetName] = useState('')
+  const [captionParser, setCaptionParser] = useState<Pick<ImageGenPromptPreset, 'parserConnectionId' | 'parserModel' | 'parserParameters'>>({})
+  const updateCaptionParser = (patch: Partial<typeof captionParser>) => setCaptionParser((previous) => ({ ...previous, ...patch }))
   const [editTarget, setEditTarget] = useState<'main' | 'character' | 'persona' | 'captioning'>('main')
   const [draftPrompt, setDraftPrompt] = useState('')
   const [draftNegative, setDraftNegative] = useState('')
@@ -77,7 +79,10 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
   customPromptRef.current = imageGeneration.customPrompt
   const customNegativePromptRef = useRef(imageGeneration.customNegativePrompt)
   customNegativePromptRef.current = imageGeneration.customNegativePrompt
+  const previousTarget = useRef(editTarget)
   useEffect(() => {
+    const changedTarget = previousTarget.current !== editTarget
+    previousTarget.current = editTarget
     if (editTarget === 'main') {
       const activeId = imageGeneration.activePromptPresetId || null
       const activePreset = activeId ? mainPresets.find((p) => p.id === activeId) : null
@@ -94,7 +99,8 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
       setLoadedPresetId(preset?.id ?? null)
       setDraftPrompt(preset?.prompt || '')
       setDraftNegative(preset?.negativePrompt || '')
-    } else if (editTarget === 'captioning') {
+    } else if (editTarget === 'captioning' && changedTarget) {
+      setCaptionParser({})
       setLoadedPresetId(null)
       setDraftPrompt('')
       setDraftNegative('')
@@ -178,6 +184,7 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
         setDraftPrompt('')
         setDraftNegative('')
       } else if (target === 'captioning') {
+        setCaptionParser({})
         setDraftPrompt('')
         setDraftNegative('')
       }
@@ -194,10 +201,9 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
         promptMode: preset.mode,
         customPrompt: preset.prompt,
         customNegativePrompt: preset.negativePrompt || '',
-        promptParserConnectionId: preset.parserConnectionId || null,
-        promptParserModel: preset.parserModel || '',
-        promptParserParameters: preset.parserParameters || {},
       } as any)
+    } else if (target === 'captioning') {
+      setCaptionParser({ parserConnectionId: preset.parserConnectionId, parserModel: preset.parserModel, parserParameters: preset.parserParameters })
     } else if (target === 'character') {
       bindCharacterPreset(preset.id)
     } else if (target === 'persona') {
@@ -219,9 +225,7 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
       mode: imageGeneration.promptMode === 'parsed_custom' ? 'parsed_custom' : 'custom',
       prompt: draftPrompt,
       negativePrompt: draftNegative,
-      parserConnectionId: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserConnectionId || null) : null,
-      parserModel: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserModel || '') : '',
-      parserParameters: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserParameters || {}) : {},
+      ...(editTarget === 'captioning' ? captionParser : {}),
       kind: editTarget,
     }
     const next = existingId
@@ -246,6 +250,7 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
   }, [
     activeCharacterId,
     activePersonaId,
+    captionParser,
     bindCharacterPreset,
     bindPersonaPreset,
     draftNegative,
@@ -314,6 +319,8 @@ export function useImageGenPromptEditor(setError: (message: string | null) => vo
   return {
     presetName,
     setPresetName,
+    captionParser,
+    updateCaptionParser,
     editTarget,
     setEditTarget,
     draftPrompt,

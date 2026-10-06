@@ -47,7 +47,7 @@ For example, a parser instruction like:
 
 ## Picking the Parser LLM
 
-Scene and Chat-aware Custom both need a parser LLM. By default Lumiverse uses the **Council sidecar**, but you can override it in **Prompt Studio → Prompt Parser**:
+Scene and Chat-aware Custom both need a parser LLM. By default Lumiverse uses the **Council sidecar**, but you can override it in **Prompt Studio → Parser**:
 
 | Field | Purpose |
 |-------|---------|
@@ -72,7 +72,7 @@ Custom and Chat-aware prompts can be saved as **presets** and reloaded later. Pr
 | **Persona preset** | A snippet that fills `{{persona_prompt}}` (and `{{persona_negative_prompt}}`) in the main preset. |
 | **Captioning preset** | Instructions used by **Caption Image** when describing an uploaded image. |
 
-**Prompt Studio** has **Main**, **Character**, **Persona**, and **Captioning** views. Each view lists only its own presets. Edit the prompt and name, then use **Save Changes** to update a loaded preset or **Save As New** to create one. Delete requires confirmation. **Preset Negative Prompt** belongs to the prompt preset; **Provider Negative Prompt** in Generation Settings is a separate connection parameter.
+**Prompt Studio** has **Main**, **Character**, **Persona**, **Parser**, and **Captioning** views. Main, Character, and Persona share the generation parser configured in **Parser**. Switching or saving their presets does not replace that connection, model, or sampling settings. Captioning stays last and has its own parser controls saved with each captioning preset. The preset views list only their own presets. Edit the prompt and name, then use **Save Changes** to update a loaded preset or **Save As New** to create one. Delete requires confirmation. **Preset Negative Prompt** belongs to the prompt preset; **Provider Negative Prompt** in Generation Settings is a separate connection parameter.
 
 The main prompt draft is saved to settings after a short typing pause and flushed before manual generation. Saving a preset is a separate action. Closing the studio preserves the draft for the current mounted drawer session.
 
