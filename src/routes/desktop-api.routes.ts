@@ -15,6 +15,7 @@ import {
 import { resolveDesktopRequestOrigin } from "../auth/request-origin";
 import { isConnectionFromExplicitTrustedProxy } from "../utils/client-ip";
 import { desktopCaptureBroker, DesktopCaptureBroker, DesktopCaptureError } from "../spindle/desktop-capture-broker";
+import { getPresenceSnapshot, type PresenceSnapshot } from "../services/presence.service";
 
 export interface DesktopPrincipal {
   id: string;
@@ -37,6 +38,7 @@ export interface DesktopApiDependencies {
   loadPrincipal: (userId: string) => DesktopPrincipal | null;
   getStatus: () => Promise<unknown>;
   getInstance: (issuer: string) => { id: string; name: string };
+  getPresence?: (userId: string) => PresenceSnapshot | null | Promise<PresenceSnapshot | null>;
 }
 
 export function canReadDesktopStatus(role: string): boolean {
@@ -85,6 +87,7 @@ const defaultDependencies: DesktopApiDependencies = {
   loadPrincipal: loadDesktopPrincipal,
   getStatus: async () => (await import("../services/operator.service")).operatorService.getFullStatus(),
   getInstance: instanceIdentity,
+  getPresence: getPresenceSnapshot,
 };
 
 export function createDesktopApiRoutes(
@@ -208,6 +211,11 @@ export function createDesktopApiRoutes(
         canReadStatus: canReadDesktopStatus(principal.role),
       },
     });
+  });
+
+  app.get("/presence", async (c) => {
+    const principal = c.get("desktopPrincipal");
+    return c.json({ active: await dependencies.getPresence?.(principal.id) ?? null });
   });
 
   app.get("/status", async (c) => {

@@ -16,6 +16,8 @@ export interface TraySettings {
   bunPath: string | null;
   /** Start the Lumiverse server as soon as the tray app launches. */
   autoStartServer: boolean;
+  /** Show the active roleplay in the user's Discord status via Rich Presence. */
+  discordRpcEnabled: boolean;
   /** Last frontend window position/size; null = center 1200x800. */
   frontendBounds: {
     x: number;
@@ -31,6 +33,7 @@ const DEFAULTS: TraySettings = {
   repoDir: null,
   bunPath: null,
   autoStartServer: true,
+  discordRpcEnabled: false,
   frontendBounds: null,
   instanceConnection: LOCAL_INSTANCE_CONNECTION,
 };

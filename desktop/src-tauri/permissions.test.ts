@@ -26,7 +26,7 @@ function registeredCommands(): string[] {
   const lib = readSource("lib.rs");
   const block = lib.match(/generate_handler!\[([\s\S]*?)\]/);
   if (!block) throw new Error("generate_handler! block not found in lib.rs");
-  return [...block[1].matchAll(/(?:runner|frontend|notifications|remote_instance|capture)::([a-z0-9_]+)/g)].map((m) => m[1]);
+  return [...block[1].matchAll(/(?:\b[a-z_][a-z0-9_]*::)+([a-z_][a-z0-9_]*)/g)].map((m) => m[1]);
 }
 
 /** Every command name appearing in any `commands.allow` list. */
@@ -131,15 +131,40 @@ describe("capability origins", () => {
     expect(broken).toEqual([]);
   });
 
-  test("remote instance credentials are callable only from local windows", () => {
+  test("remote instance credentials are callable only from the bundled or development tray host", () => {
     const grants = capabilities().filter((capability) =>
       ((capability.json.permissions as Array<string | { identifier?: string }>) ?? [])
         .some((permission) => permission === "remote-instance-commands"
           || (typeof permission === "object" && permission.identifier === "remote-instance-commands")),
     );
     expect(grants.length).toBeGreaterThan(0);
-    expect(grants.every((capability) => capability.json.remote === undefined)).toBe(true);
-    expect(grants.flatMap((capability) => capability.json.windows as string[])).not.toContain("frontend");
+    expect(grants.some((capability) => capability.json.remote === undefined)).toBe(true);
+    for (const capability of grants) {
+      expect(capability.json.windows).toEqual(["main"]);
+      if (capability.json.remote === undefined) {
+        expect(capability.json.local).not.toBe(false);
+        continue;
+      }
+      // Tauri serves the hidden tray from Vite in development. Keep that
+      // exception on its fixed port; other loopback servers are remote content.
+      expect(capability.file).toBe("tray-dev.json");
+      expect(capability.json.local).toBe(false);
+      const urls = (capability.json.remote as { urls: string[] }).urls;
+      expect(urls.toSorted()).toEqual(["http://127.0.0.1:1430", "http://localhost:1430"]);
+      const patterns = urls.map((url) => new URLPattern(url));
+      const allows = (url: string) => patterns.some((pattern) => pattern.test(url));
+      const config = JSON.parse(readFileSync(join(HERE, "tauri.conf.json"), "utf8"));
+      expect(allows(config.build.devUrl)).toBe(true);
+      for (const url of [
+        "http://127.0.0.1:1430/", "http://localhost:1430/index.html",
+      ]) expect(allows(url)).toBe(true);
+      for (const url of [
+        "http://localhost:7860/", "http://127.0.0.1:7860/",
+        "http://localhost:1431/", "http://127.0.0.1:1431/",
+        "https://localhost:1430/", "https://lumiverse.example/",
+        "http://192.168.1.20:1430/",
+      ]) expect(allows(url)).toBe(false);
+    }
   });
 
   test("desktop installer handoff is callable only from the hidden local tray host", () => {

@@ -3,6 +3,7 @@ import type { STTAudioFrame, STTConfig, STTEngine, STTEngineStatus, STTResult } 
 import { AudioWindowBuffer, PcmResampler, SpeechActivityDetector, TranscriptAssembler, type AudioWindow } from './audio'
 import { getWhistleUnavailableReason, whistleLanguage } from './config'
 import { whistleClient, type WhistleClient } from './client'
+import { scheduleMicrotask } from '../schedule-microtask'
 
 export class WhistleSTTEngine implements STTEngine {
   private resultCb: ((result: STTResult) => void) | null = null
@@ -232,7 +233,7 @@ export class WhistleSTTEngine implements STTEngine {
       this.fallbackCapture.onaudioprocess = null
       // A silence-triggered stop can run inside resampler.push(). Finish after
       // that callback returns so its fractional sample state is not re-entered.
-      queueMicrotask(() => {
+      scheduleMicrotask(() => {
         if (this.destroyed || this.abort.signal.aborted) return
         this.fallbackResampler?.flush(this.acceptFallbackSample)
         this.flushFallbackFrame()

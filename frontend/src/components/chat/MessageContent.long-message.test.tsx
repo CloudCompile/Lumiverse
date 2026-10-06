@@ -113,6 +113,11 @@ mock.module('@/lib/cssModuleRegistry', () => ({
   CSS_MODULE_REGISTRY: [],
   generateSelector: () => '',
 }))
+// The real store imports Whistle through the Spindle loader. Bun does not
+// transform Vite worker URLs, and these rendering tests never start capture.
+mock.module('@/lib/whistle/capture.worklet.ts?worker&url', () => ({
+  default: '/test-capture-worklet.js',
+}))
 
 let createRoot: typeof CreateRoot
 let MessageContent: typeof MessageContentType

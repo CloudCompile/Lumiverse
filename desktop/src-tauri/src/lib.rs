@@ -1,4 +1,5 @@
 mod capture;
+mod discord_rpc;
 mod frontend;
 mod notifications;
 mod remote_instance;
@@ -229,6 +230,7 @@ pub fn run() {
         .manage(frontend::DesktopWidgetCatalogState::default())
         .manage(notifications::DesktopNotificationTransportState::default())
         .manage(remote_instance::RemoteInstanceState::default())
+        .manage(discord_rpc::DiscordRpcState::default())
         .manage(capture::DesktopCaptureState::default())
         .invoke_handler(tauri::generate_handler![
             runner::runner_start,
@@ -271,6 +273,10 @@ pub fn run() {
             remote_instance::remote_instance_connect,
             remote_instance::remote_instance_poll,
             remote_instance::remote_instance_disconnect,
+            remote_instance::discord_presence_fetch,
+            discord_rpc::discord_rpc_set_enabled,
+            discord_rpc::discord_rpc_update,
+            discord_rpc::discord_presence_changed,
             capture::desktop_capture_connect,
             capture::desktop_capture_disconnect,
             capture::desktop_capture_status,
@@ -305,6 +311,7 @@ pub fn run() {
                 // Cover native exit paths on every platform, including ones
                 // that never passed through the tray's JS quit handshake.
                 notifications::stop_desktop_notification_transport(app);
+                discord_rpc::shutdown(&tauri::Manager::state::<discord_rpc::DiscordRpcState>(app));
                 runner::force_stop(app);
             }
         });

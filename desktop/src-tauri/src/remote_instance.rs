@@ -139,6 +139,8 @@ impl RemoteInstanceSnapshot {
 enum PollError {
     Reauth(String),
     Unreachable(String),
+    /// No session exists for this origin and none could be restored.
+    Disconnected,
 }
 
 fn http_client() -> Result<Client, String> {
@@ -664,7 +666,70 @@ pub async fn remote_instance_connect(
         .await
         .map_err(|error| match error {
             PollError::Reauth(message) | PollError::Unreachable(message) => message,
+            PollError::Disconnected => unreachable!("fetch_snapshot never reports Disconnected"),
         })
+}
+
+/// Resolve a usable session for `origin`: in-memory session, keyring restore,
+/// or a proactive refresh when the access token is about to expire. Refreshed
+/// sessions are written back to the in-memory map.
+async fn resolve_session(
+    state: &RemoteInstanceState,
+    client: &Client,
+    origin: &Url,
+    canonical_origin: &str,
+) -> Result<RemoteOAuthSession, PollError> {
+    let mut session = state.sessions.lock().unwrap().get(canonical_origin).cloned();
+    if session.is_none() {
+        match load_refresh_token(canonical_origin.to_string()).await {
+            Ok(Some(refresh_token)) => match refresh_session(client, origin, refresh_token).await {
+                Ok(refreshed) => session = Some(refreshed),
+                Err(PollError::Reauth(message)) => {
+                    let _ = delete_refresh_token(canonical_origin.to_string()).await;
+                    return Err(PollError::Reauth(message));
+                }
+                Err(PollError::Unreachable(message)) => {
+                    return Err(PollError::Unreachable(message));
+                }
+                Err(PollError::Disconnected) => unreachable!("refresh_session never reports Disconnected"),
+            },
+            Ok(None) => {
+                return Err(PollError::Disconnected);
+            }
+            Err(error) => {
+                return Err(PollError::Reauth(format!(
+                    "Could not read the saved Lumiverse credential: {error}"
+                )));
+            }
+        }
+    }
+
+    let mut session = session.expect("session resolved above");
+    if session.access_expires_at <= Instant::now() + Duration::from_secs(30) {
+        let Some(refresh_token) = session.refresh_token.clone() else {
+            return Err(PollError::Reauth(
+                "Lumiverse authorization must be renewed".into(),
+            ));
+        };
+        match refresh_session(client, origin, refresh_token).await {
+            Ok(refreshed) => session = refreshed,
+            Err(PollError::Reauth(message)) => {
+                let _ = delete_refresh_token(canonical_origin.to_string()).await;
+                state.sessions.lock().unwrap().remove(canonical_origin);
+                return Err(PollError::Reauth(message));
+            }
+            Err(PollError::Unreachable(message)) => {
+                return Err(PollError::Unreachable(message));
+            }
+            Err(PollError::Disconnected) => unreachable!("refresh_session never reports Disconnected"),
+        }
+    }
+    state
+        .sessions
+        .lock()
+        .unwrap()
+        .insert(canonical_origin.to_string(), session.clone());
+    Ok(session)
 }
 
 pub(crate) async fn poll_remote_instance(
@@ -693,86 +758,30 @@ pub(crate) async fn poll_remote_instance(
         }
     };
 
-    let mut session = state
-        .sessions
-        .lock()
-        .unwrap()
-        .get(&canonical_origin)
-        .cloned();
-    if session.is_none() {
-        match load_refresh_token(canonical_origin.clone()).await {
-            Ok(Some(refresh_token)) => match refresh_session(&client, &origin, refresh_token).await
-            {
-                Ok(refreshed) => session = Some(refreshed),
-                Err(PollError::Reauth(message)) => {
-                    let _ = delete_refresh_token(canonical_origin.clone()).await;
-                    return RemoteInstanceSnapshot::empty(
-                        &canonical_origin,
-                        RemoteConnectionPhase::ReauthRequired,
-                        Some(message),
-                    );
-                }
-                Err(PollError::Unreachable(message)) => {
-                    return RemoteInstanceSnapshot::empty(
-                        &canonical_origin,
-                        RemoteConnectionPhase::Unreachable,
-                        Some(message),
-                    );
-                }
-            },
-            Ok(None) => {
-                return RemoteInstanceSnapshot::empty(
-                    &canonical_origin,
-                    RemoteConnectionPhase::Disconnected,
-                    None,
-                );
-            }
-            Err(error) => {
-                return RemoteInstanceSnapshot::empty(
-                    &canonical_origin,
-                    RemoteConnectionPhase::ReauthRequired,
-                    Some(format!(
-                        "Could not read the saved Lumiverse credential: {error}"
-                    )),
-                );
-            }
+    let session = match resolve_session(state, &client, &origin, &canonical_origin).await {
+        Ok(session) => session,
+        Err(PollError::Disconnected) => {
+            return RemoteInstanceSnapshot::empty(
+                &canonical_origin,
+                RemoteConnectionPhase::Disconnected,
+                None,
+            );
         }
-    }
-
-    let mut session = session.expect("session resolved above");
-    if session.access_expires_at <= Instant::now() + Duration::from_secs(30) {
-        let Some(refresh_token) = session.refresh_token.clone() else {
+        Err(PollError::Reauth(message)) => {
             return RemoteInstanceSnapshot::empty(
                 &canonical_origin,
                 RemoteConnectionPhase::ReauthRequired,
-                Some("Lumiverse authorization must be renewed".into()),
+                Some(message),
             );
-        };
-        match refresh_session(&client, &origin, refresh_token).await {
-            Ok(refreshed) => session = refreshed,
-            Err(PollError::Reauth(message)) => {
-                let _ = delete_refresh_token(canonical_origin.clone()).await;
-                state.sessions.lock().unwrap().remove(&canonical_origin);
-                return RemoteInstanceSnapshot::empty(
-                    &canonical_origin,
-                    RemoteConnectionPhase::ReauthRequired,
-                    Some(message),
-                );
-            }
-            Err(PollError::Unreachable(message)) => {
-                return RemoteInstanceSnapshot::empty(
-                    &canonical_origin,
-                    RemoteConnectionPhase::Unreachable,
-                    Some(message),
-                );
-            }
         }
-    }
-    state
-        .sessions
-        .lock()
-        .unwrap()
-        .insert(canonical_origin.clone(), session.clone());
+        Err(PollError::Unreachable(message)) => {
+            return RemoteInstanceSnapshot::empty(
+                &canonical_origin,
+                RemoteConnectionPhase::Unreachable,
+                Some(message),
+            );
+        }
+    };
 
     match fetch_snapshot(&client, &origin, &session).await {
         Ok(snapshot) => snapshot,
@@ -810,6 +819,9 @@ pub(crate) async fn poll_remote_instance(
                             RemoteConnectionPhase::Unreachable,
                             Some(message),
                         ),
+                        Err(PollError::Disconnected) => {
+                            unreachable!("fetch_snapshot never reports Disconnected")
+                        }
                     }
                 }
                 Err(PollError::Reauth(message)) => {
@@ -826,6 +838,9 @@ pub(crate) async fn poll_remote_instance(
                     RemoteConnectionPhase::Unreachable,
                     Some(message),
                 ),
+                Err(PollError::Disconnected) => {
+                    unreachable!("refresh_session never reports Disconnected")
+                }
             }
         }
         Err(PollError::Unreachable(message)) => RemoteInstanceSnapshot::empty(
@@ -833,6 +848,9 @@ pub(crate) async fn poll_remote_instance(
             RemoteConnectionPhase::Unreachable,
             Some(message),
         ),
+        Err(PollError::Disconnected) => {
+            unreachable!("fetch_snapshot never reports Disconnected")
+        }
     }
 }
 
@@ -855,6 +873,138 @@ pub async fn remote_instance_disconnect(
     crate::capture::stop(&app, Some(&canonical_origin));
     state.sessions.lock().unwrap().remove(&canonical_origin);
     delete_refresh_token(canonical_origin).await
+}
+
+/// Chat or landing-page snapshot served by the instance's desktop API for
+/// Discord Rich Presence. Mirrors the backend's `PresenceSnapshot` DTO.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresenceSnapshotDto {
+    pub chat_id: Option<String>,
+    pub character_name: Option<String>,
+    pub message_count: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub model: Option<String>,
+    #[serde(default)]
+    pub character_count: Option<u64>,
+}
+
+/// Outcome of a presence poll. `ReauthRequired` and `Disconnected` tell the
+/// tray a desktop sign-in is needed before presence can flow.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum PresenceFetch {
+    Active { snapshot: PresenceSnapshotDto },
+    Inactive,
+    Disconnected,
+    ReauthRequired { error: Option<String> },
+    Unreachable { error: Option<String> },
+}
+
+async fn fetch_presence(
+    client: &Client,
+    origin: &Url,
+    session: &RemoteOAuthSession,
+) -> Result<Option<PresenceSnapshotDto>, PollError> {
+    #[derive(Deserialize)]
+    struct PresenceResponse {
+        active: Option<PresenceSnapshotDto>,
+    }
+    let url = origin
+        .join("/api/desktop/v1/presence")
+        .map_err(|error| PollError::Unreachable(error.to_string()))?;
+    let response = client
+        .get(url)
+        .bearer_auth(&session.access_token)
+        .send()
+        .await
+        .map_err(|error| {
+            PollError::Unreachable(format!("Could not reach the Lumiverse instance: {error}"))
+        })?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        return Err(PollError::Reauth(
+            "Lumiverse authorization must be renewed".into(),
+        ));
+    }
+    if !response.status().is_success() {
+        return Err(PollError::Unreachable(format!(
+            "Presence request failed ({})",
+            response.status()
+        )));
+    }
+    let body: PresenceResponse = response.json().await.map_err(|error| {
+        PollError::Unreachable(format!("Invalid presence response: {error}"))
+    })?;
+    Ok(body.active)
+}
+
+/// Fetch the current user's presence from the instance's desktop
+/// API, reusing (and refreshing) this origin's stored desktop session.
+#[tauri::command]
+pub async fn discord_presence_fetch(
+    state: State<'_, RemoteInstanceState>,
+    origin: String,
+) -> Result<PresenceFetch, String> {
+    let origin = normalize_origin(&origin).map_err(|error| error.to_string())?;
+    let canonical_origin = origin.as_str().trim_end_matches('/').to_string();
+    let client = http_client().map_err(|error| error.to_string())?;
+
+    let session = match resolve_session(state.inner(), &client, &origin, &canonical_origin).await {
+        Ok(session) => session,
+        Err(PollError::Disconnected) => return Ok(PresenceFetch::Disconnected),
+        Err(PollError::Reauth(message)) => return Ok(PresenceFetch::ReauthRequired { error: Some(message) }),
+        Err(PollError::Unreachable(message)) => return Ok(PresenceFetch::Unreachable { error: Some(message) }),
+    };
+
+    match fetch_presence(&client, &origin, &session).await {
+        Ok(Some(snapshot)) => Ok(PresenceFetch::Active { snapshot }),
+        Ok(None) => Ok(PresenceFetch::Inactive),
+        Err(PollError::Reauth(message)) => {
+            // A server may revoke an access token before its advertised
+            // expiry. Refresh and retry exactly once before giving up.
+            let Some(refresh_token) = session.refresh_token.clone() else {
+                state.sessions.lock().unwrap().remove(&canonical_origin);
+                return Ok(PresenceFetch::ReauthRequired { error: Some(message) });
+            };
+            match refresh_session(&client, &origin, refresh_token).await {
+                Ok(refreshed) => {
+                    state
+                        .sessions
+                        .lock()
+                        .unwrap()
+                        .insert(canonical_origin.clone(), refreshed.clone());
+                    match fetch_presence(&client, &origin, &refreshed).await {
+                        Ok(Some(snapshot)) => Ok(PresenceFetch::Active { snapshot }),
+                        Ok(None) => Ok(PresenceFetch::Inactive),
+                        Err(PollError::Reauth(message)) => {
+                            let _ = delete_refresh_token(canonical_origin.clone()).await;
+                            state.sessions.lock().unwrap().remove(&canonical_origin);
+                            Ok(PresenceFetch::ReauthRequired { error: Some(message) })
+                        }
+                        Err(PollError::Unreachable(message)) => {
+                            Ok(PresenceFetch::Unreachable { error: Some(message) })
+                        }
+                        Err(PollError::Disconnected) => {
+                            unreachable!("fetch_presence never reports Disconnected")
+                        }
+                    }
+                }
+                Err(PollError::Reauth(message)) => {
+                    let _ = delete_refresh_token(canonical_origin.clone()).await;
+                    state.sessions.lock().unwrap().remove(&canonical_origin);
+                    Ok(PresenceFetch::ReauthRequired { error: Some(message) })
+                }
+                Err(PollError::Unreachable(message)) => {
+                    Ok(PresenceFetch::Unreachable { error: Some(message) })
+                }
+                Err(PollError::Disconnected) => {
+                    unreachable!("refresh_session never reports Disconnected")
+                }
+            }
+        }
+        Err(PollError::Unreachable(message)) => Ok(PresenceFetch::Unreachable { error: Some(message) }),
+        Err(PollError::Disconnected) => unreachable!("fetch_presence never reports Disconnected"),
+    }
 }
 
 #[cfg(test)]

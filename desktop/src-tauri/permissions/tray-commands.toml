@@ -74,10 +74,24 @@ description = "Allows only the local tray host to authorize, poll, and disconnec
 commands.allow = [
   "remote_instance_connect",
   "remote_instance_poll",
-  "remote_instance_disconnect"
+  "remote_instance_disconnect",
+  "discord_presence_fetch"
+]
+
+[[permission]]
+identifier = "discord-rpc-commands"
+description = "Allows only the hidden local tray host to toggle and feed Discord Rich Presence."
+commands.allow = [
+  "discord_rpc_set_enabled",
+  "discord_rpc_update"
 ]
 
 [[permission]]
 identifier = "desktop-update-install"
 description = "Allows only the hidden local tray host to stage a validated desktop installer handoff."
 commands.allow = ["stage_desktop_update"]
+
+[[permission]]
+identifier = "desktop-discord-presence-refresh"
+description = "Allows the primary frontend to request an active-chat presence refresh from the tray."
+commands.allow = ["discord_presence_changed"]

@@ -15,6 +15,7 @@
   "permissions": [
     "allow-configure-frontend-appearance",
     "desktop-frontend-presence",
+    "desktop-discord-presence-refresh",
     "desktop-startup-appearance",
     "desktop-widget-catalog",
     "desktop-notification-registration",

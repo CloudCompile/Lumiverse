@@ -3,9 +3,14 @@
   "identifier": "tray-dev",
   "description": "Allows the Vite-served hidden tray host to use its native tray and runner commands during development.",
   "local": false,
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "remote": {
-    "urls": ["http://127.0.0.1:*", "http://localhost:*"]
+    "urls": [
+      "http://127.0.0.1:1430",
+      "http://localhost:1430"
+    ]
   },
   "permissions": [
     "core:default",
@@ -32,7 +37,16 @@
     "opener:allow-reveal-item-in-dir",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "http://*" }, { "url": "https://*" }]
-    }
+      "allow": [
+        {
+          "url": "http://*"
+        },
+        {
+          "url": "https://*"
+        }
+      ]
+    },
+    "discord-rpc-commands",
+    "remote-instance-commands"
   ]
 }

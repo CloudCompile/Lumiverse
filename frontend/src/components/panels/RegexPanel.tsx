@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
 
-import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink, TriangleAlert, ShieldAlert, GripVertical, Power, PowerOff, ListChecks, Square, CheckSquare } from 'lucide-react'
+import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink, TriangleAlert, ShieldAlert, GripVertical, Power, PowerOff, ListChecks, Square, CheckSquare, Pencil } from 'lucide-react'
 import {
   MouseSensor,
   TouchSensor,
@@ -26,7 +26,9 @@ import { useStore } from '@/store'
 import { regexApi } from '@/api/regex'
 import { toast } from '@/lib/toast'
 import { useFolders } from '@/hooks/useFolders'
+import { useLongPress } from '@/hooks/useLongPress'
 import FolderDropdown from '@/components/shared/FolderDropdown'
+import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
 import { Toggle } from '@/components/shared/Toggle'
 import { Badge } from '@/components/shared/Badge'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
@@ -176,7 +178,12 @@ export default function RegexPanel() {
 
   const [scopeFilter, setScopeFilter] = useState<RegexPanelScopeFilterValue>('all')
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(new Set())
+  // Newly loaded or created folders stay collapsed until explicitly opened.
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
+  const [folderMenu, setFolderMenu] = useState<{ folder: string; position: ContextMenuPos } | null>(null)
+  const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
+  const [renamingValue, setRenamingValue] = useState('')
+  const [renameBusy, setRenameBusy] = useState(false)
   const [showCreatePopover, setShowCreatePopover] = useState(false)
   const [creatingFolderName, setCreatingFolderName] = useState('')
   const [creatingFolderMode, setCreatingFolderMode] = useState(false)
@@ -188,8 +195,9 @@ export default function RegexPanel() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const popoverRef = useRef<HTMLDivElement>(null)
   const folderInputRef = useRef<HTMLInputElement>(null)
+  const renameInputRef = useRef<HTMLInputElement>(null)
 
-  const { folders, createFolder, deleteFolder } = useFolders('regexScriptFolders', regexScripts)
+  const { folders, createFolder, renameFolder, deleteFolder } = useFolders('regexScriptFolders', regexScripts)
 
   useEffect(() => {
     loadRegexScripts()
@@ -216,6 +224,13 @@ export default function RegexPanel() {
       folderInputRef.current.focus()
     }
   }, [creatingFolderMode])
+
+  useEffect(() => {
+    if (renamingFolder !== null) {
+      renameInputRef.current?.focus()
+      renameInputRef.current?.select()
+    }
+  }, [renamingFolder])
 
   // The active Loom preset exposes a dedicated filter tab only when it actually
   // bundles regexes (e.g. built-in scripts shipped with the preset).
@@ -288,7 +303,7 @@ export default function RegexPanel() {
   }, [filteredScripts, folders, scopeFilter])
 
   const toggleFolder = useCallback((folder: string) => {
-    setCollapsedFolders((prev) => {
+    setExpandedFolders((prev) => {
       const next = new Set(prev)
       if (next.has(folder)) next.delete(folder)
       else next.add(folder)
@@ -314,13 +329,13 @@ export default function RegexPanel() {
       const ids: string[] = []
       for (const group of groupedScripts) {
         const folderKey = group.folder || UNCATEGORIZED_KEY
-        if (collapsedFolders.has(folderKey)) continue
+        if (!expandedFolders.has(folderKey)) continue
         for (const s of group.scripts) ids.push(s.id)
       }
       return ids
     }
     return filteredScripts.map((s) => s.id)
-  }, [groupedScripts, filteredScripts, collapsedFolders])
+  }, [groupedScripts, filteredScripts, expandedFolders])
 
   const handleDragEnd = useCallback((event: DragEndEvent) => {
     const { active, over } = event
@@ -402,6 +417,7 @@ export default function RegexPanel() {
         folder: folder || '',
         ...createScope.input,
       })
+      setExpandedFolders((previous) => new Set(previous).add(script.folder || UNCATEGORIZED_KEY))
       setExpandedId(script.id)
     } catch (err: any) {
       toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
@@ -416,6 +432,41 @@ export default function RegexPanel() {
     setCreatingFolderName('')
     setShowCreatePopover(false)
   }, [creatingFolderName, createFolder])
+
+  const handleRenameFolder = useCallback(async () => {
+    if (renamingFolder === null || renameBusy) return
+    const newName = renamingValue.trim()
+    if (!newName) return
+    if (newName === renamingFolder) {
+      setRenamingFolder(null)
+      return
+    }
+
+    setRenameBusy(true)
+    try {
+      // Rename every member, including scripts hidden by the current scope.
+      // Wait for all writes before changing the stored folder name so a failed
+      // request keeps the original folder available for retry.
+      const results = await Promise.allSettled(regexScripts
+        .filter((script) => script.folder === renamingFolder)
+        .map((script) => updateRegexScript(script.id, { folder: newName })))
+      const failure = results.find((result) => result.status === 'rejected')
+      if (failure?.status === 'rejected') throw failure.reason
+
+      renameFolder(renamingFolder, newName)
+      setExpandedFolders((previous) => {
+        const next = new Set(previous)
+        if (next.delete(renamingFolder)) next.add(newName)
+        return next
+      })
+      setRenamingFolder(null)
+      setRenamingValue('')
+    } catch (err: any) {
+      toast.error(err.body?.error || err.message || t('regexPanel.requestFailed'))
+    } finally {
+      setRenameBusy(false)
+    }
+  }, [renamingFolder, renamingValue, renameBusy, regexScripts, updateRegexScript, renameFolder, t])
 
   const handleDelete = useCallback(async (id: string) => {
     setDeleteScriptTarget(null)
@@ -504,8 +555,8 @@ export default function RegexPanel() {
     }
   }, [filteredScriptIds, selectedIds, toggleSelectedRegexScripts, t])
 
-  const handleToggleFolder = useCallback(async (scripts: RegexScript[], folder: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleToggleFolder = useCallback(async (scripts: RegexScript[], folder: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
     if (scripts.length === 0) return
     const allEnabled = scripts.every((s) => !s.disabled)
     const nextDisabled = allEnabled
@@ -541,8 +592,8 @@ export default function RegexPanel() {
     }
   }, [activeLoomPresetId, updateRegexScript, t])
 
-  const handleBindFolderToPreset = useCallback(async (scripts: RegexScript[], folderLabel: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleBindFolderToPreset = useCallback(async (scripts: RegexScript[], folderLabel: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
     if (!activeLoomPresetId) {
       toast.error(t('regexPanel.selectPresetFirstFolder'))
       return
@@ -574,8 +625,8 @@ export default function RegexPanel() {
     }
   }, [t])
 
-  const handleExportFolder = useCallback(async (folder: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const handleExportFolder = useCallback(async (folder: string, e?: React.MouseEvent) => {
+    e?.stopPropagation()
     try {
       const data = await regexApi.exportScripts(undefined, { folder })
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
@@ -611,8 +662,11 @@ export default function RegexPanel() {
   }, [filteredScriptIds, selectedIds, t])
 
   const toggleBulkMode = useCallback(() => {
+    if (renameBusy) return
     const nextEnabled = !bulkMode
     setBulkMode(nextEnabled)
+    setFolderMenu(null)
+    setRenamingFolder(null)
     setSelectedIds(new Set())
     if (nextEnabled) {
       setExpandedId(null)
@@ -620,7 +674,7 @@ export default function RegexPanel() {
       setCreatingFolderMode(false)
       setCreatingFolderName('')
     }
-  }, [bulkMode])
+  }, [bulkMode, renameBusy])
 
   const toggleScriptSelection = useCallback((id: string) => {
     setSelectedIds((previous) => {
@@ -673,6 +727,67 @@ export default function RegexPanel() {
       case 'character': return <User size={12} />
       case 'chat': return <MessageCircle size={12} />
     }
+  }
+
+  const menuGroup = folderMenu && groupedScripts.find((group) => group.folder === folderMenu.folder)
+  const folderMenuItems: ContextMenuEntry[] = []
+  if (menuGroup) {
+    const { folder, scripts } = menuGroup
+    const folderLabel = folder || t('shared:uncategorized')
+    if (folder) {
+      folderMenuItems.push({
+        key: 'rename',
+        label: t('shared:folderDropdown.renameFolder', { name: folderLabel }),
+        icon: <Pencil size={14} />,
+        onClick: () => {
+          setFolderMenu(null)
+          setRenamingFolder(folder)
+          setRenamingValue(folder)
+        },
+      })
+    }
+    if (scripts.length > 0) {
+      const allEnabled = scripts.every((script) => !script.disabled)
+      folderMenuItems.push({
+        key: 'toggle',
+        label: t(allEnabled ? 'regexPanel.disableFolderTitle' : 'regexPanel.enableFolderTitle', { folder: folderLabel }),
+        icon: allEnabled ? <PowerOff size={14} /> : <Power size={14} />,
+        onClick: () => {
+          setFolderMenu(null)
+          void handleToggleFolder(scripts, folder)
+        },
+      })
+    }
+    if (folder && activeLoomPresetId) {
+      const allBound = scripts.length > 0 && scripts.every((script) => script.preset_id === activeLoomPresetId)
+      folderMenuItems.push({
+        key: 'bind',
+        label: t(allBound ? 'regexPanel.unbindFolderFromPreset' : 'regexPanel.bindFolderToPreset', { folder: folderLabel }),
+        icon: allBound ? <Unlink size={14} /> : <Link size={14} />,
+        onClick: () => {
+          setFolderMenu(null)
+          void handleBindFolderToPreset(scripts, folderLabel)
+        },
+      })
+    }
+    folderMenuItems.push({
+      key: 'export',
+      label: t('regexPanel.exportFolder', { folder: folderLabel }),
+      icon: <Download size={14} />,
+      onClick: () => {
+        setFolderMenu(null)
+        void handleExportFolder(folder)
+      },
+    }, {
+      key: 'delete',
+      label: t('regexPanel.deleteFolderScripts', { folder: folderLabel }),
+      icon: <Trash2 size={14} />,
+      danger: true,
+      onClick: () => {
+        setFolderMenu(null)
+        setDeleteGroupTarget({ scripts, folder })
+      },
+    })
   }
 
   return (
@@ -851,7 +966,7 @@ export default function RegexPanel() {
             <SortableContext items={renderedScriptIds} strategy={verticalListSortingStrategy}>
               {groupedScripts.map((group) => {
                 const folderKey = group.folder || UNCATEGORIZED_KEY
-                const isCollapsed = collapsedFolders.has(folderKey)
+                const isCollapsed = !expandedFolders.has(folderKey)
                 const folderLabel = group.folder || t('shared:uncategorized')
                 const isNamedFolder = Boolean(group.folder)
                 const presetVersions = getRemotePresetVersions(group.scripts, presets)
@@ -861,7 +976,11 @@ export default function RegexPanel() {
                       <DroppableFolderHeader
                         folderKey={folderKey}
                         dropDisabled={!isCollapsed && group.scripts.length > 0}
-                        onToggle={() => toggleFolder(folderKey)}
+                        expanded={!isCollapsed}
+                        onToggle={() => { if (renamingFolder !== group.folder) toggleFolder(folderKey) }}
+                        onOpenMenu={!bulkMode && renamingFolder === null
+                          ? (position) => setFolderMenu({ folder: group.folder, position })
+                          : undefined}
                       >
                         {bulkMode ? (
                           <button
@@ -885,9 +1004,52 @@ export default function RegexPanel() {
                             className={clsx(styles.folderChevron, !isCollapsed && styles.folderChevronOpen)}
                           />
                         )}
-                        <span className={styles.folderName}>
-                          {folderLabel}
-                        </span>
+                        {renamingFolder === group.folder ? (
+                          <div
+                            className={styles.folderRename}
+                            onClick={(e) => e.stopPropagation()}
+                            onTouchStart={(e) => e.stopPropagation()}
+                            onKeyDown={(e) => {
+                              e.stopPropagation()
+                              if (e.key === 'Enter' && e.target === renameInputRef.current) {
+                                e.preventDefault()
+                                void handleRenameFolder()
+                              }
+                              if (e.key === 'Escape' && !renameBusy) setRenamingFolder(null)
+                            }}
+                          >
+                            <input
+                              ref={renameInputRef}
+                              className={styles.folderRenameInput}
+                              value={renamingValue}
+                              onChange={(e) => setRenamingValue(e.target.value)}
+                              aria-label={t('regexPanel.folderName')}
+                              disabled={renameBusy}
+                            />
+                            <button
+                              type="button"
+                              className={styles.folderRenameBtn}
+                              onClick={() => { void handleRenameFolder() }}
+                              disabled={renameBusy || !renamingValue.trim()}
+                              aria-label={t('shared:folderDropdown.confirmRename')}
+                              title={t('shared:folderDropdown.confirmRename')}
+                            >
+                              <Check size={12} />
+                            </button>
+                            <button
+                              type="button"
+                              className={styles.folderRenameBtn}
+                              onClick={() => setRenamingFolder(null)}
+                              disabled={renameBusy}
+                              aria-label={t('shared:folderDropdown.cancelRename')}
+                              title={t('shared:folderDropdown.cancelRename')}
+                            >
+                              <X size={12} />
+                            </button>
+                          </div>
+                        ) : (
+                          <span className={styles.folderName}>{folderLabel}</span>
+                        )}
                         {presetVersions.map(({ source, version }) => (
                           <span
                             key={`${source}:${version}`}
@@ -909,7 +1071,7 @@ export default function RegexPanel() {
                           </span>
                         ))}
                         <span className={styles.folderCount}>{group.scripts.length}</span>
-                        {!bulkMode && <div className={styles.folderActions}>
+                        {!bulkMode && renamingFolder !== group.folder && <div className={styles.folderActions}>
                           {group.scripts.length > 0 && (
                             <button
                               className={clsx(
@@ -994,6 +1156,12 @@ export default function RegexPanel() {
         )}
       </div>
 
+      <ContextMenu
+        position={menuGroup ? folderMenu.position : null}
+        items={folderMenuItems}
+        onClose={() => setFolderMenu(null)}
+      />
+
       {deleteScriptTarget && (
         <ConfirmationModal
           isOpen={true}
@@ -1044,15 +1212,20 @@ export default function RegexPanel() {
 function DroppableFolderHeader({
   folderKey,
   dropDisabled,
+  expanded,
   onToggle,
+  onOpenMenu,
   children,
 }: {
   folderKey: string
   dropDisabled: boolean
+  expanded: boolean
   onToggle: () => void
+  onOpenMenu?: (position: ContextMenuPos) => void
   children: React.ReactNode
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: FOLDER_DROP_PREFIX + folderKey, disabled: dropDisabled })
+  const longPress = useLongPress({ onLongPress: (position) => onOpenMenu?.(position) })
   return (
     <div
       ref={setNodeRef}
@@ -1060,7 +1233,24 @@ function DroppableFolderHeader({
       onClick={onToggle}
       role="button"
       tabIndex={0}
-      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') onToggle() }}
+      aria-expanded={expanded}
+      aria-haspopup={onOpenMenu ? 'menu' : undefined}
+      {...(onOpenMenu ? longPress : {})}
+      onTouchStart={(e) => {
+        if (onOpenMenu && !(e.target as Element).closest('button, input')) longPress.onTouchStart(e)
+      }}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onToggle()
+        }
+        if (onOpenMenu && (e.key === 'ContextMenu' || (e.shiftKey && e.key === 'F10'))) {
+          e.preventDefault()
+          const rect = e.currentTarget.getBoundingClientRect()
+          onOpenMenu({ x: rect.left + 24, y: rect.top + 24 })
+        }
+      }}
     >
       {children}
     </div>

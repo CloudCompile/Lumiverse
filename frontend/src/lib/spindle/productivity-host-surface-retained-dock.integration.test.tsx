@@ -14,6 +14,11 @@ mock.module('@/lib/cssModuleRegistry', () => ({
   CSS_MODULE_REGISTRY: [],
   generateSelector: () => '',
 }))
+// The real store imports Whistle through the Spindle loader. Bun does not
+// transform Vite worker URLs, and these host lifecycle tests never start capture.
+mock.module('@/lib/whistle/capture.worklet.ts?worker&url', () => ({
+  default: '/test-capture-worklet.js',
+}))
 mock.module('@/components/quick-toolbar/QuickToolbar', () => ({
   QuickToolbar: () => createElement('nav', { 'data-component': 'QuickToolbar', 'data-toolbar-action-scroller': 'ready' }, 'toolbar'),
 }))

@@ -19,6 +19,7 @@ import Pagination from '@/components/shared/Pagination'
 import { triggerBlobDownload } from '@/lib/downloads'
 import { upsertById } from '@/lib/worldBookList'
 import { toast } from '@/lib/toast'
+import { scheduleMicrotask } from '@/lib/schedule-microtask'
 import type { WorldBook, WorldBookVectorSummary } from '@/types/api'
 import type { WorldBookExportFormat } from '@/api/world-books'
 
@@ -785,7 +786,7 @@ export default function WorldBookEditorModal() {
             />
           </div>
 
-          {!isMobile && !booksCollapsed && <WorldBookColumnHandle label="Resize books column" width={booksWidth} defaultWidth={200} min={140} max={320} collapseBelow={100} onResize={setBooksWidth} onCollapse={() => { toggleBooks(); queueMicrotask(() => booksToggleRef.current?.focus()) }} />}
+          {!isMobile && !booksCollapsed && <WorldBookColumnHandle label="Resize books column" width={booksWidth} defaultWidth={200} min={140} max={320} collapseBelow={100} onResize={setBooksWidth} onCollapse={() => { toggleBooks(); scheduleMicrotask(() => booksToggleRef.current?.focus()) }} />}
           {/* Right panel: Book content */}
           <div ref={contentRootRef} className={clsx(styles.content, isMobile && (mobileBooksOpen || !selectedBookId) && styles.sidebarHidden)}>
             <div ref={contentScrollRef} className={clsx(styles.contentScroll, styles.workspaceScroll)}>

@@ -91,6 +91,7 @@ import styles from './WorldBookEntriesSection.module.css'
 import { clearSearchOnEscape } from '@/lib/clearableSearch'
 import { classifyWorldBookEntryMutationError, type WorldBookEntryMutationIssue } from '@/lib/worldBookEntryConflict'
 import { estimateTokens } from '@/lib/tokenEstimate'
+import { scheduleMicrotask } from '@/lib/schedule-microtask'
 import {
   createEntrySearchIndex,
   searchEntriesByQuery,
@@ -1711,7 +1712,7 @@ export default function WorldBookEntriesSection({
     if (splitEntryId === id || selectedEntryId === id) setSplitEntryId(null)
     const remaining = openIds.filter(value => value !== id)
     const next = selectedEntryId === id ? remaining[Math.min(openIds.indexOf(id), remaining.length - 1)] : selectedEntryId
-    queueMicrotask(() => {
+    scheduleMicrotask(() => {
       if (isMobile) workspaceSwitcherRef.current?.focus()
       else if (next) document.getElementById(`entry-tab-${next}`)?.focus()
       else navigatorToggleRef.current?.focus()
@@ -2503,7 +2504,7 @@ export default function WorldBookEntriesSection({
       )}
       </>}
       </div>
-      {presentation === 'workspace' && !isMobile && !navigatorCollapsed && <WorldBookColumnHandle label="Resize entries column" width={navigatorWidth} defaultWidth={300} min={200} max={420} collapseBelow={140} onResize={setNavigatorWidth} onCollapse={() => { setNavigatorCollapsed(true); queueMicrotask(() => navigatorToggleRef.current?.focus()) }} />}
+      {presentation === 'workspace' && !isMobile && !navigatorCollapsed && <WorldBookColumnHandle label="Resize entries column" width={navigatorWidth} defaultWidth={300} min={200} max={420} collapseBelow={140} onResize={setNavigatorWidth} onCollapse={() => { setNavigatorCollapsed(true); scheduleMicrotask(() => navigatorToggleRef.current?.focus()) }} />}
       {presentation === 'workspace' && <div className={styles.editorWorkspace} hidden={isMobile && (mobileBrowsing || !detailEntry)}>
         {!detailEntry && <p className={styles.workspaceEmpty}>Open an entry to start editing.</p>}
         {tabs.map(entry => {

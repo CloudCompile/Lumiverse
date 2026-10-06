@@ -27,6 +27,7 @@ import {
   type UpdateState,
 } from "./runner-client";
 import { loadSettings, saveSetting, type TraySettings } from "./settings";
+import { createDiscordPresenceRefreshQueue } from "./discord-presence";
 import { restoreDesktopSession, type DesktopUpdateResume } from "./update-resume";
 import { type InstanceConnection, LOCAL_INSTANCE_CONNECTION } from "./instance-connection";
 import {
@@ -72,6 +73,34 @@ let instanceConnection: InstanceConnection = LOCAL_INSTANCE_CONNECTION;
 let remoteSnapshot: RemoteInstanceSnapshot | null = null;
 let openIntegratedBrowserWhenReady = false;
 
+// ─── Discord Rich Presence ──────────────────────────────────────────────────
+// The tray fetches the active-chat snapshot on chat switches and polls the
+// instance's desktop API as a fallback. It relays each snapshot to the Rust
+// worker, which owns the Discord IPC connection. When
+// the Discord toggle is switched on without a usable desktop session, the
+// standard remote-instance OAuth sign-in runs once against the current
+// origin (local instances included) — always as a direct consequence of the
+// user's click, never from a background poll.
+
+interface DiscordPresenceSnapshot {
+  chatId: string | null;
+  characterName: string | null;
+  messageCount: number | null;
+  totalTokens: number | null;
+  model: string | null;
+  characterCount?: number | null;
+}
+
+type DiscordPresenceFetch =
+  | { state: "active"; snapshot: DiscordPresenceSnapshot }
+  | { state: "inactive" }
+  | { state: "disconnected" }
+  | { state: "reauth_required"; error: string | null }
+  | { state: "unreachable"; error: string | null };
+
+let discordPresenceEverActive = false;
+let discordPresenceIssueAlerted = false;
+
 function isRemoteMode(): boolean {
   return instanceConnection.mode === "remote";
 }
@@ -94,6 +123,7 @@ let checkUpdatesItem: MenuItem;
 let applyUpdateItem: MenuItem;
 let rebuildDesktopItem: MenuItem;
 let autoStartItem: CheckMenuItem;
+let discordRpcItem: CheckMenuItem;
 let loginItem: CheckMenuItem;
 let openIntegratedBrowserItem: MenuItem;
 let openDefaultBrowserItem: MenuItem;
@@ -668,6 +698,106 @@ async function toggleDesktopCapture(): Promise<void> {
   await updateMenu();
 }
 
+// ─── Discord Rich Presence plumbing ─────────────────────────────────────────
+
+/** The instance origin the presence snapshot should be read from, if any. */
+function presenceOrigin(): string | null {
+  // Inline the mode check so TypeScript narrows `instanceConnection`.
+  if (instanceConnection.mode === "remote") return instanceConnection.origin;
+  if (serverState === "running" || externalRunning) return `http://localhost:${port}`;
+  return null;
+}
+
+/**
+ * Poll the active-chat snapshot once and relay it to the Discord worker.
+ * Never throws — a failed poll keeps the last known presence until the next
+ * tick. Returns "needs-auth" when the instance requires a desktop sign-in.
+ */
+async function pollDiscordPresence(): Promise<"ok" | "needs-auth"> {
+  if (!settings.discordRpcEnabled) return "ok";
+  try {
+    const origin = presenceOrigin();
+    if (!origin) {
+      await invoke("discord_rpc_update", { payload: null });
+      return "ok";
+    }
+    const result = await invoke<DiscordPresenceFetch>("discord_presence_fetch", { origin });
+    // A fetch for the old instance must not overwrite the new selection or
+    // restore activity after the user disables presence.
+    if (!settings.discordRpcEnabled || presenceOrigin() !== origin) return "ok";
+    switch (result.state) {
+      case "active":
+        discordPresenceEverActive = true;
+        await invoke("discord_rpc_update", { payload: result.snapshot });
+        return "ok";
+      case "inactive":
+        discordPresenceEverActive = true;
+        await invoke("discord_rpc_update", { payload: null });
+        return "ok";
+      case "unreachable":
+        await invoke("discord_rpc_update", { payload: null });
+        return "ok";
+      case "disconnected":
+      case "reauth_required":
+        await invoke("discord_rpc_update", { payload: null });
+        // A sign-in that lapsed mid-run is worth one mention so the missing
+        // presence is not mysterious. A user who never signed in stays silent
+        // — they were told how at toggle time.
+        if (discordPresenceEverActive && !discordPresenceIssueAlerted) {
+          discordPresenceIssueAlerted = true;
+          await alert(
+            "Discord Rich Presence",
+            "Lumiverse's desktop sign-in expired, so Discord presence is paused. Toggle Discord Rich Presence off and on in the tray menu to sign in again.",
+          );
+        }
+        return "needs-auth";
+    }
+  } catch {
+    return "ok";
+  }
+}
+
+const refreshDiscordPresence = createDiscordPresenceRefreshQueue(pollDiscordPresence);
+
+/**
+ * Run the standard desktop OAuth sign-in against the given origin so
+ * presence can flow. Opens the system browser — only call from the toggle
+ * action, never from a background poll.
+ */
+async function authorizeDiscordPresence(origin: string): Promise<void> {
+  await alert(
+    "Discord Rich Presence",
+    "Sign in to Lumiverse in your browser so the desktop app can read your active roleplay for Discord presence.",
+  );
+  // Drop any stale credential for this origin before the fresh sign-in.
+  await invoke("remote_instance_disconnect", { origin }).catch(() => {});
+  await invoke("remote_instance_connect", { origin });
+}
+
+async function toggleDiscordRpc(): Promise<void> {
+  const enabled = !settings.discordRpcEnabled;
+  settings.discordRpcEnabled = enabled;
+  await discordRpcItem.setChecked(enabled);
+  await saveSetting("discordRpcEnabled", enabled);
+  await invoke("discord_rpc_set_enabled", { enabled });
+  if (enabled) {
+    const origin = presenceOrigin();
+    if (!origin) {
+      await alert(
+        "Discord Rich Presence",
+        "Presence will start once your Lumiverse server is running. If you are not signed in yet, toggle Discord Rich Presence off and on after it starts to sign in.",
+      );
+    } else {
+      const outcome = await refreshDiscordPresence();
+      if (outcome === "needs-auth") {
+        await authorizeDiscordPresence(origin);
+        await refreshDiscordPresence();
+      }
+    }
+  }
+  await updateMenu();
+}
+
 // ─── Action wrapper ─────────────────────────────────────────────────────────
 
 function updateMenuInBackground(): void {
@@ -801,6 +931,11 @@ async function buildTray(): Promise<void> {
       await saveSetting("autoStartServer", settings.autoStartServer);
     }),
   });
+  discordRpcItem = await CheckMenuItem.new({
+    text: "Discord Rich Presence",
+    checked: settings.discordRpcEnabled,
+    action: action(toggleDiscordRpc),
+  });
   loginItem = await CheckMenuItem.new({
     text: "Launch at Login",
     checked: await autostartEnabled().catch(() => false),
@@ -869,6 +1004,7 @@ async function buildTray(): Promise<void> {
       rebuildDesktopItem,
       await separator(),
       autoStartItem,
+      discordRpcItem,
       loginItem,
       setFolderItem,
       await separator(),
@@ -898,6 +1034,8 @@ async function toggleServer(): Promise<void> {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {
+  // Presence rides the shared tick; its polling handles its own errors.
+  void refreshDiscordPresence();
   if (isRemoteMode()) {
     await pollRemoteInstance();
     await updateMenu();
@@ -914,6 +1052,10 @@ async function tick(): Promise<void> {
 async function boot(): Promise<void> {
   settings = await loadSettings();
   instanceConnection = settings.instanceConnection;
+
+  await listen<{ origin: string }>("discord-presence-changed", ({ payload }) => {
+    if (payload?.origin === presenceOrigin()) void refreshDiscordPresence();
+  });
 
   await listen<{ connection: InstanceConnection }>("instance-connection-changed", async ({ payload }) => {
     await invoke("desktop_capture_disconnect");
@@ -933,6 +1075,8 @@ async function boot(): Promise<void> {
         await alert("Lumiverse", error instanceof Error ? error.message : String(error), true);
       });
     }
+    // Re-target (or clear) presence for the newly selected instance.
+    void refreshDiscordPresence();
     await updateMenu();
   });
   await listen<DesktopWidgetCatalogEntry[]>("desktop-widget-catalog", ({ payload }) => {
@@ -967,6 +1111,9 @@ async function boot(): Promise<void> {
         .catch((err) => alert("Lumiverse", err instanceof Error ? err.message : String(err), true));
     } else if (state === "stopped" || state === "crashed") {
       openIntegratedBrowserWhenReady = false;
+      // The instance cannot serve a presence snapshot anymore — clear now
+      // rather than waiting for the next tick.
+      void refreshDiscordPresence();
     }
     if (state === "running" || state === "stopped" || state === "crashed") {
       busyMessage = null;
@@ -990,6 +1137,7 @@ async function boot(): Promise<void> {
     serverState = "stopped";
     lastStatus = null;
     busyMessage = null;
+    void refreshDiscordPresence();
     void updateMenu();
   };
 
@@ -1006,6 +1154,12 @@ async function boot(): Promise<void> {
 
   await buildTray();
   await updateMenu();
+  if (settings.discordRpcEnabled) {
+    await invoke("discord_rpc_set_enabled", { enabled: true }).catch((error) => {
+      console.warn("Unable to resume Discord Rich Presence", error);
+    });
+    void refreshDiscordPresence();
+  }
   await invoke("desktop_startup_ready");
   const updateResume = await invoke<DesktopUpdateResume | null>("take_desktop_update_resume");
 

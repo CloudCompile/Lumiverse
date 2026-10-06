@@ -79,6 +79,7 @@ import type { RoomStateView } from '@/types/multiplayer'
 import type { CouncilToolResult } from 'lumiverse-spindle-types'
 import type { ActivatedWorldInfoEntry, WorldInfoStats } from '@/types/api'
 import { playNotificationPing } from '@/lib/notificationAudio'
+import { subscribeDesktopDiscordPresenceRefresh } from '@/lib/desktop-discord-presence'
 import {
   extensionUpdateFingerprint,
   pruneAnnouncedExtensionUpdates,
@@ -613,6 +614,7 @@ export function useWebSocket() {
     wsClient.connect()
 
     const unsubs = [
+      subscribeDesktopDiscordPresenceRefresh(wsClient),
       // Connection lifecycle — drives the full-screen "Server connection lost"
       // overlay. Each disconnect resets all three signals; reconnect flips them
       // back to true (socket open → CONNECTED with role → pong received).

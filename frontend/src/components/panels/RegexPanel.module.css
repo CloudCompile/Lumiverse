@@ -474,6 +474,8 @@
   cursor: pointer;
   border-radius: 6px;
   transition: background var(--lumiverse-transition-fast);
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 
 .folderHeader:hover {
@@ -506,6 +508,48 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.folderRename {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.folderRenameInput {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 4px;
+  background: var(--lumiverse-bg);
+  color: var(--lumiverse-text);
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  user-select: text;
+}
+
+.folderRenameBtn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text-dim);
+  cursor: pointer;
+}
+
+.folderRenameBtn:hover:not(:disabled) {
+  color: var(--lumiverse-text);
+  background: var(--lumiverse-surface-hover);
+}
+
+.folderRenameBtn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .folderVersionBadge {
