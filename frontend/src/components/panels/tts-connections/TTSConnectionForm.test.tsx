@@ -211,6 +211,39 @@ test('renders standard API key and API url inputs for other providers', async ()
   expect(passwordInput).toBeTruthy()
 })
 
+test.each(['google_tts', 'google_vertex_tts'])('shows gender and tone for %s voices and saves the API voice ID', async (providerId) => {
+  saved = []
+  const googleProvider: TtsProviderInfo = {
+    ...providers[1],
+    id: providerId,
+    capabilities: {
+      ...providers[1].capabilities,
+      staticVoices: [
+        { id: 'Kore', name: 'Kore', gender: 'feminine', description: 'Firm, assured delivery.', language: 'en-US' },
+        { id: 'Algieba', name: 'Algieba', gender: 'masculine', description: 'Smooth, flowing delivery.', language: 'en-US' },
+      ],
+    },
+  }
+  await render(
+    <Form
+      providers={[googleProvider]}
+      profile={ttsProfile({ provider: providerId })}
+      onSave={(input) => saved.push(input)}
+      onCancel={() => {}}
+    />
+  )
+
+  const voiceCombobox = [...modelComboboxProps].reverse().find((props) => props.refreshKey?.endsWith(':voices'))
+  expect(voiceCombobox?.models).toEqual(['Kore', 'Algieba'])
+  expect(voiceCombobox?.modelLabels.Kore).toBe('Kore (Female) — Firm, assured delivery. · en-US')
+  expect(voiceCombobox?.modelLabels.Algieba).toBe('Algieba (Male) — Smooth, flowing delivery. · en-US')
+
+  await act(async () => voiceCombobox!.onChange('Algieba'))
+  const saveBtn = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('save'))
+  act(() => saveBtn!.click())
+  expect(saved[0].voice).toBe('Algieba')
+})
+
 test('allows disabling streaming for Google Vertex TTS', async () => {
   saved = []
   await render(

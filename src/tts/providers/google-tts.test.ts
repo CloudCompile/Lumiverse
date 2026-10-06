@@ -89,17 +89,20 @@ describe("Google TTS providers", () => {
     expect(ids).toEqual(["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]);
   });
 
-  test("voice mapping is non-empty, unique, and gendered", async () => {
+  test("voice mapping is unique, gendered, and includes tone descriptions", async () => {
     for (const p of [studio, vertex]) {
       const voices = await p.listVoices("", "");
       expect(voices.length).toBeGreaterThanOrEqual(30);
       expect(new Set(voices.map((v) => v.id)).size).toBe(voices.length);
       for (const v of voices) {
         expect(v.name).toBeTruthy();
-        expect(["masculine", "feminine"]).toContain((v as any).gender);
+        expect(["masculine", "feminine"]).toContain(v.gender ?? "");
+        expect(v.description?.trim()).toBeTruthy();
       }
       expect(voices.map((v) => v.id)).toContain("Kore");
       expect(voices.map((v) => v.id)).toContain("Charon");
+      expect(voices.find((v) => v.id === "Algieba")?.gender).toBe("masculine");
+      expect(voices.find((v) => v.id === "Kore")?.gender).toBe("feminine");
     }
     expect(GOOGLE_TTS_VOICES.length).toBe((await studio.listVoices("", "")).length);
   });

@@ -1,4 +1,4 @@
-import type { TtsRequest, TtsStreamChunk } from "../types";
+import type { TtsRequest, TtsStreamChunk, TtsVoice } from "../types";
 
 /** Gemini text-to-speech models. TTS-only list: no text/generation models. */
 export const GOOGLE_TTS_MODELS: Array<{ id: string; label: string }> = [
@@ -16,39 +16,42 @@ export function isTtsModelId(id: string): boolean {
 /**
  * Prebuilt Gemini voices, mapped to readable names with documented gender.
  * IDs are the API voice names; `language` marks the documented voice locale.
+ * Gender: https://docs.cloud.google.com/text-to-speech/docs/gemini-tts#voice_options
+ * Tone descriptions paraphrase Google's voice style labels:
+ * https://ai.google.dev/gemini-api/docs/speech-generation#voice_options
  */
 export const GOOGLE_TTS_VOICES = [
-  { id: "Achird", name: "Achird", language: "en-US", gender: "masculine" },
-  { id: "Achernar", name: "Achernar", language: "en-US", gender: "feminine" },
-  { id: "Algenib", name: "Algenib", language: "en-US", gender: "masculine" },
-  { id: "Algieba", name: "Algieba", language: "en-US", gender: "feminine" },
-  { id: "Alnilam", name: "Alnilam", language: "en-US", gender: "masculine" },
-  { id: "Aoede", name: "Aoede", language: "en-US", gender: "feminine" },
-  { id: "Autonoe", name: "Autonoe", language: "en-US", gender: "feminine" },
-  { id: "Callirrhoe", name: "Callirrhoe", language: "en-US", gender: "feminine" },
-  { id: "Charon", name: "Charon", language: "en-US", gender: "masculine" },
-  { id: "Despina", name: "Despina", language: "en-US", gender: "feminine" },
-  { id: "Enceladus", name: "Enceladus", language: "en-US", gender: "masculine" },
-  { id: "Erinome", name: "Erinome", language: "en-US", gender: "feminine" },
-  { id: "Fenrir", name: "Fenrir", language: "en-US", gender: "masculine" },
-  { id: "Gacrux", name: "Gacrux", language: "en-US", gender: "feminine" },
-  { id: "Iapetus", name: "Iapetus", language: "en-US", gender: "masculine" },
-  { id: "Kore", name: "Kore", language: "en-US", gender: "feminine" },
-  { id: "Laomedeia", name: "Laomedeia", language: "en-US", gender: "feminine" },
-  { id: "Leda", name: "Leda", language: "en-US", gender: "feminine" },
-  { id: "Orus", name: "Orus", language: "en-US", gender: "masculine" },
-  { id: "Pulcherrima", name: "Pulcherrima", language: "en-US", gender: "feminine" },
-  { id: "Puck", name: "Puck", language: "en-US", gender: "masculine" },
-  { id: "Rasalgethi", name: "Rasalgethi", language: "en-US", gender: "masculine" },
-  { id: "Sadachbia", name: "Sadachbia", language: "en-US", gender: "masculine" },
-  { id: "Sadaltager", name: "Sadaltager", language: "en-US", gender: "masculine" },
-  { id: "Schedar", name: "Schedar", language: "en-US", gender: "masculine" },
-  { id: "Sulafat", name: "Sulafat", language: "en-US", gender: "feminine" },
-  { id: "Umbriel", name: "Umbriel", language: "en-US", gender: "masculine" },
-  { id: "Vindemiatrix", name: "Vindemiatrix", language: "en-US", gender: "feminine" },
-  { id: "Zephyr", name: "Zephyr", language: "en-US", gender: "feminine" },
-  { id: "Zubenelgenubi", name: "Zubenelgenubi", language: "en-US", gender: "masculine" },
-];
+  { id: "Achird", name: "Achird", language: "en-US", gender: "masculine", description: "Friendly, approachable delivery." },
+  { id: "Achernar", name: "Achernar", language: "en-US", gender: "feminine", description: "Soft, delicate delivery." },
+  { id: "Algenib", name: "Algenib", language: "en-US", gender: "masculine", description: "Gravelly, textured voice." },
+  { id: "Algieba", name: "Algieba", language: "en-US", gender: "masculine", description: "Smooth, flowing delivery." },
+  { id: "Alnilam", name: "Alnilam", language: "en-US", gender: "masculine", description: "Firm, steady delivery." },
+  { id: "Aoede", name: "Aoede", language: "en-US", gender: "feminine", description: "Breezy, relaxed delivery." },
+  { id: "Autonoe", name: "Autonoe", language: "en-US", gender: "feminine", description: "Bright, buoyant tone." },
+  { id: "Callirrhoe", name: "Callirrhoe", language: "en-US", gender: "feminine", description: "Easygoing, relaxed delivery." },
+  { id: "Charon", name: "Charon", language: "en-US", gender: "masculine", description: "Informative, explanatory delivery." },
+  { id: "Despina", name: "Despina", language: "en-US", gender: "feminine", description: "Smooth, flowing delivery." },
+  { id: "Enceladus", name: "Enceladus", language: "en-US", gender: "masculine", description: "Breathy, airy voice." },
+  { id: "Erinome", name: "Erinome", language: "en-US", gender: "feminine", description: "Clear, articulate delivery." },
+  { id: "Fenrir", name: "Fenrir", language: "en-US", gender: "masculine", description: "Excitable, animated tone." },
+  { id: "Gacrux", name: "Gacrux", language: "en-US", gender: "feminine", description: "Mature, seasoned tone." },
+  { id: "Iapetus", name: "Iapetus", language: "en-US", gender: "masculine", description: "Clear, articulate delivery." },
+  { id: "Kore", name: "Kore", language: "en-US", gender: "feminine", description: "Firm, assured delivery." },
+  { id: "Laomedeia", name: "Laomedeia", language: "en-US", gender: "feminine", description: "Upbeat, cheerful tone." },
+  { id: "Leda", name: "Leda", language: "en-US", gender: "feminine", description: "Youthful, light tone." },
+  { id: "Orus", name: "Orus", language: "en-US", gender: "masculine", description: "Firm, assured delivery." },
+  { id: "Pulcherrima", name: "Pulcherrima", language: "en-US", gender: "feminine", description: "Forward, direct delivery." },
+  { id: "Puck", name: "Puck", language: "en-US", gender: "masculine", description: "Upbeat, cheerful tone." },
+  { id: "Rasalgethi", name: "Rasalgethi", language: "en-US", gender: "masculine", description: "Informative, explanatory delivery." },
+  { id: "Sadachbia", name: "Sadachbia", language: "en-US", gender: "masculine", description: "Lively, spirited tone." },
+  { id: "Sadaltager", name: "Sadaltager", language: "en-US", gender: "masculine", description: "Knowledgeable, considered delivery." },
+  { id: "Schedar", name: "Schedar", language: "en-US", gender: "masculine", description: "Even, balanced delivery." },
+  { id: "Sulafat", name: "Sulafat", language: "en-US", gender: "feminine", description: "Warm, welcoming tone." },
+  { id: "Umbriel", name: "Umbriel", language: "en-US", gender: "masculine", description: "Easygoing, relaxed delivery." },
+  { id: "Vindemiatrix", name: "Vindemiatrix", language: "en-US", gender: "feminine", description: "Gentle, soft delivery." },
+  { id: "Zephyr", name: "Zephyr", language: "en-US", gender: "feminine", description: "Bright, buoyant tone." },
+  { id: "Zubenelgenubi", name: "Zubenelgenubi", language: "en-US", gender: "masculine", description: "Casual, conversational delivery." },
+] satisfies TtsVoice[];
 
 export const GOOGLE_TTS_PARAMETERS = {
   language_code: {

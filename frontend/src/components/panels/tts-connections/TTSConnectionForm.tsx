@@ -6,6 +6,7 @@ import ModelCombobox from '@/components/panels/connection-manager/ModelCombobox'
 import { VERTEX_REGIONS } from '@/components/panels/connection-manager/vertexConstants'
 import { ttsConnectionsApi } from '@/api/tts-connections'
 import { isQwenTtsProvider, QWEN_LANGUAGE_OPTIONS } from '@/lib/qwenTts'
+import { getTtsVoiceLabel, getTtsVoiceSublabel } from '@/lib/ttsVoiceLabels'
 import type {
   TtsProviderInfo,
   TtsConnectionProfile,
@@ -89,10 +90,11 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
 
   const voiceLabels = useMemo(() => {
     return Object.fromEntries(
-      voiceOptions.map((option) => [
-        option.id,
-        option.language ? `${option.name} (${option.language})` : option.name,
-      ])
+      voiceOptions.map((option) => {
+        const label = getTtsVoiceLabel(option)
+        const sublabel = getTtsVoiceSublabel(option)
+        return [option.id, sublabel ? `${label} — ${sublabel}` : label]
+      })
     )
   }, [voiceOptions])
 

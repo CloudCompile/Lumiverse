@@ -576,6 +576,7 @@ export interface TtsVoice {
   name: string;
   language?: string;
   gender?: string;
+  description?: string;
   previewUrl?: string;
 }
 
