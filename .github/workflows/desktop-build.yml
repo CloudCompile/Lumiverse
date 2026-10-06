@@ -5,7 +5,6 @@ name: Build Desktop
 # are handled separately by desktop-release.yml on staging→main merges.
 on:
   push:
-    branches-ignore: [main]
     paths:
       - "desktop/package.json"
       - "desktop/src-tauri/Cargo.toml"

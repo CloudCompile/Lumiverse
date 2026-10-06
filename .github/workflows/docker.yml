@@ -2,6 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
+    branches: ["**"]
     tags: ["v*"]
     # GitHub does not evaluate `paths` filters for tag pushes, so release
     # builds are gated on a previous-tag diff in the job condition below
@@ -22,7 +23,7 @@ jobs:
     # GitHub ignores `paths` filters on tag pushes, so this job compares the
     # tag against the previous tag and only builds when image-essential or
     # documentation paths changed. Schedule/dispatch runs skip this gate.
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.diff.outputs.build }}
@@ -55,6 +56,7 @@ jobs:
     if: >-
       always() && (
         github.event_name != 'push' ||
+        startsWith(github.ref, 'refs/heads/') ||
         needs.changes.result == 'failure' ||
         needs.changes.outputs.build == 'true'
       )
@@ -89,6 +91,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
             type=raw,value=latest,enable=${{ github.event_name == 'schedule' }}
 

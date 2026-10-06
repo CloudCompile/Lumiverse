@@ -2,7 +2,7 @@ name: Build & Push Staging Docker Image
 
 on:
   push:
-    branches: [staging]
+    branches: ["**"]
     # Allowlist of what the image compiles, runs, or documents (mirrors the
     # Dockerfile COPY set plus shipped docs). Docs, workflow files, desktop/,
     # scripts/, tests/ and other non-essential paths don't burn a two-platform
@@ -20,9 +20,9 @@ on:
       - "Dockerfile"
       - ".dockerignore"
   schedule:
-    # Daily staging rebuild from the `staging` branch. Runs once per day so we
-    # don't burn through the GitHub Actions free tier on every commit but still
-    # get a current `:staging` image for Docker-based environments.
+    # Daily rebuild from the default branch. Runs once per day so we don't burn
+    # through the GitHub Actions free tier on every commit but still get a
+    # current branch image for Docker-based environments.
     - cron: "0 5 * * *"  # Daily 05:00 UTC
   workflow_dispatch:
 
@@ -35,7 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: staging
           # The native Tauri app is not part of the container build.
           sparse-checkout-cone-mode: false
           sparse-checkout: |
@@ -58,6 +57,8 @@ jobs:
           echo "ca=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
           echo "frontend=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          branch_slug="$(echo "${GITHUB_REF_NAME}" | tr '[:upper:]' '[:lower:]' | sed 's|/|-|g' | sed 's|[^a-z0-9._-]||g')"
+          echo "branch=${branch_slug:-default}" >> "$GITHUB_OUTPUT"
 
       - uses: docker/build-push-action@v7
         with:
@@ -65,15 +66,15 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/prolix-oc/lumiverse:staging
-            ghcr.io/prolix-oc/lumiverse:staging-${{ steps.refresh.outputs.sha }}
+            ghcr.io/prolix-oc/lumiverse:${{ steps.refresh.outputs.branch }}
+            ghcr.io/prolix-oc/lumiverse:${{ steps.refresh.outputs.branch }}-${{ steps.refresh.outputs.sha }}
           labels: |
-            org.opencontainers.image.title=Lumiverse (staging)
-            org.opencontainers.image.description=AI chat application server — staging branch build
+            org.opencontainers.image.title=Lumiverse (${{ github.ref_name }})
+            org.opencontainers.image.description=AI chat application server — ${{ github.ref_name }} branch build
             org.opencontainers.image.source=https://github.com/prolix-oc/Lumiverse
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             CA_REFRESH=${{ steps.refresh.outputs.ca }}
             FRONTEND_REFRESH=${{ steps.refresh.outputs.frontend }}
-          cache-from: type=gha,scope=staging
-          cache-to: type=gha,mode=max,scope=staging
+          cache-from: type=gha,scope=${{ steps.refresh.outputs.branch }}
+          cache-to: type=gha,mode=max,scope=${{ steps.refresh.outputs.branch }}
