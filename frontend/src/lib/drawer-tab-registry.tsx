@@ -152,15 +152,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'loom',
-    shortName: 'Loom',
-    tabName: 'Loom',
+    shortName: 'Preset',
+    tabName: 'Preset',
     tabDescription: 'Configure narrative structure and story beats',
     tabIcon: GitFork,
+    tabHeaderTitle: 'Loom',
     guide: {
   kind: 'builtin',
   path: 'presets/index.md',
 },
-    keywords: ['narrative', 'story', 'lore', 'structure', 'beats', 'loom', 'pacing', 'plot', 'sovereign hand', 'director'],
+    keywords: ['preset', 'presets', 'narrative', 'story', 'lore', 'structure', 'beats', 'loom', 'pacing', 'plot', 'sovereign hand', 'director'],
     mount: (root) => mountReactComponent(root, <LoomBuilder compact />),
   },
   {

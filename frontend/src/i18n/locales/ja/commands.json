@@ -79,7 +79,7 @@
       "description": "推論、思考の連鎖、プロンプトの動作を設定する"
     },
     "panel-loom": {
-      "label": "織機",
+      "label": "プリセット",
       "description": "物語の構造とストーリーのビートを設定する"
     },
     "panel-dream-weaver": {

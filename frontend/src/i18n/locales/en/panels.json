@@ -74,8 +74,8 @@
       "tabHeaderTitle": "Reasoning"
     },
     "loom": {
-      "shortName": "Loom",
-      "tabName": "Loom",
+      "shortName": "Preset",
+      "tabName": "Preset",
       "tabDescription": "Configure narrative structure and story beats",
       "tabHeaderTitle": "Loom"
     },

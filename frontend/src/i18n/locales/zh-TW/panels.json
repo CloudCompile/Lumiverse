@@ -13,8 +13,8 @@
       "tabHeaderTitle": "推理"
     },
     "loom": {
-      "shortName": "織機",
-      "tabName": "織機",
+      "shortName": "預設",
+      "tabName": "預設",
       "tabDescription": "配置敘事結構與故事節拍",
       "tabHeaderTitle": "織機"
     },

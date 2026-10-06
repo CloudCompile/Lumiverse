@@ -13,8 +13,8 @@
       "tabHeaderTitle": "理性"
     },
     "loom": {
-      "shortName": "織機",
-      "tabName": "織機",
+      "shortName": "プリセット",
+      "tabName": "プリセット",
       "tabDescription": "物語の構造とストーリーのビートを設定する",
       "tabHeaderTitle": "織機"
     },

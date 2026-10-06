@@ -79,7 +79,7 @@
       "description": "配置推理、思維鏈與提示詞行為"
     },
     "panel-loom": {
-      "label": "織機",
+      "label": "預設",
       "description": "配置敘事結構與故事節拍"
     },
     "panel-dream-weaver": {
