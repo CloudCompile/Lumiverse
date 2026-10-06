@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Mount a Cloudflare R2 bucket to a local filesystem path so Lumiverse's
+# Mount a Filebase bucket to a local filesystem path so Lumiverse's
 # DATA_DIR/LanceDB layout keeps working across cold starts.
 #
 # Required env vars:
-#   LUMIVERSE_CLOUDFLARE_R2_ENABLED=true
-#   LUMIVERSE_CLOUDFLARE_R2_BUCKET=lumiverse-data
-#   LUMIVERSE_CLOUDFLARE_R2_ENDPOINT=https://<account>.r2.cloudflarestorage.com
-#   LUMIVERSE_CLOUDFLARE_R2_ACCESS_KEY_ID=...
-#   LUMIVERSE_CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
+#   LUMIVERSE_FILEBASE_ENABLED=true
+#   LUMIVERSE_FILEBASE_BUCKET=lumiverse-data
+#   LUMIVERSE_FILEBASE_ENDPOINT=https://s3.filebase.com
+#   LUMIVERSE_FILEBASE_ACCESS_KEY_ID=...
+#   LUMIVERSE_FILEBASE_SECRET_ACCESS_KEY=...
 #
 # Optional env vars:
-#   LUMIVERSE_CLOUDFLARE_R2_MOUNT_PATH=/mnt/lumiverse-r2
-#   DATA_DIR=/mnt/lumiverse-r2
+#   LUMIVERSE_FILEBASE_MOUNT_PATH=/mnt/lumiverse-filebase
+#   DATA_DIR=/mnt/lumiverse-filebase
 #
 # This script only mounts the bucket if the feature is enabled. It leaves the
 # normal local DATA_DIR behavior untouched otherwise.
 
-if [[ "${LUMIVERSE_CLOUDFLARE_R2_ENABLED:-false}" != "true" ]]; then
+if [[ "${LUMIVERSE_FILEBASE_ENABLED:-false}" != "true" ]]; then
   exit 0
 fi
 
@@ -31,26 +31,26 @@ require_value() {
   fi
 }
 
-require_value LUMIVERSE_CLOUDFLARE_R2_BUCKET
-require_value LUMIVERSE_CLOUDFLARE_R2_ENDPOINT
-require_value LUMIVERSE_CLOUDFLARE_R2_ACCESS_KEY_ID
-require_value LUMIVERSE_CLOUDFLARE_R2_SECRET_ACCESS_KEY
+require_value LUMIVERSE_FILEBASE_BUCKET
+require_value LUMIVERSE_FILEBASE_ENDPOINT
+require_value LUMIVERSE_FILEBASE_ACCESS_KEY_ID
+require_value LUMIVERSE_FILEBASE_SECRET_ACCESS_KEY
 
-MOUNT_PATH="${LUMIVERSE_CLOUDFLARE_R2_MOUNT_PATH:-/mnt/lumiverse-r2}"
+MOUNT_PATH="${LUMIVERSE_FILEBASE_MOUNT_PATH:-/mnt/lumiverse-filebase}"
 RCLONE_CONFIG_DIR="${HOME:-/root}/.config/rclone"
 RCLONE_CONFIG_FILE="$RCLONE_CONFIG_DIR/rclone.conf"
-RCLONE_REMOTE_NAME="cloudflare-r2"
+RCLONE_REMOTE_NAME="filebase"
 
 mkdir -p "$RCLONE_CONFIG_DIR" "$MOUNT_PATH"
 
 cat > "$RCLONE_CONFIG_FILE" <<EOF
 [$RCLONE_REMOTE_NAME]
 type = s3
-provider = Cloudflare
-access_key_id = ${LUMIVERSE_CLOUDFLARE_R2_ACCESS_KEY_ID}
-secret_access_key = ${LUMIVERSE_CLOUDFLARE_R2_SECRET_ACCESS_KEY}
-endpoint = ${LUMIVERSE_CLOUDFLARE_R2_ENDPOINT}
-region = auto
+provider = Other
+access_key_id = ${LUMIVERSE_FILEBASE_ACCESS_KEY_ID}
+secret_access_key = ${LUMIVERSE_FILEBASE_SECRET_ACCESS_KEY}
+endpoint = ${LUMIVERSE_FILEBASE_ENDPOINT}
+region = us-east-1
 acl = private
 storage_class = STANDARD
 EOF
@@ -66,9 +66,9 @@ if ! command -v rclone >/dev/null 2>&1; then
 fi
 
 if ! mountpoint -q "$MOUNT_PATH"; then
-  echo "Mounting Cloudflare R2 bucket ${LUMIVERSE_CLOUDFLARE_R2_BUCKET} to $MOUNT_PATH"
+  echo "Mounting Filebase bucket ${LUMIVERSE_FILEBASE_BUCKET} to $MOUNT_PATH"
   rclone mount \
-    "$RCLONE_REMOTE_NAME:${LUMIVERSE_CLOUDFLARE_R2_BUCKET}" \
+    "$RCLONE_REMOTE_NAME:${LUMIVERSE_FILEBASE_BUCKET}" \
     "$MOUNT_PATH" \
     --allow-other \
     --dir-cache-time 1h \
@@ -95,7 +95,7 @@ export DATA_DIR="${DATA_DIR:-$MOUNT_PATH}"
 mkdir -p "$DATA_DIR"
 
 if [[ "$DATA_DIR" == "$MOUNT_PATH" ]]; then
-  echo "DATA_DIR is mounted from Cloudflare R2 at $DATA_DIR"
+  echo "DATA_DIR is mounted from Filebase at $DATA_DIR"
 else
-  echo "Cloudflare R2 is mounted at $MOUNT_PATH and DATA_DIR is $DATA_DIR"
+  echo "Filebase is mounted at $MOUNT_PATH and DATA_DIR is $DATA_DIR"
 fi
