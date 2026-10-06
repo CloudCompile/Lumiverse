@@ -16,7 +16,7 @@ Deep editing opens in a modal:
 
 | Entry point | What it contains |
 |-------------|------------------|
-| **Edit** beside the prompt preset / **Prompt Studio…** in Scene mode | Main, Character, Persona, and Captioning preset editors, macro insertion, and parser connection/model settings. |
+| **Edit** beside the prompt preset / **Prompt Studio…** in Scene mode | Main, Character, and Persona preset editors, a shared Parser tab, and separate Captioning preset/parser controls. |
 | **Edit** beside the LoRA preset | **LoRA Studio**: ordered LoRA rows, strengths, base tags, preset save/delete, bypass controls, and strength scale. |
 | **Configure Generation…** | **Generation Settings**: provider parameters and models, source images where supported, automation, background display, and timeouts. |
 | **Caption Image** | Upload an image to generate descriptive tags with the existing captioner. |

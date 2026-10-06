@@ -151,7 +151,7 @@ test("cancellation is scoped to the job's account and extension", async () => {
   await expect(pending).rejects.toThrow("cancelled");
 });
 
-test("explicit parsed Main Presets use their parser configuration, including sidecar defaults", async () => {
+test("explicit parsed Main Presets use the shared parser despite stale saved IDs, including sidecar defaults", async () => {
   let parserRequest: GenerationRequest | undefined;
   registerProvider({
     name: "custom", displayName: "Test parser", defaultUrl: originalParser.defaultUrl, capabilities: originalParser.capabilities,
@@ -160,20 +160,20 @@ test("explicit parsed Main Presets use their parser configuration, including sid
   });
   const parserConnection = await llmConnections.createConnection(userId, { name: "Selected parser", provider: "custom", api_url: "http://127.0.0.1:1", model: "connection-model" });
   const current = settings.getSetting(userId, "imageGeneration")!.value;
-  settings.putSetting(userId, "imageGeneration", { ...current, promptParserConnectionId: "deleted-global-parser", promptParserModel: "global-model", promptParserParameters: { temperature: 1.5 },
-    promptPresets: [...current.promptPresets, { id: "parsed", name: "Parsed", kind: "main", mode: "parsed_custom", prompt: "camera pan", parserConnectionId: parserConnection.id, parserModel: "preset-model", parserParameters: { temperature: 0.2 } }],
+  settings.putSetting(userId, "imageGeneration", { ...current, promptParserConnectionId: parserConnection.id, promptParserModel: "global-model", promptParserParameters: { temperature: 1.5 },
+    promptPresets: [...current.promptPresets, { id: "parsed", name: "Parsed", kind: "main", mode: "parsed_custom", prompt: "camera pan", parserConnectionId: "deleted-preset-parser", parserModel: "preset-model", parserParameters: { temperature: 0.2 } }],
   });
   const before = settings.getSetting(userId, "imageGeneration");
   await generateSceneBackground(userId, chatId, { ...options(), promptPresetId: "parsed" });
-  expect(parserRequest?.model).toBe("preset-model");
-  expect(parserRequest?.parameters?.temperature).toBe(0.2);
+  expect(parserRequest?.model).toBe("global-model");
+  expect(parserRequest?.parameters?.temperature).toBe(1.5);
   expect(captured?.prompt).toBe("parsed motion");
   expect(captured?.negativePrompt).toBe("blur");
   expect(settings.getSetting(userId, "imageGeneration")).toEqual(before);
 
   settings.putSetting(userId, "sidecarSettings", { connectionProfileId: parserConnection.id, model: "sidecar-model", temperature: 0.7 });
   const configured = settings.getSetting(userId, "imageGeneration")!.value;
-  settings.putSetting(userId, "imageGeneration", { ...configured, promptPresets: configured.promptPresets.map((preset: any) => preset.id === "parsed" ? { ...preset, parserConnectionId: null, parserModel: "", parserParameters: {} } : preset) });
+  settings.putSetting(userId, "imageGeneration", { ...configured, promptParserConnectionId: null, promptParserModel: "", promptParserParameters: {} });
   await generateSceneBackground(userId, chatId, { ...options(), promptPresetId: "parsed" });
   expect(parserRequest?.model).toBe("sidecar-model");
   expect(parserRequest?.parameters?.temperature).toBe(0.7);

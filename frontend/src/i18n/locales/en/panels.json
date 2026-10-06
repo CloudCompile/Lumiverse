@@ -1077,6 +1077,7 @@
     "promptParser": "Prompt Parser",
     "parserConnection": "Parser Connection",
     "parserConnectionHint": "Overrides the Council sidecar for ImageGen scene/prompt parsing.",
+    "captionParserConnectionHint": "Used by this captioning preset. Save the preset to keep its parser settings. When no connection is selected, captioning uses the Council sidecar.",
     "useSidecarOrSelect": "Use Council sidecar / select...",
     "searchConnections": "Search connections...",
     "noLlmConnections": "No LLM connections configured",

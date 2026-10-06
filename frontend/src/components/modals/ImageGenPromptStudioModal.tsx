@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Settings2 } from 'lucide-react'
 import { Button, FormField, Select, TextInput, EditorSection } from '@/components/shared/FormComponents'
@@ -15,8 +16,21 @@ export default function ImageGenPromptStudioModal({ isOpen, onClose, editor, ima
   updateTop: (patch: Partial<ImageGenSettings>) => void; availableMacros: MacroGroup[]; refreshMacros: () => void
 }) {
   const { t } = useTranslation('panels')
+  const [parserView, setParserView] = useState(false)
+  useEffect(() => setParserView(false), [isOpen, editor.editTarget])
+  const captioning = editor.editTarget === 'captioning' && !parserView
+  const parserSettings = captioning ? editor.captionParser : { parserConnectionId: imageGeneration.promptParserConnectionId, parserModel: imageGeneration.promptParserModel, parserParameters: imageGeneration.promptParserParameters }
+  const updateParser = (patch: Partial<typeof parserSettings>) => {
+    if (captioning) editor.updateCaptionParser(patch)
+    else updateTop({
+      ...(Object.hasOwn(patch, 'parserConnectionId') ? { promptParserConnectionId: patch.parserConnectionId } : {}),
+      ...(Object.hasOwn(patch, 'parserModel') ? { promptParserModel: patch.parserModel } : {}),
+      ...(Object.hasOwn(patch, 'parserParameters') ? { promptParserParameters: patch.parserParameters } : {}),
+    })
+  }
   const { presetName, setPresetName, editTarget, setEditTarget, draftPrompt, draftNegative, loadedPresetId, loadedPreset, confirmDeletePreset, setConfirmDeletePreset, onDraftPromptChange, onDraftNegativeChange, pickPreset, savePromptPreset, deletePromptPreset, mainPresetOptions, characterPresetOptions, personaPresetOptions, captioningPresetOptions, activeCharacterId, activePersonaId } = editor
-  return <ImageGenEditorModal dismissible={!confirmDeletePreset} isOpen={isOpen} onClose={onClose} title="Prompt Studio" navigation={<ImageGenViews<ImageGenPromptEditor['editTarget']> value={editTarget} onChange={setEditTarget} label="Prompt authoring target" views={[{value:'main',label:'Main'},{value:'character',label:'Character'},{value:'persona',label:'Persona'},{value:'captioning',label:'Captioning'}]} />}>
+  return <ImageGenEditorModal dismissible={!confirmDeletePreset} isOpen={isOpen} onClose={onClose} title="Prompt Studio" navigation={<ImageGenViews<ImageGenPromptEditor['editTarget'] | 'parser'> value={parserView ? 'parser' : editTarget} onChange={(value) => { setParserView(value === 'parser'); if (value !== 'parser') setEditTarget(value) }} label="Prompt authoring target" views={[{value:'main',label:'Main'},{value:'character',label:'Character'},{value:'persona',label:'Persona'},{value:'parser',label:'Parser'},{value:'captioning',label:'Captioning'}]} />}>
+                {!parserView && <>
                 <FormField
                   label={editTarget === 'main' ? t('imageGenPanel.activeMainPreset') : editTarget === 'character' ? t('imageGenPanel.boundCharacterPreset') : editTarget === 'captioning' ? t('imageGenPanel.boundCaptioningPreset') : t('imageGenPanel.boundPersonaPreset')}
                   hint={
@@ -150,17 +164,18 @@ export default function ImageGenPromptStudioModal({ isOpen, onClose, editor, ima
                     {editTarget === 'persona' && activePersonaId && ` · ${t('imageGenPanel.boundToActivePersona')}`}
                   </div>
                 )}
-          {(editTarget === 'captioning' || imageGeneration.promptMode === 'scene' || imageGeneration.promptMode === 'parsed_custom') && (
+                </>}
+          {(captioning || parserView) && (
             <EditorSection title={t('imageGenPanel.promptParser')} Icon={Settings2} defaultExpanded>
-              <FormField label={t('imageGenPanel.parserConnection')} hint={t('imageGenPanel.parserConnectionHint')}>
+              <FormField label={t('imageGenPanel.parserConnection')} hint={t(captioning ? 'imageGenPanel.captionParserConnectionHint' : 'imageGenPanel.parserConnectionHint')}>
                 <ConnectionSelect
                   kind="llm"
-                  value={imageGeneration.promptParserConnectionId || ''}
-                  onChange={(value) => updateTop({ promptParserConnectionId: value || null })}
+                  value={parserSettings.parserConnectionId || ''}
+                  onChange={(value) => updateParser({ parserConnectionId: value || null })}
                   withModel
                   seedDefaultModel={false}
-                  modelValue={imageGeneration.promptParserModel || ''}
-                  onModelChange={(value) => updateTop({ promptParserModel: value })}
+                  modelValue={parserSettings.parserModel || ''}
+                  onModelChange={(value) => updateParser({ parserModel: value })}
                   placeholder={t('imageGenPanel.useSidecarOrSelect')}
                   searchPlaceholder={t('imageGenPanel.searchConnections')}
                   emptyMessage={t('imageGenPanel.noLlmConnections')}
@@ -178,9 +193,9 @@ export default function ImageGenPromptStudioModal({ isOpen, onClose, editor, ima
                 min={0}
                 max={2}
                 step={0.05}
-                value={imageGeneration.promptParserParameters?.temperature ?? 0.4}
+                value={parserSettings.parserParameters?.temperature ?? 0.4}
                 formatValue={(v) => v.toFixed(2)}
-                onCommit={(v) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), temperature: v } })}
+                onCommit={(v) => updateParser({ parserParameters: { ...(parserSettings.parserParameters || {}), temperature: v } })}
               />
 
               <LabeledRangeSlider
@@ -188,15 +203,15 @@ export default function ImageGenPromptStudioModal({ isOpen, onClose, editor, ima
                 min={0}
                 max={1}
                 step={0.05}
-                value={imageGeneration.promptParserParameters?.top_p ?? 1}
+                value={parserSettings.parserParameters?.top_p ?? 1}
                 formatValue={(v) => v.toFixed(2)}
-                onCommit={(v) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), top_p: v } })}
+                onCommit={(v) => updateParser({ parserParameters: { ...(parserSettings.parserParameters || {}), top_p: v } })}
               />
 
               <FormField label={t('imageGenPanel.parserMaxTokens')}>
                 <TextInput
-                  value={String(imageGeneration.promptParserParameters?.max_tokens ?? '')}
-                  onChange={(value) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), max_tokens: value ? Number(value) : undefined } })}
+                  value={String(parserSettings.parserParameters?.max_tokens ?? '')}
+                  onChange={(value) => updateParser({ parserParameters: { ...(parserSettings.parserParameters || {}), max_tokens: value ? Number(value) : undefined } })}
                   placeholder={t('imageGenPanel.useConnectionDefault')}
                 />
               </FormField>

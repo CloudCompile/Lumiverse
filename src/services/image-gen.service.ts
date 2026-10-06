@@ -1370,9 +1370,10 @@ async function resolvePromptInput(
     mode: requestedMode === "parsed_custom" ? "parsed_custom" : "custom",
     prompt,
     negativePrompt,
-    parserConnectionId: opts?.promptPresetId && preset?.parserConnectionId !== undefined ? preset.parserConnectionId : settings.promptParserConnectionId ?? preset?.parserConnectionId ?? null,
-    parserModel: opts?.promptPresetId ? preset?.parserModel ?? settings.promptParserModel ?? "" : settings.promptParserModel ?? preset?.parserModel ?? "",
-    parserParameters: opts?.promptPresetId ? preset?.parserParameters ?? settings.promptParserParameters ?? {} : settings.promptParserParameters ?? preset?.parserParameters ?? {},
+    // Generation uses one shared parser; only captioning presets own parser overrides.
+    parserConnectionId: settings.promptParserConnectionId ?? null,
+    parserModel: settings.promptParserModel ?? "",
+    parserParameters: settings.promptParserParameters ?? {},
   };
 }
 
