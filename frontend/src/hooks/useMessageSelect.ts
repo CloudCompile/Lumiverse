@@ -2,6 +2,7 @@ import { useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useStore } from '@/store'
 import { messagesApi } from '@/api/chats'
+import { copyTextToClipboard } from '@/lib/clipboard'
 import { toast } from '@/lib/toast'
 
 export function useMessageSelect(chatId: string) {
@@ -42,6 +43,20 @@ export function useMessageSelect(chatId: string) {
   const exitSelectMode = useCallback(() => {
     setMessageSelectMode(false)
   }, [setMessageSelectMode])
+
+  const bulkCopy = useCallback(async () => {
+    const selectedIds = new Set(selectedMessageIds)
+    const selectedMessages = messages.filter((message) => selectedIds.has(message.id))
+    if (selectedMessages.length === 0) return
+    try {
+      await copyTextToClipboard(selectedMessages.map((message) => message.content).join('\n\n---\n\n'))
+      toast.success(t('messagesCopied', { count: selectedMessages.length }))
+      setMessageSelectMode(false)
+    } catch (err) {
+      console.error('[useMessageSelect] Bulk copy failed:', err)
+      toast.error(t('failedCopyMessages'))
+    }
+  }, [messages, selectedMessageIds, setMessageSelectMode, t])
 
   const bulkHide = useCallback(async (hidden: boolean) => {
     if (selectedMessageIds.length === 0) return
@@ -85,6 +100,7 @@ export function useMessageSelect(chatId: string) {
     selectAllMessages,
     clearMessageSelection,
     selectMessageRange,
+    bulkCopy,
     bulkHide,
     bulkDelete,
   }

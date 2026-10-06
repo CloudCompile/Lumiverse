@@ -196,6 +196,8 @@
     "messagesDeleted": "已删除 {{count}} 条消息",
     "messagesDeleted_plural": "已删除 {{count}} 条消息",
     "failedDeleteMessages": "删除消息失败",
+    "messagesCopied_other": "已复制 {{count}} 条消息",
+    "failedCopyMessages": "复制消息失败",
     "uploadFileFailed": "上传 {{name}} 失败",
     "failedSaveMessageEdit": "保存消息编辑失败",
     "convertingChat": "正在转换聊天",

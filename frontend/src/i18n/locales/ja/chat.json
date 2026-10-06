@@ -191,6 +191,8 @@
     "messagesDeleted": "{{count}}メッセージが削除されました",
     "messagesDeleted_plural": "{{count}}件のメッセージが削除されました",
     "failedDeleteMessages": "メッセージの削除に失敗しました",
+    "messagesCopied_other": "{{count}} 件のメッセージをコピーしました",
+    "failedCopyMessages": "メッセージのコピーに失敗しました",
     "uploadFileFailed": "アップロードに失敗",
     "failedSaveMessageEdit": "メッセージ編集の保存に失敗しました",
     "convertingChat": "チャットを変換しています",

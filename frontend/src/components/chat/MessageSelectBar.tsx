@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Trash2, X, CheckSquare, Square } from 'lucide-react'
+import { Copy, Eye, EyeOff, Trash2, X, CheckSquare, Square } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useMessageSelect } from '@/hooks/useMessageSelect'
 import { useStore } from '@/store'
@@ -20,6 +20,7 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
     exitSelectMode,
     selectAllMessages,
     clearMessageSelection,
+    bulkCopy,
     bulkHide,
     bulkDelete,
   } = useMessageSelect(chatId)
@@ -54,6 +55,17 @@ export default function MessageSelectBar({ chatId }: MessageSelectBarProps) {
         </span>
       </div>
       <div className={styles.actions}>
+        <button
+          type="button"
+          className={styles.actionBtn}
+          onClick={bulkCopy}
+          disabled={selectedCount === 0}
+          title={t('messageActions.copy')}
+          aria-label={t('messageActions.copy')}
+        >
+          <Copy size={13} />
+          <span className={styles.actionLabel}>{t('messageActions.copy')}</span>
+        </button>
         {hasVisibleSelected && (
           <button
             type="button"
