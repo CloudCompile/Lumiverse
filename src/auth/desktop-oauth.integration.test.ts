@@ -110,7 +110,7 @@ describe("desktop OAuth provider integration", () => {
     expect(response.status).toBe(403);
   });
 
-  test("issues resource-bound PKCE tokens to the fixed desktop client", async () => {
+  test("issues resource-bound PKCE tokens and rejects refresh token reuse", async () => {
     const signUp = await auth.handler(new Request(
       "http://localhost:7860/api/auth/sign-up/email",
       {
@@ -195,6 +195,39 @@ describe("desktop OAuth provider integration", () => {
     expect(await protectedResource.json()).toMatchObject({
       account: { username: "desktopowner", role: "user" },
     });
+
+    const refresh = (refreshToken: string) => app.request(new Request(
+      "http://localhost:7860/api/auth/oauth2/token",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          host: "localhost:7860",
+        },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          client_id: "lumiverse-desktop",
+          refresh_token: refreshToken,
+          scope: "openid profile offline_access desktop:instance-status:read",
+          resource: "urn:lumiverse:desktop-api",
+        }),
+      },
+    ));
+    const renewed = await refresh(tokenBody.refresh_token!);
+    expect(renewed.status).toBe(200);
+    const renewedBody = await renewed.json() as { refresh_token: string; expires_in: number };
+    expect(renewedBody.expires_in).toBe(300);
+    expect(renewedBody.refresh_token).toBeTruthy();
+    expect(renewedBody.refresh_token).not.toBe(tokenBody.refresh_token);
+
+    // Concurrent Desktop consumers must not submit the original token again:
+    // replay is rejected and also invalidates the newly rotated credential.
+    const replay = await refresh(tokenBody.refresh_token!);
+    expect(replay.status).toBe(400);
+    expect(await replay.json()).toMatchObject({ error: "invalid_grant" });
+    const invalidated = await refresh(renewedBody.refresh_token);
+    expect(invalidated.status).toBe(400);
+    expect(await invalidated.json()).toMatchObject({ error: "invalid_grant" });
   });
 
   test("accepts an ephemeral loopback port and redirects an unsigned-in user to login", async () => {

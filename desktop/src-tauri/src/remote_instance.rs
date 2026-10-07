@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -19,6 +19,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::{Mutex as AsyncMutex, OwnedMutexGuard},
     time::timeout,
 };
 
@@ -30,15 +31,41 @@ const AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_CALLBACK_REQUEST_BYTES: usize = 8 * 1024;
 
-#[derive(Default)]
 pub struct RemoteInstanceState {
     sessions: Mutex<HashMap<String, RemoteOAuthSession>>,
+    operations: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    credentials: Arc<dyn RefreshCredentialStore>,
+}
+
+impl Default for RemoteInstanceState {
+    fn default() -> Self {
+        Self {
+            sessions: Mutex::new(HashMap::new()),
+            operations: Mutex::new(HashMap::new()),
+            credentials: Arc::new(KeyringCredentialStore),
+        }
+    }
 }
 
 impl RemoteInstanceState {
+    async fn lock_origin(&self, origin: &str) -> OwnedMutexGuard<()> {
+        let operation = self
+            .operations
+            .lock()
+            .unwrap()
+            .entry(origin.to_owned())
+            .or_default()
+            .clone();
+        // Refresh tokens rotate after one use. Keep restoration, refresh,
+        // persistence and deletion in one operation per origin so status,
+        // presence and capture cannot reuse or erase each other's credential.
+        operation.lock_owned().await
+    }
+
     pub(crate) fn capture_access_token(&self, origin: &str) -> Option<String> {
         self.sessions
-            .lock().ok()?
+            .lock()
+            .ok()?
             .get(origin)
             .filter(|session| session.access_expires_at > Instant::now() + Duration::from_secs(20))
             .map(|session| session.access_token.clone())
@@ -120,7 +147,9 @@ pub struct RemoteInstanceSnapshot {
 
 impl RemoteInstanceSnapshot {
     pub(crate) fn capture_account(&self) -> Option<(&str, &str)> {
-        self.account.as_ref().map(|account| (account.id.as_str(), account.name.as_str()))
+        self.account
+            .as_ref()
+            .map(|account| (account.id.as_str(), account.name.as_str()))
     }
 
     fn empty(origin: &str, state: RemoteConnectionPhase, error: Option<String>) -> Self {
@@ -229,42 +258,69 @@ fn keyring_account(origin: &str) -> String {
         .collect()
 }
 
-async fn save_refresh_token(origin: String, token: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        Entry::new(KEYRING_SERVICE, &keyring_account(&origin))
-            .map_err(|error| error.to_string())?
-            .set_password(&token)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
+trait RefreshCredentialStore: Send + Sync {
+    fn save(&self, origin: &str, token: &str) -> Result<(), String>;
+    fn load(&self, origin: &str) -> Result<Option<String>, String>;
+    fn delete(&self, origin: &str) -> Result<(), String>;
 }
 
-async fn load_refresh_token(origin: String) -> Result<Option<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let entry = Entry::new(KEYRING_SERVICE, &keyring_account(&origin))
-            .map_err(|error| error.to_string())?;
-        match entry.get_password() {
+struct KeyringCredentialStore;
+
+impl KeyringCredentialStore {
+    fn entry(origin: &str) -> Result<Entry, String> {
+        Entry::new(KEYRING_SERVICE, &keyring_account(origin)).map_err(|error| error.to_string())
+    }
+}
+
+impl RefreshCredentialStore for KeyringCredentialStore {
+    fn save(&self, origin: &str, token: &str) -> Result<(), String> {
+        Self::entry(origin)?
+            .set_password(token)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load(&self, origin: &str) -> Result<Option<String>, String> {
+        match Self::entry(origin)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(error.to_string()),
         }
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
+    }
 
-async fn delete_refresh_token(origin: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let entry = Entry::new(KEYRING_SERVICE, &keyring_account(&origin))
-            .map_err(|error| error.to_string())?;
-        match entry.delete_credential() {
+    fn delete(&self, origin: &str) -> Result<(), String> {
+        match Self::entry(origin)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error.to_string()),
         }
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    }
+}
+
+async fn save_refresh_token(
+    state: &RemoteInstanceState,
+    origin: String,
+    token: String,
+) -> Result<(), String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.save(&origin, &token))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn load_refresh_token(
+    state: &RemoteInstanceState,
+    origin: String,
+) -> Result<Option<String>, String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.load(&origin))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+async fn delete_refresh_token(state: &RemoteInstanceState, origin: String) -> Result<(), String> {
+    let credentials = state.credentials.clone();
+    tauri::async_runtime::spawn_blocking(move || credentials.delete(&origin))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 fn pkce_pair() -> (String, String) {
@@ -448,6 +504,7 @@ async fn exchange_code(
 }
 
 async fn refresh_session(
+    state: &RemoteInstanceState,
     client: &Client,
     origin: &Url,
     refresh_token: String,
@@ -474,18 +531,27 @@ async fn refresh_session(
                 "Could not refresh Lumiverse authorization: {error}"
             ))
         })?;
-    if matches!(
-        response.status(),
-        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
-    ) {
-        return Err(PollError::Reauth(
-            "Lumiverse authorization must be renewed".into(),
-        ));
-    }
     if !response.status().is_success() {
+        let status = response.status();
+        #[derive(Deserialize)]
+        struct OAuthErrorResponse {
+            error: String,
+        }
+        let error = response.json::<OAuthErrorResponse>().await.ok();
+        // Only an invalid grant proves the refresh credential is unusable.
+        // Proxy errors and other OAuth failures must not erase a saved token.
+        if matches!(status, StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED)
+            && error
+                .as_ref()
+                .is_some_and(|error| error.error == "invalid_grant")
+        {
+            return Err(PollError::Reauth(
+                "Lumiverse authorization must be renewed".into(),
+            ));
+        }
         return Err(PollError::Unreachable(format!(
             "Lumiverse token refresh failed ({})",
-            response.status()
+            status
         )));
     }
     let token: OAuthTokenResponse = response.json().await.map_err(|error| {
@@ -493,9 +559,13 @@ async fn refresh_session(
     })?;
     let next_refresh = token.refresh_token.or(Some(refresh_token));
     let persisted = if let Some(value) = &next_refresh {
-        save_refresh_token(origin.as_str().trim_end_matches('/').into(), value.clone())
-            .await
-            .is_ok()
+        save_refresh_token(
+            state,
+            origin.as_str().trim_end_matches('/').into(),
+            value.clone(),
+        )
+        .await
+        .is_ok()
     } else {
         false
     };
@@ -635,6 +705,7 @@ pub async fn remote_instance_connect(
     if callback.issuer.trim_end_matches('/') != metadata.issuer.trim_end_matches('/') {
         return Err("OAuth callback issuer did not match the selected instance".into());
     }
+    let _operation = state.lock_origin(&canonical_origin).await;
     let token = exchange_code(
         &client,
         &metadata,
@@ -645,7 +716,7 @@ pub async fn remote_instance_connect(
     )
     .await?;
     let credential_persisted = if let Some(refresh_token) = &token.refresh_token {
-        save_refresh_token(canonical_origin.clone(), refresh_token.clone())
+        save_refresh_token(&state, canonical_origin.clone(), refresh_token.clone())
             .await
             .is_ok()
     } else {
@@ -672,32 +743,41 @@ pub async fn remote_instance_connect(
 
 /// Resolve a usable session for `origin`: in-memory session, keyring restore,
 /// or a proactive refresh when the access token is about to expire. Refreshed
-/// sessions are written back to the in-memory map.
+/// sessions are written back to the in-memory map. Caller holds lock_origin.
 async fn resolve_session(
     state: &RemoteInstanceState,
     client: &Client,
     origin: &Url,
     canonical_origin: &str,
 ) -> Result<RemoteOAuthSession, PollError> {
-    let mut session = state.sessions.lock().unwrap().get(canonical_origin).cloned();
+    let mut session = state
+        .sessions
+        .lock()
+        .unwrap()
+        .get(canonical_origin)
+        .cloned();
     if session.is_none() {
-        match load_refresh_token(canonical_origin.to_string()).await {
-            Ok(Some(refresh_token)) => match refresh_session(client, origin, refresh_token).await {
-                Ok(refreshed) => session = Some(refreshed),
-                Err(PollError::Reauth(message)) => {
-                    let _ = delete_refresh_token(canonical_origin.to_string()).await;
-                    return Err(PollError::Reauth(message));
+        match load_refresh_token(state, canonical_origin.to_string()).await {
+            Ok(Some(refresh_token)) => {
+                match refresh_session(state, client, origin, refresh_token).await {
+                    Ok(refreshed) => session = Some(refreshed),
+                    Err(PollError::Reauth(message)) => {
+                        let _ = delete_refresh_token(state, canonical_origin.to_string()).await;
+                        return Err(PollError::Reauth(message));
+                    }
+                    Err(PollError::Unreachable(message)) => {
+                        return Err(PollError::Unreachable(message));
+                    }
+                    Err(PollError::Disconnected) => {
+                        unreachable!("refresh_session never reports Disconnected")
+                    }
                 }
-                Err(PollError::Unreachable(message)) => {
-                    return Err(PollError::Unreachable(message));
-                }
-                Err(PollError::Disconnected) => unreachable!("refresh_session never reports Disconnected"),
-            },
+            }
             Ok(None) => {
                 return Err(PollError::Disconnected);
             }
             Err(error) => {
-                return Err(PollError::Reauth(format!(
+                return Err(PollError::Unreachable(format!(
                     "Could not read the saved Lumiverse credential: {error}"
                 )));
             }
@@ -711,17 +791,28 @@ async fn resolve_session(
                 "Lumiverse authorization must be renewed".into(),
             ));
         };
-        match refresh_session(client, origin, refresh_token).await {
+        match refresh_session(state, client, origin, refresh_token).await {
             Ok(refreshed) => session = refreshed,
             Err(PollError::Reauth(message)) => {
-                let _ = delete_refresh_token(canonical_origin.to_string()).await;
+                let _ = delete_refresh_token(state, canonical_origin.to_string()).await;
                 state.sessions.lock().unwrap().remove(canonical_origin);
                 return Err(PollError::Reauth(message));
             }
             Err(PollError::Unreachable(message)) => {
                 return Err(PollError::Unreachable(message));
             }
-            Err(PollError::Disconnected) => unreachable!("refresh_session never reports Disconnected"),
+            Err(PollError::Disconnected) => {
+                unreachable!("refresh_session never reports Disconnected")
+            }
+        }
+    } else if !session.credential_persisted {
+        if let Some(refresh_token) = &session.refresh_token {
+            // A locked credential store can recover during this run. Retry
+            // saving the current rotated token before Desktop is restarted.
+            session.credential_persisted =
+                save_refresh_token(state, canonical_origin.to_string(), refresh_token.clone())
+                    .await
+                    .is_ok();
         }
     }
     state
@@ -747,6 +838,7 @@ pub(crate) async fn poll_remote_instance(
         }
     };
     let canonical_origin = origin.as_str().trim_end_matches('/').to_string();
+    let _operation = state.lock_origin(&canonical_origin).await;
     let client = match http_client() {
         Ok(value) => value,
         Err(error) => {
@@ -796,7 +888,7 @@ pub(crate) async fn poll_remote_instance(
                     Some(message),
                 );
             };
-            match refresh_session(&client, &origin, refresh_token).await {
+            match refresh_session(state, &client, &origin, refresh_token).await {
                 Ok(refreshed) => {
                     state
                         .sessions
@@ -806,7 +898,7 @@ pub(crate) async fn poll_remote_instance(
                     match fetch_snapshot(&client, &origin, &refreshed).await {
                         Ok(snapshot) => snapshot,
                         Err(PollError::Reauth(message)) => {
-                            let _ = delete_refresh_token(canonical_origin.clone()).await;
+                            let _ = delete_refresh_token(state, canonical_origin.clone()).await;
                             state.sessions.lock().unwrap().remove(&canonical_origin);
                             RemoteInstanceSnapshot::empty(
                                 &canonical_origin,
@@ -825,7 +917,7 @@ pub(crate) async fn poll_remote_instance(
                     }
                 }
                 Err(PollError::Reauth(message)) => {
-                    let _ = delete_refresh_token(canonical_origin.clone()).await;
+                    let _ = delete_refresh_token(state, canonical_origin.clone()).await;
                     state.sessions.lock().unwrap().remove(&canonical_origin);
                     RemoteInstanceSnapshot::empty(
                         &canonical_origin,
@@ -871,8 +963,9 @@ pub async fn remote_instance_disconnect(
     let origin = normalize_origin(&origin)?;
     let canonical_origin = origin.as_str().trim_end_matches('/').to_string();
     crate::capture::stop(&app, Some(&canonical_origin));
+    let _operation = state.lock_origin(&canonical_origin).await;
     state.sessions.lock().unwrap().remove(&canonical_origin);
-    delete_refresh_token(canonical_origin).await
+    delete_refresh_token(&state, canonical_origin).await
 }
 
 /// Chat or landing-page snapshot served by the instance's desktop API for
@@ -932,9 +1025,10 @@ async fn fetch_presence(
             response.status()
         )));
     }
-    let body: PresenceResponse = response.json().await.map_err(|error| {
-        PollError::Unreachable(format!("Invalid presence response: {error}"))
-    })?;
+    let body: PresenceResponse = response
+        .json()
+        .await
+        .map_err(|error| PollError::Unreachable(format!("Invalid presence response: {error}")))?;
     Ok(body.active)
 }
 
@@ -945,15 +1039,31 @@ pub async fn discord_presence_fetch(
     state: State<'_, RemoteInstanceState>,
     origin: String,
 ) -> Result<PresenceFetch, String> {
+    poll_presence(state.inner(), origin).await
+}
+
+async fn poll_presence(
+    state: &RemoteInstanceState,
+    origin: String,
+) -> Result<PresenceFetch, String> {
     let origin = normalize_origin(&origin).map_err(|error| error.to_string())?;
     let canonical_origin = origin.as_str().trim_end_matches('/').to_string();
+    let _operation = state.lock_origin(&canonical_origin).await;
     let client = http_client().map_err(|error| error.to_string())?;
 
-    let session = match resolve_session(state.inner(), &client, &origin, &canonical_origin).await {
+    let session = match resolve_session(state, &client, &origin, &canonical_origin).await {
         Ok(session) => session,
         Err(PollError::Disconnected) => return Ok(PresenceFetch::Disconnected),
-        Err(PollError::Reauth(message)) => return Ok(PresenceFetch::ReauthRequired { error: Some(message) }),
-        Err(PollError::Unreachable(message)) => return Ok(PresenceFetch::Unreachable { error: Some(message) }),
+        Err(PollError::Reauth(message)) => {
+            return Ok(PresenceFetch::ReauthRequired {
+                error: Some(message),
+            })
+        }
+        Err(PollError::Unreachable(message)) => {
+            return Ok(PresenceFetch::Unreachable {
+                error: Some(message),
+            })
+        }
     };
 
     match fetch_presence(&client, &origin, &session).await {
@@ -964,9 +1074,11 @@ pub async fn discord_presence_fetch(
             // expiry. Refresh and retry exactly once before giving up.
             let Some(refresh_token) = session.refresh_token.clone() else {
                 state.sessions.lock().unwrap().remove(&canonical_origin);
-                return Ok(PresenceFetch::ReauthRequired { error: Some(message) });
+                return Ok(PresenceFetch::ReauthRequired {
+                    error: Some(message),
+                });
             };
-            match refresh_session(&client, &origin, refresh_token).await {
+            match refresh_session(state, &client, &origin, refresh_token).await {
                 Ok(refreshed) => {
                     state
                         .sessions
@@ -977,114 +1089,41 @@ pub async fn discord_presence_fetch(
                         Ok(Some(snapshot)) => Ok(PresenceFetch::Active { snapshot }),
                         Ok(None) => Ok(PresenceFetch::Inactive),
                         Err(PollError::Reauth(message)) => {
-                            let _ = delete_refresh_token(canonical_origin.clone()).await;
+                            let _ = delete_refresh_token(state, canonical_origin.clone()).await;
                             state.sessions.lock().unwrap().remove(&canonical_origin);
-                            Ok(PresenceFetch::ReauthRequired { error: Some(message) })
+                            Ok(PresenceFetch::ReauthRequired {
+                                error: Some(message),
+                            })
                         }
-                        Err(PollError::Unreachable(message)) => {
-                            Ok(PresenceFetch::Unreachable { error: Some(message) })
-                        }
+                        Err(PollError::Unreachable(message)) => Ok(PresenceFetch::Unreachable {
+                            error: Some(message),
+                        }),
                         Err(PollError::Disconnected) => {
                             unreachable!("fetch_presence never reports Disconnected")
                         }
                     }
                 }
                 Err(PollError::Reauth(message)) => {
-                    let _ = delete_refresh_token(canonical_origin.clone()).await;
+                    let _ = delete_refresh_token(state, canonical_origin.clone()).await;
                     state.sessions.lock().unwrap().remove(&canonical_origin);
-                    Ok(PresenceFetch::ReauthRequired { error: Some(message) })
+                    Ok(PresenceFetch::ReauthRequired {
+                        error: Some(message),
+                    })
                 }
-                Err(PollError::Unreachable(message)) => {
-                    Ok(PresenceFetch::Unreachable { error: Some(message) })
-                }
+                Err(PollError::Unreachable(message)) => Ok(PresenceFetch::Unreachable {
+                    error: Some(message),
+                }),
                 Err(PollError::Disconnected) => {
                     unreachable!("refresh_session never reports Disconnected")
                 }
             }
         }
-        Err(PollError::Unreachable(message)) => Ok(PresenceFetch::Unreachable { error: Some(message) }),
+        Err(PollError::Unreachable(message)) => Ok(PresenceFetch::Unreachable {
+            error: Some(message),
+        }),
         Err(PollError::Disconnected) => unreachable!("fetch_presence never reports Disconnected"),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        authorization_url, keyring_account, normalize_origin, parse_callback_target,
-        validate_metadata_endpoint, OAuthMetadata, CLIENT_ID, RESOURCE,
-    };
-
-    #[test]
-    fn remote_origins_require_tls_except_for_loopback() {
-        assert!(normalize_origin("https://example.com/path").is_ok());
-        assert!(normalize_origin("http://127.0.0.1:7860").is_ok());
-        assert!(normalize_origin("http://192.168.1.20:7860").is_err());
-        assert!(normalize_origin("https://user:secret@example.com").is_err());
-    }
-
-    #[test]
-    fn authorization_request_is_pkce_and_resource_bound() {
-        let origin = normalize_origin("https://example.com").unwrap();
-        let metadata = OAuthMetadata {
-            issuer: "https://example.com/api/auth".into(),
-            authorization_endpoint: "https://example.com/api/auth/oauth2/authorize".into(),
-            token_endpoint: "https://example.com/api/auth/oauth2/token".into(),
-        };
-        let url = authorization_url(
-            &metadata,
-            &origin,
-            "http://127.0.0.1:43123/callback",
-            "state-value",
-            "nonce-value",
-            "challenge-value",
-        )
-        .unwrap();
-        let params = url
-            .query_pairs()
-            .collect::<std::collections::HashMap<_, _>>();
-        assert_eq!(params.get("client_id").unwrap(), CLIENT_ID);
-        assert_eq!(params.get("code_challenge_method").unwrap(), "S256");
-        assert!(params
-            .get("scope")
-            .unwrap()
-            .contains("desktop:instance-status:read"));
-        assert_eq!(params.get("resource").unwrap(), RESOURCE);
-    }
-
-    #[test]
-    fn endpoint_mismatch_reports_the_advertised_and_expected_origins() {
-        let origin = normalize_origin("https://example.com").unwrap();
-        let error = validate_metadata_endpoint(
-            &origin,
-            "http://example.com/api/auth/oauth2/authorize",
-            "authorization endpoint",
-        )
-        .unwrap_err();
-        assert!(error.contains("http://example.com"));
-        assert!(error.contains("https://example.com"));
-    }
-
-    #[test]
-    fn callback_requires_matching_state_and_issuer() {
-        let callback = parse_callback_target(
-            "/callback?code=abc&state=expected&iss=https%3A%2F%2Fexample.com%2Fapi%2Fauth",
-            "expected",
-        )
-        .unwrap();
-        assert_eq!(callback.code, "abc");
-        assert_eq!(callback.issuer, "https://example.com/api/auth");
-        assert!(parse_callback_target(
-            "/callback?code=abc&state=wrong&iss=https%3A%2F%2Fexample.com%2Fapi%2Fauth",
-            "expected"
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn keyring_account_is_stable_without_revealing_the_origin() {
-        let account = keyring_account("https://example.com");
-        assert_eq!(account.len(), 64);
-        assert!(!account.contains("example"));
-        assert_eq!(account, keyring_account("https://example.com"));
-    }
-}
+mod tests;
