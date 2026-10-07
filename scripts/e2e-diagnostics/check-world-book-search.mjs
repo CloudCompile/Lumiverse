@@ -27,6 +27,22 @@ for (const name of (process.env.SEARCH_BROWSERS ?? 'chromium,firefox,webkit').sp
     if (width === 412) await page.getByRole('button', { name: 'Books', exact: true }).click()
     await page.getByRole('button', { name: /Fixture book 137/ }).click()
    }
+   const folders = page.getByRole('navigation', { name: 'Entry folders', exact: true }).filter({ visible: true })
+   await folders.waitFor()
+   const folderRows = folders.getByRole('button')
+   const geometry = await folderRows.evaluateAll(rows => rows.map(row => {
+    const style = getComputedStyle(row)
+    return { display: style.display, minHeight: parseFloat(style.minHeight), border: style.borderTopStyle, radius: parseFloat(style.borderRadius), icons: row.querySelectorAll('svg[aria-hidden="true"]').length, overflow: row.scrollWidth > row.clientWidth + 1 }
+   }))
+   assert.ok(geometry.every(row => row.display === 'grid' && row.minHeight === 48 && row.border === 'solid' && row.radius === 10 && row.icons === 2 && !row.overflow), 'folder cards keep icons, borders and touch targets without overflow')
+   await folderRows.first().press('Tab')
+   assert.equal(await folderRows.nth(1).evaluate(el => el === document.activeElement), true, 'folder navigation follows native keyboard order')
+   assert.equal(await folderRows.nth(1).evaluate(el => getComputedStyle(el).outlineStyle), 'solid', 'keyboard focus remains visible')
+   if (process.env.FOLDER_SCREENSHOT && name === 'chromium' && width === 412 && scale === 1 && surface === 'workspace') await page.screenshot({ path: process.env.FOLDER_SCREENSHOT })
+   await folderRows.nth(2).press('Enter')
+   await page.locator('[data-entry-id="b5-e1"]').waitFor()
+   await page.getByRole('button', { name: /Folders$/, exact: false }).click()
+   await folders.waitFor()
    await page.getByRole('button', { name: 'All entries 137', exact: true }).click()
    await page.locator('[data-entry-id="b5-e0"]').waitFor()
    assert.equal(await page.locator('[data-entry-id]:visible').count(), 50)

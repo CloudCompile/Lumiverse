@@ -59,6 +59,9 @@ describe('native entry organization interactions', () => {
     await act(async () => { buttons[0]!.click(); buttons[1]!.click(); buttons[2]!.click() })
     expect(selected).toEqual([undefined, '', 'Characters'])
     expect(host.textContent).toContain('100')
+    expect(buttons.every(node => node.classList.contains('folderRow'))).toBe(true)
+    expect(buttons.every(node => node.querySelectorAll('svg[aria-hidden="true"]').length === 2)).toBe(true)
+    expect(buttons.map(node => node.querySelector('span')?.textContent)).toEqual(['All entries', 'Unfiled', 'Characters'])
   })
   test('empty organization chrome is hidden but moving an entry can still create the first folder', async () => {
     const ref = createRef<import('./EntryOrganizationControls').EntryOrganizationHandle>()
