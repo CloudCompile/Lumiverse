@@ -474,7 +474,7 @@
   flex-shrink: 0;
   background: var(--lumiverse-bg-deep);
   border-top: 1px solid color-mix(in srgb, var(--lumiverse-border) 55%, transparent);
-  padding: 8px 20px calc(16px + env(safe-area-inset-bottom, 0px));
+  padding: 8px 20px calc(16px + var(--worldbook-footer-safe-bottom, env(safe-area-inset-bottom, 0px)));
   overflow-x: auto;
   overscroll-behavior-x: contain;
   -webkit-overflow-scrolling: touch;
@@ -993,7 +993,17 @@
 .vectorTools summary { cursor: pointer; color: var(--lumiverse-text-muted); font-size: calc(12px * var(--lumiverse-font-scale, 1)); }
 
 .nativeModal { height: calc(85dvh / var(--lumiverse-ui-scale, 1)); }
-.nativeModal.nativeFullscreen { height: 100%; max-height: none; border-radius: 0; }
+.nativeModal.nativeFullscreen {
+  height: 100%;
+  max-height: none;
+  border-radius: 0;
+  /* Body zoom scales the modal; hardware insets must stay in viewport pixels. */
+  padding-top: calc(var(--worldbook-safe-top, var(--app-interactive-safe-top, env(safe-area-inset-top, 0px))) / var(--lumiverse-ui-scale, 1));
+  padding-right: calc(var(--worldbook-safe-right, env(safe-area-inset-right, 0px)) / var(--lumiverse-ui-scale, 1));
+  padding-bottom: calc(max(0px, var(--worldbook-safe-bottom, env(safe-area-inset-bottom, 0px)) - var(--app-keyboard-inset-bottom, 0px)) / var(--lumiverse-ui-scale, 1));
+  padding-left: calc(var(--worldbook-safe-left, env(safe-area-inset-left, 0px)) / var(--lumiverse-ui-scale, 1));
+  --worldbook-footer-safe-bottom: 0px;
+}
 
 .bookWorkspace { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .bookWorkspace[hidden] { display: none; }

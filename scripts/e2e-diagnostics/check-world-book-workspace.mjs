@@ -14,7 +14,7 @@ const theme = `*{box-sizing:border-box;margin:0}html{--lumiverse-bg:#211e2b;--lu
 let cases = 0
 for (const name of (process.env.WORKSPACE_BROWSERS ?? 'chromium,firefox,webkit').split(',')) {
  const browser = await playwright[name].launch({ headless: true })
- try { for (const width of (process.env.SIDEBAR_ONLY ? [] : [1200, 412])) for (const scale of [1, 1.25]) {
+ try { for (const width of (process.env.SIDEBAR_ONLY || process.env.SAFE_AREA_ONLY ? [] : [1200, 412])) for (const scale of [1, 1.25]) {
   const page = await browser.newPage({ viewport: { width, height: 915 }, reducedMotion: 'reduce' }); page.setDefaultTimeout(8000)
   const errors = []; page.on('pageerror', error => errors.push(error.message))
   await page.route('http://fixture.local/**', route => route.fulfill({ contentType: 'text/html', body: `<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><style>${theme}${css}</style></head><body><div id="root"></div><script>${js}</script></body></html>` }))
@@ -177,7 +177,76 @@ for (const name of (process.env.WORKSPACE_BROWSERS ?? 'chromium,firefox,webkit')
   } catch (error) { console.error(JSON.stringify({ name, width, scale, errors, text: await page.locator('body').innerText() })); throw error }
   finally { await page.close() }
  }
- for (const sidebarWidth of [320, 440, 560]) for (const scale of [1, 1.25]) {
+ // Device emulation alone has zero hardware insets. Supply explicit values to
+ // exercise the real fullscreen flex/scroll layout, including zoom and keyboard.
+ if (!process.env.SIDEBAR_ONLY) for (const scale of [1, 1.25]) {
+  const context = await browser.newContext({ viewport: { width: 393, height: 852 }, hasTouch: true, reducedMotion: 'reduce' })
+  const page = await context.newPage(); page.setDefaultTimeout(8000)
+  const errors = []; page.on('pageerror', error => errors.push(error.message))
+  await page.route('http://fixture.local/**', route => route.fulfill({ contentType: 'text/html', body: `<html><head><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><style>${theme}${css}</style></head><body><div id="root"></div><script>${js}</script></body></html>` }))
+  try {
+   await page.goto(`http://fixture.local/?scale=${scale}`)
+   await page.locator('[data-entry-id="b1-e0"]').waitFor()
+   for (const profile of [
+    { label: 'portrait', width: 393, height: 852, top: 59, right: 0, bottom: 34, left: 0, keyboard: 0 },
+    { label: 'landscape', width: 852, height: 393, top: 0, right: 59, bottom: 21, left: 59, keyboard: 0 },
+    { label: 'keyboard', width: 393, height: 500, top: 59, right: 0, bottom: 34, left: 0, keyboard: 352 },
+   ]) {
+    await page.setViewportSize({ width: profile.width, height: profile.height })
+    await page.evaluate(p => {
+     const root = document.documentElement
+     root.setAttribute('data-ios-pwa', '')
+     // Top uses the existing app-level variable; other edges override env().
+     root.style.setProperty('--app-interactive-safe-top', p.top + 'px')
+     for (const edge of ['right', 'bottom', 'left']) root.style.setProperty('--worldbook-safe-' + edge, p[edge] + 'px')
+     root.style.setProperty('--app-keyboard-inset-bottom', p.keyboard + 'px')
+    }, profile)
+    // Wait for the shell entrance animation and responsive resize to settle.
+    await page.waitForFunction(p => {
+     const frame = document.querySelector('[data-spindle-mount="modal_header_actions"]')?.parentElement.getBoundingClientRect()
+     return frame && Math.abs(frame.width-p.width)<1 && Math.abs(frame.height-p.height)<1 && Math.abs(frame.x)<1 && Math.abs(frame.y)<1
+    }, profile)
+    const insetBottom = Math.max(0, profile.bottom - profile.keyboard)
+    if (profile.label !== 'portrait') assert.equal(await page.locator('#entry-panel-b4-e49 textarea').first().inputValue(), 'Safe-area draft', 'orientation and keyboard resize retain the existing draft')
+    const header = page.locator('h2').first().locator('..')
+    const frame = await page.locator('[data-spindle-mount="modal_header_actions"]').evaluate(el => { const r=el.parentElement.getBoundingClientRect(); return { x:r.x, y:r.y, width:r.width, height:r.height } })
+    assert.ok(Math.abs(frame.width-profile.width)<2 && Math.abs(frame.height-profile.height)<2 && Math.abs(frame.x)<2 && Math.abs(frame.y)<2, `safe padding stays inside the fullscreen frame: ${JSON.stringify({ name, scale, profile, frame })}`)
+    const headerBox = await header.boundingBox()
+    assert.ok(headerBox.y >= profile.top && headerBox.x >= profile.left && headerBox.x+headerBox.width <= profile.width-profile.right+1, `${name}/${scale}/${profile.label}: header clears hardware insets`)
+    const contentBottom = await header.evaluate(el => el.nextElementSibling.getBoundingClientRect().bottom)
+    assert.ok(Math.abs(contentBottom-(profile.height-insetBottom))<2, 'body clears home indicator without double padding or keyboard gap')
+    await page.getByRole('button', { name: 'Books', exact: true }).click()
+    const books = page.locator('div[aria-label="Books"]')
+    assert.equal(await books.isVisible(), true, 'landscape touch device keeps mobile books navigation')
+    const bookBox = await books.boundingBox()
+    assert.ok(bookBox.x >= profile.left && bookBox.x+bookBox.width <= profile.width-profile.right+1 && bookBox.y >= profile.top && bookBox.y+bookBox.height <= profile.height-insetBottom+1, 'books pane stays inside all safe edges')
+    await page.getByRole('button', { name: /Fixture book 50/ }).click()
+    const allEntries = page.getByRole('button', { name: 'All entries 50', exact: true })
+    if (await allEntries.count()) await allEntries.click()
+    const last = page.locator('[data-entry-id="b4-e49"]')
+    await last.scrollIntoViewIfNeeded()
+    const rowBox = await last.boundingBox()
+    assert.ok(rowBox.y >= profile.top && rowBox.y+rowBox.height <= profile.height-insetBottom+1, 'last entry scrolls clear of home indicator')
+    await last.getByRole('button', { name: 'Open entry editor', exact: true }).click()
+    const detail = page.locator('[aria-label="Entry detail"]:visible')
+    const field = detail.locator('textarea').first(); await field.fill('Safe-area draft')
+    if (process.env.SAFE_AREA_SCREENSHOT && name === 'webkit' && scale === 1 && profile.label === 'portrait') await page.screenshot({ path: process.env.SAFE_AREA_SCREENSHOT })
+    const metadataToggle = detail.getByRole('button', { name: /^sections.metadata/ })
+    if (await metadataToggle.getAttribute('aria-expanded') === 'false') await metadataToggle.click()
+    const automation = detail.locator('[id$="-metadata"] input').last()
+    await automation.scrollIntoViewIfNeeded(); await automation.fill('safe-area-fixture')
+    const fieldBox = await automation.boundingBox()
+    assert.ok(fieldBox.x >= profile.left && fieldBox.x+fieldBox.width <= profile.width-profile.right+1 && fieldBox.y+fieldBox.height <= profile.height-insetBottom+1, 'last editor field is reachable inside safe bounds')
+    assert.equal(await field.inputValue(), 'Safe-area draft', 'inset/viewport changes preserve drafts')
+    await page.getByRole('button', { name: '‹ Entries', exact: true }).click()
+    cases++
+   }
+   await page.getByRole('button', { name: 'actions.close', exact: true }).click()
+   assert.equal(await page.locator('html').getAttribute('data-close-attempts'), '1', 'close control remains reachable')
+   assert.deepEqual(errors, [])
+  } finally { await context.close() }
+ }
+ for (const sidebarWidth of (process.env.SAFE_AREA_ONLY ? [] : [320, 440, 560])) for (const scale of [1, 1.25]) {
   const page = await browser.newPage({ viewport: { width: 1200, height: 915 } }); page.setDefaultTimeout(8000)
   const errors = []; page.on('pageerror', error => errors.push(error.message))
   await page.route('http://fixture.local/**', route => route.fulfill({ contentType: 'text/html', body: `<html><head><style>${theme}${css}</style></head><body><div id="root"></div><script>${js}</script></body></html>` }))
