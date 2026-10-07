@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -136,10 +137,12 @@ export default function SearchableSelect(props: SearchableSelectProps) {
   const [search, setSearch] = useState('')
   const [activeIdx, setActiveIdx] = useState(0)
   const [pos, setPos] = useState<{ top: number | null; bottom: number | null; left: number; width: number; maxHeight: number } | null>(null)
+  const listId = useId()
 
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
   useEffect(() => onSearchChange?.(search), [onSearchChange, search])
   const isPortalOwnerActive = useCallback(() => {
     if (!portal || !portalOwnerId) return true
@@ -185,6 +188,36 @@ export default function SearchableSelect(props: SearchableSelectProps) {
     [isMulti, props.value],
   )
 
+  const hasClearOption = !isMulti && 'clearable' in props && props.clearable
+  const clearOptionOffset = hasClearOption ? 1 : 0
+  const clearOptionLabel = 'clearLabel' in props ? props.clearLabel ?? t('clear') : t('clear')
+  const navigableOptions = useMemo<SearchableSelectOption[]>(() => hasClearOption
+    ? [{ value: '', label: clearOptionLabel }, ...filtered]
+    : filtered, [hasClearOption, filtered, clearOptionLabel])
+  const firstEnabledIdx = navigableOptions.findIndex((option) => !option.disabled)
+  const activeOptionIdx = navigableOptions[activeIdx] && !navigableOptions[activeIdx].disabled
+    ? activeIdx : firstEnabledIdx
+  const showSearch = forceSearch || options.length > searchThreshold || search.length > 0
+  const pickerName = ariaLabel ?? placeholder
+
+  const closePicker = useCallback((restoreFocus = false) => {
+    setOpen(false)
+    setSearch('')
+    if (restoreFocus) triggerRef.current?.focus()
+  }, [])
+
+  const openPicker = () => {
+    const selectedIdx = navigableOptions.findIndex((option) => !option.disabled && isSelected(option.value))
+    setActiveIdx(selectedIdx >= 0 ? selectedIdx : firstEnabledIdx)
+    setOpen(true)
+  }
+
+  const focusOption = (index: number) => {
+    setActiveIdx(index)
+    const option = listRef.current?.querySelector<HTMLElement>(`[data-opt-idx="${index}"]`)
+    ;(option ?? listRef.current)?.focus()
+  }
+
   const toggleValue = useCallback(
     (v: string) => {
       if (isMulti) {
@@ -194,19 +227,11 @@ export default function SearchableSelect(props: SearchableSelectProps) {
       } else {
         // Match native <select>: re-picking the selected option is not a change.
         if (v !== props.value) (props.onChange as (value: string) => void)(v)
-        setOpen(false)
-        setSearch('')
+        closePicker(true)
       }
     },
-    [isMulti, props.onChange, props.value],
+    [isMulti, props.onChange, props.value, closePicker],
   )
-
-  const clearValue = useCallback(() => {
-    if (isMulti) return
-    ;(props.onChange as (value: string) => void)('')
-    setOpen(false)
-    setSearch('')
-  }, [isMulti, props.onChange])
 
   // Tracks the last window/visualViewport resize so the outside-click handler
   // can suppress dismissals while the Android soft keyboard is actively
@@ -350,66 +375,109 @@ export default function SearchableSelect(props: SearchableSelectProps) {
     reposition()
   }, [open, portal, isPortalOwnerActive, reposition])
 
-  // Focus search input when opened
+  // Move real DOM focus into the popup, including lists without a search field.
   useEffect(() => {
     if (!open) return
-    const id = requestAnimationFrame(() => searchRef.current?.focus())
+    const id = requestAnimationFrame(() => {
+      const option = listRef.current?.querySelector<HTMLElement>('[role="option"][tabindex="0"]')
+      ;(searchRef.current ?? option ?? listRef.current)?.focus()
+    })
     return () => cancelAnimationFrame(id)
   }, [open])
 
-  // Reset hover index when filter or open state changes
+  // Search starts at the first matching enabled option, rather than the clear row.
   useEffect(() => {
-    setActiveIdx(0)
-  }, [needle, open])
+    setActiveIdx(clearOptionOffset)
+  }, [needle, clearOptionOffset])
 
   // Scroll active option into view
   useEffect(() => {
     if (!open) return
     const el = popoverRef.current?.querySelector(
-      `[data-opt-idx="${activeIdx}"]`,
+      `[data-opt-idx="${activeOptionIdx}"]`,
     ) as HTMLElement | null
     el?.scrollIntoView({ block: 'nearest' })
-  }, [activeIdx, open])
+  }, [activeOptionIdx, open, filtered])
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    if (e.defaultPrevented) return
     if (e.key === 'Escape') {
       if (search) {
         e.preventDefault()
         e.stopPropagation()
         setSearch('')
-        setActiveIdx(0)
+        searchRef.current?.focus()
         return
       }
       if (open) {
         e.preventDefault()
         e.stopPropagation()
-        setOpen(false)
-        setSearch('')
-        triggerRef.current?.focus()
+        closePicker(true)
       }
       return
     }
 
     if (!open) {
-      if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
-        setOpen(true)
+        openPicker()
       }
       return
     }
 
-    if (e.key === 'ArrowDown') {
+    const target = e.target as HTMLElement
+    const fromSearch = target === searchRef.current
+    const fromTrigger = target === triggerRef.current
+    const fromList = !!listRef.current?.contains(target)
+
+    if (e.key === 'Tab') {
+      const tabbable = Array.from(popoverRef.current?.querySelectorAll<HTMLElement>(
+        'input, button:not(:disabled):not([tabindex="-1"]), [tabindex="0"]',
+      ) ?? [])
+      if (fromTrigger || (e.shiftKey ? target === tabbable[0] : target === tabbable.at(-1)) || target === listRef.current) {
+        // Body portals must exit relative to their trigger, not the end of the page.
+        closePicker(true)
+        if (!fromTrigger) {
+          // Browsers differ on whether Tab follows a focus change during keydown.
+          // Choose the next control explicitly instead of relying on that default.
+          e.preventDefault()
+          if (!e.shiftKey) {
+            const pageControls = Array.from(document.querySelectorAll<HTMLElement>(
+              'a[href], button, input, select, textarea, [tabindex], [contenteditable="true"]',
+            )).filter((control) => control.tabIndex >= 0
+              && !control.matches(':disabled')
+              && !control.closest('[inert], [hidden]')
+              && !popoverRef.current?.contains(control)
+              && control.getClientRects().length > 0)
+            const triggerIdx = pageControls.indexOf(triggerRef.current!)
+            if (triggerIdx >= 0) pageControls[triggerIdx + 1]?.focus()
+          }
+        }
+      }
+      return
+    }
+
+    if (!fromSearch && !fromTrigger && !fromList) return
+    if (fromSearch && (e.altKey || e.ctrlKey || e.metaKey)) return
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault()
-      setActiveIdx((i) => Math.min(filtered.length - 1, i + 1))
-    } else if (e.key === 'ArrowUp') {
+      const direction = e.key === 'ArrowDown' ? 1 : -1
+      let next = fromSearch || fromTrigger
+        ? (direction === 1 ? -1 : navigableOptions.length)
+        : activeOptionIdx
+      do { next += direction } while (navigableOptions[next]?.disabled)
+      if (next >= 0 && next < navigableOptions.length) focusOption(next)
+    } else if (fromList && (e.key === 'Home' || e.key === 'End')) {
       e.preventDefault()
-      setActiveIdx((i) => Math.max(0, i - 1))
-    } else if (e.key === 'Enter') {
+      const index = e.key === 'Home' ? firstEnabledIdx : navigableOptions.findLastIndex((option) => !option.disabled)
+      focusOption(index)
+    } else if (fromSearch && e.key === 'Enter') {
       e.preventDefault()
-      const opt = filtered[activeIdx]
-      if (opt && !opt.disabled) toggleValue(opt.value)
-    } else if (e.key === 'Tab') {
-      setOpen(false)
+      const opt = navigableOptions[activeOptionIdx]
+      if (opt && !opt.disabled) {
+        focusOption(activeOptionIdx)
+        toggleValue(opt.value)
+      }
     }
   }
 
@@ -424,7 +492,7 @@ export default function SearchableSelect(props: SearchableSelectProps) {
       const count = (props.value as string[]).length
       return count === 0
         ? { text: placeholder, isPlaceholder: true }
-        : { text: `${count} selected`, isPlaceholder: false }
+        : { text: t('selectedCount', { count, defaultValue: '{{count}} selected' }), isPlaceholder: false }
     }
     return selectedOption
       ? { text: selectedOption.label, isPlaceholder: false }
@@ -432,7 +500,32 @@ export default function SearchableSelect(props: SearchableSelectProps) {
   }
 
   const label = renderLabel()
-  const showSearch = forceSearch || options.length > searchThreshold
+
+  const renderOption = (opt: SearchableSelectOption, index: number) => {
+    const selected = isSelected(opt.value)
+    return (
+      <button
+        key={opt.value}
+        type="button"
+        data-opt-idx={index}
+        disabled={opt.disabled}
+        tabIndex={index === activeOptionIdx ? 0 : -1}
+        className={clsx(styles.option, selected && styles.optionActive, index === activeOptionIdx && styles.optionHover, opt.disabled && styles.optionDisabled)}
+        onClick={() => !opt.disabled && toggleValue(opt.value)}
+        onFocus={() => setActiveIdx(index)}
+        role="option"
+        aria-selected={selected}
+        aria-disabled={opt.disabled || undefined}
+      >
+        <span className={styles.optionCheck} aria-hidden>{selected ? '✓' : ''}</span>
+        {opt.leading && <span className={clsx(styles.optionLeading, leadingClassName)} aria-hidden>{opt.leading}</span>}
+        <span className={styles.optionTextWrap}>
+          <span className={styles.optionLabel}>{opt.label}</span>
+          {opt.sublabel && <span className={styles.optionSublabel}>{opt.sublabel}</span>}
+        </span>
+      </button>
+    )
+  }
 
   const popover = (
     <div
@@ -442,8 +535,11 @@ export default function SearchableSelect(props: SearchableSelectProps) {
       data-spindle-component-portal-owner-active={
         portal && portalOwnerId ? 'true' : undefined
       }
-      role="listbox"
-      aria-multiselectable={isMulti || undefined}
+      onKeyDown={handleKeyDown}
+      onBlur={(event) => {
+        const next = event.relatedTarget as Node | null
+        if (next && !popoverRef.current?.contains(next) && !triggerRef.current?.contains(next)) closePicker()
+      }}
       style={{
         maxHeight: portal && pos ? pos.maxHeight : maxHeight,
         ...(portal && pos
@@ -460,13 +556,13 @@ export default function SearchableSelect(props: SearchableSelectProps) {
             className={styles.searchInput}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            onKeyDown={handleKeyDown}
             placeholder={searchPlaceholder}
             autoComplete="off"
             autoCorrect="off"
             autoCapitalize="none"
             spellCheck={false}
             aria-label={searchPlaceholder}
+            aria-controls={listId}
           />
           {search && (
             <button
@@ -479,97 +575,53 @@ export default function SearchableSelect(props: SearchableSelectProps) {
               }}
               aria-label={t('clearSearch')}
             >
-              <X size={12} />
+              <X size={12} aria-hidden />
             </button>
           )}
         </div>
       )}
-      <div className={styles.optionList}>
-        {!isMulti && 'clearable' in props && props.clearable && (
-          <button
-            type="button"
-            className={clsx(styles.option, props.value === '' && styles.optionActive)}
-            onClick={clearValue}
-          >
-            <span className={styles.optionCheck}>{props.value === '' ? '✓' : ''}</span>
-            <span className={styles.optionLabel}>{props.clearLabel ?? t('clear')}</span>
-          </button>
-        )}
-        {filtered.length === 0 ? (
-          <div className={styles.emptyMessage}>
-            {loading ? loadingMessage : options.length === 0 ? emptyMessage : noResultsMessage}
-          </div>
-        ) : (
-          (() => {
-            let lastGroupKey: string | null = null
-            const nodes: ReactNode[] = []
-            filtered.forEach((opt, i) => {
-              if (hasGroups) {
-                const key = getGroupKey(opt)
-                if (key !== lastGroupKey) {
-                  const headerLabel = key === UNCATEGORIZED_KEY
-                    ? t('uncategorized')
-                    : (opt.group ?? '').trim()
-                  nodes.push(
-                    <div
-                      key={`__group__${key}`}
-                      className={styles.optionGroupHeader}
-                      role="presentation"
-                      aria-hidden
-                    >
-                      {headerLabel}
-                    </div>,
-                  )
-                  lastGroupKey = key
-                }
-              }
-              const selected = isSelected(opt.value)
-              nodes.push(
-                <button
-                  key={opt.value}
-                  type="button"
-                  data-opt-idx={i}
-                  disabled={opt.disabled}
-                  className={clsx(
-                    styles.option,
-                    selected && styles.optionActive,
-                    i === activeIdx && styles.optionHover,
-                    opt.disabled && styles.optionDisabled,
-                  )}
-                  onClick={() => !opt.disabled && toggleValue(opt.value)}
-                  onMouseEnter={() => setActiveIdx(i)}
-                  role="option"
-                  aria-selected={selected}
-                >
-                  <span className={styles.optionCheck}>{selected ? '✓' : ''}</span>
-                  {opt.leading && (
-                    <span className={clsx(styles.optionLeading, leadingClassName)} aria-hidden>
-                      {opt.leading}
-                    </span>
-                  )}
-                  <span className={styles.optionTextWrap}>
-                    <span className={styles.optionLabel}>{opt.label}</span>
-                    {opt.sublabel && (
-                      <span className={styles.optionSublabel}>{opt.sublabel}</span>
-                    )}
-                  </span>
-                </button>,
-              )
-            })
-            return nodes
-          })()
-        )}
-        {(hasMore || (loading && filtered.length > 0)) && onLoadMore && (
-          <button
-            type="button"
-            className={styles.loadMore}
-            onClick={onLoadMore}
-            disabled={loading}
-          >
-            {loading ? loadingMessage : loadMoreLabel}
-          </button>
-        )}
+      <div
+        ref={listRef}
+        id={listId}
+        className={styles.optionList}
+        role="listbox"
+        aria-label={pickerName}
+        aria-multiselectable={isMulti || undefined}
+        aria-busy={loading || undefined}
+        tabIndex={-1}
+      >
+        {hasClearOption && renderOption(navigableOptions[0], 0)}
+        {hasGroups ? (() => {
+          const groups = new Map<string, ReactNode[]>()
+          filtered.forEach((opt, index) => {
+            const key = getGroupKey(opt)
+            if (!groups.has(key)) groups.set(key, [])
+            groups.get(key)!.push(renderOption(opt, index + clearOptionOffset))
+          })
+          return Array.from(groups, ([key, rows]) => {
+            const name = key === UNCATEGORIZED_KEY ? t('uncategorized') : key
+            return <div key={key} className={styles.optionGroup} role="group" aria-label={name}>
+              <div className={styles.optionGroupHeader} aria-hidden>{name}</div>
+              {rows}
+            </div>
+          })
+        })() : filtered.map((opt, index) => renderOption(opt, index + clearOptionOffset))}
       </div>
+      {filtered.length === 0 && (
+        <div className={styles.emptyMessage} role="status">
+          {loading ? loadingMessage : options.length === 0 ? emptyMessage : noResultsMessage}
+        </div>
+      )}
+      {(hasMore || (loading && filtered.length > 0)) && onLoadMore && (
+        <button
+          type="button"
+          className={styles.loadMore}
+          onClick={onLoadMore}
+          disabled={loading}
+        >
+          {loading ? loadingMessage : loadMoreLabel}
+        </button>
+      )}
     </div>
   )
 
@@ -587,11 +639,12 @@ export default function SearchableSelect(props: SearchableSelectProps) {
         disabled={disabled}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? listId : undefined}
         aria-label={ariaLabel}
-        onClick={() => !disabled && setOpen((o) => !o)}
+        onClick={() => { if (!disabled) { if (open) closePicker(); else openPicker() } }}
         onKeyDown={handleKeyDown}
       >
-        {triggerIcon && <span className={styles.triggerIcon}>{triggerIcon}</span>}
+        {triggerIcon && <span className={styles.triggerIcon} aria-hidden>{triggerIcon}</span>}
         {selectedOption?.leading && triggerLabel === undefined && (
           <span className={clsx(styles.triggerLeading, leadingClassName)} aria-hidden>
             {selectedOption.leading}
@@ -614,6 +667,7 @@ export default function SearchableSelect(props: SearchableSelectProps) {
         )}
         <ChevronDown
           size={12}
+          aria-hidden
           className={clsx(styles.chevron, open && styles.chevronOpen)}
         />
       </button>

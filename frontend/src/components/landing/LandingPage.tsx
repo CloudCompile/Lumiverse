@@ -303,7 +303,7 @@ function RecentChatAvatar({ item, variant, eager = false }: RecentChatAvatarProp
 
   if (isGroup) {
     return (
-      <div className={imageClassName}>
+      <div className={imageClassName} aria-hidden="true">
         <div className={clsx(styles.groupMosaic, mosaicClass)}>
           {mosaicIds.map((id) => {
             const char = characters.find((c) => c.id === id)
@@ -332,13 +332,13 @@ function RecentChatAvatar({ item, variant, eager = false }: RecentChatAvatarProp
 
   if (hasPerspectiveStack) {
     return (
-      <div className={clsx(imageClassName, styles.perspectiveStack)}>
+      <div className={clsx(imageClassName, styles.perspectiveStack)} aria-hidden="true">
         {perspectiveLayers.map((layer, index) => (
           <img
             key={layer.id || layer.image_id}
             className={styles.perspectiveLayer}
             src={imagesApi.largeUrl(layer.image_id)}
-            alt={index === perspectiveLayers.length - 1 ? item.character_name : ''}
+            alt=""
             loading={imageLoading}
             decoding={imageDecoding}
             draggable={false}
@@ -354,10 +354,10 @@ function RecentChatAvatar({ item, variant, eager = false }: RecentChatAvatarProp
   }
 
   return (
-    <div className={imageClassName}>
+    <div className={imageClassName} aria-hidden="true">
       <LazyImage
         src={avatarUrl}
-        alt={item.character_name}
+        alt=""
         decoding={imageDecoding}
         loading={imageLoading}
         fallback={
@@ -667,6 +667,7 @@ const ChatCard = memo(function ChatCard({ item, animateEntry, eagerImages, shift
               handleDelete?.()
             }}
             title={deleteTitle}
+            aria-label={`${deleteTitle}: ${displayName}`}
           >
             {shiftPressed ? (
               <EyeOff size={14} strokeWidth={1.5} />
@@ -758,6 +759,7 @@ const ChatListItem = memo(function ChatListItem({ item, animateEntry, eagerImage
             handleDelete?.()
           }}
           title={deleteTitle}
+          aria-label={`${deleteTitle}: ${displayName}`}
         >
           {shiftPressed ? (
             <EyeOff size={14} strokeWidth={1.5} />

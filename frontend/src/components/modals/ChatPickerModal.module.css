@@ -291,6 +291,30 @@
   white-space: nowrap;
 }
 
+.openChatBtn {
+  padding: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.openChatBtn::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.openChatBtn:focus-visible {
+  outline: none;
+}
+
+.openChatBtn:focus-visible::after {
+  outline: 2px solid var(--lumiverse-primary);
+  outline-offset: 2px;
+}
+
 .activeBadge {
   display: inline-flex;
   align-items: center;
@@ -337,6 +361,8 @@
 
 /* ── Context Menu ── */
 .menuBtn {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -371,6 +397,8 @@
 }
 
 .editInput {
+  position: relative;
+  z-index: 1;
   flex: 1;
   background: var(--lumiverse-fill-subtle);
   border: 1px solid var(--lumiverse-border-hover);

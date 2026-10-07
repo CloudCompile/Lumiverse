@@ -774,6 +774,7 @@ export default function WorldBookPanel() {
               <SearchableSelect
                 multi
                 value={globalWorldBooks ?? []}
+                ariaLabel={t('worldBookPanel.addGlobalBooks')}
                 onChange={(ids) => { void setGlobalBooks(ids) }}
                 options={bookPickerOptions}
                 triggerLabel={t('worldBookPanel.add')}
@@ -803,6 +804,7 @@ export default function WorldBookPanel() {
                       className={styles.globalPillRemove}
                       onClick={() => removeGlobalBook(book.id)}
                       title={t('worldBookPanel.removeFromAlwaysActive')}
+                      aria-label={`${t('worldBookPanel.removeFromAlwaysActive')}: ${book.name}`}
                     >
                       <X size={10} />
                     </button>
@@ -821,6 +823,7 @@ export default function WorldBookPanel() {
               <SearchableSelect
                 multi
                 value={globalWorldBooks ?? []}
+                ariaLabel={t('worldBookPanel.addGlobalBooks')}
                 onChange={(ids) => { void setGlobalBooks(ids) }}
                 options={bookPickerOptions}
                 triggerLabel={t('worldBookPanel.add')}
@@ -850,6 +853,7 @@ export default function WorldBookPanel() {
                       className={styles.globalPillRemove}
                       onClick={() => removeGlobalBook(book.id)}
                       title={t('worldBookPanel.removeFromAlwaysActive')}
+                      aria-label={`${t('worldBookPanel.removeFromAlwaysActive')}: ${book.name}`}
                     >
                       <X size={10} />
                     </button>
@@ -882,6 +886,7 @@ export default function WorldBookPanel() {
                 <SearchableSelect
                   multi
                   value={chatWorldBookIds}
+                  ariaLabel={t('worldBookPanel.addChatBooks')}
                   onChange={(ids) => { void handleChatBooksChange(ids) }}
                   options={bookPickerOptions}
                   triggerLabel={t('worldBookPanel.add')}
@@ -914,6 +919,7 @@ export default function WorldBookPanel() {
                       className={styles.chatPillRemove}
                       onClick={() => removeChatBook(book.id)}
                       title={t('worldBookPanel.removeFromChat')}
+                      aria-label={`${t('worldBookPanel.removeFromChat')}: ${book.name}`}
                     >
                       <X size={10} />
                     </button>
@@ -933,6 +939,7 @@ export default function WorldBookPanel() {
                 <SearchableSelect
                   multi
                   value={chatWorldBookIds}
+                  ariaLabel={t('worldBookPanel.addChatBooks')}
                   onChange={(ids) => { void handleChatBooksChange(ids) }}
                   options={bookPickerOptions}
                   triggerLabel={t('worldBookPanel.add')}
@@ -965,6 +972,7 @@ export default function WorldBookPanel() {
                       className={styles.chatPillRemove}
                       onClick={() => removeChatBook(book.id)}
                       title={t('worldBookPanel.removeFromChat')}
+                      aria-label={`${t('worldBookPanel.removeFromChat')}: ${book.name}`}
                     >
                       <X size={10} />
                     </button>

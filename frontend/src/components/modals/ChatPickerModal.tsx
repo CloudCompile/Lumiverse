@@ -309,20 +309,6 @@ export default function ChatPickerModal({
                 key={item.id}
                 className={clsx(styles.card, isActive && styles.cardActive)}
                 style={{ animationDelay: `${Math.min(i * 40, 200)}ms`, zIndex: isMenuOpen ? 10 : undefined }}
-                role="button"
-                tabIndex={isRenaming ? -1 : 0}
-                aria-disabled={isRenaming || isMenuOpen}
-                onClick={() => {
-                  if (!isRenaming && !isMenuOpen) onSelect(item.id)
-                }}
-                onKeyDown={(e) => {
-                  if (e.target !== e.currentTarget) return
-                  if (isRenaming || isMenuOpen) return
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    onSelect(item.id)
-                  }
-                }}
               >
                 <div className={styles.cardHeader}>
                   <div className={styles.cardTitleRow}>
@@ -332,6 +318,7 @@ export default function ChatPickerModal({
                         type="text"
                         className={styles.editInput}
                         value={renameValue}
+                        aria-label={`${t('chatPicker.menuRename')}: ${formatChatName(item)}`}
                         onChange={(e) => setRenameValue(e.target.value)}
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') handleConfirmRename(item.id)
@@ -341,9 +328,14 @@ export default function ChatPickerModal({
                         onClick={(e) => e.stopPropagation()}
                       />
                     ) : (
-                      <span className={styles.cardLabel}>
+                      <button
+                        type="button"
+                        className={clsx(styles.cardLabel, styles.openChatBtn)}
+                        onClick={() => onSelect(item.id)}
+                        disabled={isMenuOpen}
+                      >
                         {formatChatName(item)}
-                      </span>
+                      </button>
                     )}
 
                     {isActive && !isRenaming && (
@@ -373,6 +365,8 @@ export default function ChatPickerModal({
                       openActiveMenu(item.id, e.currentTarget)
                     }}
                     title={t('chatPicker.moreOptions')}
+                    aria-label={`${t('chatPicker.moreOptions')}: ${formatChatName(item)}`}
+                    aria-expanded={isMenuOpen}
                   >
                     <MoreHorizontal size={14} />
                   </button>

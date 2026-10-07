@@ -1613,6 +1613,8 @@
   "worldBookPanel": {
     "alwaysActive": "Always Active",
     "add": "Add",
+    "addGlobalBooks": "Add always-active lorebooks",
+    "addChatBooks": "Add lorebooks to this chat",
     "searchWorldBooks": "Search world books…",
     "noWorldBooksAvailable": "No world books available",
     "removeFromAlwaysActive": "Remove from always active",

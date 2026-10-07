@@ -2646,6 +2646,7 @@ export default function CharacterEditorPage() {
                             onChange={(ids) => { void handleWorldBookIdsChange(ids) }}
                             options={worldBooks.map((wb) => ({ value: wb.id, label: wb.name, group: wb.folder || undefined }))}
                             placeholder={t('characterEditor.addWorldBooks')}
+                            ariaLabel={t('characterEditor.addWorldBooks')}
                             triggerLabel={t('characterEditor.add')}
                             triggerIcon={<Plus size={11} />}
                             searchPlaceholder={t('characterEditor.searchWorldBooks')}

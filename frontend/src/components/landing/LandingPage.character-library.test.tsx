@@ -574,6 +574,22 @@ afterEach(async () => {
 })
 
 describe('LandingPage character library', () => {
+  for (const layout of ['cards', 'compact'] as const) {
+    test(`keeps decorative avatars out of chat names and identifies delete targets in ${layout}`, async () => {
+      storeState = { ...createStoreState(false), landingPageLayoutMode: layout }
+      listRecentGrouped.mockResolvedValue(page([recentChat('character-1', 'Ava')]))
+      const host = await mountLanding()
+      await flush()
+      const chats = host.querySelector('[data-component="LandingPageChats"]')!
+      const image = chats.querySelector('img')!
+      expect(image.getAttribute('alt')).toBe('')
+      expect(image.closest('[aria-hidden="true"]') !== null).toBe(true)
+      const action = chats.querySelector<HTMLButtonElement>(layout === 'cards' ? '.deleteBtn' : '.listDeleteBtn')!
+      expect(action.getAttribute('aria-label')).toBe('Delete chat: Ava')
+      expect(chats.querySelector(layout === 'cards' ? '.cardBtn' : '.listBtn')?.querySelector('.deleteBtn, .listDeleteBtn')).toBeNull()
+    })
+  }
+
   test('opens chat history for forked one-member converted groups', async () => {
     storeState = createStoreState(false)
     listRecentGrouped.mockResolvedValue(page([convertedGroupChat('character-1', 'Ava')]))
@@ -708,7 +724,7 @@ describe('LandingPage character library', () => {
     const restoredHost = await mountLanding()
 
     expect(restoredHost.textContent).toContain('Ava')
-    expect(restoredHost.querySelector('img[alt="Ava"]')?.getAttribute('loading')).toBe('eager')
+    expect(restoredHost.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
     expect(restoredHost.querySelector('.cardEntry')).toBeNull()
     expect(restoredHost.querySelector('[data-entry-mode="chat-return"]')?.classList.contains('routeEntering')).toBe(true)
     expect(restoredHost.querySelector('[data-entry-mode="chat-return"]')?.getAttribute('data-motion-initial')).toBe('{"opacity":0,"y":10,"scale":0.985}')
@@ -749,8 +765,8 @@ describe('LandingPage character library', () => {
     expect(landing?.classList.contains('routeEntering')).toBe(true)
     expect(landing?.getAttribute('data-motion-initial')).toBe('{"opacity":0,"y":10,"scale":0.985}')
     expect(landing?.getAttribute('data-motion-animate')).toBe('{"opacity":1,"y":0,"scale":1}')
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('loading')).toBe('eager')
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('decoding')).toBe('sync')
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('sync')
   })
 
   test('reconciles a restored chat card with character edits before the refresh resolves', async () => {
@@ -785,7 +801,7 @@ describe('LandingPage character library', () => {
 
     expect(countExactText(host, 'Bea')).toBeGreaterThan(0)
     expect(countExactText(host, 'Ava')).toBe(0)
-    expect(host.querySelector('img[alt="Bea"]')?.getAttribute('src')).toBe('/avatar-bea-image.png')
+    expect(host.querySelector('.cardImage img')?.getAttribute('src')).toBe('/avatar-bea-image.png')
 
     await settleDeferred(refresh, page([recentChat('character-1', 'Bea')]))
   })
@@ -830,7 +846,7 @@ describe('LandingPage character library', () => {
 
     expect(countExactText(host, 'Bea')).toBeGreaterThan(0)
     expect(countExactText(host, 'Ava')).toBe(0)
-    expect(host.querySelector('img[alt="Bea"]')?.getAttribute('src')).toBe('/avatar-bea-image.png')
+    expect(host.querySelector('.cardImage img')?.getAttribute('src')).toBe('/avatar-bea-image.png')
     expect(listRecentGrouped).toHaveBeenCalledTimes(2)
 
     await settleDeferred(refresh, page([recentChat('character-1', 'Bea')]))
@@ -982,8 +998,8 @@ describe('LandingPage character library', () => {
     await flush()
 
     expect(host.querySelector('[data-entry-mode="cold-return"]')?.getAttribute('data-motion-initial')).toBe('{"opacity":0}')
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('loading')).toBe('eager')
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('decoding')).toBe('sync')
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('sync')
   })
 
   test('eagerly requests bounded rows but keeps decoding asynchronous in non-macOS Tauri', async () => {
@@ -995,8 +1011,8 @@ describe('LandingPage character library', () => {
     const host = await mountLanding()
     await flush()
 
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('loading')).toBe('eager')
-    expect(host.querySelector('img[alt="Ava"]')?.getAttribute('decoding')).toBe('async')
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('async')
   })
 
   test('keeps the recent-chat gallery compact by default and can expand it', async () => {

@@ -247,6 +247,14 @@
   background: var(--lumiverse-fill-subtle);
 }
 
+.trigger:focus-visible,
+.option:focus-visible,
+.searchClear:focus-visible,
+.loadMore:focus-visible {
+  outline: 2px solid var(--lumiverse-primary);
+  outline-offset: -2px;
+}
+
 .option:hover:not(:disabled) {
   background: var(--lumiverse-fill-subtle);
 }
@@ -301,7 +309,7 @@
   user-select: none;
 }
 
-.optionGroupHeader:not(:first-child) {
+.optionGroup + .optionGroup .optionGroupHeader {
   border-top: 1px solid var(--lumiverse-border);
   margin-top: 4px;
   padding-top: 8px;
