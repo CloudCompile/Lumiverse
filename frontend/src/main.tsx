@@ -6,6 +6,7 @@ import { registerSW } from 'virtual:pwa-register'
 import { getSafeInAppNavigationUrl } from './lib/navigationSafety'
 import { installWindowOpenGuard } from './lib/windowOpenGuard'
 import { computeViewportKeyboardInset } from './lib/viewportKeyboardInset'
+import { usesNativeWidgetTouchScroll } from './lib/spindle/widget-touch-scroll'
 import { installKeyboardFocusReveal } from './lib/keyboardFocusReveal'
 import { rememberRegistration } from './lib/swUpdater'
 import { claimServiceWorkerReload } from './lib/swUpdatePolicy'
@@ -355,6 +356,8 @@ if ((window.navigator as any).standalone === true && navigator.maxTouchPoints > 
 
   document.addEventListener('touchmove', (e) => {
     if (e.touches.length !== 1) return
+    // Only an explicitly opted-in live widget owns its single-finger scrolling.
+    if (usesNativeWidgetTouchScroll(e)) return
     // Let the browser pan the magnified page.
     if (Math.abs((window.visualViewport?.scale ?? 1) - 1) > 0.01) return
 

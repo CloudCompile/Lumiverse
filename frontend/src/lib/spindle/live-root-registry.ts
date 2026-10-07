@@ -135,6 +135,11 @@ export function getLiveRootRecord(
   return null
 }
 
+/** Resolve an exact root without trusting extension-authored DOM attributes. */
+export function getLiveRootRecordAt(root: Element): LiveRootRecord | null {
+  return records.get(root) ?? null
+}
+
 export function getLiveRootRecordExact(
   extensionId: string,
   root: Element,
