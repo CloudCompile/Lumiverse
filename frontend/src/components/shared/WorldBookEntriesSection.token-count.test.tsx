@@ -303,6 +303,70 @@ afterAll(() => {
   }
 })
 
+describe('WorldBookEntriesSection ranked search', () => {
+  async function search(host: HTMLElement, value: string) {
+    const input = host.querySelector<HTMLInputElement>('input[type="search"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+      input.dispatchEvent(new window.Event('input', { bubbles: true }))
+      await flush()
+    })
+    await wait(10)
+  }
+
+  for (const presentation of [undefined, 'workspace'] as const) for (const mobile of [false, true]) {
+    test(`ranks off-page title/key matches and reuses the complete source: ${presentation ?? 'sidebar'}/${mobile ? 'mobile' : 'desktop'}`, async () => {
+      mobileFixture = mobile
+      const data = Array.from({ length: 1107 }, (_, i) => entry(`entry-${i}`, 'A dragon appears in the background.'))
+      data[1105] = { ...data[1105], key: ['dragon'] }
+      data[1106] = { ...data[1106], comment: 'Dragon' }
+      const { root, host } = await render(data, presentation)
+      try {
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(host.querySelector('[data-entry-id="entry-1106"]')).toBeNull()
+        await search(host, 'dragon')
+        expect([...host.querySelectorAll('[data-entry-id]')].slice(0, 2).map(row => row.getAttribute('data-entry-id'))).toEqual(['entry-1106', 'entry-1105'])
+        expect(organizationQueries.slice(-2).map(query => query.offset)).toEqual([0, 1000])
+        expect(organizationQueries.slice(-2).every(query => query.search === undefined)).toBe(true)
+        const calls = listEntryCalls.length
+        click(host, '[aria-label="Next entry page"]'); await wait(10)
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(host.querySelector('[data-entry-id="entry-1106"]')).toBeNull()
+        expect(listEntryCalls.length).toBe(calls)
+        await search(host, 'dragn')
+        expect([...host.querySelectorAll('[data-entry-id]')].map(row => row.getAttribute('data-entry-id'))).toEqual(['entry-1106', 'entry-1105'])
+        expect(listEntryCalls.length).toBe(calls)
+        await search(host, 'no-such-match')
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(0)
+        await search(host, '')
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(organizationQueries.at(-1)).toMatchObject({ limit: 50, offset: 0 })
+      } finally { unmount(root) }
+    })
+  }
+
+  test('search keeps folder, all-of tags and activation type scope through ranking', async () => {
+    const data = Array.from({ length: 107 }, (_, i) => ({ ...entry(`entry-${i}`, 'dragon'), folder: 'Characters', tags: ['a,b', 'Villain'], constant: true }))
+    data.push({ ...entry('wrong-folder'), comment: 'Dragon', folder: 'Locations', tags: ['a,b', 'Villain'], constant: true })
+    data.push({ ...entry('wrong-tag'), comment: 'Dragon', folder: 'Characters', tags: ['a,b'], constant: true })
+    data.push({ ...entry('wrong-type'), comment: 'Dragon', folder: 'Characters', tags: ['a,b', 'Villain'] })
+    data[106] = { ...data[106], comment: 'Dragon' }
+    const { root, host } = await render(data)
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Filter entry tags"]')!
+      await act(async () => { select.value = 'a,b'; select.dispatchEvent(new window.Event('change', { bubbles: true })) })
+      await act(async () => { select.value = 'Villain'; select.dispatchEvent(new window.Event('change', { bubbles: true })) })
+      clickByText(host, 'Constant'); await wait(10)
+      await search(host, 'dragon')
+      expect(host.querySelector('[data-entry-id]')?.getAttribute('data-entry-id')).toBe('entry-106')
+      expect(host.querySelector('[data-entry-id="wrong-folder"], [data-entry-id="wrong-tag"], [data-entry-id="wrong-type"]')).toBeNull()
+      expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', tag: ['a,b', 'Villain'], type: 'constant', limit: 1000, offset: 0 })
+      expect(host.textContent).toContain('107')
+    } finally { unmount(root) }
+  })
+})
+
 describe('WorldBookEntriesSection token-count invalidation', () => {
   test('opens a pending deep-linked entry outside the current server page', async () => {
     const entries = Array.from({ length: 75 }, (_, index) => entry(`entry-${String(index + 1).padStart(2, '0')}`))
