@@ -89,6 +89,7 @@ import type {
 } from '@/types/store'
 import styles from './WorldBookEntriesSection.module.css'
 import { clearSearchOnEscape } from '@/lib/clearableSearch'
+import { loadLorebookSearchEntries } from '@/lib/loadLorebookSearchEntries'
 import { classifyWorldBookEntryMutationError, type WorldBookEntryMutationIssue } from '@/lib/worldBookEntryConflict'
 import { estimateTokens } from '@/lib/tokenEstimate'
 import { scheduleMicrotask } from '@/lib/schedule-microtask'
@@ -802,6 +803,7 @@ export default function WorldBookEntriesSection({
   const selectedBookIdRef = useRef(selectedBookId)
   const requestGenerationRef = useRef(0)
   const entriesAbortRef = useRef<AbortController | null>(null)
+  const loadedSearchScopeRef = useRef<string | null>(null)
   const entryTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({})
   const sectionRef = useRef<HTMLDivElement>(null)
   const entrySearchInputRef = useRef<HTMLInputElement>(null)
@@ -953,22 +955,30 @@ export default function WorldBookEntriesSection({
   const liveRefetchTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const pageSize = entryPageSize === 'all' ? DEFAULT_PAGE_SIZE : entryPageSize
-  // Folder, tag, text and activation filters are applied on the server before paging.
-  // Client-side matches are used only to decorate the returned rows.
-  const orderedEntries = entries
+  // Search ranks the complete organization/type scope before slicing a page.
+  // Ordinary browsing keeps its server pagination and selected sort.
+  const searchCorpusMode = entrySearchFilter.trim().length > 0
   const entrySearchResults = useMemo(
     () => searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex),
     [entries, entrySearchFilter, entrySearchIndex],
   )
   const searchActive = entrySearchResults !== null
-  const queryEntries = orderedEntries
+  const queryEntries = useMemo(
+    () => entrySearchResults?.map((result) => result.entry) ?? entries,
+    [entrySearchResults, entries],
+  )
   const typeCounts = useMemo(() => {
     const counts = { trigger: 0, constant: 0, vector: 0 }
     for (const entry of queryEntries) counts[getEntryType(entry)] += 1
     return counts
   }, [queryEntries])
-  const filteredEntries = queryEntries
-  const entryTotal = sourceEntryTotal
+  const filteredEntries = useMemo(
+    () => searchCorpusMode
+      ? queryEntries.slice((entryPage - 1) * pageSize, entryPage * pageSize)
+      : queryEntries,
+    [searchCorpusMode, queryEntries, entryPage, pageSize],
+  )
+  const entryTotal = searchCorpusMode ? queryEntries.length : sourceEntryTotal
   const entryTotalPages = pageSize ? Math.max(1, Math.ceil(entryTotal / pageSize)) : 1
   const visibleEntries = filteredEntries
   useTokenCountSweep(showTokens ? visibleEntries : [])
@@ -1129,6 +1139,9 @@ export default function WorldBookEntriesSection({
     bookId: string,
     opts?: { silent?: boolean; force?: boolean },
   ) => {
+    const searchScope = JSON.stringify([bookId, entryFolder, entryTags, entryTypeFilter])
+    if (searchCorpusMode && !opts?.force && loadedSearchScopeRef.current === searchScope) return
+    loadedSearchScopeRef.current = null
 
     const requestGeneration = requestGenerationRef.current
     const isCurrent = () => mountedRef.current && selectedBookIdRef.current === bookId && requestGenerationRef.current === requestGeneration
@@ -1139,14 +1152,22 @@ export default function WorldBookEntriesSection({
     if (!silent && isCurrent()) setLoadingEntries(true)
     try {
       const paginatedPageSize = entryPageSize === 'all' ? DEFAULT_PAGE_SIZE : entryPageSize
-      const [res, summary] = await Promise.all([worldBooksApi.listEntries(bookId, {
+      const [res, summary] = await Promise.all([searchCorpusMode
+        ? loadLorebookSearchEntries(pagination => worldBooksApi.listEntries(bookId, {
+            ...pagination,
+            sort_by: 'order',
+            sort_dir: 'asc',
+            folder: entryFolder,
+            tag: entryTags,
+            type: entryTypeFilter === 'all' ? undefined : entryTypeFilter,
+          }, { signal: controller.signal }), controller.signal).then(data => ({ data, total: data.length }))
+        : worldBooksApi.listEntries(bookId, {
             limit: paginatedPageSize,
             offset: (entryPage - 1) * paginatedPageSize,
             sort_by: mapSortForApi(entrySortBy),
             sort_dir: entrySortBy === 'custom' ? 'asc' : entrySortDir,
             folder: entryFolder,
             tag: entryTags,
-            search: entrySearchFilter,
             type: entryTypeFilter === 'all' ? undefined : entryTypeFilter,
           }, { signal: controller.signal }), worldBooksApi.getEntryOrganization(bookId)])
       let nextEntries = res.data
@@ -1162,9 +1183,10 @@ export default function WorldBookEntriesSection({
       if (!isCurrent() || controller.signal.aborted || entriesAbortRef.current !== controller) { if (opts?.force) throw new Error('Reload superseded'); return }
       setEntries(nextEntries)
       setSourceEntryTotal(res.total)
+      loadedSearchScopeRef.current = searchCorpusMode ? searchScope : null
       setOrganization(summary)
       setEntriesError('')
-      if ((entryPage - 1) * paginatedPageSize >= res.total) setEntryPage(Math.max(1, Math.ceil(res.total / paginatedPageSize)))
+      if (!searchCorpusMode && (entryPage - 1) * paginatedPageSize >= res.total) setEntryPage(Math.max(1, Math.ceil(res.total / paginatedPageSize)))
     } catch (error) {
       if (!controller.signal.aborted) { if (isCurrent() && entriesAbortRef.current === controller) setEntriesError('Could not load entries. Retry Refresh.'); throw error }
       if (opts?.force) throw error
@@ -1173,7 +1195,7 @@ export default function WorldBookEntriesSection({
       if (ownsRequest) entriesAbortRef.current = null
       if (!silent && ownsRequest && isCurrent()) setLoadingEntries(false)
     }
-  }, [entryFolder, entryTags, entrySearchFilter, entryTypeFilter, entryPage, entryPageSize, entrySortBy, entrySortDir, active, setEntries])
+  }, [entryFolder, entryTags, searchCorpusMode, entryTypeFilter, entryPage, entryPageSize, entrySortBy, entrySortDir, active, setEntries])
 
   const selectedBookViewPreference = worldBookEntryViewPrefs[selectedBookId]
   const resolvedSelectedBookViewPreference = useMemo(
@@ -1213,7 +1235,7 @@ export default function WorldBookEntriesSection({
   }, [selectedBookId, loadEntries])
 
   // Keep the silent-refetch closure current so the WS subscription (bound once
-  // per book) always refetches the complete client-side search source.
+  // per book) refetches the current server page or complete search scope.
   useEffect(() => {
     liveRefetchRef.current = () => {
       if (!selectedBookId) return

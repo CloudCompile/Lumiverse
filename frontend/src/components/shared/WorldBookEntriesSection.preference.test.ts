@@ -35,6 +35,7 @@ mock.module('@dnd-kit/sortable', () => ({
 mock.module('lucide-react', () => ({
   ArrowDown: noop, ArrowUp: noop, ArrowUpDown: noop, CheckSquare: noop,
   ChevronDown: noop, ChevronRight: noop, Copy: noop, FileText: noop, GripVertical: noop,
+  Files: noop, Folder: noop, FolderOpen: noop,
   Hash: noop, MoreVertical: noop, MoveRight: noop, Plus: noop, Plug: noop,
   Search: noop, Square: noop, Tag: noop, Trash2: noop, X: noop,
   ArrowBigUp: noop, ArrowBigDown: noop, BetweenHorizontalStart: noop,

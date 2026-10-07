@@ -1,5 +1,6 @@
 import { useEffect, useId, useImperativeHandle, useRef, useState, type Ref } from 'react'
 import { createPortal } from 'react-dom'
+import { ChevronRight, Files, Folder, FolderOpen } from 'lucide-react'
 import { ApiError } from '@/api/client'
 import { worldBooksApi } from '@/api/world-books'
 import type { WorldBook, WorldBookEntry, WorldBookEntryBulkActionInput, WorldBookEntryOrganizationSummary } from '@/types/api'
@@ -14,9 +15,9 @@ type Action = 'move' | 'rename' | 'remove' | 'move_folder' | 'add_tags' | 'remov
 export function EntryFolderList({ summary, onOpen }: { summary: WorldBookEntryOrganizationSummary | null; onOpen: (folder?: string) => void }) {
   if (!summary) return <div className={styles.root} role="status">Loading folders…</div>
   return <nav className={styles.root} aria-label="Entry folders">
-    <button type="button" onClick={() => onOpen()}>All entries <b>{summary.total}</b></button>
-    <button type="button" onClick={() => onOpen('')}>Unfiled <b>{summary.unfiled}</b></button>
-    {summary.folders.map(item => <button type="button" key={item.name} onClick={() => onOpen(item.name)}><span>{item.name}</span><b>{item.count}</b></button>)}
+    <button className={styles.folderRow} type="button" onClick={() => onOpen()}><Files className={styles.folderIcon} size={18} aria-hidden="true" /><span>All entries</span><b>{summary.total}</b><ChevronRight className={styles.folderChevron} size={16} aria-hidden="true" /></button>
+    <button className={styles.folderRow} type="button" onClick={() => onOpen('')}><FolderOpen className={styles.folderIcon} size={18} aria-hidden="true" /><span>Unfiled</span><b>{summary.unfiled}</b><ChevronRight className={styles.folderChevron} size={16} aria-hidden="true" /></button>
+    {summary.folders.map(item => <button className={styles.folderRow} type="button" key={item.name} onClick={() => onOpen(item.name)}><Folder className={styles.folderIcon} size={18} aria-hidden="true" /><span>{item.name}</span><b>{item.count}</b><ChevronRight className={styles.folderChevron} size={16} aria-hidden="true" /></button>)}
   </nav>
 }
 

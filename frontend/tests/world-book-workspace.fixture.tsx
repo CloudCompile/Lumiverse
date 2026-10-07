@@ -22,8 +22,9 @@ const t = (key: string, values?: any) => values?.count !== undefined ? `${key} (
 export const useTranslation = () => ({ t, i18n: { language: 'en' } })
 const books = [1, 0, 44, 50, 137].map((count, i) => ({ id: `b${i + 1}`, name: `Fixture book ${count}`, description: '', folder: '', entry_count: count, created_at: 0, updated_at: 0, metadata: {} }))
 const flatBook = new URLSearchParams(location.search).has('flatBook')
+const searchFixture = new URLSearchParams(location.search).has('searchFixture')
 const rows: WorldBookEntry[] = books.flatMap(book => Array.from({ length: book.entry_count }, (_, index) => ({
-  id: `${book.id}-e${index}`, world_book_id: book.id, uid: String(index), key: [], keysecondary: [], comment: `Fixture entry ${index}`, content: 'Controlled fixture content', folder: !flatBook && index % 2 ? 'Characters' : '', tags: flatBook ? [] : index % 2 ? ['a,b', 'Villain'] : ['a,b'], revision: 1,
+  id: `${book.id}-e${index}`, world_book_id: book.id, uid: String(index), key: [], keysecondary: [], comment: searchFixture && index === book.entry_count - 1 ? 'Dragon' : `Fixture entry ${index}`, content: searchFixture ? 'A dragon appears in the background' : 'Controlled fixture content', folder: !flatBook && index % 2 ? 'Characters' : '', tags: flatBook ? [] : index % 2 ? ['a,b', 'Villain'] : ['a,b'], revision: 1,
   position: 0, depth: 4, role: null, order_value: index, priority: index, selective: false, constant: false, disabled: false, group_name: '', group_override: false, group_weight: 100, probability: 100, scan_depth: null, case_sensitive: false, match_whole_words: false, automation_id: null, use_regex: false, prevent_recursion: false, exclude_recursion: false, delay_until_recursion: false, sticky: 0, cooldown: 0, delay: 0, selective_logic: 0, use_probability: false, vectorized: false, vector_index_status: 'not_enabled', vector_indexed_at: null, vector_index_error: null, extensions: {}, created_at: 0, updated_at: 0, outlet_name: null, wi_marker: null, wi_marker_side: null,
 })))
 export const worldBooksApi = {
@@ -44,7 +45,7 @@ function SidebarFixture() {
   const width = Number(new URLSearchParams(location.search).get('sidebarWidth') || 440)
   return <div className={panelStyles.panel} style={{ width: `min(100%, ${width}px)`, height: '100%' }}>
     <div ref={scrollRef} className={panelStyles.panelScroll} data-sidebar-scroll>
-      <WorldBookEntriesSection books={books} selectedBookId="b3" editorDensity="compact" scrollContainerRef={scrollRef} />
+      <WorldBookEntriesSection books={books} selectedBookId={searchFixture ? 'b5' : 'b3'} editorDensity="compact" scrollContainerRef={scrollRef} />
     </div>
   </div>
 }
