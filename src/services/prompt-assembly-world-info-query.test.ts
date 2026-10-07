@@ -341,4 +341,39 @@ describe("world-book vector query scope", () => {
     expect(actual.queryPreview).toBe(reference.text);
     expect(actual.queryScope.tokenTruncated).toBe(reference.truncated);
   });
+
+  test("leaves scan-excluded text out of the vector query", async () => {
+    const result = await buildWorldInfoVectorQuery(
+      [
+        message(0, "We ride north. <wi-exclude>Tracker: Zebulon</wi-exclude>"),
+        message(1, '<div class="tracker" wi-exclude>Off-scene: Mordecai</div>'),
+        message(2, "The gate opens."),
+      ],
+      null,
+      null,
+    );
+
+    expect(result.queryPreview).toContain("We ride north.");
+    expect(result.queryPreview).toContain("The gate opens.");
+    expect(result.queryPreview).not.toMatch(/Zebulon|Mordecai|Tracker/);
+    expect(result.queryScope.visibleMessagesAvailable).toBe(2);
+    expect(result.queryScope.messagesSelected).toBe(2);
+  });
+
+  test("keeps marker-excluded text out of long plain-text messages", async () => {
+    const result = await buildWorldInfoVectorQuery(
+      [
+        message(
+          0,
+          `${"The caravan rolls on. ".repeat(1_200)}!--WI_EXCLUDE_START--! Tracker: Zebulon !--WI_EXCLUDE_END--!`,
+        ),
+      ],
+      null,
+      null,
+    );
+
+    expect(result.queryScope.tokenTruncated).toBe(true);
+    expect(result.queryPreview).toContain("The caravan rolls on.");
+    expect(result.queryPreview).not.toContain("Zebulon");
+  });
 });

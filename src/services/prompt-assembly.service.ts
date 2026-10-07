@@ -61,6 +61,7 @@ import {
   supportsClaudeOpusXhigh,
 } from "../utils/claude-model";
 import { createActivationInputSnapshot } from "../utils/regex-activation-inputs";
+import { maskWorldInfoScanExclusions } from "../utils/world-info-scan-exclusion";
 import {
   activateWorldInfo,
   applyWorldInfoGroupLogic,
@@ -5164,9 +5165,14 @@ function selectWorldInfoVectorQueryMessages(
   messages: Message[],
   globalScanDepth: number | null,
 ): { visibleMessages: Message[]; queryMessages: Message[] } {
-  const visibleMessages = messages.filter(
-    (m) => !m.extra?.hidden && m.content.trim().length > 0,
-  );
+  // The vector query is a World Info scan input, so it honours scan-exclusion markup.
+  const visibleMessages: Message[] = [];
+  for (const message of messages) {
+    if (message.extra?.hidden) continue;
+    const content = maskWorldInfoScanExclusions(message.content);
+    if (content.trim().length === 0) continue;
+    visibleMessages.push(content === message.content ? message : { ...message, content });
+  }
   return {
     visibleMessages,
     queryMessages: globalScanDepth === null
