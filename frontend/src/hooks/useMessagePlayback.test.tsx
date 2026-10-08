@@ -128,6 +128,55 @@ describe('message TTS button with default connection', () => {
     expect(requests[1].path).toBe('/api/v1/tts/save-message-audio')
   })
 
+  test.each([
+    { provider: 'google_tts', model: 'gemini-3.8-flash-tts' },
+    { provider: 'google_vertex_tts', model: 'gemini-3.1-flash-tts-preview' },
+    { provider: 'openrouter_tts', model: 'google/gemini-3.8-flash-tts' },
+  ])('$provider sends future cues and trailing dialogue in the character voice', ({ provider, model }) => {
+    useStore.setState({
+      ttsProfiles: [{ ...defaultProfile, provider, model, voice: 'Kore' }],
+      activeChatMetadata: { voiceOverrides: {
+        characters: { alice: { connectionId: 'default', voice: 'Kore' } },
+        narrator: { connectionId: 'narrator', voice: 'Puck' },
+      } },
+    })
+    const plan = planMessagePlayback({
+      messageName: 'Alice', messageIsUser: false,
+      messageContent: '<div><font color="red"><span>"First sentence." "Like a delivery guy. <brand new cue> Still talking."</span></font></div>',
+    })
+    expect(plan).toEqual([{
+      text: 'First sentence. Like a delivery guy. <brand new cue> Still talking.',
+      voice: { connectionId: 'default', voice: 'Kore', parameters: undefined },
+    }])
+  })
+
+  test('plain TTS strips cues while keeping the rest of the message', () => {
+    expect(planMessagePlayback({
+      messageName: 'Alice', messageIsUser: false,
+      messageContent: '"Before <giggle> after the cue."',
+    })).toEqual([{ text: 'Before after the cue.', voice: { connectionId: 'default', voice: '' } }])
+  })
+
+  test('preserves cues only for Gemini when speech and narration use different providers', () => {
+    useStore.setState({
+      ttsProfiles: [
+        { ...defaultProfile, provider: 'google_tts', model: 'gemini-3.8-flash-tts', voice: 'Kore' },
+        { ...defaultProfile, id: 'narrator', is_default: false },
+      ],
+      activeChatMetadata: { voiceOverrides: {
+        characters: { alice: { connectionId: 'default', voice: 'Kore' } },
+        narrator: { connectionId: 'narrator', voice: 'alloy' },
+      } },
+    })
+    expect(planMessagePlayback({
+      messageName: 'Alice', messageIsUser: false,
+      messageContent: 'Narration <new cue> continues. "Dialogue <giggle> continues."',
+    })).toEqual([
+      { text: 'Narration continues.', voice: { connectionId: 'narrator', voice: 'alloy', parameters: undefined } },
+      { text: 'Dialogue <giggle> continues.', voice: { connectionId: 'default', voice: 'Kore', parameters: undefined } },
+    ])
+  })
+
   test('a narrator override does not require a speech override', async () => {
     useStore.setState({ activeChatMetadata: { voiceOverrides: { narrator: { connectionId: 'narrator', voice: 'Kore' } } } })
     await clickAndFlush(mount())

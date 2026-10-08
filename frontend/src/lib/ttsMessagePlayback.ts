@@ -18,7 +18,7 @@ import { useStore } from '@/store'
 import { ttsApi } from '@/api/tts'
 import { audioApi } from '@/api/audio'
 import { markFreshlyAttached } from '@/lib/ttsPersistence'
-import { sanitizeForTts, parseSegments } from '@/lib/speechDetection'
+import { sanitizeForTts, parseSegments, stripTtsAudioCues } from '@/lib/speechDetection'
 import { synthesizeTtsSegments, shouldUseStreamingEndpoint, type SynthesizedTtsSegment } from '@/lib/ttsSynthesis'
 import {
   resolveMessageVoices,
@@ -38,6 +38,15 @@ const MAX_CONCURRENT_SYNTH = 3
 interface PlanItem {
   text: string
   voice: VoiceRef
+}
+
+function voiceSupportsAudioCues(voice: VoiceRef | null, profiles: TtsConnectionProfile[]): boolean {
+  const profile = profiles.find((candidate) => candidate.id === voice?.connectionId)
+  return !!profile && (
+    profile.provider === 'google_tts'
+    || profile.provider === 'google_vertex_tts'
+    || (profile.provider === 'openrouter_tts' && /^google\/gemini-/i.test(profile.model))
+  )
 }
 
 /**
@@ -61,7 +70,11 @@ export function planMessagePlayback(args: {
     ttsProfiles: state.ttsProfiles,
   })
 
-  const cleaned = sanitizeForTts(args.messageContent)
+  const speechSupportsCues = voiceSupportsAudioCues(voices.speech, state.ttsProfiles)
+  const narrationSupportsCues = voiceSupportsAudioCues(voices.narration, state.ttsProfiles)
+  const cleaned = sanitizeForTts(args.messageContent, {
+    preserveAudioCues: speechSupportsCues || narrationSupportsCues,
+  })
   if (!cleaned) return []
   const segments = parseSegments(cleaned, voiceSettings.speechDetectionRules)
 
@@ -74,11 +87,14 @@ export function planMessagePlayback(args: {
     if (seg.action === 'skip') continue
     const voice = seg.action === 'narration' ? voices.narration : voices.speech
     if (!voice) continue
+    const supportsCues = seg.action === 'narration' ? narrationSupportsCues : speechSupportsCues
+    const text = supportsCues ? seg.text : stripTtsAudioCues(seg.text)
+    if (!text) continue
     const last = resolved[resolved.length - 1]
     if (last && voiceCoalesceKey(last.voice) === voiceCoalesceKey(voice)) {
-      last.text += ' ' + seg.text
+      last.text += ' ' + text
     } else {
-      resolved.push({ text: seg.text, voice })
+      resolved.push({ text, voice })
     }
   }
 
