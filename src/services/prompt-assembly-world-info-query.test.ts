@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 
 import { initMacros } from "../macros";
 import type { MacroEnv } from "../macros";
 import type { Message } from "../types/message";
+import { resolveAndSanitizeForVectorization } from "./vectorization-content.service";
 import {
   __worldInfoVectorQueryTest,
   buildWorldInfoVectorQuery,
@@ -187,6 +189,14 @@ describe("world-book vector query scope", () => {
     }> = [
       {
         messages: [
+          message(0, "<think>private</think>"),
+          message(1, "visible"),
+          message(2, "<reasoning>unfinished"),
+        ],
+        depth: null,
+      },
+      {
+        messages: [
           message(0, `old ${"a".repeat(30_000)}`),
           message(1, "<think>private chain</think>kept"),
           message(2, "<details><summary>meta</summary>inside</details>tail"),
@@ -358,6 +368,64 @@ describe("world-book vector query scope", () => {
     expect(result.queryPreview).not.toMatch(/Zebulon|Mordecai|Tracker/);
     expect(result.queryScope.visibleMessagesAvailable).toBe(2);
     expect(result.queryScope.messagesSelected).toBe(2);
+  });
+
+  test("keeps canonical content and literal provenance together until formatting", () => {
+    const content = "Literal: {{user}} <wi-exclude>Off-scene: Zebulon</wi-exclude>";
+    const hash = createHash("sha256").update(content).digest("hex");
+    const source = message(0, content, { macro_literal_braces: { [hash]: [9, 10, 15, 16] } });
+    const { queryMessages } = __worldInfoVectorQueryTest.selectMessages([source], null);
+
+    expect(queryMessages).toHaveLength(1);
+    const selected = queryMessages[0];
+    const selectedHash = createHash("sha256").update(selected.content).digest("hex");
+    expect(selected.extra.macro_literal_braces[selectedHash]).toEqual([9, 10, 15, 16]);
+    expect(selected.content).toBe(source.content);
+    expect(source.swipes[0]).toBe(content);
+  });
+
+  for (const [kind, tracker] of [
+    ["markers", "!--WI_EXCLUDE_START--!Off-scene: Zebulon!--WI_EXCLUDE_END--!"],
+    ["inline element", "<span wi-exclude>Off-scene: Zebulon</span>"],
+    ["tag", "<wi-exclude>Off-scene: Zebulon</wi-exclude>"],
+  ] as const) {
+    test(`excludes ${kind} emitted by macros before vector sanitization`, async () => {
+      initMacros();
+      const env = macroEnv();
+      env.variables.chat.set("tracker", tracker);
+      const source = message(0, "We ride north. {{getchatvar::tracker}} The gate opens.");
+      const result = await buildWorldInfoVectorQuery([source], null, env);
+
+      expect(result.queryPreview).toContain("We ride north.");
+      expect(result.queryPreview).toContain("The gate opens.");
+      expect(result.queryPreview).not.toMatch(/Zebulon|Off-scene|WI_EXCLUDE/);
+      expect(source.content).toBe("We ride north. {{getchatvar::tracker}} The gate opens.");
+    });
+  }
+
+  test("does not execute macros in excluded source or affect chat-memory sanitization", async () => {
+    initMacros();
+    const env = macroEnv();
+    const source = message(0, "Road. <span wi-exclude>{{setchatvar::owned::yes}}Zebulon</span>");
+    const result = await buildWorldInfoVectorQuery([source], null, env);
+    expect(result.queryPreview).toContain("Road.");
+    expect(result.queryPreview).not.toContain("Zebulon");
+    expect(env.variables.chat.has("owned")).toBe(false);
+    expect(await resolveAndSanitizeForVectorization("Road. <span wi-exclude>Zebulon</span>", null))
+      .toContain("Zebulon");
+  });
+
+  test("does not build a query from wholly excluded macro output", async () => {
+    initMacros();
+    for (const tracker of [
+      "!--WI_EXCLUDE_START--!Off-scene: Zebulon!--WI_EXCLUDE_END--!",
+      "<span wi-exclude>Off-scene: Zebulon</span>",
+    ]) {
+      const env = macroEnv();
+      env.variables.chat.set("tracker", tracker);
+      const result = await buildWorldInfoVectorQuery([message(0, "{{getchatvar::tracker}}")], null, env);
+      expect(result.queryPreview).toBe("");
+    }
   });
 
   test("keeps marker-excluded text out of long plain-text messages", async () => {

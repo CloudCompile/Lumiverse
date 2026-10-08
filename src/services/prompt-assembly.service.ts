@@ -5171,7 +5171,9 @@ function selectWorldInfoVectorQueryMessages(
     if (message.extra?.hidden) continue;
     const content = maskWorldInfoScanExclusions(message.content);
     if (content.trim().length === 0) continue;
-    visibleMessages.push(content === message.content ? message : { ...message, content });
+    // Formatting must read the original text with its saved literal provenance.
+    // Mask only after that protection is restored, immediately before evaluation.
+    visibleMessages.push(message);
   }
   return {
     visibleMessages,
@@ -5190,8 +5192,11 @@ async function formatWorldInfoVectorQueryMessage(
     stripReasoningTags(message.content),
     env,
     reasoningStrip,
+    maskWorldInfoScanExclusions,
   );
-  return `[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitized}`;
+  return sanitized.trim()
+    ? `[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitized}`
+    : "";
 }
 
 async function buildWorldInfoVectorQueryTextReference(
@@ -5205,7 +5210,7 @@ async function buildWorldInfoVectorQueryTextReference(
     ),
   );
   return truncateToContextSizeWithStatus(
-    parts.join("\n").trim(),
+    parts.filter(Boolean).join("\n").trim(),
     WORLD_INFO_VECTOR_QUERY_MAX_TOKENS,
   );
 }
@@ -5214,10 +5219,11 @@ const DEFAULT_REASONING_OPEN_TAG_RE = /<(?:think|thinking|reasoning)>/i;
 const HTML_LIKE_VECTOR_HINT_RE = /<\s*\/?\s*[a-zA-Z]/;
 
 function worldInfoVectorMessageHasMacroHints(message: Message): boolean {
-  if (contentHasMacroHints(message.content)) return true;
+  const content = maskWorldInfoScanExclusions(message.content);
+  if (contentHasMacroHints(content)) return true;
   return (
-    DEFAULT_REASONING_OPEN_TAG_RE.test(message.content) &&
-    contentHasMacroHints(stripReasoningTags(message.content))
+    DEFAULT_REASONING_OPEN_TAG_RE.test(content) &&
+    contentHasMacroHints(stripReasoningTags(content))
   );
 }
 
@@ -5283,18 +5289,19 @@ function normalizePlainVectorQuerySuffix(
 
 function buildPlainVectorQueryMessageSuffix(
   message: Message,
+  content: string,
   maxChars: number,
   reasoningStrip?: SanitizeOptions,
 ): { part: string; truncated: boolean } | null {
   if (
-    message.content.length <= maxChars ||
-    !hasPlainVectorSuffix(message.content, reasoningStrip)
+    content.length <= maxChars ||
+    !hasPlainVectorSuffix(content, reasoningStrip)
   ) {
     return null;
   }
 
   const normalized = normalizePlainVectorQuerySuffix(
-    message.content,
+    content,
     maxChars,
   );
   if (normalized.fillsLimit) {
@@ -5341,6 +5348,7 @@ async function buildWorldInfoVectorQueryTextBounded(
     }
     const messageSuffix = buildPlainVectorQueryMessageSuffix(
       queryMessages[index],
+      maskWorldInfoScanExclusions(queryMessages[index].content),
       remainingChars,
       reasoningStrip,
     );
@@ -5357,8 +5365,9 @@ async function buildWorldInfoVectorQueryTextBounded(
         env,
         reasoningStrip,
       );
-    reverseParts.push(part);
     firstIncludedIndex = index;
+    if (!part) continue;
+    reverseParts.push(part);
     suffix = suffix ? `${part}\n${suffix}` : part;
     if (suffix.trim().length >= maxChars) break;
   }
@@ -5398,6 +5407,7 @@ export async function buildWorldInfoVectorQuery(
 
 export const __worldInfoVectorQueryTest = {
   buildReference: buildWorldInfoVectorQueryTextReference,
+  selectMessages: selectWorldInfoVectorQueryMessages,
 };
 
 function resolveWorldInfoVectorSettings(
