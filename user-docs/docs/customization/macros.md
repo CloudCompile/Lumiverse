@@ -52,6 +52,7 @@ Current time: 14:30 on Wednesday.
 | **Logic** | `{{switch}}`, `{{case}}`, `{{default}}`, `{{and}}`, `{{not}}`, `{{matches}}` | [Logic macros](../presets/macros-reference.md#logic-comparisons) |
 | **Random** | `{{random::1::100}}`, `{{pick::a::b::c}}`, `{{roll::2d6}}` | [Entropy macros](../presets/macros-reference.md#random-entropy) |
 | **Variables** | `{{.var}}` (local), `{{@var}}` (chat-persisted), `{{$var}}` (global) | [Variable macros](../presets/macros-reference.md#variables) |
+| **JSON** | `{{jsonGet}}`, `{{jsonSet}}`, `{{jsonBlock}}`, `{{getchatvarkey::state::party[0].hp}}` | [JSON macros](../presets/macros-reference.md#json) |
 | **Prompt Variables** | `{{var::tone}}`, `{{varDefault::tone}}` | [Prompt variable macros](../presets/macros-reference.md#prompt-variables-preset-inputs) |
 | **Conditionals** | `{{if .var == 5}}...{{elseif::...}}...{{else}}...{{/if}}`, `{{unless}}` | [Core macros](../presets/macros-reference.md#core-macros) |
 | **Memory & Retrieval** | `{{memories}}`, `{{databank}}`, `{{entities}}` | [Memory macros](../presets/macros-reference.md#memory) |

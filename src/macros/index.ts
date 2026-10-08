@@ -27,6 +27,7 @@ import { registerChatMacros } from "./definitions/conversation";
 import { registerTimeMacros } from "./definitions/temporal";
 import { registerRandomMacros } from "./definitions/entropy";
 import { registerVariableMacros } from "./definitions/vars";
+import { registerJsonMacros } from "./definitions/json";
 import { registerStateMacros } from "./definitions/runtime";
 import { registerReasoningMacros } from "./definitions/cot";
 import { registerLumiaMacros } from "./definitions/lumia";
@@ -63,6 +64,7 @@ export function initMacros(): void {
   registerTimeMacros();
   registerRandomMacros();
   registerVariableMacros();
+  registerJsonMacros();
   registerStateMacros();
   registerReasoningMacros();
   registerLumiaMacros();

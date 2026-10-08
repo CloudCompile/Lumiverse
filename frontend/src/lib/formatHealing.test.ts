@@ -20,6 +20,13 @@ describe('healFormattingArtifacts', () => {
       'Use this exactly:\n```json\n{ "example": "* softly*" }\n```\n\nThen *softly*.',
     )
   })
+
+  test('leaves valid <json> blocks untouched while healing surrounding prose', () => {
+    const block = '<json>{"say": " padded ", "act": "* softly*"}</json>'
+    expect(healFormattingArtifacts(`Then * softly*. ${block}`)).toBe(`Then *softly*. ${block}`)
+    // Not JSON, so it is ordinary prose.
+    expect(healFormattingArtifacts('<json>" padded " text</json>')).toBe('<json>"padded" text</json>')
+  })
 })
 
 test('preserves adjacent HTML buttons with an empty conditional class', () => {

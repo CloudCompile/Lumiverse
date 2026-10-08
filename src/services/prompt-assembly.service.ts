@@ -54,6 +54,8 @@ import {
 } from "../macros";
 import type { AstNode, MacroEnv } from "../macros/types";
 import { parse } from "../macros/MacroParser";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
 import { readMessageRevision } from "../utils/message-revision";
 import {
@@ -936,12 +938,14 @@ export async function resolvePromptMacrosAfterRegexPass(
   result: LlmMessage[],
   macroEnv: MacroEnv,
 ): Promise<void> {
+  // Valid <json> blocks stay verbatim in every message: whatever the first
+  // pass or a regex script left in a block must not be expanded or healed here.
   for (let i = 0; i < result.length; i++) {
     const msg = result[i];
     if (typeof msg.content === "string") {
       if (!msg.content.includes("{{") && !msg.content.includes("<")) continue;
-      const resolved = healFormattingArtifacts(
-        (await evaluate(msg.content, macroEnv, registry)).text,
+      const resolved = await withJsonBlocksProtected(msg.content, macroEnv, async (protectedContent) =>
+        healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
       );
       if (resolved !== msg.content) {
         result[i] = { ...msg, content: resolved };
@@ -956,8 +960,8 @@ export async function resolvePromptMacrosAfterRegexPass(
       msg.content.map(async (part: any) => {
         if (part.type !== "text") return part;
         if (!part.text.includes("{{") && !part.text.includes("<")) return part;
-        const text = healFormattingArtifacts(
-          (await evaluate(part.text, macroEnv, registry)).text,
+        const text = await withJsonBlocksProtected(part.text, macroEnv, async (protectedContent) =>
+          healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
         );
         if (text !== part.text) changed = true;
         return text !== part.text ? { ...part, text } : part;
@@ -3377,15 +3381,17 @@ export async function assemblePrompt(
         // alloc) when no markers are present. This mirrors the evaluator's own
         // fast-path but avoids the function-call overhead and 4 string scans
         // that evaluate() performs before reaching its early return.
-        const rawContent = msg.content;
+        const rawContent = shieldMessageLiterals(msg.content, msg);
         const needsEval =
           rawContent.includes("{{") ||
           rawContent.includes("<USER>") ||
           rawContent.includes("<BOT>") ||
           rawContent.includes("<CHAR>");
         const visibleResolvedContent = needsEval
-          ? healFormattingArtifacts(
-              (await evaluateForPromptAssembly(rawContent, macroEnv)).text,
+          ? await withJsonBlocksProtected(rawContent, macroEnv, async (protectedContent) =>
+              healFormattingArtifacts(
+                (await evaluateForPromptAssembly(protectedContent, macroEnv)).text,
+              ),
             )
           : rawContent;
         const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
@@ -5189,7 +5195,7 @@ async function formatWorldInfoVectorQueryMessage(
   reasoningStrip?: SanitizeOptions,
 ): Promise<string> {
   const sanitized = await resolveAndSanitizeForVectorization(
-    stripReasoningTags(message.content),
+    stripReasoningTags(shieldMessageLiterals(message.content, message)),
     env,
     reasoningStrip,
     maskWorldInfoScanExclusions,
@@ -6176,7 +6182,7 @@ async function buildQueryText(
     case "last_user_message": {
       const lastUser = [...visibleMessages].reverse().find((m) => m.is_user);
       if (!lastUser) return "";
-      const sanitized = await resolveAndSanitizeForVectorization(lastUser.content, env, reasoningStrip);
+      const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(lastUser.content, lastUser), env, reasoningStrip);
       return truncateToContextSize(
         `[USER | ${lastUser.name}]: ${sanitized}`,
         settings.queryMaxTokens,
@@ -6185,7 +6191,7 @@ async function buildQueryText(
     case "weighted_recent": {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async (m) => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       if (parts.length > 0) parts.push(parts[parts.length - 1]);
@@ -6198,7 +6204,7 @@ async function buildQueryText(
     default: {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async (m) => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       return truncateToContextSize(
@@ -8056,8 +8062,8 @@ async function onelinerImpersonation(
       throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
-    const visibleResolvedContent = healFormattingArtifacts(
-      (await evaluate(msg.content, macroEnv, registry)).text,
+    const visibleResolvedContent = await withJsonBlocksProtected(shieldMessageLiterals(msg.content, msg), macroEnv, async (protectedContent) =>
+      healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
     );
     const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
     result.push(
@@ -8432,7 +8438,12 @@ async function legacyAssembly(
     } else if (signal?.aborted) {
       throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
-    const visibleResolved = healFormattingArtifacts(await resolveMacros(m.content));
+    // Without an env no macro runs, and healing skips valid blocks itself.
+    const visibleResolved = macroEnv
+      ? await withJsonBlocksProtected(shieldMessageLiterals(m.content, m), macroEnv, async (protectedContent) =>
+          healFormattingArtifacts(await resolveMacros(protectedContent)),
+        )
+      : healFormattingArtifacts(m.content);
     const resolved = appendAssociativeRegexContext(visibleResolved, m);
     const attachments = attachmentsForContext(m, legacyGeneratedImageContextPolicy);
     if (m.extra?.image_gen && resolved.trim().length === 0 && attachments.length === 0) {
