@@ -3368,6 +3368,7 @@ async function runGeneration(
     cotDelimiters,
     cotAutoParse,
   );
+  let hasDelimitedReasoning = false;
 
   function emitContentToken(text: string) {
     if (!text) return;
@@ -3389,8 +3390,13 @@ async function runGeneration(
 
   function processContentToken(token: string, receivedAt?: number) {
     const parsed = cotParser.push(token);
-    if (parsed.reasoning) emitReasoningToken(parsed.reasoning);
-    if (parsed.content && receivedAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
+    if (parsed.reasoning) {
+      if (receivedAt != null) hasDelimitedReasoning = true;
+      emitReasoningToken(parsed.reasoning);
+    }
+    // Some providers send structural whitespace in content while they are
+    // still reasoning. Start response throughput when visible text arrives.
+    if (/\S/.test(parsed.content) && receivedAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
       poolEntry.firstContentTokenAt = receivedAt;
     }
     if (parsed.content) emitContentToken(parsed.content);
@@ -3398,8 +3404,11 @@ async function runGeneration(
 
   function flushCotBuffers() {
     const parsed = cotParser.flush();
-    if (parsed.reasoning) emitReasoningToken(parsed.reasoning);
-    if (parsed.content && lastProviderContentAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
+    if (parsed.reasoning) {
+      if (lastProviderContentAt != null) hasDelimitedReasoning = true;
+      emitReasoningToken(parsed.reasoning);
+    }
+    if (/\S/.test(parsed.content) && lastProviderContentAt != null && poolEntry && poolEntry.firstContentTokenAt == null) {
       poolEntry.firstContentTokenAt = lastProviderContentAt;
     }
     if (parsed.content) emitContentToken(parsed.content);
@@ -3909,12 +3918,17 @@ async function runGeneration(
             cotDelimiters,
           );
           if (extracted.reasoning) {
+            hasDelimitedReasoning = true;
             fullContent = extracted.cleaned;
             fullReasoning =
               (fullReasoning ? fullReasoning + "\n" : "") + extracted.reasoning;
           }
         }
       }
+
+      // Throughput counts provider-produced response text, before authored
+      // prefill, tail trimming, regex rewrites, or formatting can affect it.
+      const responseContentForMetrics = fullContent.slice(assistantPrefillContentLength);
 
       if (useStreaming && trimIncompleteWords) {
         fullContent = trimIncompleteStreamTail(fullContent);
@@ -4146,19 +4160,47 @@ async function runGeneration(
 
         // ── Generation metrics (tokenCount, TTFT, TPS) ───────────────────
         const finalPoolEntry = pool.getPoolEntry(generationId);
+        let calculatedMessageTokenCount: number | undefined;
         let calculatedResponseTokenCount: number | undefined;
+        const tokenCountOptions = {
+          hasReasoning: !!(
+            fullReasoning || finalPoolEntry?.reasoning ||
+            nativeThinkingBlocks?.length || nativeReasoningDetails?.length
+          ),
+          hasDelimitedReasoning,
+          providerRaw: streamUsage?.provider_raw,
+        };
         const providerTokenCounts = resolveGenerationTokenCounts(
           streamUsage?.completion_tokens,
+          undefined,
+          tokenCountOptions,
         );
-        // Provider completion usage is authoritative. Only pay the cost of
-        // tokenizing the finalized message when the provider omitted it.
+        // Preserve the existing final-report fallback: count the finalized
+        // message, including authored prefill and response transformations.
         if (providerTokenCounts.messageTokenCount == null && fullContent.length > 0) {
           try {
-            calculatedResponseTokenCount =
-              (await tokenizerSvc.countForModel(model, fullContent)) ??
-              undefined;
+            calculatedMessageTokenCount =
+              (await tokenizerSvc.countForModel(model, fullContent)) ?? undefined;
           } catch {
-            calculatedResponseTokenCount = undefined;
+            calculatedMessageTokenCount = undefined;
+          }
+        }
+
+        // TPS counts only provider-produced visible text when usage cannot
+        // separate reasoning. Reuse the local count when both texts match.
+        if (
+          useStreaming && providerTokenCounts.responseTokenCount == null &&
+          /\S/.test(responseContentForMetrics)
+        ) {
+          if (providerTokenCounts.messageTokenCount == null && responseContentForMetrics === fullContent) {
+            calculatedResponseTokenCount = calculatedMessageTokenCount;
+          } else {
+            try {
+              calculatedResponseTokenCount =
+                (await tokenizerSvc.countForModel(model, responseContentForMetrics)) ?? undefined;
+            } catch {
+              calculatedResponseTokenCount = undefined;
+            }
           }
         }
         const {
@@ -4166,7 +4208,11 @@ async function runGeneration(
           responseTokenCount,
         } = resolveGenerationTokenCounts(
           streamUsage?.completion_tokens,
-          calculatedResponseTokenCount,
+          {
+            messageTokenCount: calculatedMessageTokenCount,
+            responseTokenCount: calculatedResponseTokenCount,
+          },
+          tokenCountOptions,
         );
 
         let generationMetrics:

@@ -9,9 +9,11 @@ import { INTERNAL_PRESET_METADATA_KEY } from '../spindle/preset-metadata-context
 import * as chats from "./chats.service";
 import * as connections from "./connections.service";
 import * as secrets from "./secrets.service";
+import * as settings from "./settings.service";
 import * as pool from "./generation-pool.service";
 import * as presets from "./presets.service";
 import * as tokenizer from "./tokenizer.service";
+import * as regexScripts from "./regex-scripts.service";
 import { dryRunGeneration, startGeneration, stopAllGenerations, stopGenerationSweep } from "./generate.service";
 
 const userId = "provider-outcomes-test";
@@ -40,7 +42,11 @@ beforeAll(async () => {
     if (type === EventType.GENERATION_METRICS_READY) metricsReady.push(payload);
   });
 });
-afterEach(async () => { await Bun.sleep(5); fetchSpy?.mockRestore(); });
+afterEach(async () => {
+  await Bun.sleep(5);
+  fetchSpy?.mockRestore();
+  settings.deleteSetting(userId, "reasoningSettings");
+});
 afterAll(() => {
   removeFrontend();
   contextHandlerChain.unregisterByExtension('origin-test'); interceptorPipeline.unregisterByExtension('origin-test');
@@ -48,7 +54,7 @@ afterAll(() => {
   secretSpy.mockRestore(); eventSpy.mockRestore(); closeDatabase();
 });
 
-async function run(provider: string, body: object[], options: { responses?: boolean; nonStreaming?: boolean; presetName?: string; presetMetadata?: Record<string, unknown>; chunkDelayMs?: number } = {}) {
+async function run(provider: string, body: object[], options: { responses?: boolean; nonStreaming?: boolean; presetName?: string; presetMetadata?: Record<string, unknown>; chunkDelayMs?: number; assistantPrefill?: string } = {}) {
   const connection = await connections.createConnection(userId, {
     name: "Mock", provider, model: "test-model", api_url: "https://example.test",
   });
@@ -56,7 +62,11 @@ async function run(provider: string, body: object[], options: { responses?: bool
     ? presets.createPreset(userId, {
         name: options.presetName,
         provider,
-        prompt_order: [],
+        prompt_order: options.assistantPrefill ? [{
+          id: "main", name: "Main", content: "Be brief.", role: "system", enabled: true, position: "pre_history",
+          depth: 0, marker: null, isLocked: false, color: null, injectionTrigger: [], group: null,
+        }] : [],
+        ...(options.assistantPrefill ? { prompts: { completionSettings: { assistantPrefill: options.assistantPrefill } } } : {}),
         ...(options.presetMetadata ? { metadata: options.presetMetadata } : {}),
       })
     : null;
@@ -208,7 +218,6 @@ test("generation meta token count uses provider usage without local tokenization
   const tokenizerSpy = spyOn(tokenizer, "countForModel").mockResolvedValue(4);
   try {
     const { generationId } = await run("openai", [
-      chatThought,
       { choices: [{ delta: { content: "Visible answer." }, finish_reason: "stop" }] },
       {
         choices: [],
@@ -225,6 +234,149 @@ test("generation meta token count uses provider usage without local tokenization
     expect(metricsEvent?.tokenCount).toBe(128);
   } finally {
     tokenizerSpy.mockRestore();
+  }
+});
+test("whitespace during native reasoning does not start the response TPS timer", async () => {
+  const tokenizerSpy = spyOn(tokenizer, "countForModel").mockResolvedValue(4);
+  try {
+    const { generationId } = await run("openai", [
+      { choices: [{ delta: { content: "\n", reasoning_content: "A thought." } }] },
+      chatThought,
+      { choices: [{ delta: { content: "Visible answer." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 128, total_tokens: 138 } },
+    ], { chunkDelayMs: 30 });
+    const deadline = Date.now() + 3000;
+    while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+      await Bun.sleep(5);
+    }
+
+    const entry = pool.getPoolEntry(generationId)!;
+    const metricsEvent = metricsReady.find((event) => event.generationId === generationId);
+    expect(entry.firstContentTokenAt! - entry.firstTokenAt!).toBeGreaterThanOrEqual(50);
+    expect(tokenizerSpy).toHaveBeenCalledWith("test-model", "\nVisible answer.");
+    expect(metricsEvent?.tokenCount).toBe(128);
+    expect(metricsEvent?.generationMetrics.tps).toBe(
+      Math.round(40_000 / (entry.responseStoppedAt! - entry.firstContentTokenAt!)) / 10,
+    );
+    expect(chats.getMessage(userId, metricsEvent.messageId)?.extra.generationMetrics).toEqual(metricsEvent.generationMetrics);
+  } finally {
+    tokenizerSpy.mockRestore();
+  }
+});
+test("reasoning with whitespace-only content does not report response TPS", async () => {
+  const { generationId } = await run("openai", [
+    { choices: [{ delta: { content: "\n", reasoning_content: "A thought." } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+    { choices: [], usage: { prompt_tokens: 10, completion_tokens: 128, total_tokens: 138 } },
+  ], { chunkDelayMs: 30 });
+  const deadline = Date.now() + 3000;
+  while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+    await Bun.sleep(5);
+  }
+  expect(pool.getPoolEntry(generationId)?.firstContentTokenAt).toBeUndefined();
+  expect(metricsReady.find((event) => event.generationId === generationId)?.generationMetrics.tps).toBeUndefined();
+});
+test("TPS excludes guided reasoning split across content chunks", async () => {
+  settings.putSetting(userId, "reasoningSettings", { autoParse: true, prefix: "<think>", suffix: "</think>" });
+  const tokenizerSpy = spyOn(tokenizer, "countForModel").mockResolvedValue(4);
+  try {
+    const { generationId } = await run("openai", [
+      { choices: [{ delta: { content: "<thi" } }] },
+      { choices: [{ delta: { content: "nk>A thought.</thi" } }] },
+      { choices: [{ delta: { content: "nk>\n" } }] },
+      { choices: [{ delta: { content: "Visible answer." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 128, total_tokens: 138, completion_tokens_details: { reasoning_tokens: 0 } } },
+    ], { chunkDelayMs: 30 });
+    const deadline = Date.now() + 3000;
+    while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+      await Bun.sleep(5);
+    }
+
+    const entry = pool.getPoolEntry(generationId)!;
+    const metricsEvent = metricsReady.find((event) => event.generationId === generationId);
+    expect(entry.firstContentTokenAt! - entry.firstTokenAt!).toBeGreaterThanOrEqual(80);
+    expect(tokenizerSpy).toHaveBeenCalledWith("test-model", "Visible answer.");
+    expect(metricsEvent?.tokenCount).toBe(128);
+    expect(metricsEvent?.generationMetrics.tps).toBe(
+      Math.round(40_000 / (entry.responseStoppedAt! - entry.firstContentTokenAt!)) / 10,
+    );
+    expect(chats.getMessage(userId, metricsEvent.messageId)?.extra.reasoning).toBe("A thought.");
+  } finally {
+    tokenizerSpy.mockRestore();
+  }
+});
+test.each([false, true])("TPS uses reported reasoning usage without local tokenization (Responses API: %s)", async (responses) => {
+  const tokenizerSpy = spyOn(tokenizer, "countForModel").mockResolvedValue(4);
+  try {
+    const { generationId } = await run("openai", responses ? [
+      { type: "response.output_text.delta", delta: "Visible answer." },
+      { type: "response.completed", response: {
+        status: "completed",
+        usage: { input_tokens: 10, output_tokens: 128, total_tokens: 138, output_tokens_details: { reasoning_tokens: 108 } },
+      } },
+    ] : [
+      chatThought,
+      { choices: [{ delta: { content: "Visible answer." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      { choices: [], usage: { prompt_tokens: 10, completion_tokens: 128, total_tokens: 138, completion_tokens_details: { reasoning_tokens: 108 } } },
+    ], { responses, chunkDelayMs: 30 });
+    const deadline = Date.now() + 3000;
+    while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+      await Bun.sleep(5);
+    }
+
+    const entry = pool.getPoolEntry(generationId)!;
+    const metricsEvent = metricsReady.find((event) => event.generationId === generationId);
+    expect(tokenizerSpy).not.toHaveBeenCalled();
+    expect(metricsEvent?.tokenCount).toBe(128);
+    expect(metricsEvent?.generationMetrics.tps).toBe(
+      Math.round(200_000 / (entry.responseStoppedAt! - entry.firstContentTokenAt!)) / 10,
+    );
+  } finally {
+    tokenizerSpy.mockRestore();
+  }
+});
+test.each([true, false])("reported token count preserves provider or finalized-message totals while TPS excludes prefill and edits (provider usage: %s)", async (providerUsage) => {
+  const script = regexScripts.createRegexScript(userId, {
+    name: "Response rewrite",
+    find_regex: "Visible answer\\.",
+    replace_string: "Rewritten answer with additional text.",
+    placement: ["ai_output"],
+    target: ["response"],
+  });
+  if (typeof script === "string") throw new Error(script);
+  const tokenizerSpy = spyOn(tokenizer, "countForModel").mockImplementation(async (_model, text) =>
+    text === "Visible answer." ? 4 : 12,
+  );
+  try {
+    const { generationId } = await run("openai", [
+      chatThought,
+      { choices: [{ delta: { content: "Visible answer." } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ...(providerUsage ? [{ choices: [], usage: { prompt_tokens: 10, completion_tokens: 128, total_tokens: 138 } }] : []),
+    ], { presetName: "Prefill metrics", assistantPrefill: "Prefill. ", chunkDelayMs: 30 });
+    const deadline = Date.now() + 3000;
+    while (!metricsReady.some((event) => event.generationId === generationId) && Date.now() < deadline) {
+      await Bun.sleep(5);
+    }
+
+    const entry = pool.getPoolEntry(generationId)!;
+    const metricsEvent = metricsReady.find((event) => event.generationId === generationId);
+    const saved = chats.getMessage(userId, metricsEvent.messageId)!;
+    expect(saved.content).toBe("Prefill. Rewritten answer with additional text.");
+    expect(metricsEvent?.tokenCount).toBe(providerUsage ? 128 : 12);
+    expect(saved.extra.tokenCount).toBe(providerUsage ? 128 : 12);
+    if (!providerUsage) expect(tokenizerSpy).toHaveBeenCalledWith("test-model", saved.content);
+    expect(entry.firstContentTokenAt).toBeGreaterThan(entry.firstTokenAt!);
+    expect(tokenizerSpy).toHaveBeenCalledWith("test-model", "Visible answer.");
+    expect(metricsEvent?.generationMetrics.tps).toBe(
+      Math.round(40_000 / (entry.responseStoppedAt! - entry.firstContentTokenAt!)) / 10,
+    );
+  } finally {
+    tokenizerSpy.mockRestore();
+    regexScripts.deleteRegexScript(userId, script.id);
   }
 });
 test("non-streaming generation metrics retain identity without TTFT or TPS", async () => {

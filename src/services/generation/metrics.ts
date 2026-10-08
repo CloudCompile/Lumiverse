@@ -17,17 +17,28 @@ export interface GenerationTimingMetrics {
 export interface GenerationTokenCounts {
   /** Authoritative generated-token count for message metadata. */
   messageTokenCount?: number;
-  /** Generated-token count used for response throughput. */
+  /** Visible response-token count used for response throughput. */
   responseTokenCount?: number;
 }
 
+export interface GenerationTokenCountOptions {
+  hasReasoning?: boolean;
+  /** Guided reasoning is counted as ordinary content by the provider. */
+  hasDelimitedReasoning?: boolean;
+  providerRaw?: Record<string, unknown>;
+}
+
 /**
- * Prefer the provider's final completion usage. Locally calculated message
- * tokens are a fallback for providers that do not return usable metadata.
+ * Provider completion usage remains authoritative for message metadata. TPS
+ * uses completion usage minus reported reasoning tokens, or a local visible
+ * response count when reasoning cannot be separated from the provider total.
+ * Local message and response counts are independent: finalized-message tokens
+ * belong in the final report, and generated-response tokens belong in TPS.
  */
 export function resolveGenerationTokenCounts(
   providerCompletionTokenCount: unknown,
-  calculatedResponseTokenCount?: number,
+  calculatedTokenCounts: GenerationTokenCounts = {},
+  options: GenerationTokenCountOptions = {},
 ): GenerationTokenCounts {
   const normalizedProviderCount =
     typeof providerCompletionTokenCount === "number" &&
@@ -36,10 +47,31 @@ export function resolveGenerationTokenCounts(
       ? Math.floor(providerCompletionTokenCount)
       : undefined;
 
-  const resolvedCount = normalizedProviderCount ?? calculatedResponseTokenCount;
+  const details = options.providerRaw?.completion_tokens_details
+    ?? options.providerRaw?.output_tokens_details;
+  const reasoningTokenCount = typeof details === "object" && details !== null
+    ? (details as Record<string, unknown>).reasoning_tokens
+      ?? (details as Record<string, unknown>).thinking_tokens
+    : undefined;
+
+  let providerResponseTokenCount: number | undefined;
+  if (!options.hasDelimitedReasoning) {
+    if (
+      normalizedProviderCount != null &&
+      typeof reasoningTokenCount === "number" &&
+      Number.isInteger(reasoningTokenCount) &&
+      reasoningTokenCount >= 0 &&
+      reasoningTokenCount <= normalizedProviderCount
+    ) {
+      providerResponseTokenCount = normalizedProviderCount - reasoningTokenCount;
+    } else if (!options.hasReasoning && reasoningTokenCount == null) {
+      providerResponseTokenCount = normalizedProviderCount;
+    }
+  }
+
   return {
-    messageTokenCount: resolvedCount,
-    responseTokenCount: resolvedCount,
+    messageTokenCount: normalizedProviderCount ?? calculatedTokenCounts.messageTokenCount,
+    responseTokenCount: providerResponseTokenCount ?? calculatedTokenCounts.responseTokenCount,
   };
 }
 
@@ -47,8 +79,8 @@ export function resolveGenerationTokenCounts(
  * Calculate response timings. TTFT retains its historical meaning (the first
  * provider token, including reasoning), while TPS starts at the first
  * response-content token and ends at the provider's terminal stop, before
- * message persistence or deferred token counting. It uses the resolved
- * provider-or-local token count.
+ * message persistence or deferred token counting. Its token count excludes
+ * reasoning to match the measured response-content interval.
  */
 export function calculateGenerationTimingMetrics(
   source: GenerationTimingSource,

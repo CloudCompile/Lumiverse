@@ -68,7 +68,7 @@ export interface PooledTokensEntry {
   streamingStartedAt?: number;
   /** Timestamp (ms) when the first token (content or reasoning) arrived from the provider */
   firstTokenAt?: number;
-  /** Timestamp (ms) when the first content token arrived (excluding reasoning) */
+  /** Timestamp (ms) when the first non-whitespace response token arrived (excluding reasoning) */
   firstContentTokenAt?: number;
   responseStoppedAt?: number;
   /** Whether this generation used streaming mode */

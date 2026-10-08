@@ -5,7 +5,7 @@ import {
 } from "./metrics";
 
 test("message token count prefers provider usage over local tokenization", () => {
-  expect(resolveGenerationTokenCounts(128, 40)).toEqual({
+  expect(resolveGenerationTokenCounts(128, { messageTokenCount: 40, responseTokenCount: 40 })).toEqual({
     messageTokenCount: 128,
     responseTokenCount: 128,
   });
@@ -19,11 +19,79 @@ test("provider usage supplies token counts without local tokenization", () => {
 });
 
 test("message token count ignores invalid provider usage", () => {
-  expect(resolveGenerationTokenCounts(undefined, 40)).toEqual({
+  expect(resolveGenerationTokenCounts(undefined, { messageTokenCount: 40, responseTokenCount: 40 })).toEqual({
     messageTokenCount: 40,
     responseTokenCount: 40,
   });
-  expect(resolveGenerationTokenCounts(0, 40).messageTokenCount).toBe(40);
+  expect(resolveGenerationTokenCounts(0, { messageTokenCount: 40 }).messageTokenCount).toBe(40);
+});
+
+test.each([
+  { completion_tokens_details: { reasoning_tokens: 108 } },
+  { output_tokens_details: { reasoning_tokens: 108 } },
+  { output_tokens_details: { thinking_tokens: 108 } },
+])("provider reasoning breakdown separates response throughput from message totals: %j", (providerRaw) => {
+  expect(resolveGenerationTokenCounts(128, undefined, { providerRaw })).toEqual({
+    messageTokenCount: 128,
+    responseTokenCount: 20,
+  });
+});
+
+test("reasoning without a usage breakdown needs visible response tokenization", () => {
+  expect(resolveGenerationTokenCounts(128, undefined, { hasReasoning: true })).toEqual({
+    messageTokenCount: 128,
+    responseTokenCount: undefined,
+  });
+  expect(resolveGenerationTokenCounts(128, { responseTokenCount: 40 }, { hasReasoning: true })).toEqual({
+    messageTokenCount: 128,
+    responseTokenCount: 40,
+  });
+});
+
+test("guided reasoning cannot use a native reasoning-token breakdown", () => {
+  expect(resolveGenerationTokenCounts(128, { responseTokenCount: 40 }, {
+    hasDelimitedReasoning: true,
+    providerRaw: { completion_tokens_details: { reasoning_tokens: 0 } },
+  })).toEqual({ messageTokenCount: 128, responseTokenCount: 40 });
+});
+
+test("provider reasoning breakdown remains authoritative over local estimates", () => {
+  expect(resolveGenerationTokenCounts(128, { responseTokenCount: 40 }, {
+    hasReasoning: true,
+    providerRaw: { completion_tokens_details: { reasoning_tokens: 108 } },
+  })).toEqual({ messageTokenCount: 128, responseTokenCount: 20 });
+});
+
+test.each([-1, 129, 1.5, NaN, Infinity, "108"])("invalid reasoning usage falls back to visible tokenization: %j", (reasoning_tokens) => {
+  const options = { providerRaw: { completion_tokens_details: { reasoning_tokens } } };
+  expect(resolveGenerationTokenCounts(128, undefined, options).responseTokenCount).toBeUndefined();
+  expect(resolveGenerationTokenCounts(128, { responseTokenCount: 40 }, options)).toEqual({
+    messageTokenCount: 128,
+    responseTokenCount: 40,
+  });
+});
+
+test.each([undefined, 0])("final token report uses finalized-message tokens independently of TPS (provider usage: %j)", (providerCount) => {
+  expect(resolveGenerationTokenCounts(providerCount, {
+    messageTokenCount: 70,
+    responseTokenCount: 40,
+  }, { hasReasoning: true })).toEqual({
+    messageTokenCount: 70,
+    responseTokenCount: 40,
+  });
+});
+
+test("response-only tokenization cannot supply the final token report", () => {
+  expect(resolveGenerationTokenCounts(undefined, { responseTokenCount: 40 })).toEqual({
+    messageTokenCount: undefined,
+    responseTokenCount: 40,
+  });
+});
+
+test("usage containing only reasoning has zero response tokens", () => {
+  expect(resolveGenerationTokenCounts(128, undefined, {
+    providerRaw: { completion_tokens_details: { reasoning_tokens: 128 } },
+  })).toEqual({ messageTokenCount: 128, responseTokenCount: 0 });
 });
 
 test("TPS starts at visible response content and excludes reasoning time", () => {
