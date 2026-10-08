@@ -6,6 +6,8 @@
  * This avoids round-tripping to the backend macro engine for every message.
  */
 
+import { mapOutsideJsonBlocks } from './jsonBlocks'
+
 const LEGACY_MAP: Record<string, string> = {
   '<USER>': '{{user}}',
   '<BOT>': '{{char}}',
@@ -21,20 +23,12 @@ export interface DisplayMacroContext {
 
 export function stripDisplaySetterMacros(text: string): string {
   if (!text || !text.includes('{{')) return text
-  return text.replace(DISPLAY_SETTER_RE, '')
+  return mapOutsideJsonBlocks(text, (segment) => segment.replace(DISPLAY_SETTER_RE, ''))
 }
 
 export function resolveDisplayMacros(text: string, ctx: DisplayMacroContext): string {
   if (!text || !text.includes('{{') && !text.includes('<USER>') && !text.includes('<BOT>') && !text.includes('<CHAR>')) {
     return text
-  }
-
-  // Legacy token replacement
-  let result = text
-  for (const [legacy, replacement] of Object.entries(LEGACY_MAP)) {
-    if (result.includes(legacy)) {
-      result = result.replaceAll(legacy, replacement)
-    }
   }
 
   // Resolve known display macros
@@ -47,8 +41,20 @@ export function resolveDisplayMacros(text: string, ctx: DisplayMacroContext): st
     not_char: ctx.userName,
   }
 
-  return result.replace(/\{\{([a-zA-Z_]+)\}\}/g, (match, name) => {
-    if (name in macros) return macros[name]
-    return match
-  }).replace(DISPLAY_SETTER_RE, '')
+  // Valid <json> blocks are data the backend keeps verbatim, so only the text
+  // around them is resolved.
+  return mapOutsideJsonBlocks(text, (segment) => {
+    // Legacy token replacement
+    let result = segment
+    for (const [legacy, replacement] of Object.entries(LEGACY_MAP)) {
+      if (result.includes(legacy)) {
+        result = result.replaceAll(legacy, replacement)
+      }
+    }
+
+    return result.replace(/\{\{([a-zA-Z_]+)\}\}/g, (match, name) => {
+      if (name in macros) return macros[name]
+      return match
+    }).replace(DISPLAY_SETTER_RE, '')
+  })
 }

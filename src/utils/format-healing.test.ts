@@ -43,6 +43,29 @@ describe("healFormattingArtifacts", () => {
     );
   });
 
+  test("leaves valid <json> blocks untouched while healing the prose around them", () => {
+    const block = '<json>{"say": " padded ", "act": "* softly*"}</json>';
+    expect(healFormattingArtifacts(`He said, " like this" ${block} then * softly*.`))
+      .toBe(`He said, "like this" ${block} then *softly*.`);
+    // Not JSON, so it is ordinary prose.
+    expect(healFormattingArtifacts('<json>" padded " text</json>')).toBe('<json>"padded" text</json>');
+  });
+
+  test("heals a block inside a macro tag with the rest of the tag", () => {
+    // The macro pass reads that block as the tag's text, not as data.
+    const block = '<json>{"act": "* softly*"}</json>';
+    expect(healFormattingArtifacts(`{{setvar::note::${block}}} ${block}`)).toBe(
+      `{{setvar::note::<json>{"act": "*softly*"}</json>}} ${block}`,
+    );
+  });
+
+  test("leaves the text past the block scan's rejection cap as written", () => {
+    // The block scan never classified that text, so it may be data.
+    const strays = "<json>bad</json>".repeat(256);
+    const rest = '<json>{"act": "* softly*"}</json> then * softly*.';
+    expect(healFormattingArtifacts(`* softly* ${strays}${rest}`)).toBe(`*softly* ${strays}${rest}`);
+  });
+
   test("leaves nested emphasis patterns alone", () => {
     expect(healFormattingArtifacts("*outer *inner**")).toBe("*outer *inner**");
   });

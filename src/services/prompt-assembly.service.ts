@@ -54,6 +54,7 @@ import {
 } from "../macros";
 import type { AstNode, MacroEnv } from "../macros/types";
 import { parse } from "../macros/MacroParser";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
 import { readMessageRevision } from "../utils/message-revision";
 import {
@@ -935,12 +936,14 @@ export async function resolvePromptMacrosAfterRegexPass(
   result: LlmMessage[],
   macroEnv: MacroEnv,
 ): Promise<void> {
+  // Valid <json> blocks stay verbatim in every message: whatever the first
+  // pass or a regex script left in a block must not be expanded or healed here.
   for (let i = 0; i < result.length; i++) {
     const msg = result[i];
     if (typeof msg.content === "string") {
       if (!msg.content.includes("{{") && !msg.content.includes("<")) continue;
-      const resolved = healFormattingArtifacts(
-        (await evaluate(msg.content, macroEnv, registry)).text,
+      const resolved = await withJsonBlocksProtected(msg.content, macroEnv, async (protectedContent) =>
+        healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
       );
       if (resolved !== msg.content) {
         result[i] = { ...msg, content: resolved };
@@ -955,8 +958,8 @@ export async function resolvePromptMacrosAfterRegexPass(
       msg.content.map(async (part: any) => {
         if (part.type !== "text") return part;
         if (!part.text.includes("{{") && !part.text.includes("<")) return part;
-        const text = healFormattingArtifacts(
-          (await evaluate(part.text, macroEnv, registry)).text,
+        const text = await withJsonBlocksProtected(part.text, macroEnv, async (protectedContent) =>
+          healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
         );
         if (text !== part.text) changed = true;
         return text !== part.text ? { ...part, text } : part;
@@ -3383,8 +3386,10 @@ export async function assemblePrompt(
           rawContent.includes("<BOT>") ||
           rawContent.includes("<CHAR>");
         const visibleResolvedContent = needsEval
-          ? healFormattingArtifacts(
-              (await evaluateForPromptAssembly(rawContent, macroEnv)).text,
+          ? await withJsonBlocksProtected(rawContent, macroEnv, async (protectedContent) =>
+              healFormattingArtifacts(
+                (await evaluateForPromptAssembly(protectedContent, macroEnv)).text,
+              ),
             )
           : rawContent;
         const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
@@ -8040,8 +8045,8 @@ async function onelinerImpersonation(
       throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
-    const visibleResolvedContent = healFormattingArtifacts(
-      (await evaluate(msg.content, macroEnv, registry)).text,
+    const visibleResolvedContent = await withJsonBlocksProtected(msg.content, macroEnv, async (protectedContent) =>
+      healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
     );
     const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
     result.push(
@@ -8416,7 +8421,12 @@ async function legacyAssembly(
     } else if (signal?.aborted) {
       throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
-    const visibleResolved = healFormattingArtifacts(await resolveMacros(m.content));
+    // Without an env no macro runs, and healing skips valid blocks itself.
+    const visibleResolved = macroEnv
+      ? await withJsonBlocksProtected(m.content, macroEnv, async (protectedContent) =>
+          healFormattingArtifacts(await resolveMacros(protectedContent)),
+        )
+      : healFormattingArtifacts(m.content);
     const resolved = appendAssociativeRegexContext(visibleResolved, m);
     const attachments = attachmentsForContext(m, legacyGeneratedImageContextPolicy);
     if (m.extra?.image_gen && resolved.trim().length === 0 && attachments.length === 0) {

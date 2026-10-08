@@ -255,3 +255,79 @@ describe("resolvePromptMacrosAfterRegexPass + {{#escape}}", () => {
     expect(messages[0].content).toBe("A\x03B\x04C");
   });
 });
+
+describe("resolvePromptMacrosAfterRegexPass + <json> blocks", () => {
+  beforeAll(() => {
+    initMacros();
+  });
+
+  test("keeps valid blocks verbatim in string and text-part content", async () => {
+    const env = makeEnv();
+    const block = '<json>{"who": "<user>", "say": " {{user}} "}</json>';
+    const messages: LlmMessage[] = [
+      markChatHistory({ role: "assistant", content: `{{user}}: ${block}` }),
+      { role: "user", content: [{ type: "text", text: `${block} <char>` }] },
+    ];
+
+    await resolvePromptMacrosAfterRegexPass(messages, env);
+
+    expect(messages[0].content).toBe(`User: ${block}`);
+    expect(isChatHistoryMessage(messages[0])).toBe(true);
+    expect(messages[1].content).toEqual([{ type: "text", text: `${block} Assistant` }]);
+  });
+
+  test("restores a block one text part captured and a concurrent part read", async () => {
+    // Part A captures its block and stays pending until part B, which waits
+    // for the capture, has read the variable.
+    const gates: Record<string, PromiseWithResolvers<void>> = {
+      captured: Promise.withResolvers<void>(),
+      read: Promise.withResolvers<void>(),
+    };
+    registry.registerMacro({
+      name: "testJsonSignal",
+      category: "Test",
+      description: "Opens the named gate",
+      handler: (ctx) => {
+        gates[ctx.args[0]].resolve();
+        return "";
+      },
+    });
+    registry.registerMacro({
+      name: "testJsonWait",
+      category: "Test",
+      description: "Waits until the named gate opens",
+      handler: async (ctx) => {
+        await gates[ctx.args[0]].promise;
+        return "";
+      },
+    });
+
+    try {
+      const env = makeEnv();
+      const block = '<json>{"note": "{{user}}"}</json>';
+      const messages: LlmMessage[] = [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `{{setchatvar::state}}${block}{{/setchatvar}}{{testJsonSignal::captured}}{{testJsonWait::read}}A`,
+            },
+            { type: "text", text: "{{testJsonWait::captured}}B={{getchatvar::state}}{{testJsonSignal::read}}" },
+          ],
+        } as unknown as LlmMessage,
+      ];
+
+      await resolvePromptMacrosAfterRegexPass(messages, env);
+
+      expect(messages[0].content).toEqual([
+        { type: "text", text: "A" },
+        { type: "text", text: `B=${block}` },
+      ]);
+      expect(env.variables.chat.get("state")).toBe(String.raw`<json>{"note": "\u007b\u007buser\u007d\u007d"}</json>`);
+    } finally {
+      registry.unregisterMacro("testJsonSignal");
+      registry.unregisterMacro("testJsonWait");
+    }
+  });
+});

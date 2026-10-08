@@ -302,7 +302,7 @@ async function evaluateNodes(
  * Returns the original array unchanged (no allocation) when nothing is trimmed,
  * which is the common case. Never mutates the input (the AST is cached).
  */
-function stripArgFraming(nodes: AstNode[]): AstNode[] {
+export function stripArgFraming(nodes: AstNode[]): AstNode[] {
   if (nodes.length === 0) return nodes;
 
   // Single text node: strip both ends.

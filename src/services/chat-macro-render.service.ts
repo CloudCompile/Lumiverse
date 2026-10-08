@@ -1,4 +1,5 @@
 import { cloneEnv, evaluate, initMacros, registry, type MacroEnv } from "../macros";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
 import type { Message } from "../types/message";
 import { healFormattingArtifacts } from "../utils/format-healing";
 import * as chatsSvc from "./chats.service";
@@ -47,7 +48,9 @@ export async function resolveRenderedChatMessages(
     const message = input.messages[i];
     if (message.extra?.hidden === true) continue;
     const resolved = HAS_MACRO_RE.test(message.content)
-      ? healFormattingArtifacts((await evaluate(message.content, env, registry)).text)
+      ? await withJsonBlocksProtected(message.content, env, async (protectedContent) =>
+          healFormattingArtifacts((await evaluate(protectedContent, env, registry)).text),
+        )
       : message.content;
     if (targetSet.has(message.id)) {
       resolvedById.set(message.id, resolved);
@@ -67,7 +70,9 @@ export async function resolveRenderedMessageContent(
 ): Promise<string> {
   if (env.extra.preserveMessageSource || !HAS_MACRO_RE.test(content)) return content;
   initMacros();
-  return healFormattingArtifacts((await evaluate(content, env, registry)).text);
+  return withJsonBlocksProtected(content, env, async (protectedContent) =>
+    healFormattingArtifacts((await evaluate(protectedContent, env, registry)).text),
+  );
 }
 
 export function buildPersistedMacroVariables(

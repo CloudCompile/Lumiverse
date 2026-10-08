@@ -839,9 +839,14 @@ Local variables live for the duration of a single evaluation pass. They are usef
 | `{{decvar::key}}` | Decrement by 1 (returns new value) | Variable name |
 | `{{hasvar::key}}` | Check if variable exists (`"true"` / `"false"`) | Variable name |
 | `{{deletevar::key}}` | Delete a variable | Variable name |
+| `{{getvarkey::key::path}}` | Read a value inside a JSON variable (empty when the variable or path is missing) | Variable name, optional [path](#json-paths) |
+| `{{setvarkey::key::path::value}}` | Write a value inside a JSON variable (returns nothing). Scoped form: `{{setvarkey::key::path}}value{{/setvarkey}}` | Name, path, value |
+| `{{addvarkey::key::path::value}}` | Add a number to a value inside a JSON variable (returns new value) | Name, path, number |
+| `{{hasvarkey::key::path}}` | Check if a path exists (`"true"` / `"false"`) | Name and path |
+| `{{deletevarkey::key::path}}` | Remove the value at a path | Name and path |
 | `{{let::key::value}}...{{/let}}` | Temporarily bind local variables for the scoped body, then restore previous values | Pairs of name/value arguments |
 
-Aliases: `{{varexists}}` for `{{hasvar}}`, `{{flushvar}}` for `{{deletevar}}`, `{{withVar}}` / `{{scope}}` for `{{let}}`
+Aliases: `{{varexists}}` for `{{hasvar}}`, `{{flushvar}}` for `{{deletevar}}`, `{{withVar}}` / `{{scope}}` for `{{let}}`, `{{getvarindex}}` for `{{getvarkey}}`, `{{setvarindex}}` for `{{setvarkey}}`
 
 **Shorthand:** `.` prefix — `{{.myVar}}`, `{{.score = 100}}`, `{{.counter++}}`
 
@@ -868,6 +873,11 @@ Chat-persisted variables are **automatically saved** to the chat after each gene
 | `{{decchatvar::key}}` | Decrement by 1 (returns new value) | Variable name |
 | `{{haschatvar::key}}` | Check if exists (`"true"` / `"false"`) | Variable name |
 | `{{deletechatvar::key}}` | Delete a persisted variable | Variable name |
+| `{{getchatvarkey::key::path}}` | Read a value inside a JSON variable (empty when the variable or path is missing) | Variable name, optional [path](#json-paths) |
+| `{{setchatvarkey::key::path::value}}` | Write a value inside a JSON variable (returns nothing). Scoped form: `{{setchatvarkey::key::path}}value{{/setchatvarkey}}` | Name, path, value |
+| `{{addchatvarkey::key::path::value}}` | Add a number to a value inside a JSON variable (returns new value) | Name, path, number |
+| `{{haschatvarkey::key::path}}` | Check if a path exists (`"true"` / `"false"`) | Name and path |
+| `{{deletechatvarkey::key::path}}` | Remove the value at a path | Name and path |
 
 Alias: `{{flushchatvar}}` for `{{deletechatvar}}`
 
@@ -922,10 +932,42 @@ Global variables persist across all chats for the current user. Useful for prefe
 | `{{decgvar::key}}` | Decrement by 1 (returns new value) | Variable name |
 | `{{hasgvar::key}}` | Check if exists (`"true"` / `"false"`) | Variable name |
 | `{{deletegvar::key}}` | Delete a global variable | Variable name |
+| `{{getgvarkey::key::path}}` | Read a value inside a JSON variable (empty when the variable or path is missing) | Variable name, optional [path](#json-paths) |
+| `{{setgvarkey::key::path::value}}` | Write a value inside a JSON variable (returns nothing). Scoped form: `{{setgvarkey::key::path}}value{{/setgvarkey}}` | Name, path, value |
+| `{{addgvarkey::key::path::value}}` | Add a number to a value inside a JSON variable (returns new value) | Name, path, number |
+| `{{hasgvarkey::key::path}}` | Check if a path exists (`"true"` / `"false"`) | Name and path |
+| `{{deletegvarkey::key::path}}` | Remove the value at a path | Name and path |
 
 Aliases: `{{getglobalvar}}`, `{{setglobalvar}}`, `{{addglobalvar}}`, `{{incglobalvar}}`, `{{decglobalvar}}`, `{{hasglobalvar}}`, `{{gvarexists}}`, `{{flushgvar}}`, `{{flushglobalvar}}`, `{{deleteglobalvar}}`
 
+Path aliases: `{{getglobalvarkey}}` / `{{getglobalvarindex}}` for `{{getgvarkey}}`, `{{setglobalvarkey}}` / `{{setglobalvarindex}}` for `{{setgvarkey}}`, `{{addglobalvarkey}}` for `{{addgvarkey}}`, `{{hasglobalvarkey}}` for `{{hasgvarkey}}`, `{{deleteglobalvarkey}}` for `{{deletegvarkey}}`
+
 **Shorthand:** `$` prefix — `{{$theme}}`, `{{$theme = dark}}`
+
+### Variable Paths
+
+The `…varkey` macros above work inside a variable that holds [JSON](#json), so one variable can carry a whole structure — an inventory, a party roster, a set of quest flags — instead of many separate variables. They use the same [path syntax](#json-paths) as the JSON macros.
+
+```
+{{setchatvar::party}}{"leader": "Aria", "members": [{"name": "Aria", "hp": 30}]}{{/setchatvar}}
+{{getchatvarkey::party::members[0].name}}        — "Aria"
+{{addchatvarkey::party::members[0].hp::-5}}      — "25"
+{{setchatvarkey::party::members[]}}{"name": "Bram", "hp": 24}{{/setchatvarkey}}
+{{haschatvarkey::party::members[1]}}             — "true"
+{{deletechatvarkey::party::members[0]}}          — removes Aria; Bram becomes members[0]
+```
+
+- A variable that is missing or empty has no document yet. The first write creates it, along with any objects and arrays on the path: `{{setchatvarkey::stats::str::12}}` on an unset variable stores `{"str":12}`.
+- A variable that holds text that isn't valid JSON is never overwritten. The macro reports a diagnostic naming itself and leaves the variable alone. An empty variable name does the same.
+- Writes store compact JSON and type the value automatically — `12` is stored as a number, `rope` as a string. See [Writing Values](#writing-values).
+- `add…varkey` treats a missing or `null` target as `0`. If the target is not a number (for example a string or an object), or the amount isn't a finite number, it reports a diagnostic, leaves the variable unchanged, and returns nothing.
+- Shorthand (`{{.x}}`, `{{@x}}`, `{{$x}}`, and the same forms in conditions) always reads or writes the whole variable. Use `get…varkey` to read a single value by path.
+
+!!! note "Coming from SillyTavern"
+    - The `getvarkey` / `getvarindex` / `getglobalvarkey` / `getglobalvarindex` names and their `set…` counterparts are accepted, but Lumiverse paths can reach nested values (`party.members[0].hp`) and written values are auto-typed.
+    - Lumiverse local variables (`.`) last for a single generation. The chat scope (`@`) is the persistent equivalent of SillyTavern's local variables, so use `getchatvarkey` / `setchatvarkey` where a SillyTavern preset expected a local value to stick around.
+    - The chat-scope path macros (`getchatvarkey`, `setchatvarkey`, `addchatvarkey`, `haschatvarkey`, `deletechatvarkey`) are Lumiverse additions.
+    - `{{addvar}}`, `{{addchatvar}}`, and `{{addgvar}}` stay numeric; they never append to text or arrays. To append, write to a `[]` path: `{{setchatvarkey::log::[]::arrived at the temple}}`.
 
 ### Variable Scope Summary
 
@@ -985,6 +1027,203 @@ Style guidelines:
 Stay tight and respectful — no throat-clearing.
 {{/if}}
 ```
+
+---
+
+## JSON
+
+Read and edit JSON — structured data such as objects (`{"hp": 30}`) and arrays (`["torch", "rope"]`) — held in variables, produced by other macros, or written by the model into chat messages. Every JSON macro takes JSON text and returns text, so the family composes with variables, lists, and iteration. To work directly on a variable, use the [variable path macros](#variable-paths).
+
+| Macro | Aliases | Returns |
+|-------|---------|---------|
+| `{{jsonGet::json::path}}` | `{{json_get}}` | The value at `path`, or the whole value when `path` is omitted (see [Reading Values](#reading-values)). Empty when the path is missing |
+| `{{jsonSet::json::path::value}}` | `{{json_set}}` | The JSON with `value` written at `path`. Scoped form: `{{jsonSet::json::path}}value{{/jsonSet}}`. On any failure, the original JSON unchanged |
+| `{{jsonDelete::json::path}}` | `{{json_delete}}` | The JSON with the value at `path` removed (later array items move up). The original JSON when the path doesn't exist |
+| `{{jsonHas::json::path}}` | `{{json_has}}` | `"true"` / `"false"` — whether the path exists, even when its value is `null`, `false`, `0`, or `""` (condition-compatible) |
+| `{{jsonKeys::json::path}}` | `{{json_keys}}` | An object's keys, or an array's indexes (`0, 1, 2`), as a comma-separated list. Empty for any other value |
+| `{{jsonLength::json::path}}` | `{{json_length}}` | Number of array items, object keys, or string characters. `0` for any other value or a missing path |
+| `{{jsonEscape::text}}` | `{{json_escape}}` | `text` escaped for use inside a JSON string, without the surrounding quotes. Scoped form: `{{jsonEscape}}text{{/jsonEscape}}` |
+| `{{jsonPretty::json}}` | `{{json_pretty}}` | The JSON indented with two spaces, for display |
+| `{{jsonBlock::text::index}}` | `{{json_block}}` | The JSON inside the `index`-th valid `<json>…</json>` block in `text` (0-based, default `0`, negative counts from the end). Empty when there is no such block |
+
+**Examples:**
+
+```
+{{jsonGet::{{getchatvar::tracker}}::gold}}                    — "10"
+{{jsonSet::{{getchatvar::tracker}}::gold::25}}                — the tracker with gold set to 25 (not stored)
+{{jsonHas::{{getchatvar::tracker}}::flags.met_guard}}         — "true" / "false"
+{{jsonLength::{{getchatvar::tracker}}::inventory}}            — number of items
+{{jsonPretty::{{getchatvar::tracker}}}}                       — readable, indented copy
+{{jsonBlock::{{lastCharMessage}}}}                            — the JSON block in the last reply
+```
+
+When the JSON input is invalid, the macro reports a diagnostic. `jsonGet`, `jsonKeys`, and `jsonLength` then return nothing, `jsonHas` returns `"false"`, and `jsonSet`, `jsonDelete`, and `jsonPretty` return their input unchanged.
+
+### JSON Paths
+
+A path picks one value inside JSON. Chain object keys with `.` and array positions with `[n]`:
+
+| Path | Selects |
+|------|---------|
+| `gold` | The `gold` key |
+| `party[0].name` | `name` of the first item in the `party` array |
+| `items[-1]` | The last item (negative positions count from the end) |
+| `items.0` | Same as `items[0]` |
+| `["key.with.dots"]` or `['key']` | A key written in quotes, which may contain `.`, `[`, or `]`. Inside the quotes, use `\"`, `\'`, and `\\` for a literal quote or backslash |
+| `items[]` | A new item appended to the end of `items` — only for writes, and only at the end of a path |
+| *(empty)* | The whole value |
+
+A segment that is a whole number (`0`, `-1`) selects an array position; on an object it is an ordinary key, so `scores.2024` reads the key `"2024"`. A quoted key is always an object key. Arrays answer only to positions, so `items.name` on an array is treated as missing. A path can have at most 64 segments; a path that breaks these rules is reported as invalid and nothing is changed.
+
+### Reading Values
+
+| Value at the path | Result |
+|-------------------|--------|
+| String | The text, without quotes |
+| Number or boolean | The value as text (`42`, `true`) |
+| `null`, or a missing path | Empty |
+| Object or array | Compact JSON |
+
+### Writing Values
+
+Values written by `jsonSet` and the `set…varkey` macros are typed automatically. Surrounding spaces are ignored when checking whether a value is JSON; a value stored as text keeps them.
+
+| You write | Stored as |
+|-----------|-----------|
+| `10`, `-2.5` | Number |
+| `true`, `false` | Boolean |
+| `null` | `null` |
+| `{"stage": 1}`, `["a", "b"]` | Object or array |
+| `"10"` | The string `10` (use quotes to keep number-like text as a string) |
+| *(empty)* | An empty string |
+| Anything else, such as `rope` | A string |
+
+If a value starts with `{` or `[` but isn't valid JSON, it is stored as a string and a diagnostic says it looks like JSON but failed to parse. The usual cause is an inline argument that was cut short — see [Supplying JSON](#supplying-json).
+
+- Missing objects and arrays along the path are created: when the next segment is a number or `[]`, an array; otherwise, an object. A `null` along the path counts as missing, and so does a missing or empty document.
+- A write never passes through a string, number, or boolean: `gold.copper` fails when `gold` is `10`, and the JSON is left unchanged.
+- In arrays, writing at the position just past the last item appends. A position further out fails (arrays never get gaps), and a negative position must point at an existing item.
+- Deleting an array item moves the later items up. Deleting a path that doesn't exist changes nothing.
+
+### Supplying JSON
+
+An argument separated by `::` ends at the first `}}`, and `::` always starts a new argument, even inside JSON quotes. JSON typed straight into an argument therefore breaks as soon as it contains `}}` (any nested object at the end) or `::`. Bring JSON in another way:
+
+- **Scoped body** — the text between the opening and closing tags is ordinary text, so braces are safe there. Macros inside the body run before the value is used.
+
+    ```
+    {{setchatvar::tracker}}{"gold": 10, "quests": {"temple": {"stage": 1}}}{{/setchatvar}}
+    {{setchatvarkey::tracker::quests.temple}}{"stage": 2, "done": false}{{/setchatvarkey}}
+    ```
+
+- **A variable, through a nested macro** — text produced by a nested macro is passed as one argument, whatever it contains: `{{jsonGet::{{getchatvar::tracker}}::quests.temple.stage}}`.
+- **Simple inline values** — numbers, `true`, plain words, and flat JSON with no `}}` or `::` are fine inline: `{{setchatvarkey::tracker::tags::["calm","wary"]}}`.
+
+For example, `{{setchatvarkey::tracker::quests.temple::{"stage": {"n": 1}}}}` ends at the first `}}`, so the value is cut off, stored as text, and reported as failed JSON. Use the scoped form instead.
+
+JSON sources and written values may also be wrapped in a single `<json>…</json>` block (tags in any letter case, surrounding whitespace allowed). The wrapper is removed before parsing, so a block copied out of a message works as-is.
+
+### JSON Is Data
+
+Text stored inside JSON strings is data, never a macro. When a JSON macro reads a string value, any `{{…}}` macro text inside it — for example a `{{char}}` the model wrote into a `<json>` block — appears exactly as written and never runs, either then or in a later evaluation pass.
+
+When the JSON comes straight from a variable getter (`{{getvar::x}}`, `{{getchatvar::x}}`, `{{getgvar::x}}`, or the `.x`, `@x`, and `$x` shorthand) or from a message macro (`{{lastMessage}}`, `{{lastUserMessage}}`, `{{lastCharMessage}}`, `{{rejectedSwipe}}`, `{{input}}`, `{{messageAt::n}}`, and the Loom equivalents), the JSON macro reads the stored text directly instead of evaluating it, so macro text anywhere in that data never runs. Any other nested macro is evaluated first, as usual.
+
+When Lumiverse writes JSON, `{`, `}`, and `<` inside string values are written as `\u007b`, `\u007d`, and `\u003c`. The result is still standard JSON — any JSON reader turns these back into the original characters — and it can pass through later macro passes without anything inside it running. `{{jsonEscape}}` uses the same encoding, which makes it the safe way to place arbitrary text inside a JSON string you build yourself:
+
+```
+{{setchatvarkey::tracker::last_words}}"{{jsonEscape::{{input}}}}"{{/setchatvarkey}}
+```
+
+Because the value is quoted, it is always stored as a string, even when the user's message is a number or starts with `{`. Use the inline form shown here: the body of the scoped form, `{{jsonEscape}}…{{/jsonEscape}}`, is evaluated like any other template first.
+
+Plain text read out of JSON keeps its braces literal from then on; legacy `<user>` and `<char>` tags in it are replaced like anywhere else.
+
+### Limits
+
+- JSON text and written values are limited to 1,000,000 characters; larger input is rejected with a diagnostic.
+- Paths are limited to 64 segments.
+- `{{jsonKeys}}` lists at most 1000 keys, like other list macros, and reports a diagnostic when it cuts the list short.
+- Every write reserializes the whole document as compact JSON: the original spacing and indentation are not kept. Use `{{jsonPretty}}` when you want a readable copy.
+- Numbers follow standard double-precision rules: `1.0` is stored as `1`, and whole numbers larger than 9,007,199,254,740,991 may lose precision. Numbers outside that range, such as `1e999`, are rejected rather than silently turned into `null`.
+- Object keys keep the order they were added in, except keys that look like non-negative whole numbers (`"2"`, `"10"`), which always come first in ascending order.
+- Finding `<json>` blocks stops after 256 `<json>` tags that turn out not to start a valid block. `{{jsonBlock}}` doesn't look past that point, and a chat message that reaches the limit is kept exactly as written, with none of its macros evaluated.
+
+### `<json>` Blocks in Chat Messages
+
+Valid JSON inside `<json>…</json>` in a chat message is kept exactly as written. Macros inside it don't run, `<user>`/`<char>` placeholders aren't replaced, and formatting cleanup skips it. The block reaches the model unchanged unless a regex script changes it — regex scripts still see the real text, so a script can hide or remove the block as usual.
+
+A block that isn't valid JSON yet, such as `<json>{{getchatvar::state}}</json>`, is filled in normally. Preset and lorebook text work as before; this protection applies only to chat message content. The opening tag must be exactly `<json>` (any letter case, no attributes). A block ends at the first `</json>` outside a JSON string, so strings inside the JSON may mention `<json>` or `</json>` freely.
+
+The protection covers blocks in the message's own text. A block written inside a macro's arguments, such as `{{setchatvar::state::<json>…</json>}}`, belongs to that macro and follows the normal macro rules, so a `}}` inside it ends the macro early. To store a block from a message, use a scoped setter instead: `{{setchatvar::state}}<json>{"hp": 3}</json>{{/setchatvar}}`. The variable then holds the block with the same escaping JSON macros use, so reading it later never runs macro text from it.
+
+Quoting a message with `{{lastCharMessage}}` or a similar macro works as before: the quoted text is a template, so macros in it run. To read a block's JSON as data, use `{{jsonBlock}}`, which reads the stored message directly:
+
+```
+{{jsonBlock::{{lastCharMessage}}}}            — first valid block in the last reply
+{{jsonBlock::{{lastCharMessage}}::-1}}        — last valid block
+```
+
+### Example: Story Tracker
+
+One chat variable holds the whole state.
+
+**Create it once**, at the top of a preset block:
+
+```
+{{unless::{{haschatvar::tracker}}}}{{setchatvar::tracker}}{"gold": 10, "inventory": ["torch"], "quests": {}, "flags": {}}{{/setchatvar}}{{/unless}}
+```
+
+**Read values:**
+
+```
+Gold: {{getchatvarkey::tracker::gold}}
+Carrying {{jsonLength::{{getchatvar::tracker}}::inventory}} items; the newest is {{getchatvarkey::tracker::inventory[-1]}}.
+```
+
+**Update it:**
+
+```
+{{setchatvarkey::tracker::inventory[]::rope}}
+{{setchatvarkey::tracker::quests.temple}}{"stage": 1, "done": false}{{/setchatvarkey}}
+{{setchatvarkey::tracker::flags.met_guard::true}}
+Gold after the toll: {{addchatvarkey::tracker::gold::-3}}
+```
+
+`rope` is appended as a string, the quest is stored as an object, `true` becomes a boolean, and `addchatvarkey` prints the new total (`7`).
+
+**List the quests:**
+
+```
+{{foreach::{{jsonKeys::{{getchatvar::tracker}}::quests}}::q}}
+- {{.q}}: stage {{getchatvarkey::tracker::quests.{{.q}}.stage}}
+{{/foreach}}
+```
+
+**Branch on it:**
+
+```
+{{if::{{haschatvarkey::tracker::quests.temple}}}}The temple quest is underway.{{/if}}
+{{if::{{getchatvarkey::tracker::flags.met_guard}}}}The guard recognizes {{user}}.{{/if}}
+```
+
+`haschatvarkey` checks whether a value exists at all; reading the value tests what it is, so a stored `false` is falsy.
+
+**Sync from the model's reply.** Ask the model to end each reply with the updated tracker:
+
+```
+End every reply with the updated tracker inside <json></json> tags. Current tracker:
+<json>{{getchatvar::tracker}}</json>
+```
+
+Then, before any block that reads the tracker, copy the reply's block back into the variable:
+
+```
+{{setvar::synced}}{{jsonBlock::{{lastCharMessage}}}}{{/setvar}}
+{{if::{{len::{{.synced}}}}}}{{setchatvar::tracker::{{.synced}}}}{{/if}}
+```
+
+The `{{if}}` keeps the current tracker when the reply has no valid block. Add a regex script if you want to hide the block from the chat display.
 
 ---
 
@@ -1187,6 +1426,10 @@ These macros return condition-friendly truthy/falsy values (such as `"yes"` / `"
 | `{{hasvar::key}}` | Local variable exists |
 | `{{haschatvar::key}}` | Chat-persisted variable exists |
 | `{{hasgvar::key}}` | Global variable exists |
+| `{{hasvarkey::key::path}}` | Path exists in a local JSON variable |
+| `{{haschatvarkey::key::path}}` | Path exists in a chat-persisted JSON variable |
+| `{{hasgvarkey::key::path}}` | Path exists in a global JSON variable |
+| `{{jsonHas::json::path}}` | Path exists in the JSON |
 | `{{hasPromptVar::name}}` | A prompt variable is available |
 | `{{hasTag::name}}` | Character has the given tag (case-insensitive) |
 | `{{var::name::ison::keyA,keyB}}` | All listed option keys are selected on a multi-select prompt variable |
