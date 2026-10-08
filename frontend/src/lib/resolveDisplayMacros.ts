@@ -7,6 +7,7 @@
  */
 
 import { mapOutsideJsonBlocks } from './jsonBlocks'
+import { restoreLiteralBraces } from './literalBraces'
 
 const LEGACY_MAP: Record<string, string> = {
   '<USER>': '{{user}}',
@@ -28,7 +29,7 @@ export function stripDisplaySetterMacros(text: string): string {
 
 export function resolveDisplayMacros(text: string, ctx: DisplayMacroContext): string {
   if (!text || !text.includes('{{') && !text.includes('<USER>') && !text.includes('<BOT>') && !text.includes('<CHAR>')) {
-    return text
+    return restoreLiteralBraces(text)
   }
 
   // Resolve known display macros
@@ -43,7 +44,7 @@ export function resolveDisplayMacros(text: string, ctx: DisplayMacroContext): st
 
   // Valid <json> blocks are data the backend keeps verbatim, so only the text
   // around them is resolved.
-  return mapOutsideJsonBlocks(text, (segment) => {
+  return restoreLiteralBraces(mapOutsideJsonBlocks(text, (segment) => {
     // Legacy token replacement
     let result = segment
     for (const [legacy, replacement] of Object.entries(LEGACY_MAP)) {
@@ -56,5 +57,5 @@ export function resolveDisplayMacros(text: string, ctx: DisplayMacroContext): st
       if (name in macros) return macros[name]
       return match
     }).replace(DISPLAY_SETTER_RE, '')
-  })
+  }))
 }

@@ -1,4 +1,5 @@
 import { registry } from "../MacroRegistry";
+import { registerDataMacro } from "../data-input";
 import type { AstNode, ScopedMacroNode } from "../types";
 import { isConditionTruthy } from "../conditions";
 
@@ -171,7 +172,7 @@ export function registerLogicMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "matches",
@@ -192,7 +193,7 @@ export function registerLogicMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "startsWith",
@@ -207,7 +208,7 @@ export function registerLogicMacros(): void {
     handler: (ctx) => (ctx.args[0] ?? "").startsWith(ctx.args[1] ?? "") ? "true" : "",
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "endsWith",
@@ -222,7 +223,7 @@ export function registerLogicMacros(): void {
     handler: (ctx) => (ctx.args[0] ?? "").endsWith(ctx.args[1] ?? "") ? "true" : "",
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "eq",
@@ -243,7 +244,7 @@ export function registerLogicMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "ne",

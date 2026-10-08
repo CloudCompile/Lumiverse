@@ -1,10 +1,14 @@
+import { withDataInput } from "../data-input";
 import { registry } from "../MacroRegistry";
 import { evaluate } from "../MacroEvaluator";
+import { protectLiteralData, withJsonBlocksProtected } from "../json-blocks";
+import { substituteRegexCaptures } from "../../utils/regex-sandbox-core";
 import {
   getRegexScriptByScriptId,
 } from "../../services/regex-scripts.service";
 import {
   regexCaptureReplacementsSandboxed,
+  regexCollectSandboxed,
   regexReplaceSandboxed,
   RegexTimeoutError,
 } from "../../utils/regex-sandbox";
@@ -31,7 +35,7 @@ export function registerRegexRefMacros(): void {
       { name: "text", optional: true, description: "Text to apply the regex to (or use scoped body)" },
     ],
     aliases: ["regex_installed", "hasRegex", "has_regex"],
-    handler: async (ctx) => {
+    handler: withDataInput(async (ctx, hasData) => {
       const scriptId = normalizeScriptId((ctx.args[0] ?? "").trim());
       if (!scriptId) return "";
 
@@ -64,34 +68,48 @@ export function registerRegexRefMacros(): void {
           findRegex = (await evaluate(findRegex, ctx.env, registry)).text;
         }
 
-        if (script.substitute_macros === "raw") {
+        if (script.substitute_macros === "raw" || (hasData && script.substitute_macros === "after")) {
           // "raw" mode: substitute capture groups BEFORE macro resolution
           // so $1, $2, etc. are available inside macro arguments. Match
-          // interpolation runs in the regex sandbox so a malicious script
-          // pattern can't freeze the assembly thread and large capture arrays
-          // never need to cross the worker boundary.
-          const matches = await regexCaptureReplacementsSandboxed(
-            findRegex,
-            script.flags,
-            text,
-            script.replace_string,
-            REGEX_REF_TIMEOUT_MS,
-          );
+          // Matching stays in the sandbox. Literal-data inputs bring captures
+          // back so only captured text is shielded; authored macros still run.
+          const matches = hasData
+            ? (await regexCollectSandboxed(findRegex, script.flags, text, REGEX_REF_TIMEOUT_MS)).map((match) => ({
+                index: match.index,
+                matchLength: match.fullMatch.length,
+                replacement: substituteRegexCaptures(
+                  script.replace_string, match.fullMatch, match.groups, match.index, text, match.namedGroups,
+                  {
+                    transformCapture: (capture) => protectLiteralData(capture, ctx.env),
+                    nativeReplacement: script.substitute_macros === "after",
+                  },
+                ),
+              }))
+            : await regexCaptureReplacementsSandboxed(
+                findRegex,
+                script.flags,
+                text,
+                script.replace_string,
+                REGEX_REF_TIMEOUT_MS,
+              );
 
           if (matches.length > 0) {
             const replacements = await Promise.all(
               matches.map(async ({ replacement }) => {
-                return (await evaluate(replacement, ctx.env, registry)).text;
+                return withJsonBlocksProtected(replacement, ctx.env, async (protectedText) =>
+                  (await evaluate(protectedText, ctx.env, registry, { deferLiteralBraceRestore: true })).text,
+                );
               }),
             );
             let out = "";
             let lastIdx = 0;
             for (let i = 0; i < matches.length; i++) {
-              out += text.slice(lastIdx, matches[i].index);
+              const unmatched = text.slice(lastIdx, matches[i].index);
+              out += hasData ? protectLiteralData(unmatched, ctx.env) : unmatched;
               out += replacements[i];
               lastIdx = matches[i].index + matches[i].matchLength;
             }
-            out += text.slice(lastIdx);
+            out += hasData ? protectLiteralData(text.slice(lastIdx), ctx.env) : text.slice(lastIdx);
             result = out;
           } else {
             result = text;
@@ -105,7 +123,9 @@ export function registerRegexRefMacros(): void {
             REGEX_REF_TIMEOUT_MS,
           );
           result = substituted !== text
-            ? (await evaluate(substituted, ctx.env, registry)).text
+            ? await withJsonBlocksProtected(substituted, ctx.env, async (protectedText) =>
+                (await evaluate(protectedText, ctx.env, registry)).text,
+              )
             : substituted;
         } else {
           // "none", "find", or "escaped" mode
@@ -137,6 +157,6 @@ export function registerRegexRefMacros(): void {
         }
         return text;
       }
-    },
+    }),
   });
 }

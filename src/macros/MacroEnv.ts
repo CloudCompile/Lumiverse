@@ -1,3 +1,4 @@
+import { shieldMessageLiterals } from "./message-literals";
 import { macroInterceptorChain } from "../spindle/macro-interceptor";
 import type { Character } from "../types/character";
 import { getEffectiveCharacterName } from "../types/character";
@@ -59,7 +60,11 @@ export function resolvePersonaPronouns(persona: Persona | null): {
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
-  const { character, persona, chat, messages, generationType, connection } = ctx;
+  const { character, persona, chat, generationType, connection } = ctx;
+  const messages = ctx.messages.map((message) => {
+    const content = shieldMessageLiterals(message.content, message);
+    return content === message.content ? message : { ...message, content };
+  });
   const focusedCharacter = ctx.focusedCharacter ?? character;
   const personaPronouns = resolvePersonaPronouns(persona);
   const personaAddonOutlets = buildPersonaAddonOutlets(persona);

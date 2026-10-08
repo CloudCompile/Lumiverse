@@ -1,3 +1,4 @@
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { getDb } from "../db/connection";
 import * as embeddingsSvc from "./embeddings.service";
 import { type SanitizeOptions } from "../utils/content-sanitizer";
@@ -125,7 +126,7 @@ async function buildQueryText(
     case "last_user_message": {
       const lastUser = [...visibleMessages].reverse().find(m => m.is_user);
       if (!lastUser) return "";
-      const sanitized = await resolveAndSanitizeForVectorization(lastUser.content, env, reasoningStrip);
+      const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(lastUser.content, lastUser), env, reasoningStrip);
       return truncateToContextSize(
         `[USER | ${lastUser.name}]: ${sanitized}`,
         settings.queryMaxTokens,
@@ -134,7 +135,7 @@ async function buildQueryText(
     case "weighted_recent": {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async m => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       if (parts.length > 0) parts.push(parts[parts.length - 1]);
@@ -144,7 +145,7 @@ async function buildQueryText(
     default: {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async m => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       return truncateToContextSize(parts.join("\n").trim(), settings.queryMaxTokens);

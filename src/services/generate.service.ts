@@ -143,8 +143,9 @@ import {
 import {
   persistMacroVariableState,
   reconcileChatMessageMacros,
-  resolveRenderedMessageContent,
+  resolveMessageMacroContent,
 } from "./chat-macro-render.service";
+import { shieldMessageLiterals, withMessageLiteralExtra } from "../macros/message-literals";
 import { cloneEnv } from "../macros";
 import {
   assemblePromptInWorker,
@@ -4080,17 +4081,23 @@ async function runGeneration(
             ? savedMessage!.swipes[genSwipeId]
             : (savedMessage?.content ?? fullContent);
         let resolvedMessage = baseContent ?? fullContent;
+        let resolvedExtra = savedMessage?.extra;
         if (macroEnv || macroEnvSeed) {
           const assistantEnv = cloneEnv(macroEnv ?? macroEnvSeed!);
-          resolvedMessage = await resolveRenderedMessageContent(
-            baseContent ?? fullContent,
-            assistantEnv,
-          );
+          const source = savedMessage
+            ? shieldMessageLiterals(resolvedMessage, savedMessage)
+            : resolvedMessage;
+          const rendered = await resolveMessageMacroContent(source, assistantEnv);
+          resolvedMessage = rendered.content;
+          if (savedMessage) {
+            resolvedExtra = withMessageLiteralExtra(savedMessage.extra, rendered);
+          }
           persistMacroVariableState(userId, chatId, assistantEnv);
         }
-        if (savedMessage && baseContent !== resolvedMessage) {
+        if (savedMessage && (baseContent !== resolvedMessage || JSON.stringify(resolvedExtra) !== JSON.stringify(savedMessage.extra))) {
           chatsSvc.updateMessage(userId, messageId, {
             content: resolvedMessage,
+            extra: resolvedExtra,
             ...(genSwipeId != null ? { contentSwipeId: genSwipeId } : {}),
           });
         }

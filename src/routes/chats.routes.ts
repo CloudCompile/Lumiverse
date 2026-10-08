@@ -13,6 +13,7 @@ import {
   type MessageContentProcessorCtx,
 } from "../spindle/message-content-processor";
 import { resolveRenderedMessageContent } from "../services/chat-macro-render.service";
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { contentHasMacroHints } from "../services/vectorization-content.service";
 import { computeMessageTokenCount } from "../services/message-token-count";
 import {
@@ -141,6 +142,8 @@ async function runDisplayPreprocessItem(
     : { content: item.rawContent };
 
   let content = processed.content ?? item.rawContent;
+  const savedMessage = item.messageId ? svc.getMessage(userId, item.messageId) : null;
+  if (savedMessage?.chat_id === chatId) content = shieldMessageLiterals(content, savedMessage);
   if (contentHasMacroHints(content)) {
     const env = svc.buildMacroEnvForChat(userId, chatId);
     if (env) {
@@ -154,7 +157,7 @@ async function runDisplayPreprocessItem(
           // Leave outlets unresolved — base macro resolution still runs.
         }
       }
-      content = await resolveRenderedMessageContent(content, env);
+      content = await resolveRenderedMessageContent(content, env, true);
     }
   }
 

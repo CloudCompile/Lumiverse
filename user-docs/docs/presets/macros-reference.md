@@ -1137,7 +1137,7 @@ When Lumiverse writes JSON, `{`, `}`, and `<` inside string values are written a
 
 Because the value is quoted, it is always stored as a string, even when the user's message is a number or starts with `{`. Use the inline form shown here: the body of the scoped form, `{{jsonEscape}}…{{/jsonEscape}}`, is evaluated like any other template first.
 
-Plain text read out of JSON keeps its braces literal from then on; legacy `<user>` and `<char>` tags in it are replaced like anywhere else.
+Plain text read out of JSON keeps its braces literal from then on, including when a resolved chat message is saved and used in later history. String operations such as `upper`, `lower`, `len`, and `substr` work on the actual text while keeping macro-looking data inert; legacy `<user>` and `<char>` tags in plain text are replaced like anywhere else.
 
 ### Limits
 
@@ -1151,9 +1151,9 @@ Plain text read out of JSON keeps its braces literal from then on; legacy `<user
 
 ### `<json>` Blocks in Chat Messages
 
-Valid JSON inside `<json>…</json>` in a chat message is kept exactly as written. Macros inside it don't run, `<user>`/`<char>` placeholders aren't replaced, and formatting cleanup skips it. The block reaches the model unchanged unless a regex script changes it — regex scripts still see the real text, so a script can hide or remove the block as usual.
+Valid JSON inside `<json>…</json>` in a chat message is kept exactly as written. Macros inside it don't run, `<user>`/`<char>` placeholders aren't replaced, and formatting cleanup skips it. The block reaches the model unchanged unless a regex script changes it — regex scripts and scoped regex macros still see the real text, so they can hide or remove the block as usual.
 
-A block that isn't valid JSON yet, such as `<json>{{getchatvar::state}}</json>`, is filled in normally. Preset and lorebook text work as before; this protection applies only to chat message content. The opening tag must be exactly `<json>` (any letter case, no attributes). A block ends at the first `</json>` outside a JSON string, so strings inside the JSON may mention `<json>` or `</json>` freely.
+A block that isn't valid JSON yet, such as `<json>{{getchatvar::state}}</json>`, is filled in normally. Preset and lorebook text work as before; this protection applies only to chat message content. If malformed variable shorthand before a block makes macro boundaries uncertain, the whole message is kept as written without running macros. The opening tag must be exactly `<json>` (any letter case, no attributes). A block ends at the first `</json>` outside a JSON string, so strings inside the JSON may mention `<json>` or `</json>` freely.
 
 The protection covers blocks in the message's own text. A block written inside a macro's arguments, such as `{{setchatvar::state::<json>…</json>}}`, belongs to that macro and follows the normal macro rules, so a `}}` inside it ends the macro early. To store a block from a message, use a scoped setter instead: `{{setchatvar::state}}<json>{"hp": 3}</json>{{/setchatvar}}`. The variable then holds the block with the same escaping JSON macros use, so reading it later never runs macro text from it.
 

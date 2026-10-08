@@ -3072,3 +3072,29 @@ describe("Chat messages as JSON sources", () => {
     expect(env.variables.local.has("x")).toBe(false);
   });
 });
+
+
+describe("JSON string composition", () => {
+  test.each([
+    ["lower", "a {b}"], ["upper", "A {B}"], ["len", "5"], ["reverse", "}B{ A"],
+  ])("%s sees the actual characters of a JSON read", async (operation, expected) => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "A {B}" }) } });
+    expect(await ev(`{{${operation}::{{getchatvarkey::state::note}}}}`, env)).toBe(expected);
+    expect(await ev(`{{${operation}::{{jsonGet::{{getchatvar::state}}::note}}}}`, env)).toBe(expected);
+  });
+
+  test("substring and replacement operate on literal braces without exposing markers", async () => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "A {B}" }) } });
+    expect(await ev("{{substr::{{getchatvarkey::state::note}}::2::5}}", env)).toBe("{B}");
+    expect(await ev(String.raw`{{replace::\{::[::{{getchatvarkey::state::note}}}}`, env)).toBe("A [B}");
+    await ev("{{setchatvarkey::state::copy::{{lower::{{getchatvarkey::state::note}}}}}}", env);
+    expect(JSON.parse(env.variables.chat.get("state")!).copy).toBe("a {b}");
+  });
+
+  test("transforming a JSON read keeps macro-looking data inert across prompt passes", async () => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "{{SETCHATVAR::owned::yes}}" }) } });
+    const first = await evaluate("{{lower::{{getchatvarkey::state::note}}}}", env, registry, { deferLiteralBraceRestore: true });
+    expect((await evaluate(`${first.text}|{{user}}`, env, registry)).text).toBe("{{setchatvar::owned::yes}}|Alice");
+    expect(env.variables.chat.has("owned")).toBe(false);
+  });
+});

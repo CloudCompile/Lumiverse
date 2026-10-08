@@ -1,5 +1,6 @@
 import type { AstNode, MacroNode } from "../types";
 import { registry } from "../MacroRegistry";
+import { registerDataMacro } from "../data-input";
 import { shieldLiteralBraces } from "../literal-braces";
 import { evaluateMacroCondition } from "../conditions";
 
@@ -108,7 +109,7 @@ export function registerCoreMacros(): void {
     handler: (ctx) => ctx.env.chat.lastUserMessage,
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "reverse",

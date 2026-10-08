@@ -103,6 +103,7 @@ function findTopLevelJsonBlocks(text: string): BlockScan {
   while (open >= 0) {
     const innerStart = open + OPEN_TAG_LENGTH
     depth = macroDepthAt(text, counted, open, depth)
+    if (depth < 0) return { blocks: [], stoppedAt: 0 }
     counted = open
     if (depth > 0) {
       open = indexOfOpenTag(text, innerStart)
@@ -175,6 +176,7 @@ function macroDepthAt(text: string, from: number, to: number, depth: number): nu
     if (char === BACKSLASH && (next === OPEN_BRACE || next === CLOSE_BRACE)) {
       i++
     } else if (char === OPEN_BRACE && next === OPEN_BRACE) {
+      if (malformedShorthandAt(text, i, to)) return -1
       depth++
       i++
     } else if (char === CLOSE_BRACE && next === CLOSE_BRACE && depth > 0) {
@@ -183,4 +185,23 @@ function macroDepthAt(text: string, from: number, to: number, depth: number): nu
     }
   }
   return depth
+}
+
+/** Match the lexer's shorthand header; an uncertain early close fails closed. */
+function malformedShorthandAt(text: string, start: number, to: number): boolean {
+  const header = /^[ \t]*[!?~>/#]*[ \t]*[.@$]/.exec(text.slice(start + 2, to))
+  if (!header) return false
+  let pos = start + 2 + header[0].length
+  while (pos < to && /[\w-]/.test(text[pos])) {
+    if (text[pos] === '-' && (text[pos + 1] === '-' || text[pos + 1] === '=')) break
+    pos++
+  }
+  while (pos < to && (text[pos] === ' ' || text[pos] === '\t')) pos++
+  const operator = text.slice(pos, pos + 2)
+  if (['+=', '-=', '||', '??', '==', '!=', '>=', '<='].includes(operator) || ['=', '>', '<'].includes(text[pos])) return false
+  if (operator === '++' || operator === '--') {
+    pos += 2
+    while (pos < to && (text[pos] === ' ' || text[pos] === '\t')) pos++
+  }
+  return pos <= to && text.slice(pos, pos + 2) !== '}}'
 }

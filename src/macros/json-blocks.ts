@@ -1,4 +1,4 @@
-import { normalizeJsonInput, shieldJsonStrings } from "./json-utils";
+import { normalizeJsonInput, shieldDataBraces, shieldJsonStrings } from "./json-utils";
 import type { MacroEnv } from "./types";
 
 /**
@@ -114,6 +114,7 @@ function scanJsonBlocks(text: string, topLevel: boolean): JsonBlockScan {
     const innerStart = open + OPEN_TAG_LENGTH;
     if (topLevel) {
       depth = macroDepthAt(text, counted, open, depth);
+      if (depth < 0) return { blocks: [], stoppedAt: 0 };
       counted = open;
       if (depth > 0) {
         open = indexOfOpenTag(text, innerStart);
@@ -192,6 +193,7 @@ function macroDepthAt(text: string, from: number, to: number, depth: number): nu
     if (char === BACKSLASH && (next === OPEN_BRACE || next === CLOSE_BRACE)) {
       i++;
     } else if (char === OPEN_BRACE && next === OPEN_BRACE) {
+      if (malformedShorthandAt(text, i, to)) return -1;
       depth++;
       i++;
     } else if (char === CLOSE_BRACE && next === CLOSE_BRACE && depth > 0) {
@@ -216,7 +218,12 @@ const PLACEHOLDER_RE = /\x00(\d+)(?=\x00)/g;
  * macros see a proxy of the env but the same `extra` object, so a placeholder
  * resolves only within the env that made it, for as long as that env lives.
  */
-const registries = new WeakMap<object, Map<string, string>>();
+interface DataSource {
+  source: string;
+  literalOutput?: string;
+  storedOutput?: string;
+}
+const registries = new WeakMap<object, Map<string, DataSource>>();
 
 /**
  * Swap each top-level block in `text` for a placeholder. A text whose block
@@ -248,7 +255,7 @@ export function protectJsonBlocks(
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     const id = nonce + i;
-    sources.set(id, block.source);
+    sources.set(id, { source: block.source });
     protectedText += text.slice(cursor, block.start) + "\x00" + id + "\x00";
     cursor = block.end;
   }
@@ -260,7 +267,27 @@ export function protectJsonBlocks(
  * Placeholders from another env, and forged ones, stay as they are.
  */
 export function resolveJsonBlockPlaceholders(text: string, env: Pick<MacroEnv, "extra">): string {
-  return replacePlaceholders(text, registries.get(env.extra), (source) => source);
+  return replacePlaceholders(text, registries.get(env.extra), (entry) => entry.literalOutput ?? entry.source);
+}
+
+/** Captured data can be read by handlers without becoming executable template text. */
+export function protectLiteralData(text: string, env: Pick<MacroEnv, "extra">): string {
+  if (!text) return text;
+  const protection = protectJsonBlocks(text, env);
+  const shielded = shieldDataBraces(protection.text);
+  let sources = registries.get(env.extra);
+  if (!sources) {
+    sources = new Map();
+    registries.set(env.extra, sources);
+  }
+  const [high, low] = crypto.getRandomValues(new Uint32Array(2));
+  const id = String(high).padStart(10, "0") + String(low).padStart(10, "0");
+  sources.set(id, {
+    source: text,
+    literalOutput: protection.restore(shielded),
+    storedOutput: replacePlaceholders(shielded, sources, (entry) => entry.storedOutput ?? shieldJsonStrings(entry.source)),
+  });
+  return "\x00" + id + "\x00";
 }
 
 /**
@@ -271,13 +298,13 @@ export function resolveJsonBlockPlaceholders(text: string, env: Pick<MacroEnv, "
  * (`normalizeJsonInput`).
  */
 export function readJsonInput(text: string, env: Pick<MacroEnv, "extra">): string {
-  return normalizeJsonInput(resolveJsonBlockPlaceholders(text, env));
+  return normalizeJsonInput(replacePlaceholders(text, registries.get(env.extra), (entry) => entry.source));
 }
 
 function replacePlaceholders(
   text: string,
-  sources: Map<string, string> | undefined,
-  replace: (source: string) => string,
+  sources: Map<string, DataSource> | undefined,
+  replace: (source: DataSource) => string,
 ): string {
   if (!sources || !text.includes("\x00")) return text;
   let replaced = "";
@@ -334,13 +361,34 @@ function restoreVariables(env: ProtectedEnv): void {
     // A restored name may add an entry, which this loop then meets with
     // nothing left to restore.
     for (const [name, value] of variables) {
-      const key = replacePlaceholders(name, sources, (source) => source);
+      const key = replacePlaceholders(name, sources, (entry) => entry.source);
       // Stored chat state is untyped JSON, so a value is not always a string.
-      const restored = typeof value === "string" ? replacePlaceholders(value, sources, shieldJsonStrings) : value;
+      const restored = typeof value === "string"
+        ? replacePlaceholders(value, sources, (entry) => entry.storedOutput ?? shieldJsonStrings(entry.source))
+        : value;
       if (key === name && restored === value) continue;
       if (key !== name) variables.delete(name);
       variables.set(key, restored);
       if (scope === "chat") env._chatVarsDirty = true;
     }
   }
+}
+
+/** Match the lexer's shorthand header; an uncertain early close fails closed. */
+function malformedShorthandAt(text: string, start: number, to: number): boolean {
+  const header = /^[ \t]*[!?~>/#]*[ \t]*[.@$]/.exec(text.slice(start + 2, to));
+  if (!header) return false;
+  let pos = start + 2 + header[0].length;
+  while (pos < to && /[\w-]/.test(text[pos])) {
+    if (text[pos] === "-" && (text[pos + 1] === "-" || text[pos + 1] === "=")) break;
+    pos++;
+  }
+  while (pos < to && (text[pos] === " " || text[pos] === "\t")) pos++;
+  const operator = text.slice(pos, pos + 2);
+  if (["+=", "-=", "||", "??", "==", "!=", ">=", "<="].includes(operator) || ["=", ">", "<"].includes(text[pos])) return false;
+  if (operator === "++" || operator === "--") {
+    pos += 2;
+    while (pos < to && (text[pos] === " " || text[pos] === "\t")) pos++;
+  }
+  return pos <= to && text.slice(pos, pos + 2) !== "}}";
 }

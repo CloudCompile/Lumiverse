@@ -60,7 +60,8 @@ export interface CaptureReplacement {
  *
  * Keep this separate from native String#replace semantics: raw mode has long
  * exposed this exact contract (notably, capture references are limited to two
- * digits and an out-of-range reference is left untouched).
+ * digits and an out-of-range reference is left untouched). Callers shielding
+ * data can transform each capture and opt into native replacement fallbacks.
  */
 export function substituteRegexCaptures(
   template: string,
@@ -69,6 +70,7 @@ export function substituteRegexCaptures(
   offset: number,
   input: string,
   namedGroups?: Record<string, string | undefined>,
+  options?: { transformCapture(value: string): string; nativeReplacement?: boolean },
 ): string {
   return substituteRegexCapturesFromArrayLike(
     template,
@@ -78,6 +80,7 @@ export function substituteRegexCaptures(
     offset,
     input,
     namedGroups,
+    options,
   );
 }
 
@@ -89,25 +92,32 @@ function substituteRegexCapturesFromArrayLike(
   offset: number,
   input: string,
   namedGroups?: Record<string, string | undefined>,
+  options?: { transformCapture(value: string): string; nativeReplacement?: boolean },
 ): string {
   const groupCount = groups.length - groupOffset;
+  const capture = (value: string) => options ? options.transformCapture(value) : value;
   return template.replace(
     /\$(?:(\$)|(&)|(`)|(')|(\d{1,2})|<([^>]*)>)/g,
     (token, dollar, amp, backtick, quote, digits, name) => {
       if (dollar !== undefined) return "$";
-      if (amp !== undefined) return fullMatch;
-      if (backtick !== undefined) return input.slice(0, offset);
-      if (quote !== undefined) return input.slice(offset + fullMatch.length);
+      if (amp !== undefined) return capture(fullMatch);
+      if (backtick !== undefined) return capture(input.slice(0, offset));
+      if (quote !== undefined) return capture(input.slice(offset + fullMatch.length));
       if (digits !== undefined) {
         const idx = parseInt(digits, 10);
-        if (idx >= 1 && idx <= groupCount) return groups[idx - 1 + groupOffset] ?? "";
+        if (idx >= 1 && idx <= groupCount) return capture(groups[idx - 1 + groupOffset] ?? "");
+        if (options?.nativeReplacement && digits.length === 2) {
+          const first = parseInt(digits[0], 10);
+          if (first >= 1 && first <= groupCount) return capture(groups[first - 1 + groupOffset] ?? "") + digits[1];
+        }
         return token;
       }
       if (name !== undefined && namedGroups) {
         // A name defined by the pattern but absent from this match substitutes
         // empty (native String#replace semantics). Only a name the pattern does
         // not define at all is left untouched, so typos still surface.
-        if (Object.prototype.hasOwnProperty.call(namedGroups, name)) return namedGroups[name] ?? "";
+        if (Object.prototype.hasOwnProperty.call(namedGroups, name)) return capture(namedGroups[name] ?? "");
+        if (options?.nativeReplacement) return "";
         return token;
       }
       return token;

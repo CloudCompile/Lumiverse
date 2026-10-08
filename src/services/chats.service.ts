@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { getDatabasePath, getDb } from "../db/connection";
 import { healCorruptDatabase } from "../db/maintenance";
 import { eventBus } from "../ws/bus";
@@ -4349,7 +4350,7 @@ async function updateChatChunks(userId: string, chatId: string, newMessage: Mess
   // stripped, the stored message row stays intact for display.
   const memStripped = await regexScriptsSvc.applyMemoryIngestionRegex(
     userId,
-    newMessage.content,
+    shieldMessageLiterals(newMessage.content, newMessage),
     { characterId, chatId },
   );
 
@@ -4817,8 +4818,8 @@ async function chunkAndPersistMessages(
   const sanitizedByMsgId = new Map<string, string>();
   for (const msg of messages) {
     const memStripped = memoryScripts.length > 0
-      ? await regexScriptsSvc.applyRegexScripts(msg.content, memoryScripts, "memory", undefined, undefined, undefined, { source: "prompt_backend" })
-      : msg.content;
+      ? await regexScriptsSvc.applyRegexScripts(shieldMessageLiterals(msg.content, msg), memoryScripts, "memory", undefined, undefined, undefined, { source: "prompt_backend" })
+      : shieldMessageLiterals(msg.content, msg);
     sanitizedByMsgId.set(msg.id, await resolveAndSanitizeForVectorization(memStripped, env, reasoningStrip));
   }
 

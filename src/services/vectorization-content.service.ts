@@ -1,4 +1,6 @@
 import { evaluate, registry, type MacroEnv } from "../macros";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
+import { restoreLiteralBraces } from "../macros/literal-braces";
 import { sanitizeForVectorization, type SanitizeOptions } from "../utils/content-sanitizer";
 
 const HAS_MACRO_HINT_RE = /\{\{|<(?:user|char|bot)>/i;
@@ -16,11 +18,12 @@ export async function resolveAndSanitizeForVectorization(
   let resolved = content;
   if (env && HAS_MACRO_HINT_RE.test(content)) {
     try {
-      const result = await evaluate(content, env, registry);
-      resolved = result.text;
+      resolved = await withJsonBlocksProtected(content, env, async (protectedContent) =>
+        (await evaluate(protectedContent, env, registry)).text,
+      );
     } catch {
       resolved = content;
     }
   }
-  return sanitizeForVectorization(resolved, options);
+  return sanitizeForVectorization(restoreLiteralBraces(resolved), options);
 }

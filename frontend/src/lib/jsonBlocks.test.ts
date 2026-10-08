@@ -147,3 +147,9 @@ describe('splitJsonBlocks', () => {
     expect(performance.now() - started).toBeLessThan(250)
   })
 })
+
+
+test('keeps the whole message verbatim when malformed shorthand may close early', () => {
+  const source = '{{.x ignored <json>{"s":"{{user}}"}</json>'
+  expect(splitJsonBlocks(source)).toEqual([{ text: source, verbatim: true }])
+})

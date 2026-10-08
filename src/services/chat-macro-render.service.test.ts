@@ -259,3 +259,31 @@ describe("<json> blocks in messages", () => {
     expect(Object.keys(result.chatVariables!).some((name) => name.includes("\x00"))).toBe(false);
   });
 });
+
+
+describe("JSON blocks in scoped string operations", () => {
+  test("a scoped regex sees and can hide the real block", async () => {
+    expect(await resolveRenderedMessageContent(
+      '{{regex::<json>.*</json>::HIDDEN}}<json>{"hp":1}</json>{{/regex}}', makeEnv(),
+    )).toBe("HIDDEN");
+  });
+
+  test("scoped length measures the real block", async () => {
+    const block = '<json>{"hp":1}</json>';
+    expect(await resolveRenderedMessageContent(`{{len}}${block}{{/len}}`, makeEnv())).toBe(String(block.length));
+  });
+
+  test("regex captures and repeated blocks keep their own macros inert", async () => {
+    const block = '<json>{"note":"{{setchatvar::owned::yes}}"}</json>';
+    const env = makeEnv();
+    expect(await resolveRenderedMessageContent(`{{regex::(<json>.*</json>)::$1$1}}${block}{{/regex}}`, env)).toBe(block + block);
+    expect(env.variables.chat.has("owned")).toBe(false);
+  });
+
+  test.each(["{{.x ignored ", "{{@x++ ignored ", "{{$.x ignored "])("malformed shorthand %s fails closed", async (prefix) => {
+    const block = '<json>{"note":"{{setchatvar::owned::yes}}"}</json>';
+    const env = makeEnv();
+    expect(await resolveRenderedMessageContent(prefix + block, env)).toBe(prefix + block);
+    expect(env.variables.chat.has("owned")).toBe(false);
+  });
+});
