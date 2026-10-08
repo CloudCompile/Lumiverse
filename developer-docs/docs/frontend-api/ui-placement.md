@@ -307,7 +307,16 @@ widget.destroy()
 | `initialPosition` | `{ x, y }` | — | Starting position in viewport coordinates |
 | `snapToEdge` | `boolean` | — | Snap to the nearest screen edge after drag |
 | `tooltip` | `string` | — | Hover tooltip text |
+| `touchScrollMode` | `"guarded" \| "native"` | `"guarded"` | Installed-iOS single-finger scroll policy for this widget; reversible through `setTouchScrollMode(mode)`. |
 | `chromeless` | `boolean` | `false` | Strip the default container chrome (border, background, shadow, border-radius). The extension fully owns the visual presentation. |
+
+### Installed-iOS touch scrolling override
+
+Floating widgets use Lumiverse's existing overscroll guard by default. To let a widget own its single-finger scrolling in an installed iOS PWA, create it with `touchScrollMode: 'native'` or call `widget.setTouchScrollMode('native')`. Call `widget.setTouchScrollMode('guarded')` to restore the guard immediately.
+
+The override applies only inside that live widget root. Core surfaces and other widgets keep their existing policy, including nested registered placements. Destroying the widget, unloading the extension, or revoking `ui_panels` removes its override; newly created widgets default to guarded. Zoom and multi-finger protections are unchanged. Native mode leaves scroll containment to the extension and may expose iOS overscroll behavior; provide a reversible user setting when using it as a troubleshooting option.
+
+On older hosts, feature-detect `typeof widget.setTouchScrollMode === 'function'` before offering the option. Do not emulate it by changing document listeners or other placements.
 
 ### Dynamic sizing and desktop pop-outs
 

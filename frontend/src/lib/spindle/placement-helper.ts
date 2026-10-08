@@ -48,6 +48,7 @@ import {
 } from './preset-editor-helper'
 import { destroyComponentsForTarget } from './components-helper'
 import { getLiveRootRecordExact, registerLiveRoot, unregisterLiveRoot } from './live-root-registry'
+import { assertTouchScrollMode, setWidgetTouchScrollMode, type WidgetTouchScrollMode } from './widget-touch-scroll'
 import type { FloatWidgetState, DockPanelState, SettingsTabState } from '@/store/slices/spindle-placement'
 import {
   clampLayoutRect,
@@ -228,6 +229,7 @@ function getStore() {
 type GeometryRect = SurfaceRectPrefs
 
 type H6FloatWidgetOptions = SpindleFloatWidgetOptions & {
+  touchScrollMode?: WidgetTouchScrollMode
   resizable?: boolean
   bounds?: Partial<PlacementGeometryBounds>
   aspectLock?: boolean | number
@@ -944,10 +946,11 @@ export function createFloatWidgetHandle(
   options?: H6FloatWidgetOptions,
   assertActive: PlacementGuard = () => {},
   generation?: number,
-): SpindleFloatWidgetHandle {
+): SpindleFloatWidgetHandle & { setTouchScrollMode(mode: WidgetTouchScrollMode): void } {
   assertPlacementRegistrationAllowed(extensionId, 'ui_panels')
   assertActive()
   const floatOptions = options ?? {}
+  assertTouchScrollMode(floatOptions.touchScrollMode ?? 'guarded')
   const widgetId = nextId(extensionId, 'float')
   const geometryKey = makePlacementGeometryKey(extensionId, 'float', floatOptions.persistGeometry)
   const root = document.createElement('div')
@@ -1037,6 +1040,7 @@ export function createFloatWidgetHandle(
     destroyed = true
     if (!registered) disposedDuringRegistration = true
     runCleanupSteps(
+      () => setWidgetTouchScrollMode(root, 'guarded'),
       () => window.removeEventListener('spindle:float-resize-handle-ready', handleResizeHandleReady),
       () => window.removeEventListener('spindle:float-drag-end', handleDragEndEvent),
       () => {
@@ -1085,9 +1089,16 @@ export function createFloatWidgetHandle(
     throw error
   }
 
+  setWidgetTouchScrollMode(root, floatOptions.touchScrollMode ?? 'guarded')
+
   return {
     root,
     widgetId,
+    setTouchScrollMode(mode: WidgetTouchScrollMode) {
+      assertActive()
+      assertPlacementUsable(destroyed)
+      setWidgetTouchScrollMode(root, mode)
+    },
     moveTo(newX: number, newY: number) {
       assertPlacementUsable(destroyed)
       const widget = getStore().floatWidgets.find((entry) => entry.id === widgetId)
@@ -1166,7 +1177,7 @@ export function createFloatWidgetHandle(
       dragEndHandlers.add(handler)
       return () => { dragEndHandlers.delete(handler) }
     },
-  } as SpindleFloatWidgetHandle
+  } as SpindleFloatWidgetHandle & { setTouchScrollMode(mode: WidgetTouchScrollMode): void }
 }
 
 export function notifyFloatWidgetDragEnd(widgetId: string, pos: { x: number; y: number }) {

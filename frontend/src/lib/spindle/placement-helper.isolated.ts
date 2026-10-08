@@ -8,6 +8,7 @@ import type {
 import type { SpindlePlacementSlice } from '@/types/store'
 
 import { JSDOM } from 'jsdom'
+import { usesNativeWidgetTouchScroll } from './widget-touch-scroll'
 import { clearLiveRootsForExtension, getLiveRootRecordExact, registerLiveRoot, unregisterLiveRoot } from './live-root-registry'
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/' })
@@ -901,4 +902,56 @@ describe('preset placement lifecycle', () => {
     expect(placementStore.getState().extensionCommands).toHaveLength(0)
   })
 
+})
+
+
+describe('floating widget touch scroll override', () => {
+  function nativeTouch(root: HTMLElement): boolean {
+    return usesNativeWidgetTouchScroll({ composedPath: () => [root, document.body, document] } as unknown as Event)
+  }
+  test('default remains guarded, options opt in, setters reverse only the owned widget', () => {
+    const guarded = createFloatWidgetHandle(extensionId, {}, undefined, generation)
+    const native = createFloatWidgetHandle('other-widget', { touchScrollMode: 'native' }, undefined, generation)
+    placementHandles.push(guarded, native)
+    document.body.append(guarded.root, native.root)
+    expect(nativeTouch(guarded.root)).toBe(false)
+    expect(nativeTouch(native.root)).toBe(true)
+    native.setTouchScrollMode('guarded')
+    expect(nativeTouch(native.root)).toBe(false)
+    guarded.setTouchScrollMode('native')
+    expect(nativeTouch(guarded.root)).toBe(true)
+    expect(nativeTouch(native.root)).toBe(false)
+  })
+  test('permission revocation removes the override and stale setters cannot restore it', () => {
+    const widget = createFloatWidgetHandle(extensionId, { touchScrollMode: 'native' }, undefined, generation)
+    placementHandles.push(widget)
+    document.body.append(widget.root)
+    expect(nativeTouch(widget.root)).toBe(true)
+    destroyPlacementsForExtensionPermission(extensionId, 'ui_panels', generation)
+    expect(nativeTouch(widget.root)).toBe(false)
+    expect(() => widget.setTouchScrollMode('native')).toThrow('PLACEMENT_DESTROYED')
+  })
+  test('unload cleans native mode and remount defaults to guarded', () => {
+    const widget = createFloatWidgetHandle(extensionId, { touchScrollMode: 'native' }, undefined, generation)
+    document.body.append(widget.root)
+    destroyAllPlacementsForExtension(extensionId, generation)
+    expect(nativeTouch(widget.root)).toBe(false)
+    const remounted = createFloatWidgetHandle(extensionId, {}, undefined, generation + 1)
+    placementHandles.push(remounted)
+    document.body.append(remounted.root)
+    expect(nativeTouch(remounted.root)).toBe(false)
+  })
+  test('invalid mode fails before registering a placement', () => {
+    expect(() => createFloatWidgetHandle(extensionId, { touchScrollMode: 'invalid' } as any, undefined, generation)).toThrow('SPINDLE_TOUCH_SCROLL_MODE_INVALID')
+    expect(placementStore.getState().floatWidgets).toHaveLength(0)
+  })
+  test('setter checks the current extension authority', () => {
+    let active = true
+    const widget = createFloatWidgetHandle(extensionId, {}, () => { if (!active) throw new Error('inactive') }, generation)
+    placementHandles.push(widget)
+    document.body.append(widget.root)
+    active = false
+    expect(() => widget.setTouchScrollMode('native')).toThrow('inactive')
+    expect(nativeTouch(widget.root)).toBe(false)
+  })
 })

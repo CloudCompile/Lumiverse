@@ -55,6 +55,7 @@ export interface SpindleGeometryAPI {
 }
 
 export type FrontendFloatWidgetOptions = PublishedSpindleFloatWidgetOptions & {
+  touchScrollMode?: 'guarded' | 'native'
   resizable?: boolean
   bounds?: SpindleGeometryBounds
   aspectLock?: boolean | number
