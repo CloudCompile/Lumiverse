@@ -10,6 +10,7 @@ import {
   makeScanState,
   type ScanState,
 } from "./world-info-matcher.service";
+import { maskWorldInfoScanExclusions } from "../utils/world-info-scan-exclusion";
 
 /**
  * Per-entry sticky/cooldown/delay tracking state, stored in chat.metadata.wi_state.
@@ -750,7 +751,7 @@ function scanBaseState(
     const selectedMessages = depth === null || depth <= 0 || depth >= messages.length
       ? messages : messages.slice(-depth);
     for (const message of selectedMessages) {
-      matcher.scanChunk(message.content, state, scope, {
+      matcher.scanChunk(maskWorldInfoScanExclusions(message.content), state, scope, {
         kind: "message",
         messageId: message.id,
         messageOffset: message.index_in_chat,

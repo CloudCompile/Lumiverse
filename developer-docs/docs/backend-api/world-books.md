@@ -271,7 +271,7 @@ This is useful for:
     - The chat's attached world books (from `chat.metadata.chat_world_book_ids`)
     - All global world books (from the `globalWorldBooks` setting)
 
-    Entries are scanned against the chat's message history using the same logic as prompt assembly.
+    Entries are scanned against the chat's message history using the same logic as prompt assembly. Text inside World Info scan-exclusion markup (`<wi-exclude>`, the `!--WI_EXCLUDE_START--!` / `!--WI_EXCLUDE_END--!` markers, or any element with a `wi-exclude` attribute) is skipped, and keyword match offsets still index the stored message content.
 
 !!! note
     For user-scoped extensions, the user context is inferred automatically. For operator-scoped extensions, the user ID is resolved from the extension context. World books are always scoped to a single user.

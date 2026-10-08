@@ -83,6 +83,36 @@ Shorter scan depths make entries activate only when keywords are in the very rec
 
 ---
 
+## Excluding Text from Scans
+
+Some messages carry text the AI should keep seeing but that should never trigger lore — for example, a story tracker that lists characters who are currently off-scene. Wrap that text in exclusion markup and World Info ignores it, while it stays in the chat and in the prompt.
+
+| Form | Example |
+|---|---|
+| Tag | `<wi-exclude>Off-scene: Mira, Captain Holt</wi-exclude>` |
+| Markers | `!--WI_EXCLUDE_START--!` … `!--WI_EXCLUDE_END--!` |
+| Attribute on any HTML element | `<div class="tracker" wi-exclude>…</div>` |
+
+```html
+<div class="tracker" wi-exclude>
+  Location: The Gilded Anchor
+  Off-scene: Mira, Captain Holt
+</div>
+```
+
+The attribute form excludes the whole element, including everything nested inside it.
+
+- Excluded text is ignored by keyword matching and left out of the vectorized-entry search query. The stored message, the chat display, and what is sent to the AI are unchanged.
+- Each message is handled separately. An unclosed block runs to the end of that message only.
+- Tag and attribute names are not case-sensitive, and the attribute works with or without a value. Markers must be written exactly as shown.
+- Excluded regions are scanned as blank space, so words on either side never join into a new keyword match.
+- Lore entry content and recursion are not affected.
+
+!!! tip "Getting the AI to use it"
+    Ask in your preset or character instructions for tracker or status blocks to be wrapped in `<div wi-exclude>` or the markers. The markers appear as plain text in chat; a display-target regex script can hide them.
+
+---
+
 ## Probability
 
 Set a probability (0-100%) for the entry to activate even when keywords match. At 100%, it always activates. At 50%, it has a coin-flip chance.
