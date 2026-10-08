@@ -283,6 +283,17 @@ Configuration is managed through `.env` (see `.env.example` for all options). Se
 
 Owner password is stored hashed in `data/owner.credentials` (created by the setup wizard). To reset: `bun run reset-password`.
 
+## CharacterLibrary migration
+
+Import a CharacterLibrary **Full bundle (.zip)** into a running Lumiverse instance:
+
+```sh
+bun run migrate:cl --bundle ~/Downloads/cl-bundle.zip --dry-run
+bun run migrate:cl --bundle ~/Downloads/cl-bundle.zip --report ./cl-report.json
+```
+
+The CLI prompts for your account and password, reviews the inventory, and uploads to the authenticated `/api/v1/cl-migration` API. Add `--url` for a remote server; `--resume JOB_ID` continues an existing job. Original archives and per-item reports are retained. Current v1 exports omit expressions and external script files; imported regex is disabled unless you opt in. See [the migration guide](user-docs/docs/data-portability/character-library.md) for authentication, retry semantics, limits, and cleanup.
+
 ## Architecture
 
 ```

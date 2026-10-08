@@ -86,7 +86,7 @@ export async function detectCharacterImportFormat(file: File): Promise<Character
  * Reads PNG chunks and extracts the text value for a given keyword.
  * Handles tEXt, zTXt, and iTXt chunk types.
  */
-function extractPngTextChunk(buffer: Buffer, keyword: string): string | null {
+export function extractPngTextChunk(buffer: Buffer, keyword: string): string | null {
   // Verify PNG signature
   if (buffer.length < 8 || !buffer.subarray(0, 8).equals(PNG_SIGNATURE)) {
     throw new Error("Not a valid PNG file");

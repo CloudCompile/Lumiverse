@@ -8,6 +8,7 @@
 // The import runs as a background job; the HTTP route returns a jobId and
 // progress flows over the WebSocket EventBus.
 
+import { createHash } from "node:crypto";
 import { createInflateRaw, inflateRawSync } from "node:zlib";
 import {
   decryptSecret,
@@ -1278,6 +1279,8 @@ export interface SelectedZipExtractionOptions {
   selectEntry(name: string): string | null;
   /** Validate state accumulated by selectEntry before extraction starts. */
   validateSelection?(): void;
+  /** Legacy CL bundles can repeat a shared gallery path. Every copy must be byte-identical. */
+  allowIdenticalDuplicate?(name: string): boolean;
   maxDecompressedBytes?: number;
   signal?: AbortSignal;
 }
@@ -1341,12 +1344,16 @@ export async function extractSelectedZipEntries(
   for await (const entry of scanCentralDirectory(archive, cdOffset, cdSize, totalEntries)) {
     const relativePath = options.selectEntry(entry.name);
     if (relativePath === null) continue;
-    if (selectedByName.has(entry.name)) {
+    const previous = selectedByName.get(entry.name);
+    if (previous && !options.allowIdenticalDuplicate?.(entry.name)) {
       throw new ArchiveValidationError("not_zip", `ZIP contains a duplicate entry: ${entry.name}`);
     }
 
     const outputPath = resolveSelectedZipOutputPath(options.destinationDir, relativePath);
-    if (selectedTargets.has(outputPath)) {
+    if (previous && previous.outputPath !== outputPath) {
+      throw new ArchiveValidationError("not_zip", `duplicate ZIP entry has a different output path: ${entry.name}`);
+    }
+    if (!previous && selectedTargets.has(outputPath)) {
       throw new ArchiveValidationError("not_zip", `ZIP entries resolve to the same output path: ${relativePath}`);
     }
     const isDirectory = relativePath.endsWith("/");
@@ -1385,6 +1392,7 @@ export async function extractSelectedZipEntries(
   const archiveFd = openSync(options.archivePath, "r");
   let decompressedBytes = 0;
   let extractedEntries = 0;
+  const extractedHashes = new Map<string, string>();
   try {
     for await (const centralEntry of scanCentralDirectory(archive, cdOffset, cdSize, totalEntries)) {
       const selected = selectedByName.get(centralEntry.name);
@@ -1399,7 +1407,9 @@ export async function extractSelectedZipEntries(
 
       ensureDir(dirname(selected.outputPath));
       const dataStart = getLocalDataOffset(archiveFd, archiveSize, centralEntry);
-      const outputFd = openSync(selected.outputPath, "wx");
+      const previousHash = extractedHashes.get(centralEntry.name);
+      const outputFd = previousHash === undefined ? openSync(selected.outputPath, "wx") : null;
+      const contentHash = createHash("sha256");
       let entryBytes = 0;
       let crcState = 0xffffffff;
       let complete = false;
@@ -1411,7 +1421,8 @@ export async function extractSelectedZipEntries(
               `selected ZIP data exceeds decompressed size cap (${maxDecompressedBytes} bytes)`,
             );
           }
-          writeAllSync(outputFd, chunk);
+          if (outputFd !== null) writeAllSync(outputFd, chunk);
+          contentHash.update(chunk);
           crcState = updateCrc32(crcState, chunk);
           entryBytes += chunk.byteLength;
           decompressedBytes += chunk.byteLength;
@@ -1446,11 +1457,16 @@ export async function extractSelectedZipEntries(
             `entry CRC32 disagrees with central directory (${centralEntry.name})`,
           );
         }
+        const hash = contentHash.digest("hex");
+        if (previousHash !== undefined && previousHash !== hash) {
+          throw new ArchiveValidationError("not_zip", `duplicate ZIP entry contains different data: ${centralEntry.name}`);
+        }
+        extractedHashes.set(centralEntry.name, hash);
         complete = true;
         extractedEntries++;
       } finally {
-        closeSync(outputFd);
-        if (!complete) {
+        if (outputFd !== null) closeSync(outputFd);
+        if (!complete && outputFd !== null) {
           try { unlinkSync(selected.outputPath); } catch { /* ignore partial output cleanup */ }
         }
       }

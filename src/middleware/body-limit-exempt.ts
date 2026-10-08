@@ -33,6 +33,7 @@ export function isLargeUploadBodyLimitExemptPath(path: string, method?: string):
     path === "/api/v1/chats/import" ||
     path === "/api/v1/chats/import-st" ||
     path === "/api/v1/st-migration/backup" ||
+    (path === "/api/v1/cl-migration/bundles" && normalizedMethod === "PUT") ||
     path === "/api/v1/user-data/import" ||
     path === "/api/v1/spindle-uploads" ||
     path.startsWith("/api/v1/spindle-uploads/")

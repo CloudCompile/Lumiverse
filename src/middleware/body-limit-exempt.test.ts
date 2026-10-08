@@ -36,6 +36,13 @@ describe("isLargeUploadBodyLimitExemptPath", () => {
     expect(isLargeUploadBodyLimitExemptPath("/api/v1/st-migration/backup")).toBe(true);
   });
 
+  test("allows only CharacterLibrary bundle uploads through the global guard", () => {
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/cl-migration/bundles", "PUT")).toBe(true);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/cl-migration/bundles", "put")).toBe(true);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/cl-migration/bundles", "POST")).toBe(false);
+    expect(isLargeUploadBodyLimitExemptPath("/api/v1/cl-migration/jobs/job-1/execute", "POST")).toBe(false);
+  });
+
   test("allows full preset writes through the global 10MB guard", () => {
     expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets", "POST")).toBe(true);
     expect(isLargeUploadBodyLimitExemptPath("/api/v1/presets/preset-1", "PUT")).toBe(true);

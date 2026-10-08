@@ -77,7 +77,8 @@
     "bench:regex-captures": "bun run scripts/bench-regex-captures.ts",
     "bench:regex-social-links": "bun run scripts/bench-regex-social-links.ts",
     "bench:message-tags": "bun run scripts/bench-message-tag-interceptors.ts",
-    "edit-env": "bun run scripts/edit-env.ts"
+    "edit-env": "bun run scripts/edit-env.ts",
+    "migrate:cl": "bun run scripts/migrate-character-library.ts"
   },
   "type": "module",
   "optionalDependencies": {

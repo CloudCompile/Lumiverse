@@ -125,6 +125,7 @@ nav = [
     { "Overview" = "data-portability/index.md" },
     { "Exporting Your Data" = "data-portability/exporting.md" },
     { "Importing an Archive" = "data-portability/importing.md" },
+    { "Migrating from CharacterLibrary" = "data-portability/character-library.md" },
     { "API Keys & Tickets" = "data-portability/api-keys-and-tickets.md" },
   ] },
   { "Extensions" = [
