@@ -170,6 +170,34 @@ export function characterInstallPayload(delivery: IllarinDelivery) {
   };
 }
 
+/** Accept both portable Loom documents and LumiHub-style export envelopes. */
+export function illarinPresetInstallPayload(
+  delivery: IllarinDelivery,
+  document: Record<string, any>,
+  coverUrl: string | null,
+) {
+  const wrapped = Object.hasOwn(document, "preset");
+  const preset = wrapped ? document.preset : document;
+  if (!preset || typeof preset !== "object" || Array.isArray(preset) || !Array.isArray(preset.blocks)) {
+    throw new Error(`Illarin preset delivery ${delivery.id} has no Lumiverse prompt blocks`);
+  }
+  if (!Number.isSafeInteger(delivery.versionNumber) || delivery.versionNumber < 1) {
+    throw new Error(`Illarin preset delivery ${delivery.id} has an invalid version number`);
+  }
+  return {
+    source: "illarin" as const,
+    presetId: delivery.workId,
+    presetName: delivery.name,
+    presetVersion: typeof preset.presetVersion === "string" ? preset.presetVersion : null,
+    presetVersionNumber: delivery.versionNumber,
+    presetData: {
+      ...(wrapped ? document : { preset }),
+      // An absent sidecar must not erase a cover embedded in the export.
+      ...(coverUrl === null ? {} : { coverUrl, cover_url: coverUrl }),
+    },
+  };
+}
+
 export async function installIllarinDelivery(userId: string, delivery: IllarinDelivery): Promise<void> {
   switch (delivery.type) {
     case "character": {
@@ -191,13 +219,7 @@ export async function installIllarinDelivery(userId: string, delivery: IllarinDe
     case "preset": {
       const preset = await fetchJsonArtifact(delivery);
       const coverUrl = await persistIllarinPresetCover(userId, delivery);
-      const result = await installPreset(delivery.id, userId, {
-        source: "illarin",
-        presetId: delivery.workId,
-        presetName: delivery.name,
-        presetVersion: typeof preset.presetVersion === "string" ? preset.presetVersion : null,
-        presetData: { preset, coverUrl },
-      });
+      const result = await installPreset(delivery.id, userId, illarinPresetInstallPayload(delivery, preset, coverUrl));
       requireSuccess(result, delivery);
       return;
     }

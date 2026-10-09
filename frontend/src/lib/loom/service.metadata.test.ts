@@ -26,6 +26,21 @@ function rawPreset(metadata: Record<string, unknown>): Preset {
 }
 
 describe('Loom extension metadata preservation', () => {
+  test('retains Illarin release identity and display label through edits and exports', () => {
+    const loom = unmarshalPreset(rawPreset({
+      _lumiverse_install_source: 'illarin',
+      _lumiverse_illarin_asset_id: 'work-1',
+      _lumiverse_illarin_version_number: 4,
+      _lumiverse_preset_version: 'stable',
+    }))
+    expect(loom.presetVersion).toBe('stable')
+    expect(marshalUpdate(loom).metadata).toMatchObject({
+      _lumiverse_illarin_version_number: 4,
+      _lumiverse_preset_version: 'stable',
+    })
+    const exported = createPortableLoomPresetExport(loom)
+    expect(exported.lumihubMeta?._lumiverse_illarin_version_number).toBe(4)
+  })
   test('defaults trim-incomplete-words to off for existing presets', () => {
     expect(unmarshalPreset(rawPreset({})).advancedSettings.trimIncompleteWords).toBe(false)
   })

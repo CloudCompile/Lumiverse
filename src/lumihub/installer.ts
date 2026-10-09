@@ -3,6 +3,7 @@
  * import services directly (no HTTP self-requests).
  */
 import * as svc from "../services/characters.service";
+import { getDb } from "../db/connection";
 import * as cardSvc from "../services/character-card.service";
 import * as images from "../services/images.service";
 import * as gallerySvc from "../services/character-gallery.service";
@@ -654,7 +655,7 @@ export async function installTheme(
   }
 }
 
-/** Install a Loom preset export from LumiHub into the linked user's preset library. */
+/** Install a remote Loom export into the linked user's preset library. */
 export async function installPreset(
   requestId: string,
   userId: string,
@@ -675,11 +676,15 @@ export async function installPreset(
     const name = typeof p.name === "string" && p.name.trim() ? p.name : payload.presetName;
     const blocks = Array.isArray(p.blocks) ? p.blocks : [];
 
-    // Version sits directly below `name` in the export; fall back to the top-level field.
+    const presetVersionNumber = payload.source === "illarin" ? payload.presetVersionNumber : undefined;
+    if (presetVersionNumber !== undefined && (!Number.isSafeInteger(presetVersionNumber) || presetVersionNumber < 1)) {
+      throw new Error("Illarin preset has an invalid version number");
+    }
+    // Keep the publisher's display label, using the release number when absent.
     const presetVersion =
-      typeof p.presetVersion === "string" ? p.presetVersion
-      : typeof payload.presetVersion === "string" ? payload.presetVersion
-      : null;
+      typeof p.presetVersion === "string" && p.presetVersion.trim() ? p.presetVersion
+      : typeof payload.presetVersion === "string" && payload.presetVersion.trim() ? payload.presetVersion
+      : presetVersionNumber !== undefined ? String(presetVersionNumber) : null;
     const presetSlug = typeof payload.presetSlug === "string" ? payload.presetSlug : null;
     const presetCreator = typeof payload.presetCreator === "string" ? payload.presetCreator : null;
     // LumiHub detects installed presets by canonical creator/name slug. Prefer
@@ -761,7 +766,10 @@ export async function installPreset(
         coverUrl,
         _lumiverse_install_source: payload.source,
         ...(payload.source === "illarin"
-          ? { _lumiverse_illarin_asset_id: payload.presetId }
+          ? {
+              _lumiverse_illarin_asset_id: payload.presetId,
+              ...(presetVersionNumber === undefined ? {} : { _lumiverse_illarin_version_number: presetVersionNumber }),
+            }
           : { _lumiverse_lumihub_id: payload.presetId }),
         _lumiverse_preset_version: presetVersion,
         _lumiverse_preset_slug: presetSlug,
@@ -772,73 +780,82 @@ export async function installPreset(
 
     // Update an existing remote installation in place so "Update" advances the
     // version instead of duplicating the preset.
-    let saved;
-    if (existing) {
-      saved = presetsSvc.updatePreset(userId, existing.id, {
-        ...presetInput,
-        expected_cache_revision: existing.cache_revision,
-      })!;
-    } else {
-      saved = presetsSvc.createPreset(userId, presetInput);
-      eventBus.emit(EventType.PRESET_CHANGED, { id: saved.id, preset: saved }, userId);
-    }
-
-    // Preset-bound regex scripts ride at the top level of a LumiHub export or
-    // inside Illarin's raw preset document. On update, preserve older remotely
-    // attributed versions as disabled history and replace only an existing copy
-    // of the incoming version. Folder
-    // names are never used as ownership, so same-named local folders are untouched.
-    // LumiHub retains its historical best-effort behavior. Illarin propagates an
-    // incomplete import so durable delivery work is not acknowledged prematurely.
-    try {
-      const regexScripts = extractPresetRegexScripts(exported);
-      const previousVersion = typeof existing?.metadata?._lumiverse_preset_version === "string"
-        ? existing.metadata._lumiverse_preset_version
-        : null;
-      if (payload.source === "illarin") {
-        const previousAssetId = typeof existing?.metadata?._lumiverse_illarin_asset_id === "string"
-          ? existing.metadata._lumiverse_illarin_asset_id
-          : typeof existing?.metadata?._lumiverse_lumihub_id === "string"
-            ? existing.metadata._lumiverse_lumihub_id
-            : null;
-        regexSvc.installIllarinPresetRegexScripts(userId, {
-          presetId: saved.id,
-          presetName: saved.name,
-          assetId: payload.presetId,
-          presetVersion,
-          scripts: regexScripts,
-          previous: existing ? {
-            assetId: previousAssetId,
-            version: previousVersion,
-            presetName: existing.name,
-          } : null,
-        });
+    // Preset content and packaged regexes commit together. A failed durable
+    // Illarin delivery must retain the previous version for a safe retry.
+    const committed = eventBus.withBufferedEvents(() => getDb().transaction(() => {
+      let saved;
+      if (existing) {
+        saved = presetsSvc.updatePreset(userId, existing.id, {
+          ...presetInput,
+          expected_cache_revision: existing.cache_revision,
+        })!;
       } else {
-        regexSvc.installLumiHubPresetRegexScripts(userId, {
-          presetId: saved.id,
-          presetName: saved.name,
-          hubPresetId: payload.presetId,
-          presetVersion,
-          scripts: regexScripts,
-          previous: existing ? {
-            hubPresetId: typeof existing.metadata?._lumiverse_lumihub_id === "string"
+        saved = presetsSvc.createPreset(userId, presetInput);
+        eventBus.emit(EventType.PRESET_CHANGED, { id: saved.id, preset: saved }, userId);
+      }
+
+      // Preset-bound regex scripts ride at the top level of a LumiHub export or
+      // inside Illarin's raw preset document. On update, preserve older remotely
+      // attributed versions as disabled history and replace only an existing copy
+      // of the incoming version. Folder names are never used as ownership, so
+      // same-named local folders are untouched.
+      // LumiHub retains its historical best-effort behavior. Illarin propagates an
+      // incomplete import so durable delivery work is not acknowledged prematurely.
+      try {
+        const regexScripts = extractPresetRegexScripts(exported);
+        const previousVersion = typeof existing?.metadata?._lumiverse_preset_version === "string"
+          ? existing.metadata._lumiverse_preset_version
+          : null;
+        if (payload.source === "illarin") {
+          const previousAssetId = typeof existing?.metadata?._lumiverse_illarin_asset_id === "string"
+            ? existing.metadata._lumiverse_illarin_asset_id
+            : typeof existing?.metadata?._lumiverse_lumihub_id === "string"
               ? existing.metadata._lumiverse_lumihub_id
-              : null,
-            version: previousVersion,
-            presetName: existing.name,
-          } : null,
-        });
+              : null;
+          regexSvc.installIllarinPresetRegexScripts(userId, {
+            presetId: saved.id,
+            presetName: saved.name,
+            assetId: payload.presetId,
+            presetVersion,
+            presetVersionNumber,
+            scripts: regexScripts,
+            previous: existing ? {
+              assetId: previousAssetId,
+              version: previousVersion,
+              versionNumber: existing.metadata?._lumiverse_illarin_version_number,
+              presetName: existing.name,
+            } : null,
+          });
+        } else {
+          regexSvc.installLumiHubPresetRegexScripts(userId, {
+            presetId: saved.id,
+            presetName: saved.name,
+            hubPresetId: payload.presetId,
+            presetVersion,
+            scripts: regexScripts,
+            previous: existing ? {
+              hubPresetId: typeof existing.metadata?._lumiverse_lumihub_id === "string"
+                ? existing.metadata._lumiverse_lumihub_id
+                : null,
+              version: previousVersion,
+              presetName: existing.name,
+            } : null,
+          });
+        }
+        if (regexScripts.length > 0 && presetsSvc.reconcileActiveLoomPreset(userId) === saved.id) {
+          regexSvc.activatePresetBoundRegexScripts(userId, saved.id);
+        }
+      } catch (err) {
+        console.warn(`[${payload.source === "illarin" ? "Illarin" : "LumiHub"} Installer] Preset regex import failed:`, err);
+        // LumiHub remote installs historically treat regexes as best-effort.
+        // Illarin deliveries are durable work: acknowledging a preset whose
+        // packaged scripts were dropped would permanently lose part of it.
+        if (payload.source === "illarin") throw err;
       }
-      if (regexScripts.length > 0 && presetsSvc.reconcileActiveLoomPreset(userId) === saved.id) {
-        regexSvc.activatePresetBoundRegexScripts(userId, saved.id);
-      }
-    } catch (err) {
-      console.warn(`[${payload.source === "illarin" ? "Illarin" : "LumiHub"} Installer] Preset regex import failed:`, err);
-      // LumiHub remote installs historically treat regexes as best-effort.
-      // Illarin deliveries are durable work: acknowledging a preset whose
-      // packaged scripts were dropped would permanently lose part of it.
-      if (payload.source === "illarin") throw err;
-    }
+      return saved;
+    })());
+    const saved = committed.value;
+    for (const event of committed.events) eventBus.emit(event.event, event.payload, event.userId, event.options);
 
     eventBus.emit(EventType.LUMIHUB_INSTALL_COMPLETED, {
       characterId: saved.id,
@@ -1198,6 +1215,8 @@ function extractPresetRegexScripts(exported: Record<string, any>): any[] {
   const candidates = [
     exported?.regex_scripts,
     exported?.preset?.regex_scripts,
+    exported?.preset?.extensions?.regex_scripts,
+    exported?.preset?.extensions?.lumiverse_modules?.regex_scripts,
     exported?.extensions?.regex_scripts,
     exported?.extensions?.lumiverse_modules?.regex_scripts,
   ];

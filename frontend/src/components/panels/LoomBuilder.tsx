@@ -1,6 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useDeferredValue, type ReactNode, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
+import { remotePresetVersionLabel } from '@/lib/remotePresetVersion'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 
 import {
@@ -1707,8 +1708,10 @@ function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
   const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
   const description = preset.description?.trim()
   const origin = getRemotePresetOrigin(preset)
+  const version = remotePresetVersionLabel(origin, preset.presetVersion,
+    preset.lumihubMeta?._lumiverse_illarin_version_number)
   const visibleCoverUrl = coverUrl && failedCoverUrl !== coverUrl ? coverUrl : null
-  if (!visibleCoverUrl && !origin && !preset.presetVersion) return null
+  if (!visibleCoverUrl && !origin && !version) return null
 
   return (
     <section className={s.presetCoverHeader} aria-label={visibleCoverUrl ? t('preset.coverAria', { name: preset.name }) : undefined}>
@@ -1736,8 +1739,8 @@ function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
         <div className={s.presetCoverBadgeRow}>
           {origin === 'lumihub' && <span className={s.presetCoverBadge}>{t('preset.lumihubBadge')}</span>}
           {origin === 'illarin' && <span className={s.presetCoverBadge}>{t('preset.illarinBadge')}</span>}
-          {preset.presetVersion && (
-            <span className={s.presetCoverBadge}>{t('preset.version', { version: preset.presetVersion })}</span>
+          {version && (
+            <span className={s.presetCoverBadge}>{t('preset.version', { version })}</span>
           )}
           <span className={s.presetCoverBadge}>{t('preset.blocks', { count: preset.blocks.length })}</span>
         </div>

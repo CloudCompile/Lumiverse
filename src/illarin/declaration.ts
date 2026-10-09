@@ -39,6 +39,7 @@ export const EXTENSION_INSTALL_CAPABILITY = `${ILLARIN_CAPABILITY_NAMESPACE}:ext
  * Export targets Lumiverse can read, ordered most → least preferred.
  * Illarin delivers using the first supported entry and falls back to `raw`.
  * SillyTavern themes are deliberately absent — Lumiverse does not accept them.
+ * Presets must use the Lumiverse writer, which also converts SillyTavern uploads.
  */
 export const ILLARIN_ACCEPTED_TARGETS = Object.freeze([
   "charx",
@@ -47,7 +48,6 @@ export const ILLARIN_ACCEPTED_TARGETS = Object.freeze([
   "lorebook",
   "lorebook_sillytavern",
   "preset_lumiverse",
-  "preset_sillytavern",
   "theme_lumiverse",
   "pack_lumiverse",
   "extension_spindle",

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef, useMemo, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
+import { remotePresetVersionLabel } from '@/lib/remotePresetVersion'
 
 import { Plus, Upload, Download, Trash2, Globe, User, MessageCircle, ChevronRight, FolderPlus, Check, X, Link, Unlink, TriangleAlert, ShieldAlert, GripVertical, Power, PowerOff, ListChecks, Square, CheckSquare, Pencil } from 'lucide-react'
 import {
@@ -107,9 +108,13 @@ function getRemotePresetVersions(
     for (const source of ['lumihub', 'illarin'] as const) {
       const key = source === 'lumihub' ? '_lumiverse_lumihub_preset' : '_lumiverse_illarin_preset'
       const attribution = script.metadata?.[key]
+      // An explicitly attributed legacy script may have an unknown release.
+      // Its containing preset's latest version must not relabel that history.
+      if (attribution && typeof attribution === 'object' && 'id' in attribution
+        && typeof attribution.id === 'string' && attribution.id.trim()) attributed = true
       const attributedVersion = attribution && typeof attribution === 'object'
-        && 'version' in attribution && typeof attribution.version === 'string'
-        ? attribution.version.trim()
+        ? remotePresetVersionLabel(source, (attribution as Record<string, unknown>).version,
+          (attribution as Record<string, unknown>).versionNumber)
         : ''
       if (attributedVersion) {
         versions.set(`${source}:${attributedVersion}`, { source, version: attributedVersion })
@@ -121,9 +126,8 @@ function getRemotePresetVersions(
     const preset = script.preset_id ? presets[script.preset_id] : undefined
     const source = preset?.metadata?._lumiverse_install_source
     if (source !== 'lumihub' && source !== 'illarin') continue
-    const version = typeof preset.metadata._lumiverse_preset_version === 'string'
-      ? preset.metadata._lumiverse_preset_version.trim()
-      : ''
+    const version = remotePresetVersionLabel(source, preset.metadata._lumiverse_preset_version,
+      preset.metadata._lumiverse_illarin_version_number)
     if (version) versions.set(`${source}:${version}`, { source, version })
   }
   return [...versions.values()].sort((left, right) => (

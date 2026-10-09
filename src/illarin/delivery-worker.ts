@@ -11,7 +11,7 @@ import {
 } from "./api";
 import type { DeliveryWorkList, IllarinDelivery, TakedownNotice } from "./types";
 import { installIllarinDelivery } from "./delivery-installer";
-import { recordWithheld, reportLibrary } from "./extensions";
+import { recordWithheld, reportLibrary, subscribePresetLibraryChanges } from "./extensions";
 import { getValidAccessToken, handleTerminalUnauthorized, refreshAccessToken } from "./tokens";
 import { clearPermissionError, setPermissionError } from "./permission-state";
 
@@ -199,6 +199,7 @@ function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
 
 const workers = new Map<string, AbortController>();
 const workerTasks = new Map<string, Promise<void>>();
+const librarySubscriptions = new Map<string, () => void>();
 
 async function runWorker(userId: string, controller: AbortController): Promise<void> {
   let failures = 0;
@@ -271,6 +272,7 @@ export function startDeliveryWorker(userId: string): void {
   const controller = new AbortController();
   const previous = workerTasks.get(userId);
   workers.set(userId, controller);
+  librarySubscriptions.set(userId, subscribePresetLibraryChanges(userId));
   const task = (async () => {
     if (previous) await previous;
     if (!controller.signal.aborted) await runWorker(userId, controller);
@@ -282,6 +284,8 @@ export function startDeliveryWorker(userId: string): void {
 export function stopDeliveryWorker(userId: string): void {
   workers.get(userId)?.abort();
   workers.delete(userId);
+  librarySubscriptions.get(userId)?.();
+  librarySubscriptions.delete(userId);
   if (workerStatuses.has(userId)) updateWorkerStatus(userId, { state: "stopped" });
 }
 
@@ -308,6 +312,8 @@ export function stopAllDeliveryWorkers(): void {
     updateWorkerStatus(userId, { state: "stopped" });
   }
   workers.clear();
+  for (const dispose of librarySubscriptions.values()) dispose();
+  librarySubscriptions.clear();
   if (librarySnapshotTimer) clearInterval(librarySnapshotTimer);
   librarySnapshotTimer = null;
 }

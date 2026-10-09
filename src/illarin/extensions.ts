@@ -3,6 +3,7 @@ import type { ExtensionInfo } from "lumiverse-spindle-types";
 import * as managerSvc from "../spindle/manager.service";
 import * as lifecycle from "../spindle/lifecycle";
 import * as svc from "../services/illarin-instance.service";
+import * as presetsSvc from "../services/presets.service";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { IllarinApiError, syncLibrary } from "./api";
@@ -10,6 +11,7 @@ import { clearPermissionError, hasPermissionError, setPermissionError } from "./
 import { withAccessToken } from "./tokens";
 import { readBackendVersion } from "./warmup";
 import type { IllarinDelivery, LibrarySyncEntry, TakedownNotice } from "./types";
+import { getIllarinPresetWorkId, getIllarinPresetVersionNumber } from "./preset-metadata";
 
 const MAX_ARCHIVE_FILES = 4096;
 const MAX_EXPANDED_BYTES = 256 * 1024 * 1024;
@@ -174,14 +176,44 @@ export async function recordWithheld(userId: string, notices: readonly TakedownN
   }
 }
 
-async function sendReport(userId: string, entries: LibrarySyncEntry[] | null, removed: string[] = []): Promise<void> {
+export async function buildIllarinLibraryEntries(userId: string): Promise<LibrarySyncEntry[]> {
+  const entries = new Map<string, LibrarySyncEntry>();
+  const add = (entry: LibrarySyncEntry) => {
+    const previous = entries.get(entry.workId);
+    if (!previous || (entry.versionNumber !== undefined &&
+      (previous.versionNumber === undefined || entry.versionNumber > previous.versionNumber))) {
+      entries.set(entry.workId, entry);
+    }
+  };
+  for (const preset of presetsSvc.listPresetsForManifest(userId)) {
+    const workId = getIllarinPresetWorkId(preset.metadata);
+    if (!workId) continue;
+    const versionNumber = getIllarinPresetVersionNumber(preset.metadata);
+    add({ workId, ...(versionNumber === undefined ? {} : { versionNumber }) });
+  }
+  for (const ext of await managerSvc.list()) {
+    const source = illarinSource(ext);
+    if (source) add({ workId: source.workId, ...(source.versionNumber === undefined ? {} : { versionNumber: source.versionNumber }) });
+  }
+  return [...entries.values()];
+}
+
+async function sendReport(
+  userId: string,
+  entries: LibrarySyncEntry[] | null,
+  removed: string[] = [],
+  changedPresetWorkId?: string,
+): Promise<void> {
   const instance = await svc.getIllarinInstance(userId);
   if (!instance?.scopes.includes("library:sync")) return;
   const snapshot = entries === null;
-  const currentEntries = entries ?? (await managerSvc.list()).flatMap((ext) => {
-    const source = illarinSource(ext);
-    return source ? [{ workId: source.workId, ...(source.versionNumber === undefined ? {} : { versionNumber: source.versionNumber }) }] : [];
-  });
+  let currentEntries = entries ?? await buildIllarinLibraryEntries(userId);
+  if (changedPresetWorkId) {
+    // Resolve when the queued report runs: another copy may still be installed,
+    // or a later delivery may already have advanced the version.
+    currentEntries = (await buildIllarinLibraryEntries(userId)).filter((entry) => entry.workId === changedPresetWorkId);
+    removed = currentEntries.length === 0 ? [changedPresetWorkId] : [];
+  }
   const appVersion = await readBackendVersion();
   const result = await withAccessToken(userId, (accessToken) =>
     syncLibrary(instance.illarinUrl, accessToken, { snapshot, appVersion, entries: currentEntries, ...(snapshot ? {} : { removed }) }));
@@ -201,10 +233,10 @@ function warnReportFailed(err: unknown, userId: string): void {
 
 const reports = new Map<string, Promise<void>>();
 
-function queueReport(userId: string, entries: LibrarySyncEntry[] | null, removed: string[] = []): Promise<void> {
+function queueReport(userId: string, entries: LibrarySyncEntry[] | null, removed: string[] = [], changedPresetWorkId?: string): Promise<void> {
   if (hasPermissionError(userId, "library:sync")) return Promise.resolve();
   const task = (reports.get(userId) ?? Promise.resolve())
-    .then(() => sendReport(userId, entries, removed))
+    .then(() => sendReport(userId, entries, removed, changedPresetWorkId))
     .catch((err) => warnReportFailed(err, userId))
     .finally(() => { if (reports.get(userId) === task) reports.delete(userId); });
   reports.set(userId, task);
@@ -213,6 +245,28 @@ function queueReport(userId: string, entries: LibrarySyncEntry[] | null, removed
 
 export function reportLibrary(userId: string): Promise<void> {
   return queueReport(userId, null);
+}
+
+export function reportPresetLibraryChange(userId: string, workId: string): Promise<void> {
+  return queueReport(userId, [], [], workId);
+}
+
+/** Presets belong to the receiving user; extensions remain installation-wide. */
+export function subscribePresetLibraryChanges(userId: string): () => void {
+  const disposers = [
+    eventBus.on(EventType.LUMIHUB_INSTALL_COMPLETED, (event) => {
+      if (event.userId !== userId || event.payload.source !== "illarin" || event.payload.type !== "preset") return;
+      const preset = presetsSvc.getPreset(userId, event.payload.characterId);
+      const workId = getIllarinPresetWorkId(preset?.metadata);
+      if (workId) void reportPresetLibraryChange(userId, workId);
+    }),
+    eventBus.on(EventType.PRESET_DELETED, (event) => {
+      if (event.userId === userId && typeof event.payload.illarinWorkId === "string") {
+        void reportPresetLibraryChange(userId, event.payload.illarinWorkId);
+      }
+    }),
+  ];
+  return () => { for (const dispose of disposers) dispose(); };
 }
 
 function reportLibraryDeltaToAll(entries: LibrarySyncEntry[], removed: string[]): Promise<void> {

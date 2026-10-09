@@ -38,7 +38,6 @@ describe("buildDeclaration", () => {
       "lorebook",
       "lorebook_sillytavern",
       "preset_lumiverse",
-      "preset_sillytavern",
       "theme_lumiverse",
       "pack_lumiverse",
       "extension_spindle",

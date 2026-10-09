@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   characterInstallPayload,
+  illarinPresetInstallPayload,
   persistIllarinPresetCover,
   type PresetCoverDependencies,
 } from "./delivery-installer";
@@ -22,6 +23,23 @@ function presetDelivery(files: IllarinDelivery["files"]): IllarinDelivery {
 }
 
 describe("Illarin delivery installer", () => {
+  test("rejects malformed preset documents and invalid release numbers", () => {
+    const delivery = presetDelivery([]);
+    for (const document of [{}, { preset: null }, { preset: [] }, { blocks: "invalid" }]) {
+      expect(() => illarinPresetInstallPayload(delivery, document, null)).toThrow(/prompt blocks/);
+    }
+    for (const versionNumber of [0, -1, 1.5, Number.NaN]) {
+      expect(() => illarinPresetInstallPayload({ ...delivery, versionNumber }, { blocks: [] }, null)).toThrow(/version number/);
+    }
+  });
+
+  test("a durable sidecar replaces both wrapped cover aliases", () => {
+    const payload = illarinPresetInstallPayload(presetDelivery([]), {
+      preset: { blocks: [] }, cover_url: "https://expired.example/cover",
+    }, "/api/v1/images/local");
+    expect(payload.presetData.cover_url).toBe("/api/v1/images/local");
+    expect(payload.presetData.coverUrl).toBe("/api/v1/images/local");
+  });
   test("does not import pictures twice when CharX already contains them", () => {
     const delivery: IllarinDelivery = {
       id: "delivery-1",
