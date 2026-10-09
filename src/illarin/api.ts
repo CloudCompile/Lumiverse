@@ -1,9 +1,7 @@
 /**
- * Thin HTTP client for the Illarin linked-instance protocol (v1).
+ * Thin HTTP client for the Illarin connected-app protocol (v1).
  *
- * Every request/response shape lives in this file so reconciling against the
- * published /openapi.yaml later is a one-file change ("if this guide and that
- * contract differ, follow OpenAPI").
+ * Request and response shapes follow the Illarin app-integration guide.
  *
  * Security posture:
  * - Illarin URLs are user-supplied; safeFetch applies the standard SSRF
@@ -18,9 +16,11 @@
 
 import { safeFetch } from "../utils/safe-fetch";
 import {
+  ILLARIN_SCOPES,
   type BrowserAuthorizationRequest,
   type BrowserAuthorizationResponse,
   type DeclarationUpdate,
+  type DeliveryWorkList,
   type DevicePollResult,
   type DeviceRequestResponse,
   type IllarinDelivery,
@@ -28,9 +28,10 @@ import {
   type LibrarySyncRequest,
   type LibrarySyncResponse,
   type TokenPair,
+  type TakedownNotice,
 } from "./types";
 
-export const DEFAULT_ILLARIN_BASE_URL = "https://illarin.xyz";
+export const DEFAULT_ILLARIN_BASE_URL = "https://illarin.com";
 const DELIVERY_COLLECT_TIMEOUT_MS = 40_000;
 
 export class IllarinApiError extends Error {
@@ -126,7 +127,7 @@ async function requestJson<T>(
     });
   } catch {
     // Network failure. For state-changing calls the outcome is unknown;
-    // callers decide policy (refresh: stop and relink; others: back off).
+    // callers preserve durable local state and apply their normal backoff.
     throw new IllarinApiError(0, path, `Illarin ${path} failed: network error`);
   }
 
@@ -150,8 +151,9 @@ async function requestJson<T>(
 
 function parseRetryAfter(header: string | null): number | null {
   if (!header) return null;
-  const seconds = Number.parseInt(header, 10);
-  return Number.isFinite(seconds) && seconds >= 0 ? seconds : null;
+  if (/^\d+$/.test(header.trim())) return Number.parseInt(header.trim(), 10);
+  const until = Date.parse(header);
+  return Number.isFinite(until) ? Math.max(0, Math.ceil((until - Date.now()) / 1000)) : null;
 }
 
 function assertTokenPair(data: unknown, endpoint: string): TokenPair {
@@ -161,7 +163,9 @@ function assertTokenPair(data: unknown, endpoint: string): TokenPair {
     typeof pair.accessToken !== "string" ||
     typeof pair.accessTokenExpiresAt !== "string" ||
     typeof pair.refreshToken !== "string" ||
-    typeof pair.instance?.id !== "string"
+    typeof pair.connectedApp?.id !== "string" ||
+    !Array.isArray(pair.connectedApp.permissions) ||
+    !pair.connectedApp.permissions.every((permission) => ILLARIN_SCOPES.includes(permission))
   ) {
     throw new IllarinApiError(200, endpoint, `Illarin ${endpoint} returned a malformed token payload`);
   }
@@ -174,10 +178,10 @@ export async function createBrowserAuthorization(
   request: BrowserAuthorizationRequest,
   options?: IllarinRequestOptions,
 ): Promise<BrowserAuthorizationResponse> {
-  const path = "/api/v1/link/authorizations";
+  const path = "/api/v1/connect/authorizations";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
   const { data } = await requestJson<BrowserAuthorizationResponse>(base, "POST", path, request, options);
-  if (!data || typeof data.authorizationUrl !== "string" || typeof data.expiresAt !== "string") {
+  if (!data || typeof data.authorizationUrl !== "string" || typeof data.userCode !== "string" || typeof data.expiresAt !== "string") {
     throw new IllarinApiError(200, path, "Illarin returned a malformed authorization response");
   }
   return data;
@@ -189,7 +193,7 @@ export async function exchangeAuthorizationCode(
   body: { authorizationCode: string; codeVerifier: string; redirectUri: string },
   options?: IllarinRequestOptions,
 ): Promise<TokenPair> {
-  const path = "/api/v1/link/token";
+  const path = "/api/v1/connect/token";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
   const { data } = await requestJson<unknown>(base, "POST", path, body, options);
   return assertTokenPair(data, path);
@@ -200,7 +204,7 @@ export async function createDeviceRequest(
   declaration: IllarinDeclaration,
   options?: IllarinRequestOptions,
 ): Promise<DeviceRequestResponse> {
-  const path = "/api/v1/link/requests";
+  const path = "/api/v1/connect/requests";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
   const { data } = await requestJson<DeviceRequestResponse>(base, "POST", path, declaration, options);
   if (
@@ -228,7 +232,7 @@ export async function pollDeviceRequest(
 ): Promise<DevicePollResult> {
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
   const doFetch = options?.fetchImpl ?? safeFetch;
-  const path = "/api/v1/link/poll";
+  const path = "/api/v1/connect/poll";
   const endpoint = `${base}${path}`;
 
   let response: Response;
@@ -248,12 +252,13 @@ export async function pollDeviceRequest(
 
   if (response.status === 200) {
     const data = await response.json().catch(() => null) as ({ status?: string } & Partial<TokenPair>) | null;
-    if (data?.status === "linked") {
+    if (data?.status === "connected") {
       // The status discriminator is transport framing, not part of the pair.
       const { status: _status, ...payload } = data;
       return { kind: "linked", tokens: assertTokenPair(payload, path) };
     }
-    return { kind: "pending" };
+    if (data?.status === "pending") return { kind: "pending" };
+    throw new IllarinApiError(200, path, "Illarin returned an unknown connection status");
   }
   if (response.status === 400) {
     const code = await errorBodyCode(response);
@@ -290,7 +295,7 @@ export async function refreshTokens(
   refreshToken: string,
   options?: IllarinRequestOptions,
 ): Promise<TokenPair> {
-  const path = "/api/v1/link/refresh";
+  const path = "/api/v1/connect/refresh";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
   const { data } = await requestJson<unknown>(base, "POST", path, { refreshToken }, options);
   return assertTokenPair(data, path);
@@ -307,7 +312,7 @@ export async function updateInstanceDeclaration(
   options?: IllarinRequestOptions,
 ): Promise<void> {
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
-  await requestJson<unknown>(base, "PUT", "/api/v1/instances/me", update, { ...options, accessToken });
+  await requestJson<unknown>(base, "PUT", "/api/v1/connected-apps/me", update, { ...options, accessToken });
 }
 
 /** One durable-queue read. A 204 is a successful empty wait. */
@@ -316,24 +321,34 @@ export async function collectDeliveries(
   accessToken: string,
   acknowledge: readonly string[],
   options?: IllarinRequestOptions,
-): Promise<IllarinDelivery[]> {
+): Promise<DeliveryWorkList> {
   if (!Array.isArray(acknowledge) || acknowledge.some((id) => typeof id !== "string" || id.length === 0)) {
     throw new RangeError("acknowledge must be an array of non-empty delivery ids");
   }
-  const path = "/api/v1/deliveries/collect";
+  const path = "/api/v1/sends/collect";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
-  const { status, data } = await requestJson<{ deliveries?: unknown }>(
+  const { status, data } = await requestJson<{ sends?: unknown; takedowns?: unknown }>(
     base,
     "POST",
     path,
     { acknowledge: [...acknowledge] },
     { ...options, accessToken, timeoutMs: DELIVERY_COLLECT_TIMEOUT_MS },
   );
-  if (status === 204) return [];
-  if (!data || !Array.isArray(data.deliveries) || !data.deliveries.every(isDelivery)) {
-    throw new IllarinApiError(200, path, `Illarin ${path} returned a malformed delivery payload`);
+  if (status === 204) return { sends: [], takedowns: [] };
+  if (!data || !Array.isArray(data.sends) || !data.sends.every(isDelivery)) {
+    throw new IllarinApiError(200, path, `Illarin ${path} returned a malformed send payload`);
   }
-  return data.deliveries;
+  return { sends: data.sends, takedowns: takedownNotices(data.takedowns) };
+}
+
+function takedownNotices(value: unknown): TakedownNotice[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((notice): notice is TakedownNotice =>
+    Boolean(notice) &&
+    typeof notice.workId === "string" &&
+    typeof notice.name === "string" &&
+    typeof notice.takenDownAt === "string"
+  );
 }
 
 function isDelivery(value: unknown): value is IllarinDelivery {
@@ -341,19 +356,19 @@ function isDelivery(value: unknown): value is IllarinDelivery {
   const delivery = value as Partial<IllarinDelivery>;
   return (
     typeof delivery.id === "string" &&
-    typeof delivery.assetId === "string" &&
-    Number.isInteger(delivery.contentGeneration) &&
-    typeof delivery.kind === "string" &&
+    typeof delivery.workId === "string" &&
+    Number.isInteger(delivery.versionNumber) &&
+    typeof delivery.type === "string" &&
     typeof delivery.name === "string" &&
     typeof delivery.format === "string" &&
     typeof delivery.label === "string" &&
     typeof delivery.queuedAt === "string" &&
     typeof delivery.leaseExpiresAt === "string" &&
-    Array.isArray(delivery.artifacts) &&
-    delivery.artifacts.every((artifact) =>
+    Array.isArray(delivery.files) &&
+    delivery.files.every((artifact) =>
       Boolean(artifact) &&
       typeof artifact === "object" &&
-      typeof artifact.kind === "string" &&
+      typeof artifact.type === "string" &&
       typeof artifact.url === "string"
     )
   );
@@ -388,7 +403,13 @@ export async function syncLibrary(
   assertLibrarySyncRequest(report);
   const path = "/api/v1/library/sync";
   const base = normalizeBaseUrl(baseUrl, Boolean(options?.fetchImpl));
-  const { data } = await requestJson<LibrarySyncResponse>(base, "POST", path, report, { ...options, accessToken });
+  const { data } = await requestJson<Omit<LibrarySyncResponse, "takedowns"> & { takedowns?: unknown }>(
+    base,
+    "POST",
+    path,
+    report,
+    { ...options, accessToken },
+  );
   if (
     !data ||
     !Number.isInteger(data.accepted) ||
@@ -397,29 +418,37 @@ export async function syncLibrary(
   ) {
     throw new IllarinApiError(200, path, `Illarin ${path} returned a malformed sync response`);
   }
-  return data;
+  return { ...data, takedowns: takedownNotices(data.takedowns) };
 }
 
 function assertLibrarySyncRequest(report: LibrarySyncRequest): void {
-  if (!report || typeof report.snapshot !== "boolean" || !Array.isArray(report.entries) || !Array.isArray(report.removed)) {
+  if (!report || typeof report.snapshot !== "boolean" || !Array.isArray(report.entries) ||
+      (report.removed !== undefined && !Array.isArray(report.removed))) {
     throw new RangeError("invalid Illarin library sync report");
   }
-  if (report.entries.length > 2_000 || report.removed.length > 2_000) {
+  if (report.entries.length > 2_000 || (report.removed?.length ?? 0) > 2_000) {
     throw new RangeError("Illarin library sync reports allow at most 2000 entries and 2000 removals");
   }
-  if (report.snapshot && report.removed.length > 0) {
+  if (report.snapshot && report.removed !== undefined) {
     throw new RangeError("an Illarin library snapshot cannot include removals");
+  }
+  if (!report.snapshot && !Array.isArray(report.removed)) {
+    throw new RangeError("an Illarin incremental report requires removals, even when empty");
   }
   if (report.entries.some((entry) =>
     !entry ||
-    typeof entry.assetId !== "string" ||
-    entry.assetId.length === 0 ||
-    (entry.contentGeneration !== undefined && !Number.isInteger(entry.contentGeneration))
+    typeof entry.workId !== "string" ||
+    entry.workId.length === 0 ||
+    (entry.versionNumber !== undefined && !Number.isInteger(entry.versionNumber))
   )) {
     throw new RangeError("invalid Illarin library sync entry");
   }
-  if (report.removed.some((assetId) => typeof assetId !== "string" || assetId.length === 0)) {
+  if (report.removed?.some((workId) => typeof workId !== "string" || workId.length === 0)) {
     throw new RangeError("invalid Illarin library removal");
+  }
+  if (typeof report.appVersion !== "string" || !report.appVersion.trim() ||
+      report.appVersion.length > 64 || /[\u0000-\u001F\u007F-\u009F]/.test(report.appVersion)) {
+    throw new RangeError("Illarin library reports require a printable appVersion of at most 64 characters");
   }
   const bodyBytes = new TextEncoder().encode(JSON.stringify(report)).length;
   if (bodyBytes > 256 * 1024) {

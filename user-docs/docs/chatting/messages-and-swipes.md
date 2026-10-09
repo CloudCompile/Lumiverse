@@ -74,6 +74,19 @@ If a response feels cut short, click **Continue** to ask the AI to keep writing 
 
 ---
 
+## Impersonate
+
+Impersonation generates a draft from your persona's point of view and places it in the input box for review. Choose the account-wide default under **Settings → Chat → Default impersonation mode**. A chat or group chat can inherit that choice or override it under **Chat Settings → Impersonation Mode**:
+
+- **Preset Prompts** uses the chat's active preset and its impersonate-triggered blocks.
+- **Impersonation Preset** fully assembles the dedicated preset selected in Chat Settings, including chat history and its impersonation prompt. It falls back to the active preset when none is selected.
+- **One-liner** uses only chat history and the dedicated preset's impersonation prompt. It adds the preset's assistant prefill only when **Continue Prefill** is enabled.
+
+The input-bar **Impersonate** button uses the chat override when one is set and otherwise follows the global default. The initial global default is One-liner, and the dedicated impersonation preset does not replace the chat's main preset.
+For both full-preset options and One-liner, impersonation prefills are ignored unless **Continue Prefill** is enabled in the selected preset. When it is disabled, the impersonation instruction is sent as the final user message instead; when enabled, it is followed by the preset's partial assistant prefill.
+
+---
+
 ## Stopping Generation
 
 If the AI is generating something you don't want, click **Stop** to halt generation immediately. The partial response is saved — you can edit it, delete it, or regenerate.

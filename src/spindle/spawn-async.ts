@@ -89,7 +89,10 @@ export async function spawnAsync(
   cmd: string[],
   opts: SpawnAsyncOptions = {}
 ): Promise<SpawnAsyncResult> {
-  const hasTimeout = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0;
+  const timeoutMs = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : null;
+  const startedAt = performance.now();
 
   // Bun enforces this deadline in its subprocess implementation. This is
   // important for network commands such as `git pull`: a JS-side abort can
@@ -101,8 +104,15 @@ export async function spawnAsync(
     stdin: "ignore",
     stdout: opts.ignoreStdout ? "ignore" : "pipe",
     stderr: "pipe",
-    ...(hasTimeout ? { timeout: opts.timeoutMs } : {}),
+    ...(timeoutMs !== null ? { timeout: timeoutMs } : {}),
   });
+
+  // Bun's `killed` property means that the process has exited, not that its
+  // native timeout killed it. A timeout is instead a signal termination that
+  // occurs only once the monotonic subprocess deadline has been reached.
+  const didTimeOut = () => timeoutMs !== null
+    && proc.signalCode !== null
+    && performance.now() - startedAt >= timeoutMs;
 
   try {
     // Start draining streams immediately so the child's pipe buffers don't
@@ -116,7 +126,7 @@ export async function spawnAsync(
     );
     const exitCode = await proc.exited;
 
-    if (hasTimeout && proc.killed && exitCode !== 0) {
+    if (didTimeOut()) {
       // Killing the direct child does not guarantee that its descendants have
       // released inherited output pipes. Close our read ends and return now,
       // so a dead or private remote cannot stall the next bulk update.
@@ -125,7 +135,7 @@ export async function spawnAsync(
       return {
         exitCode: exitCode ?? -1,
         stdout: "",
-        stderr: `Command timed out after ${opts.timeoutMs}ms`,
+        stderr: `Command timed out after ${timeoutMs}ms`,
         timedOut: true,
       };
     }
@@ -139,15 +149,16 @@ export async function spawnAsync(
       timedOut: false,
     };
   } catch (err: any) {
+    const timedOut = didTimeOut();
     const stderr =
-      hasTimeout && proc.killed
-        ? `Command timed out after ${opts.timeoutMs}ms`
+      timedOut
+        ? `Command timed out after ${timeoutMs}ms`
         : err?.message || String(err);
     return {
       exitCode: -1,
       stdout: "",
       stderr,
-      timedOut: hasTimeout && proc.killed,
+      timedOut,
     };
   }
 }

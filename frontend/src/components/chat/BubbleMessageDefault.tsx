@@ -100,11 +100,13 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
   const { t } = useTranslation('chat')
   const pillRef = useRef<HTMLSpanElement>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
+  const showTimings = generationMetrics?.wasStreaming !== false
   const hasGenerationDetails = !isUser && !!generationMetrics && (
-    generationMetrics.ttft != null
-    || generationMetrics.tps != null
+    (showTimings && (generationMetrics.ttft != null || generationMetrics.tps != null))
     || !!generationMetrics.model
     || !!generationMetrics.provider
+    || !!generationMetrics.presetName
+    || !!generationMetrics.presetId
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -158,13 +160,21 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
               <span className={styles.tooltipValue}>{generationMetrics!.provider}</span>
             </span>
           )}
-          {generationMetrics!.ttft != null && (
+          {(generationMetrics!.presetName || generationMetrics!.presetId) && (
+            <span className={styles.tooltipRow}>
+              <span className={styles.tooltipLabel}>{t('messageMeta.preset')}</span>
+              <span className={styles.tooltipValue}>
+                {generationMetrics!.presetName || generationMetrics!.presetId}
+              </span>
+            </span>
+          )}
+          {showTimings && generationMetrics!.ttft != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.firstToken')}</span>
               <span className={styles.tooltipValue}>{formatMs(generationMetrics!.ttft)}</span>
             </span>
           )}
-          {generationMetrics!.tps != null && (
+          {showTimings && generationMetrics!.tps != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.speed')}</span>
               <span className={styles.tooltipValue}>{t('messageMeta.tokPerSec', { count: generationMetrics!.tps })}</span>
@@ -192,6 +202,10 @@ export default function BubbleMessageDefault({
   const swipeGesturesEnabled = useStore((s) => s.swipeGesturesEnabled)
   const showMessageTokenCount = useStore((s) => s.showMessageTokenCount ?? true)
   const messageContextMenuEnabled = useStore((s) => s.messageContextMenuEnabled ?? true)
+  // Audio renders below the response and must not reserve an empty media wrapper.
+  const visualAttachments = (message.extra?.attachments ?? []).filter(
+    (attachment) => attachment.type === 'image' || attachment.type === 'video',
+  )
   // Keep a MessageAudioSlot wrapper mounted on every assistant bubble when
   // TTS is enabled, and on either side whenever an audio attachment exists.
   // The slot itself is height-zero when no audio is attached (no wasted
@@ -448,9 +462,9 @@ export default function BubbleMessageDefault({
           />
         )}
 
-        {!isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
+        {!isUser && visualAttachments.length > 0 && !isEditing && (
           <div className={styles.content}>
-            <MessageAttachments attachments={message.extra.attachments} isUser={false} chatId={chatId} messageId={message.id} />
+            <MessageAttachments attachments={visualAttachments} isUser={false} chatId={chatId} messageId={message.id} />
           </div>
         )}
 
@@ -485,9 +499,9 @@ export default function BubbleMessageDefault({
         </div>
         <span data-spindle-mount="message_body_after" data-spindle-scope={`message:${message.id}:bubble:body-after`} style={{ display: 'contents' }} />
 
-        {isUser && message.extra?.attachments && message.extra.attachments.length > 0 && !isEditing && (
+        {isUser && visualAttachments.length > 0 && !isEditing && (
           <div className={styles.content}>
-            <MessageAttachments attachments={message.extra.attachments} isUser={true} chatId={chatId} messageId={message.id} />
+            <MessageAttachments attachments={visualAttachments} isUser={true} chatId={chatId} messageId={message.id} />
           </div>
         )}
 

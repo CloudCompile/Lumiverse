@@ -1,11 +1,11 @@
-import { registry } from "../MacroRegistry";
+import { registerDataMacro } from "../data-input";
 import {
   regexReplaceSandboxed,
   RegexTimeoutError,
 } from "../../utils/regex-sandbox";
 
 export function registerStringMacros(): void {
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "len",
@@ -20,7 +20,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "upper",
@@ -35,7 +35,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "lower",
@@ -50,7 +50,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "capitalize",
@@ -66,7 +66,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "replace",
@@ -87,7 +87,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "substr",
@@ -108,7 +108,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "split",
@@ -130,7 +130,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "join",
@@ -159,7 +159,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "repeat",
@@ -177,7 +177,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "wrap",
@@ -198,7 +198,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "regex",
@@ -232,7 +232,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "tokenCount",
@@ -247,7 +247,7 @@ export function registerStringMacros(): void {
     },
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "truncate",
@@ -260,7 +260,12 @@ export function registerStringMacros(): void {
     ],
     handler: (ctx) => {
       const text = ctx.isScoped ? ctx.body : (ctx.args[0] ?? "");
-      const maxTokens = parseInt(ctx.isScoped ? ctx.args[0] : ctx.args[1], 10) || 100;
+      const rawMaxTokens = ctx.isScoped ? ctx.args[0] : ctx.args[1];
+      const parsedMaxTokens = rawMaxTokens === undefined || rawMaxTokens.trim() === ""
+        ? 100
+        : Number.parseInt(rawMaxTokens, 10);
+      const maxTokens = Number.isFinite(parsedMaxTokens) ? Math.max(0, parsedMaxTokens) : 100;
+      if (maxTokens === 0) return "";
       const maxChars = maxTokens * 4;
       if (text.length <= maxChars) return text;
       // Truncate at nearest word boundary

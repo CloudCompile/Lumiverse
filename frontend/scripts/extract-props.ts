@@ -1,4 +1,4 @@
-import ts from "typescript";
+import * as ts from "typescript";
 import path from "path";
 import { Glob } from "bun";
 import {

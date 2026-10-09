@@ -291,6 +291,7 @@ export interface DatabaseMaintenanceResult {
   optimized: boolean
   analyzed: boolean
   vacuumed: boolean
+  staleBreakdownsDeleted: number
   state: DatabaseMaintenanceState | null
 }
 

@@ -1,18 +1,13 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Image as ImageIcon, Settings2, Trash2, Plus, X, Workflow, Shuffle, Download, Upload } from 'lucide-react'
+import { Image as ImageIcon, Trash2, Download, Upload } from 'lucide-react'
 import { IconBrush } from '@tabler/icons-react'
 import { useStore } from '@/store'
-import { imageGenApi, imageGenPresetBindingsApi, type ComfyUICapabilities, type SceneData } from '@/api/image-gen'
+import { imageGenApi, type ComfyUICapabilities, type SceneData } from '@/api/image-gen'
 import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import ImageGenProgressBar from './ImageGenProgressBar'
-import { Toggle } from '@/components/shared/Toggle'
-import { Button, FormField, Select, TextInput, EditorSection, TextArea } from '@/components/shared/FormComponents'
-import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
-import { LabeledRangeSlider } from '@/components/shared/RangeSlider'
-import { snapRangeValue } from '@/components/shared/rangeSliderMath'
+import { Button, FormField, Select } from '@/components/shared/FormComponents'
 import { useTouchActivate } from '@/hooks/useTouchActivate'
-import ModelCombobox from './connection-manager/ModelCombobox'
 import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import { getMacroCatalog } from '@/api/macros'
 import { getAvailableMacros } from '@/lib/loom/service'
@@ -24,121 +19,20 @@ import ImageLightbox from '@/components/shared/ImageLightbox'
 import { ComfyWorkflowEditor } from './image-gen-connections/ComfyWorkflowEditor'
 import { buildMappedFieldControls, type ComfyMappedFieldControl } from '@/lib/comfyui-mapped-fields'
 import type { ComfyUIFieldMapping, ComfyUIWorkflowConfig } from '@/api/image-gen-connections'
-import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import type { ImageGenConnectionProfile, ImageGenProviderInfo, ImageGenParameterSchema } from '@/types/api'
-import type { ImageGenPromptPreset, LoraEntry, LoraPreset } from '@/types/store'
-import {
-  LoraDiscoveryStatus,
-  LoraRowsEditor,
-  useLoraDiscovery,
-  type DraftLoraEntry,
-  type LoraModelLoader,
-} from './imageGenLoraEditor'
+import ImageGenPromptStudioModal from '../modals/ImageGenPromptStudioModal'
+import ImageGenLoraStudioModal from '../modals/ImageGenLoraStudioModal'
+import ImageGenSettingsModal from '../modals/ImageGenSettingsModal'
+import { useImageGenPromptEditor } from './image-gen/useImageGenPromptEditor'
+import { useImageGenLoraEditor } from './image-gen/useImageGenLoraEditor'
+import { ToggleRow } from './image-gen/ImageGenFields'
+export { ModelComboField } from './image-gen/ImageGenFields'
 import styles from './ImageGenPanel.module.css'
 
 type RefImage = { data: string; mimeType?: string }
 const COMFY_CUSTOM_CONTROL_PREFIX = 'custom:'
 const DEFAULT_PROMPT_TIMEOUT_SECONDS = 60
 const DEFAULT_IMAGE_GEN_TIMEOUT_SECONDS = 300
-const LORA_WEIGHT_MIN = 0
-const LORA_WEIGHT_MAX = 1.5
-const LORA_WEIGHT_STEP = 0.05
-const LORA_DEFAULT_WEIGHT = 1
-const LORA_STRENGTH_SCALE_MIN = 0
-const LORA_STRENGTH_SCALE_MAX = 2
-const LORA_STRENGTH_SCALE_STEP = 0.05
-const EMPTY_LORA_PRESETS: LoraPreset[] = []
-
-const loadImageGenModels: LoraModelLoader = (id, subtype) => imageGenConnectionsApi.modelsBySubtype(id, subtype)
-
-type ModelLoadResult = {
-  profile: ImageGenConnectionProfile
-  modelSubtype: string
-  models: Array<{ id: string; label: string }>
-  error: string | null
-  loading: boolean
-}
-
-const modelRefreshKeys = new WeakMap<ImageGenConnectionProfile, number>()
-let nextModelRefreshKey = 1
-
-function modelRefreshKey(profile: ImageGenConnectionProfile | null, modelSubtype: string): string {
-  if (!profile) return `none:${modelSubtype}`
-  let key = modelRefreshKeys.get(profile)
-  if (!key) {
-    key = nextModelRefreshKey++
-    modelRefreshKeys.set(profile, key)
-  }
-  return `${key}:${modelSubtype}`
-}
-
-
-function loraPresetToDraft(preset: LoraPreset | null): DraftLoraEntry[] {
-  return preset?.loras.map((lora) => {
-    const weightModel = Number.isFinite(lora.weight_model) ? String(lora.weight_model) : String(LORA_DEFAULT_WEIGHT)
-    const weightClipFallback = Number.isFinite(lora.weight_model) ? lora.weight_model : LORA_DEFAULT_WEIGHT
-    return {
-      draftId: uuidv7(),
-      lora_name: lora.lora_name,
-      weight_model: weightModel,
-      weight_clip: lora.weight_clip === undefined ? '' : String(Number.isFinite(lora.weight_clip) ? lora.weight_clip : weightClipFallback),
-    }
-  }) ?? []
-}
-
-function parseDraftLoraWeight(value: string): number | null {
-  if (!value.trim()) return null
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return null
-  return snapRangeValue(parsed, {
-    min: LORA_WEIGHT_MIN,
-    max: LORA_WEIGHT_MAX,
-    step: LORA_WEIGHT_STEP,
-  })
-}
-
-
-function normalizeTimeoutSeconds(value: string, fallback: number): number {
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed)) return fallback
-  return Math.max(0, Math.floor(parsed))
-}
-
-function coerceFiniteNumber(value: unknown): number | null {
-  if (typeof value === 'number' && Number.isFinite(value)) return value
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value)
-    if (Number.isFinite(parsed)) return parsed
-  }
-  return null
-}
-
-function normalizeSliderSchemaValue(value: unknown, schema: ImageGenParameterSchema): number | null {
-  if ((schema.type !== 'number' && schema.type !== 'integer') || schema.min === undefined || schema.max === undefined) {
-    return null
-  }
-
-  const numeric = coerceFiniteNumber(value) ?? coerceFiniteNumber(schema.default) ?? schema.min
-  const step = schema.step ?? (schema.type === 'integer' ? 1 : 0.1)
-  return snapRangeValue(numeric, {
-    min: schema.min,
-    max: schema.max,
-    step,
-    integer: schema.type === 'integer',
-  })
-}
-
-function ToggleRow({ checked, onChange, label, hint }: { checked: boolean; onChange: (checked: boolean) => void; label: string; hint?: string }) {
-  return (
-    <Toggle.Checkbox
-      checked={checked}
-      onChange={onChange}
-      label={label}
-      hint={hint}
-      className={styles.toggle}
-    />
-  )
-}
 
 function toDataRef(file: File): Promise<RefImage> {
   return new Promise((resolve, reject) => {
@@ -167,311 +61,12 @@ function parseComfyControlValue(control: ComfyMappedFieldControl, value: string)
   return value
 }
 
-/**
- * Image-gen variant of the shared ModelCombobox. Lazy-loads the model list
- * from the provider via `imageGenConnectionsApi.modelsBySubtype` and surfaces
- * the standard searchable combobox UI used by Connections / TTS / STT panels.
- */
-export function ModelComboField({
-  label,
-  hint,
-  paramKey,
-  modelSubtype,
-  activeConnection,
-  value,
-  onChange,
-  loadModels = loadImageGenModels,
-}: {
-  label: string
-  hint: string
-  paramKey: string
-  modelSubtype: string
-  activeConnection: ImageGenConnectionProfile | null
-  value: any
-  onChange: (key: string, value: any) => void
-  loadModels?: LoraModelLoader
-}) {
-  const { t } = useTranslation('panels')
-  const [result, setResult] = useState<ModelLoadResult | null>(null)
-  const latestInputsRef = useRef({ activeConnection, modelSubtype, loadModels })
-  const requestIdRef = useRef(0)
-  latestInputsRef.current = { activeConnection, modelSubtype, loadModels }
 
-  const currentResult = result
-    && result.profile.id === activeConnection?.id
-    && result.modelSubtype === modelSubtype
-  const models = useMemo(() => currentResult ? result.models : [], [currentResult, result?.models])
-  const modelError = currentResult ? result.error : null
-  const loading = currentResult ? result.loading : false
 
-  const load = useCallback(async () => {
-    if (!activeConnection) return
-    const profile = activeConnection
-    const subtype = modelSubtype
-    const requestId = ++requestIdRef.current
-    setResult({ profile, modelSubtype: subtype, models: [], error: null, loading: true })
-
-    try {
-      const response = await loadModels(profile.id, subtype)
-      if (
-        requestId !== requestIdRef.current
-        || latestInputsRef.current.activeConnection !== profile
-        || latestInputsRef.current.modelSubtype !== subtype
-        || latestInputsRef.current.loadModels !== loadModels
-      ) return
-
-      const error = typeof response.error === 'string' && response.error.trim()
-        ? response.error.trim()
-        : null
-      setResult({
-        profile,
-        modelSubtype: subtype,
-        models: error ? [] : response.models ?? [],
-        error,
-        loading: false,
-      })
-    } catch (err: unknown) {
-      if (
-        requestId !== requestIdRef.current
-        || latestInputsRef.current.activeConnection !== profile
-        || latestInputsRef.current.modelSubtype !== subtype
-        || latestInputsRef.current.loadModels !== loadModels
-      ) return
-
-      const message = err instanceof Error && err.message.trim()
-        ? err.message.trim()
-        : t('imageGenPanel.noModelsFound')
-      setResult({ profile, modelSubtype: subtype, models: [], error: message, loading: false })
-    }
-  }, [activeConnection, loadModels, modelSubtype, t])
-
-  const modelIds = useMemo(() => models.map((model) => model.id), [models])
-  const modelLabels = useMemo(() => {
-    const labels: Record<string, string> = {}
-    for (const model of models) labels[model.id] = model.label
-    return labels
-  }, [models])
-
-  const emptyMessage = activeConnection
-    ? t('imageGenPanel.noModelsFound')
-    : t('imageGenPanel.pickConnectionFirst')
-
-  return (
-    <FormField label={label} hint={hint}>
-      <ModelCombobox
-        value={typeof value === 'string' ? value : ''}
-        onChange={(nextValue) => onChange(paramKey, nextValue || undefined)}
-        models={modelIds}
-        modelLabels={modelLabels}
-        loading={loading}
-        onRefresh={load}
-        autoRefreshOnFocus
-        refreshKey={modelRefreshKey(activeConnection, modelSubtype)}
-        disabled={!activeConnection}
-        placeholder={t('imageGenPanel.workflowOrConnectionDefault')}
-        appearance="standard"
-        emptyMessage={modelError || emptyMessage}
-      />
-    </FormField>
-  )
-}
-
-/** Render a single parameter from the provider capability schema */
-/** Raw Request Override editor — validates JSON inline so typos don't silently break generation. */
-function RawOverrideField({
-  label,
-  schema,
-  value,
-  onChange,
-}: {
-  label: string
-  schema: ImageGenParameterSchema
-  value: any
-  onChange: (value: string) => void
-}) {
-  const { t } = useTranslation('panels')
-  const text = typeof value === 'string' ? value : ''
-  let error: string | undefined
-  if (text.trim()) {
-    try {
-      const parsed = JSON.parse(text)
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        error = t('imageGenPanel.rawOverrideNotObject')
-      }
-    } catch {
-      error = t('imageGenPanel.rawOverrideInvalidJson')
-    }
-  }
-  return (
-    <FormField label={label} hint={schema.description} error={error}>
-      <TextArea rows={3} value={text} onChange={onChange} placeholder='{"steps": 30}' />
-    </FormField>
-  )
-}
-
-function ParamField({
-  paramKey,
-  schema,
-  value,
-  onChange,
-  activeConnection,
-}: {
-  paramKey: string
-  schema: ImageGenParameterSchema
-  value: any
-  onChange: (key: string, value: any) => void
-  activeConnection?: ImageGenConnectionProfile | null
-}) {
-  const displayName = paramKey
-    .replace(/([A-Z])/g, ' $1')
-    .replace(/^./, (s) => s.toUpperCase())
-    .replace(/^Unet\b/, 'UNet')
-    .trim()
-  const normalizedSliderValue = useMemo(
-    () => normalizeSliderSchemaValue(value, schema),
-    [schema, value],
-  )
-
-  // Model-component fields get a combobox backed by the API
-  if (schema.modelSubtype && schema.type === 'string') {
-    return (
-      <ModelComboField
-        label={displayName}
-        hint={schema.description}
-        paramKey={paramKey}
-        modelSubtype={schema.modelSubtype}
-        activeConnection={activeConnection ?? null}
-        value={value}
-        onChange={onChange}
-      />
-    )
-  }
-
-  switch (schema.type) {
-    case 'select':
-      return (
-        <FormField label={displayName} hint={schema.description}>
-          <Select
-            value={value ?? schema.default ?? ''}
-            onChange={(v) => onChange(paramKey, v)}
-            options={(schema.options || []).map((o) => ({ value: o.id, label: o.label }))}
-          />
-        </FormField>
-      )
-
-    case 'boolean':
-      return (
-        <FormField label="" hint={schema.description}>
-          <ToggleRow
-            checked={value ?? schema.default ?? false}
-            onChange={(checked) => onChange(paramKey, checked)}
-            label={displayName}
-          />
-        </FormField>
-      )
-
-    case 'number':
-    case 'integer':
-      if (schema.min !== undefined && schema.max !== undefined) {
-        const numValue = normalizedSliderValue ?? coerceFiniteNumber(schema.default) ?? schema.min
-        const step = schema.step ?? (schema.type === 'integer' ? 1 : 0.1)
-        const isInt = schema.type === 'integer'
-        return (
-          <LabeledRangeSlider
-            label={displayName}
-            hint={schema.description}
-            min={schema.min}
-            max={schema.max}
-            step={step}
-            integer={isInt}
-            value={numValue}
-            formatValue={(v) => isInt ? String(v) : v.toFixed(step < 1 ? 2 : 1)}
-            onCommit={(v) =>
-              onChange(
-                paramKey,
-                snapRangeValue(v, {
-                  min: schema.min!,
-                  max: schema.max!,
-                  step,
-                  integer: isInt,
-                }),
-              )}
-          />
-        )
-      }
-      if (schema.type === 'integer' && paramKey.toLowerCase() === 'seed') {
-        return (
-          <FormField label={displayName} hint={schema.description}>
-            <div className={styles.inlineRow}>
-              <TextInput
-                className={styles.inlineGrow}
-                value={value != null ? String(value) : ''}
-                onChange={(v) => {
-                  const parsed = parseInt(v)
-                  onChange(paramKey, v === '' ? undefined : (isNaN(parsed) ? undefined : parsed))
-                }}
-                placeholder={schema.default != null ? String(schema.default) : ''}
-              />
-              <Button
-                variant="secondary"
-                size="sm"
-                icon={<Shuffle size={14} />}
-                onClick={() => onChange(paramKey, -1)}
-              >
-                Randomize
-              </Button>
-            </div>
-          </FormField>
-        )
-      }
-      return (
-        <FormField label={displayName} hint={schema.description}>
-          <TextInput
-            value={value != null ? String(value) : ''}
-            onChange={(v) => {
-              const parsed = schema.type === 'integer' ? parseInt(v) : parseFloat(v)
-              onChange(paramKey, v === '' ? undefined : (isNaN(parsed) ? undefined : parsed))
-            }}
-            placeholder={schema.default != null ? String(schema.default) : ''}
-          />
-        </FormField>
-      )
-
-    case 'string':
-      if (paramKey === 'rawRequestOverride') {
-        return (
-          <RawOverrideField
-            label={displayName}
-            schema={schema}
-            value={value}
-            onChange={(v) => onChange(paramKey, v)}
-          />
-        )
-      }
-      if (schema.description?.toLowerCase().includes('prompt') || schema.description?.toLowerCase().includes('negative')) {
-        return (
-          <FormField label={displayName} hint={schema.description}>
-            <TextArea
-              rows={3}
-              value={value ?? schema.default ?? ''}
-              onChange={(v) => onChange(paramKey, v)}
-              placeholder={schema.default != null ? String(schema.default) : ''}
-            />
-          </FormField>
-        )
-      }
-      return (
-        <FormField label={displayName} hint={schema.description}>
-          <TextInput
-            value={value ?? schema.default ?? ''}
-            onChange={(v) => onChange(paramKey, v)}
-          />
-        </FormField>
-      )
-
-    default:
-      return null
-  }
+function parameterAppliesToModel(schema: ImageGenParameterSchema, model: string | undefined): boolean {
+  if (!schema.modelPrefixes?.length) return true
+  if (!model) return false
+  return schema.modelPrefixes.some((prefix) => model.startsWith(prefix))
 }
 
 export default function ImageGenPanel() {
@@ -484,8 +79,6 @@ export default function ImageGenPanel() {
   const setSceneBackground = useStore((s) => s.setSceneBackground)
   const setSceneGenerating = useStore((s) => s.setSceneGenerating)
   const openModal = useStore((s) => s.openModal)
-  const activeCharacterId = useStore((s) => s.activeCharacterId)
-  const activePersonaId = useStore((s) => s.activePersonaId)
 
   const imageGenProfiles = useStore((s) => s.imageGenProfiles)
   const activeImageGenConnectionId = useStore((s) => s.activeImageGenConnectionId)
@@ -498,20 +91,7 @@ export default function ImageGenPanel() {
   const [error, setError] = useState<string | null>(null)
   const [lightboxOpen, setLightboxOpen] = useState(false)
   const [generatedPreview, setGeneratedPreview] = useState<string | null>(null)
-  const [presetName, setPresetName] = useState('')
   const [availableMacros, setAvailableMacros] = useState<MacroGroup[]>(() => getAvailableMacros())
-  const [editTarget, setEditTarget] = useState<'main' | 'character' | 'persona' | 'captioning'>('main')
-  const [draftPrompt, setDraftPrompt] = useState('')
-  const [draftNegative, setDraftNegative] = useState('')
-  const [loadedPresetId, setLoadedPresetId] = useState<string | null>(null)
-  const [confirmDeletePreset, setConfirmDeletePreset] = useState(false)
-  const [loraPresetName, setLoraPresetName] = useState('')
-  const [draftLoras, setDraftLoras] = useState<DraftLoraEntry[]>([])
-  const [draftLoraBaseTags, setDraftLoraBaseTags] = useState('')
-  const [loadedLoraPresetId, setLoadedLoraPresetId] = useState<string | null>(null)
-  const [confirmDeleteLoraPreset, setConfirmDeleteLoraPreset] = useState(false)
-  const [characterPresetId, setCharacterPresetId] = useState<string | null>(null)
-  const [personaPresetId, setPersonaPresetId] = useState<string | null>(null)
   const [currentJobId, setCurrentJobId] = useState<string | null>(null)
   const [workflowEditorOpen, setWorkflowEditorOpen] = useState(false)
   const [workflowConfig, setWorkflowConfig] = useState<ComfyUIWorkflowConfig | null>(null)
@@ -552,16 +132,18 @@ export default function ImageGenPanel() {
     [activeConnection, imageGenProviders],
   )
 
+  const promptEditor = useImageGenPromptEditor(setError)
+  const { editTarget, draftPrompt, draftNegative, promptPresets, mainPresetOptions } = promptEditor
+  const loraEditor = useImageGenLoraEditor(activeConnection)
+  const [promptStudioOpen, setPromptStudioOpen] = useState(false)
+  const [loraStudioOpen, setLoraStudioOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+
   const capabilities = providerInfo?.capabilities
   const providerName = activeConnection?.provider || ''
   const isComfyUI = providerName === 'comfyui'
+  const isNovelAIV5 = providerName === 'novelai' && activeConnection?.model.startsWith('nai-diffusion-5')
 
-  const loraDiscovery = useLoraDiscovery(
-    activeConnection,
-    loadImageGenModels,
-    t('imageGenPanel.fetchLorasFailed'),
-  )
-  const supportsLoraDiscovery = loraDiscovery.supportsDiscovery
   const comfyCustomControls = useMemo(() => {
     if (!isComfyUI || !workflowConfig) return []
     return buildMappedFieldControls(workflowConfig, workflowCapabilities)
@@ -644,7 +226,7 @@ export default function ImageGenPanel() {
   // Group parameters by their group field
   const paramGroups = useMemo(() => {
     if (!capabilities) return { main: [], advanced: [], references: [], extra: [] as Array<{ name: string; params: Array<[string, ImageGenParameterSchema]> }> }
-    const groups: Record<string, Array<[string, ImageGenParameterSchema]>> = {
+    const groups: { main: Array<[string, ImageGenParameterSchema]>; advanced: Array<[string, ImageGenParameterSchema]>; references: Array<[string, ImageGenParameterSchema]> } = {
       main: [],
       advanced: [],
       references: [],
@@ -654,9 +236,10 @@ export default function ImageGenPanel() {
     const extraMap = new Map<string, Array<[string, ImageGenParameterSchema]>>()
 
     for (const [key, schema] of Object.entries(capabilities.parameters)) {
+      if (!parameterAppliesToModel(schema, activeConnection?.model)) continue
       const group = schema.group || 'main'
       if (KNOWN_GROUPS.has(group)) {
-        groups[group].push([key, schema])
+        groups[group as keyof typeof groups].push([key, schema])
       } else {
         if (!extraMap.has(group)) extraMap.set(group, [])
         extraMap.get(group)!.push([key, schema])
@@ -666,7 +249,7 @@ export default function ImageGenPanel() {
       extraGroups.push({ name, params })
     }
     return { ...groups, extra: extraGroups }
-  }, [capabilities])
+  }, [activeConnection?.model, capabilities])
 
   // Provider parameters are saved on the active connection so they do not leak
   // across profiles that happen to use the same parameter names.
@@ -714,106 +297,6 @@ export default function ImageGenPanel() {
     return normalizeComfyControlValue(customValues[customKey] ?? control.defaultValue)
   }, [genParams.comfyui_field_values])
 
-  const promptPresets = useMemo(() => imageGeneration.promptPresets || [], [imageGeneration.promptPresets])
-  const mainPresets = useMemo(() => promptPresets.filter((p) => (p.kind ?? 'main') === 'main'), [promptPresets])
-  const characterPresets = useMemo(() => promptPresets.filter((p) => p.kind === 'character'), [promptPresets])
-  const personaPresets = useMemo(() => promptPresets.filter((p) => p.kind === 'persona'), [promptPresets])
-  const captioningPresets = useMemo(() => promptPresets.filter((p) => p.kind === 'captioning'), [promptPresets])
-  const loraPresets = imageGeneration.loraPresets ?? EMPTY_LORA_PRESETS
-
-  // Load this character's bound preset whenever the active character changes.
-  useEffect(() => {
-    if (!activeCharacterId) {
-      setCharacterPresetId(null)
-      return
-    }
-    let cancelled = false
-    imageGenPresetBindingsApi
-      .getCharacterBinding(activeCharacterId)
-      .then((binding) => {
-        if (!cancelled) setCharacterPresetId(binding?.preset_id ?? null)
-      })
-      .catch(() => {
-        if (!cancelled) setCharacterPresetId(null)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activeCharacterId])
-
-  // Load this persona's bound preset whenever the active persona changes.
-  useEffect(() => {
-    if (!activePersonaId) {
-      setPersonaPresetId(null)
-      return
-    }
-    let cancelled = false
-    imageGenPresetBindingsApi
-      .getPersonaBinding(activePersonaId)
-      .then((binding) => {
-        if (!cancelled) setPersonaPresetId(binding?.preset_id ?? null)
-      })
-      .catch(() => {
-        if (!cancelled) setPersonaPresetId(null)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activePersonaId])
-
-  const loadedPreset = useMemo(
-    () => (loadedPresetId ? promptPresets.find((p) => p.id === loadedPresetId) ?? null : null),
-    [loadedPresetId, promptPresets],
-  )
-
-  const loadedLoraPreset = useMemo(
-    () => (loadedLoraPresetId ? loraPresets.find((p) => p.id === loadedLoraPresetId) ?? null : null),
-    [loadedLoraPresetId, loraPresets],
-  )
-
-  // Re-hydrate the editor textareas whenever the edit target (or its bindings)
-  // changes. For main, the editor mirrors the live customPrompt; for
-  // character/persona, it mirrors the bound preset (or stays blank).
-  // The live custom prompt/negative are read through refs so the effect does
-  // not re-run on every keystroke while the user is editing.
-  const customPromptRef = useRef(imageGeneration.customPrompt)
-  customPromptRef.current = imageGeneration.customPrompt
-  const customNegativePromptRef = useRef(imageGeneration.customNegativePrompt)
-  customNegativePromptRef.current = imageGeneration.customNegativePrompt
-  useEffect(() => {
-    if (editTarget === 'main') {
-      const activeId = imageGeneration.activePromptPresetId || null
-      const activePreset = activeId ? mainPresets.find((p) => p.id === activeId) : null
-      setLoadedPresetId(activePreset?.id ?? null)
-      setDraftPrompt(customPromptRef.current || '')
-      setDraftNegative(customNegativePromptRef.current || '')
-    } else if (editTarget === 'character') {
-      const preset = characterPresetId ? characterPresets.find((p) => p.id === characterPresetId) : null
-      setLoadedPresetId(preset?.id ?? null)
-      setDraftPrompt(preset?.prompt || '')
-      setDraftNegative(preset?.negativePrompt || '')
-    } else if (editTarget === 'persona') {
-      const preset = personaPresetId ? personaPresets.find((p) => p.id === personaPresetId) : null
-      setLoadedPresetId(preset?.id ?? null)
-      setDraftPrompt(preset?.prompt || '')
-      setDraftNegative(preset?.negativePrompt || '')
-    } else if (editTarget === 'captioning') {
-      setLoadedPresetId(null)
-      setDraftPrompt('')
-      setDraftNegative('')
-    }
-    setPresetName('')
-  }, [editTarget, imageGeneration.activePromptPresetId, characterPresetId, personaPresetId, promptPresets, mainPresets, characterPresets, personaPresets])
-
-  useEffect(() => {
-    const activeId = imageGeneration.activeLoraPresetId || null
-    const preset = activeId ? loraPresets.find((p) => p.id === activeId) ?? null : null
-    setLoadedLoraPresetId(preset?.id ?? null)
-    setDraftLoras(loraPresetToDraft(preset))
-    setDraftLoraBaseTags(preset?.base_tags ?? '')
-    setLoraPresetName('')
-  }, [imageGeneration.activeLoraPresetId, loraPresets])
-
   // Mirror the Loom builder pattern: ship the full backend macro catalog into
   // the expandable editor so users can browse/insert macros that work inside
   // image-gen prompts ({{user}}, {{char}}, etc.).
@@ -841,307 +324,7 @@ export default function ImageGenPanel() {
 
   useEffect(() => { refreshMacros() }, [refreshMacros])
 
-  // Typing only updates local state — keystrokes do NOT touch the store, so
-  // the whole panel doesn't re-render mid-type. A debounced effect below
-  // flushes the draft to settings for persistence, and handleGenerate flushes
-  // synchronously before submitting.
-  const onDraftPromptChange = useCallback((value: string) => {
-    setDraftPrompt(value)
-  }, [])
 
-  const onDraftNegativeChange = useCallback((value: string) => {
-    setDraftNegative(value)
-  }, [])
-
-  // Persist main-mode drafts to settings after typing pauses. Keeps the prompt
-  // available on refresh / panel remount without causing per-keystroke
-  // store updates.
-  useEffect(() => {
-    if (editTarget !== 'main') return
-    const currentPrompt = imageGeneration.customPrompt || ''
-    const currentNeg = imageGeneration.customNegativePrompt || ''
-    if (draftPrompt === currentPrompt && draftNegative === currentNeg) return
-    const timer = setTimeout(() => {
-      setImageGenSettings({ customPrompt: draftPrompt, customNegativePrompt: draftNegative })
-    }, 500)
-    return () => clearTimeout(timer)
-  }, [draftPrompt, draftNegative, editTarget, imageGeneration.customPrompt, imageGeneration.customNegativePrompt, setImageGenSettings])
-
-  const bindCharacterPreset = useCallback(async (presetId: string | null) => {
-    if (!activeCharacterId) return
-    try {
-      if (!presetId) {
-        await imageGenPresetBindingsApi.deleteCharacterBinding(activeCharacterId).catch(() => {})
-        setCharacterPresetId(null)
-        return
-      }
-      const binding = await imageGenPresetBindingsApi.setCharacterBinding(activeCharacterId, presetId)
-      setCharacterPresetId(binding.preset_id)
-    } catch (err: any) {
-      setError(err?.body?.error || err?.message || t('imageGenPanel.failedUpdateCharacterBinding'))
-    }
-  }, [activeCharacterId, t])
-
-  const bindPersonaPreset = useCallback(async (presetId: string | null) => {
-    if (!activePersonaId) return
-    try {
-      if (!presetId) {
-        await imageGenPresetBindingsApi.deletePersonaBinding(activePersonaId).catch(() => {})
-        setPersonaPresetId(null)
-        return
-      }
-      const binding = await imageGenPresetBindingsApi.setPersonaBinding(activePersonaId, presetId)
-      setPersonaPresetId(binding.preset_id)
-    } catch (err: any) {
-      setError(err?.body?.error || err?.message || t('imageGenPanel.failedUpdatePersonaBinding'))
-    }
-  }, [activePersonaId, t])
-
-  // Unified picker: switches active main preset (and panel content) when
-  // editing main, or binds/unbinds the active character/persona when editing
-  // those targets. Selecting null clears the binding / active selection and
-  // empties the editor for a fresh draft.
-  const pickPreset = useCallback((presetId: string | null) => {
-    if (!presetId) {
-      setLoadedPresetId(null)
-      if (editTarget === 'main') {
-        setImageGenSettings({ activePromptPresetId: null, customPrompt: '', customNegativePrompt: '' })
-        setDraftPrompt('')
-        setDraftNegative('')
-      } else if (editTarget === 'character') {
-        bindCharacterPreset(null)
-        setDraftPrompt('')
-        setDraftNegative('')
-      } else if (editTarget === 'persona') {
-        bindPersonaPreset(null)
-        setDraftPrompt('')
-        setDraftNegative('')
-      } else if (editTarget === 'captioning') {
-        setDraftPrompt('')
-        setDraftNegative('')
-      }
-      return
-    }
-    const preset = promptPresets.find((p) => p.id === presetId)
-    if (!preset) return
-    setLoadedPresetId(preset.id)
-    setDraftPrompt(preset.prompt)
-    setDraftNegative(preset.negativePrompt || '')
-    if (editTarget === 'main') {
-      setImageGenSettings({
-        activePromptPresetId: preset.id,
-        promptMode: preset.mode,
-        customPrompt: preset.prompt,
-        customNegativePrompt: preset.negativePrompt || '',
-        promptParserConnectionId: preset.parserConnectionId || null,
-        promptParserModel: preset.parserModel || '',
-        promptParserParameters: preset.parserParameters || {},
-      } as any)
-    } else if (editTarget === 'character') {
-      bindCharacterPreset(preset.id)
-    } else if (editTarget === 'persona') {
-      bindPersonaPreset(preset.id)
-    }
-  }, [editTarget, promptPresets, setImageGenSettings, bindCharacterPreset, bindPersonaPreset])
-
-  // Saves the textarea draft back to the loaded preset (or creates a new one
-  // if nothing is loaded). The save side-effects are scoped to the edit
-  // target: 'main' bumps the activePromptPresetId and writes to settings;
-  // 'character'/'persona' rebind the new id to the active actor.
-  const savePromptPreset = useCallback(() => {
-    const targetLabel = editTarget === 'main' ? t('imageGenPanel.imagePrompt') : editTarget === 'character' ? t('imageGenPanel.characterPreset') : editTarget === 'captioning' ? t('imageGenPanel.captioningPreset') : t('imageGenPanel.personaPreset')
-    const name = presetName.trim() || loadedPreset?.name || targetLabel
-    const existingId = loadedPresetId
-    const nextPreset: ImageGenPromptPreset = {
-      id: existingId || uuidv7(),
-      name,
-      mode: imageGeneration.promptMode === 'parsed_custom' ? 'parsed_custom' : 'custom',
-      prompt: draftPrompt,
-      negativePrompt: draftNegative,
-      parserConnectionId: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserConnectionId || null) : null,
-      parserModel: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserModel || '') : '',
-      parserParameters: (editTarget === 'main' || editTarget === 'captioning') ? (imageGeneration.promptParserParameters || {}) : {},
-      kind: editTarget,
-    }
-    const next = existingId
-      ? promptPresets.map((p) => (p.id === existingId ? nextPreset : p))
-      : [...promptPresets, nextPreset]
-
-    const updates: Partial<typeof imageGeneration> = { promptPresets: next }
-    if (editTarget === 'main') {
-      ;(updates as any).activePromptPresetId = nextPreset.id
-      ;(updates as any).customPrompt = draftPrompt
-      ;(updates as any).customNegativePrompt = draftNegative
-    }
-    setImageGenSettings(updates as any)
-    setLoadedPresetId(nextPreset.id)
-    setPresetName('')
-
-    if (editTarget === 'character' && activeCharacterId) {
-      void bindCharacterPreset(nextPreset.id)
-    } else if (editTarget === 'persona' && activePersonaId) {
-      void bindPersonaPreset(nextPreset.id)
-    }
-  }, [
-    activeCharacterId,
-    activePersonaId,
-    bindCharacterPreset,
-    bindPersonaPreset,
-    draftNegative,
-    draftPrompt,
-    editTarget,
-    imageGeneration,
-    loadedPreset,
-    loadedPresetId,
-    presetName,
-    promptPresets,
-    setImageGenSettings,
-    t,
-  ])
-
-  const deletePromptPreset = useCallback(() => {
-    if (!loadedPresetId) return
-    setConfirmDeletePreset(false)
-    const id = loadedPresetId
-    const next = promptPresets.filter((p) => p.id !== id)
-    const updates: Partial<typeof imageGeneration> = { promptPresets: next }
-    if (editTarget === 'main' && imageGeneration.activePromptPresetId === id) {
-      ;(updates as any).activePromptPresetId = null
-    }
-    setImageGenSettings(updates as any)
-    setLoadedPresetId(null)
-    setDraftPrompt('')
-    setDraftNegative('')
-    if (editTarget === 'character' && characterPresetId === id) {
-      void bindCharacterPreset(null)
-    } else if (editTarget === 'persona' && personaPresetId === id) {
-      void bindPersonaPreset(null)
-    }
-  }, [
-    bindCharacterPreset,
-    bindPersonaPreset,
-    characterPresetId,
-    editTarget,
-    imageGeneration.activePromptPresetId,
-    loadedPresetId,
-    personaPresetId,
-    promptPresets,
-    setImageGenSettings,
-  ])
-
-
-  const addDraftLora = useCallback(() => {
-    setDraftLoras((current) => [
-      ...current,
-      {
-        draftId: uuidv7(),
-        lora_name: '',
-        weight_model: String(LORA_DEFAULT_WEIGHT),
-        weight_clip: '',
-      },
-    ])
-  }, [])
-
-
-  const pickLoraPreset = useCallback((presetId: string | null) => {
-    if (!presetId) {
-      setLoadedLoraPresetId(null)
-      setDraftLoras([])
-      setDraftLoraBaseTags('')
-      setLoraPresetName('')
-      setImageGenSettings({ activeLoraPresetId: null })
-      return
-    }
-
-    const preset = loraPresets.find((p) => p.id === presetId)
-    if (!preset) return
-
-    setLoadedLoraPresetId(preset.id)
-    setDraftLoras(loraPresetToDraft(preset))
-    setDraftLoraBaseTags(preset.base_tags ?? '')
-    setLoraPresetName('')
-    setImageGenSettings({ activeLoraPresetId: preset.id })
-  }, [loraPresets, setImageGenSettings])
-
-  const saveLoraPreset = useCallback(() => {
-    const loraNames = draftLoras.map((draft) => draft.lora_name.trim())
-    if (!loraNames.some(Boolean)) {
-      toast.error(t('imageGenPanel.pickLoraBeforeSave'))
-      return
-    }
-
-    if (loraNames.some((loraName) => !loraName)) {
-      toast.error(t('imageGenPanel.pickLoraFilenameBeforeSave'))
-      return
-    }
-
-    const nextLoras: LoraEntry[] = []
-
-    for (const [index, draft] of draftLoras.entries()) {
-      const loraName = loraNames[index] ?? ''
-      const weightModel = parseDraftLoraWeight(draft.weight_model)
-      const weightClip = parseDraftLoraWeight(draft.weight_clip)
-      if (weightModel === null || (draft.weight_clip.trim() && weightClip === null)) {
-        toast.error(t('imageGenPanel.loraWeightsMustBeNumbers'))
-        return
-      }
-
-      const entry: LoraEntry = {
-        lora_name: loraName,
-        weight_model: weightModel,
-      }
-      if (draft.weight_clip.trim()) entry.weight_clip = weightClip ?? weightModel
-      nextLoras.push(entry)
-    }
-
-    if (nextLoras.length === 0) {
-      toast.error(t('imageGenPanel.pickLoraBeforeSave'))
-      return
-    }
-
-    const existingId = loadedLoraPresetId
-    const nextPreset: LoraPreset = {
-      id: existingId || uuidv7(),
-      name: loraPresetName.trim() || loadedLoraPreset?.name || t('imageGenPanel.loraPresetsSection'),
-      loras: nextLoras,
-      base_tags: draftLoraBaseTags.trim() || undefined,
-    }
-    const next = existingId
-      ? loraPresets.map((preset) => (preset.id === existingId ? nextPreset : preset))
-      : [...loraPresets, nextPreset]
-
-    setImageGenSettings({
-      loraPresets: next,
-      activeLoraPresetId: nextPreset.id,
-    })
-    setLoadedLoraPresetId(nextPreset.id)
-    setLoraPresetName('')
-    toast.success(t('imageGenPanel.loraPresetSaved'))
-  }, [
-    draftLoraBaseTags,
-    draftLoras,
-    loadedLoraPreset,
-    loadedLoraPresetId,
-    loraPresetName,
-    loraPresets,
-    setImageGenSettings,
-    t,
-  ])
-
-  const deleteLoraPreset = useCallback(() => {
-    if (!loadedLoraPresetId) return
-    setConfirmDeleteLoraPreset(false)
-    const id = loadedLoraPresetId
-    const next = loraPresets.filter((preset) => preset.id !== id)
-    setImageGenSettings({
-      loraPresets: next,
-      activeLoraPresetId: imageGeneration.activeLoraPresetId === id ? null : imageGeneration.activeLoraPresetId ?? null,
-    })
-    setLoadedLoraPresetId(null)
-    setDraftLoras([])
-    setDraftLoraBaseTags('')
-    setLoraPresetName('')
-  }, [imageGeneration.activeLoraPresetId, loadedLoraPresetId, loraPresets, setImageGenSettings])
 
   const handleImportConfigFile: React.ChangeEventHandler<HTMLInputElement> = async (e) => {
     const file = e.target.files?.[0]
@@ -1185,7 +368,7 @@ export default function ImageGenPanel() {
   // Providers that accept image input: NovelAI/NanoGPT (style references) plus
   // the img2img providers, which reuse the same reference-image config surface.
   const supportsImg2ImgSource = providerName === 'swarmui' || providerName === 'comfyui' || providerName === 'google_gemini' || providerName === 'openrouter' || providerName === 'openai' || providerName === 'sdapi'
-  const supportsRefs = providerName === 'novelai' || providerName === 'nanogpt' || supportsImg2ImgSource
+  const supportsRefs = (providerName === 'novelai' && !isNovelAIV5) || providerName === 'nanogpt' || supportsImg2ImgSource
 
   const runGenerationCall = useCallback(async (input: {
     chatId: string
@@ -1336,7 +519,7 @@ export default function ImageGenPanel() {
     await runGenerationCall(baseInput)
   }
 
-  // The Generate buttons sit directly below the prompt textareas. On Android,
+  // On Android,
   // tapping them blurs the input and dismisses the keyboard, which reflows the
   // layout and moves the button before the synthetic click lands (the click is
   // then dropped — the button only flashes). Activate on pointerup instead.
@@ -1358,49 +541,6 @@ export default function ImageGenPanel() {
     }
   }
 
-  const mainPresetOptions = useMemo(() => [
-    { value: '', label: t('imageGenPanel.noSavedPrompt') },
-    ...mainPresets.map((p) => ({ value: p.id, label: p.name })),
-  ], [mainPresets, t])
-
-  const characterPresetOptions = useMemo(() => [
-    { value: '', label: t('imageGenPanel.noCharacterPreset') },
-    ...characterPresets.map((p) => ({ value: p.id, label: p.name })),
-  ], [characterPresets, t])
-
-  const personaPresetOptions = useMemo(() => [
-    { value: '', label: t('imageGenPanel.noPersonaPreset') },
-    ...personaPresets.map((p) => ({ value: p.id, label: p.name })),
-  ], [personaPresets, t])
-
-  const captioningPresetOptions = useMemo(() => [
-    { value: '', label: 'No captioning preset' },
-    ...captioningPresets.map((p) => ({ value: p.id, label: p.name })),
-  ], [captioningPresets])
-
-  const loraPresetOptions = useMemo(() => [
-    { value: '', label: t('imageGenPanel.noActiveLoraPreset') },
-    ...loraPresets.map((preset) => ({ value: preset.id, label: preset.name })),
-  ], [loraPresets, t])
-
-  const loraFilenameOptions = useMemo(() => {
-    const seen = new Set<string>()
-    const manualOptions: { value: string; label: string; sublabel?: string }[] = []
-    const discoveredOptions: { value: string; label: string; sublabel?: string }[] = []
-    for (const lora of loraDiscovery.loras) {
-      if (seen.has(lora.id)) continue
-      seen.add(lora.id)
-      discoveredOptions.push({ value: lora.id, label: lora.label, sublabel: lora.id })
-    }
-    for (const draft of draftLoras) {
-      const value = draft.lora_name.trim()
-      if (!value || seen.has(value)) continue
-      seen.add(value)
-      manualOptions.push({ value, label: value })
-    }
-    return [...manualOptions, ...discoveredOptions]
-  }, [loraDiscovery.loras, draftLoras])
-
   // Resolve the model ID to a human-readable label
   const modelLabel = useMemo(() => {
     if (!activeConnection?.model) return null
@@ -1419,34 +559,12 @@ export default function ImageGenPanel() {
         hint={t('imageGenPanel.enableHint')}
       />
 
-      <FormField label="Image Captioner" hint="Upload an image and generate descriptive tags using your parser model. Useful for creating character or scene prompts from reference images.">
-        <Button variant="secondary" size="sm" onClick={() => useStore.getState().openModal('imageCaptioner', {})}>
-          Open Captioner
-        </Button>
-      </FormField>
-
-      <EditorSection title={t('imageGenPanel.importExport')} Icon={Settings2} defaultExpanded={false}>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="secondary" size="sm" onClick={() => setExportModalOpen(true)}>
-            <Download size={14} /> {t('imageGenPanel.exportConfig')}
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => importConfigInputRef.current?.click()}
-            disabled={importConfigBusy}
-          >
-            <Upload size={14} /> {t('imageGenPanel.importConfig')}
-          </Button>
-        </div>
-        <input
-          ref={importConfigInputRef}
-          type="file"
-          accept=".json,application/json"
-          style={{ display: 'none' }}
-          onChange={handleImportConfigFile}
-        />
-      </EditorSection>
+      <div className={`${styles.actions} ${styles.utilities}`} aria-label="Image utilities">
+        <Button variant="secondary" size="sm" onClick={() => openModal('imageCaptioner', {})}>Caption Image</Button>
+          <Button variant="secondary" size="sm" onClick={() => setExportModalOpen(true)}><Download size={14} /> {t('imageGenPanel.exportConfig')}</Button>
+          <Button variant="secondary" size="sm" onClick={() => importConfigInputRef.current?.click()} disabled={importConfigBusy}><Upload size={14} /> {t('imageGenPanel.importConfig')}</Button>
+      </div>
+      <input ref={importConfigInputRef} type="file" accept=".json,application/json" style={{ display: 'none' }} onChange={handleImportConfigFile} />
 
       <ImageGenExportModal
         isOpen={exportModalOpen}
@@ -1457,7 +575,7 @@ export default function ImageGenPanel() {
       {imageGeneration.enabled && (
         <>
           {/* Connection Profile Selector */}
-          <FormField label={t('imageGenPanel.connection')} hint={imageGenProfiles.length === 0 ? t('imageGenPanel.createConnectionFirst') : undefined}>
+          <FormField className={styles.runtimeField} label={t('imageGenPanel.connection')} hint={imageGenProfiles.length === 0 ? t('imageGenPanel.createConnectionFirst') : undefined}>
             <ConnectionSelect
               kind="imageGen"
               value={activeImageGenConnectionId || ''}
@@ -1476,9 +594,9 @@ export default function ImageGenPanel() {
             )}
           </FormField>
 
-          <EditorSection title={t('imageGenPanel.promptMode')} Icon={IconBrush}>
-            <FormField label={t('imageGenPanel.mode')} hint={t('imageGenPanel.modeHint')}>
+            <FormField className={styles.runtimeField} label={t('imageGenPanel.mode')} hint={t('imageGenPanel.modeHint')}>
               <Select
+                aria-label={t('imageGenPanel.mode')}
                 value={imageGeneration.promptMode || 'scene'}
                 onChange={(value) => updateTop({ promptMode: value })}
                 options={[
@@ -1489,8 +607,9 @@ export default function ImageGenPanel() {
               />
             </FormField>
 
-            <FormField label={t('imageGenPanel.output')} hint={t('imageGenPanel.outputHint')}>
+            <FormField className={styles.runtimeField} label={t('imageGenPanel.output')} hint={t('imageGenPanel.outputHint')}>
               <Select
+                aria-label={t('imageGenPanel.output')}
                 value={imageGeneration.outputTarget || 'background'}
                 onChange={(value) => updateTop({ outputTarget: value })}
                 options={[
@@ -1502,639 +621,63 @@ export default function ImageGenPanel() {
               />
             </FormField>
 
-            {(imageGeneration.promptMode === 'custom' || imageGeneration.promptMode === 'parsed_custom') && (
-              <>
-                <FormField
-                  label={t('imageGenPanel.editing')}
-                  hint={t('imageGenPanel.editingHint')}
-                >
-                  <Select
-                    value={editTarget}
-                    onChange={(value) => setEditTarget(value as 'main' | 'character' | 'persona' | 'captioning')}
-                    options={[
-                      { value: 'main', label: t('imageGenPanel.mainPreset') },
-                      { value: 'character', label: t('imageGenPanel.characterPreset') },
-                      { value: 'persona', label: t('imageGenPanel.personaPreset') },
-                      { value: 'captioning', label: t('imageGenPanel.captioningPreset') },
-                    ]}
-                  />
-                </FormField>
-
-                <FormField
-                  label={editTarget === 'main' ? t('imageGenPanel.activeMainPreset') : editTarget === 'character' ? t('imageGenPanel.boundCharacterPreset') : editTarget === 'captioning' ? t('imageGenPanel.boundCaptioningPreset') : t('imageGenPanel.boundPersonaPreset')}
-                  hint={
-                    editTarget === 'main'
-                      ? t('imageGenPanel.pickMainPresetHint')
-                      : editTarget === 'character'
-                        ? activeCharacterId
-                          ? t('imageGenPanel.pickCharacterPresetHint')
-                          : t('imageGenPanel.openChatBindPreset')
-                        : editTarget === 'captioning'
-                          ? t('imageGenPanel.pickCaptioningPresetHint')
-                          : activePersonaId
-                            ? t('imageGenPanel.pickPersonaPresetHint')
-                            : t('imageGenPanel.selectActivePersona')
-                  }
-                >
-                  <Select
-                    value={loadedPresetId || ''}
-                    onChange={(value) => pickPreset(value || null)}
-                    options={
-                      editTarget === 'main' ? mainPresetOptions : editTarget === 'character' ? characterPresetOptions : editTarget === 'captioning' ? captioningPresetOptions : personaPresetOptions
-                    }
-                  />
-                </FormField>
-
-                <FormField
-                  label={
-                    editTarget === 'main'
-                      ? (imageGeneration.promptMode === 'parsed_custom' ? t('imageGenPanel.parserInstructions') : t('imageGenPanel.prompt'))
-                      : editTarget === 'character' ? t('imageGenPanel.characterSnippet')
-                      : editTarget === 'captioning' ? t('imageGenPanel.captioningInstructions')
-                      : t('imageGenPanel.personaSnippet')
-                  }
-                  hint={
-                    editTarget === 'main'
-                      ? (imageGeneration.promptMode === 'parsed_custom'
-                          ? t('imageGenPanel.parserInstructionsHint')
-                          : t('imageGenPanel.sentDirectlyHint'))
-                      : editTarget === 'character'
-                        ? t('imageGenPanel.characterSnippetHint')
-                        : editTarget === 'captioning'
-                          ? t('imageGenPanel.captioningInstructionsHint')
-                          : t('imageGenPanel.personaSnippetHint')
-                  }
-                >
-                  <ExpandableTextarea
-                    className={styles.promptTextarea}
-                    value={draftPrompt}
-                    onChange={onDraftPromptChange}
-                    title={loadedPreset ? t('imageGenPanel.editingPresetTitle', { name: loadedPreset.name }) : t('imageGenPanel.editTargetPromptTitle', { target: editTarget })}
-                    placeholder={
-                      editTarget === 'main'
-                        ? (imageGeneration.promptMode === 'parsed_custom'
-                            ? t('imageGenPanel.parserPromptExample')
-                            : t('imageGenPanel.describeImage'))
-                        : editTarget === 'character'
-                          ? '1girl, long red hair, leather jacket'
-                          : editTarget === 'captioning'
-                            ? 'Describe this image in detail using concise image-generation tags. Include subject, composition, style, lighting, mood, and colors.'
-                            : 'middle-aged man, glasses, beige coat'
-                    }
-                    rows={5}
-                    macros={availableMacros}
-                    onRefreshMacros={refreshMacros}
-                  />
-                  {editTarget === 'main' && /\{\{\s*character_prompt\s*\}\}/i.test(draftPrompt) && (
-                    <div className={styles.editorTargetBanner}>
-                      <code>{'{{character_prompt}}'}</code> {t('imageGenPanel.characterPromptMacroHint')}
-                    </div>
-                  )}
-                  {editTarget === 'main' && /\{\{\s*persona_prompt\s*\}\}/i.test(draftPrompt) && (
-                    <div className={styles.editorTargetBanner}>
-                      <code>{'{{persona_prompt}}'}</code> {t('imageGenPanel.personaPromptMacroHint')}
-                    </div>
-                  )}
-                </FormField>
-
-                <FormField
-                  label={editTarget === 'main' ? t('imageGenPanel.negativePrompt') : `${editTarget === 'character' ? t('imageGenPanel.character') : editTarget === 'captioning' ? t('imageGenPanel.captioning') : t('imageGenPanel.persona')} ${t('imageGenPanel.negativeSnippet')}`}
-                  hint={
-                    editTarget === 'main'
-                      ? undefined
-                      : t('imageGenPanel.negativeSnippetHint', { target: editTarget })
-                  }
-                >
-                  <ExpandableTextarea
-                    className={styles.promptTextarea}
-                    value={draftNegative}
-                    onChange={onDraftNegativeChange}
-                    title={loadedPreset ? t('imageGenPanel.editingPresetNegativeTitle', { name: loadedPreset.name }) : t('imageGenPanel.editTargetNegativeTitle', { target: editTarget })}
-                    placeholder={t('imageGenPanel.optionalNegativePrompt')}
-                    rows={3}
-                    macros={availableMacros}
-                    onRefreshMacros={refreshMacros}
-                  />
-                </FormField>
-
-                <div className={styles.inlineRow}>
-                  <TextInput
-                    value={presetName}
-                    onChange={setPresetName}
-                    placeholder={loadedPreset ? t('imageGenPanel.renamePreset', { name: loadedPreset.name }) : t('imageGenPanel.newPresetName', { target: editTarget })}
-                  />
-                  <Button variant="secondary" size="sm" onClick={savePromptPreset}>
-                    {loadedPresetId ? t('imageGenPanel.saveChanges') : t('imageGenPanel.saveAsNew')}
-                  </Button>
-                  {loadedPresetId && <Button variant="danger" size="sm" onClick={() => setConfirmDeletePreset(true)}>{t('imageGenPanel.delete')}</Button>}
-                </div>
-
-                {confirmDeletePreset && (
-                  <ConfirmationModal
-                    isOpen={true}
-                    title={t('imageGenPanel.deletePresetConfirmTitle')}
-                    message={t('imageGenPanel.deletePresetConfirmMessage', { name: loadedPreset?.name })}
-                    variant="danger"
-                    confirmText={t('imageGenPanel.delete')}
-                    onConfirm={deletePromptPreset}
-                    onCancel={() => setConfirmDeletePreset(false)}
-                  />
-                )}
-                {loadedPreset && (
-                  <div className={styles.editorTargetBanner}>
-                    {t('imageGenPanel.editing')} <strong>{loadedPreset.name}</strong> ({editTarget})
-                    {editTarget === 'character' && activeCharacterId && ` · ${t('imageGenPanel.boundToActiveCharacter')}`}
-                    {editTarget === 'persona' && activePersonaId && ` · ${t('imageGenPanel.boundToActivePersona')}`}
-                  </div>
-                )}
-              </>
-            )}
-
-          </EditorSection>
-
-          <EditorSection title={t('imageGenPanel.loraPresetsSection')} Icon={IconBrush} defaultExpanded={false}>
-            <FormField label={t('imageGenPanel.activeLoraPreset')} hint={t('imageGenPanel.loraPresetHint')}>
-              <Select
-                value={imageGeneration.activeLoraPresetId || ''}
-                onChange={(value) => pickLoraPreset(value || null)}
-                options={loraPresetOptions}
-              />
-            </FormField>
-
-            <LoraDiscoveryStatus controller={loraDiscovery} />
-            <LoraRowsEditor
-              rows={draftLoras}
-              onChange={setDraftLoras}
-              filenameOptions={loraFilenameOptions}
-              supportsDiscovery={supportsLoraDiscovery}
-              discoveryState={loraDiscovery.state}
-            />
-
-            <Button variant="secondary" size="sm" icon={<Plus size={14} />} onClick={addDraftLora}>
-              {t('imageGenPanel.addLora')}
-            </Button>
-
-            <FormField label={t('imageGenPanel.baseTags')} hint={t('imageGenPanel.baseTagsHint')}>
-              <ExpandableTextarea
-                className={styles.promptTextarea}
-                value={draftLoraBaseTags}
-                onChange={setDraftLoraBaseTags}
-                title={t('imageGenPanel.baseTags')}
-                placeholder={t('imageGenPanel.baseTags')}
-                rows={3}
-                macros={availableMacros}
-                onRefreshMacros={refreshMacros}
-              />
-            </FormField>
-
-            <div className={styles.inlineRow}>
-              <TextInput
-                value={loraPresetName}
-                onChange={setLoraPresetName}
-                placeholder={loadedLoraPreset ? t('imageGenPanel.renamePreset', { name: loadedLoraPreset.name }) : t('imageGenPanel.newLoraPresetName')}
-              />
-              <Button variant="secondary" size="sm" onClick={saveLoraPreset}>
-                {t('imageGenPanel.saveLoraPreset')}
-              </Button>
-              {loadedLoraPresetId && (
-                <Button variant="danger" size="sm" onClick={() => setConfirmDeleteLoraPreset(true)}>
-                  {t('imageGenPanel.deleteLoraPreset')}
-                </Button>
-              )}
-            </div>
-
-            {confirmDeleteLoraPreset && (
-              <ConfirmationModal
-                isOpen={true}
-                title={t('imageGenPanel.deleteLoraPresetConfirmTitle')}
-                message={t('imageGenPanel.deleteLoraPresetConfirmMessage', { name: loadedLoraPreset?.name })}
-                variant="danger"
-                confirmText={t('imageGenPanel.deleteLoraPreset')}
-                onConfirm={deleteLoraPreset}
-                onCancel={() => setConfirmDeleteLoraPreset(false)}
-              />
-            )}
-            {loadedLoraPreset && (
-              <div className={styles.editorTargetBanner}>
-                {t('imageGenPanel.editing')} <strong>{loadedLoraPreset.name}</strong>
+          {(imageGeneration.promptMode === 'custom' || imageGeneration.promptMode === 'parsed_custom') &&
+            <FormField className={styles.runtimeField} label={t('imageGenPanel.activeMainPreset')}>
+              <div className={styles.inlineRow}>
+                <Select aria-label={t('imageGenPanel.activeMainPreset')} value={imageGeneration.activePromptPresetId || ''} onChange={value => promptEditor.pickMainPreset(value || null)} options={mainPresetOptions} />
+                <Button variant="secondary" size="sm" onClick={() => setPromptStudioOpen(true)}>Edit</Button>
               </div>
-            )}
-          </EditorSection>
-
-          {(imageGeneration.promptMode === 'scene' || imageGeneration.promptMode === 'parsed_custom') && (
-            <EditorSection title={t('imageGenPanel.promptParser')} Icon={Settings2} defaultExpanded={imageGeneration.promptMode === 'parsed_custom'}>
-              <FormField label={t('imageGenPanel.parserConnection')} hint={t('imageGenPanel.parserConnectionHint')}>
-                <ConnectionSelect
-                  kind="llm"
-                  value={imageGeneration.promptParserConnectionId || ''}
-                  onChange={(value) => updateTop({ promptParserConnectionId: value || null })}
-                  withModel
-                  seedDefaultModel={false}
-                  modelValue={imageGeneration.promptParserModel || ''}
-                  onModelChange={(value) => updateTop({ promptParserModel: value })}
-                  placeholder={t('imageGenPanel.useSidecarOrSelect')}
-                  searchPlaceholder={t('imageGenPanel.searchConnections')}
-                  emptyMessage={t('imageGenPanel.noLlmConnections')}
-                  ariaLabel={t('imageGenPanel.parserConnection')}
-                  modelPlaceholder={t('imageGenPanel.useConnectionDefault')}
-                  modelEmptyMessage={t('imageGenPanel.noModelsReturned')}
-                  modelNoConnectionMessage={t('imageGenPanel.pickParserConnectionFirst')}
-                  modelAppearance="standard"
-                  portal
-                />
-              </FormField>
-
-              <LabeledRangeSlider
-                label={t('imageGenPanel.parserTemperature')}
-                min={0}
-                max={2}
-                step={0.05}
-                value={imageGeneration.promptParserParameters?.temperature ?? 0.4}
-                formatValue={(v) => v.toFixed(2)}
-                onCommit={(v) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), temperature: v } })}
-              />
-
-              <LabeledRangeSlider
-                label={t('imageGenPanel.parserTopP')}
-                min={0}
-                max={1}
-                step={0.05}
-                value={imageGeneration.promptParserParameters?.top_p ?? 1}
-                formatValue={(v) => v.toFixed(2)}
-                onCommit={(v) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), top_p: v } })}
-              />
-
-              <FormField label={t('imageGenPanel.parserMaxTokens')}>
-                <TextInput
-                  value={String(imageGeneration.promptParserParameters?.max_tokens ?? '')}
-                  onChange={(value) => updateTop({ promptParserParameters: { ...(imageGeneration.promptParserParameters || {}), max_tokens: value ? Number(value) : undefined } })}
-                  placeholder={t('imageGenPanel.useConnectionDefault')}
-                />
-              </FormField>
-            </EditorSection>
-          )}
-
-          <EditorSection title={t('imageGenPanel.timeouts')} Icon={Settings2} defaultExpanded={false}>
-            <FormField label={t('imageGenPanel.promptGenerationTimeout')} hint={t('imageGenPanel.promptGenerationTimeoutHint')}>
-              <TextInput
-                type="number"
-                min={0}
-                step={1}
-                value={String(imageGeneration.promptGenerationTimeoutSeconds ?? DEFAULT_PROMPT_TIMEOUT_SECONDS)}
-                onChange={(value) => updateTop({ promptGenerationTimeoutSeconds: normalizeTimeoutSeconds(value, DEFAULT_PROMPT_TIMEOUT_SECONDS) })}
-              />
-            </FormField>
-
-            <FormField label={t('imageGenPanel.imageGenerationTimeout')} hint={t('imageGenPanel.imageGenerationTimeoutHint')}>
-              <TextInput
-                type="number"
-                min={0}
-                step={1}
-                value={String(imageGeneration.generationTimeoutSeconds ?? DEFAULT_IMAGE_GEN_TIMEOUT_SECONDS)}
-                onChange={(value) => updateTop({ generationTimeoutSeconds: normalizeTimeoutSeconds(value, DEFAULT_IMAGE_GEN_TIMEOUT_SECONDS) })}
-              />
-            </FormField>
-          </EditorSection>
-
-          {/* Dynamic Generation Parameters from Provider Schema */}
-          {activeConnection && capabilities && (
-            <>
-              {isComfyUI && (
-                <EditorSection title={t('imageGenPanel.comfyWorkflow')} Icon={Workflow} defaultExpanded={!workflowConfig}>
-                  <div className={styles.workflowCard}>
-                    <div className={styles.workflowInfo}>
-                      <span className={styles.workflowTitle}>
-                        {workflowConfig ? t('imageGenPanel.workflowImported') : t('imageGenPanel.noWorkflowSelected')}
-                      </span>
-                      <span className={styles.workflowMeta}>
-                        {workflowConfig
-                          ? t('imageGenPanel.workflowMappedMeta', {
-                              count: workflowConfig.field_mappings.length,
-                              format: workflowConfig.workflow_format === 'ui_workflow'
-                                ? t('imageGenPanel.workflowFormatUi')
-                                : t('imageGenPanel.workflowFormatApi'),
-                            })
-                          : t('imageGenPanel.importWorkflowHint')}
-                      </span>
-                    </div>
-                    <div className={styles.workflowActions}>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        icon={<Workflow size={14} />}
-                        onClick={() => {
-                          setWorkflowEditorOpen(true)
-                          void refreshActiveComfyWorkflow(true)
-                        }}
-                        disabled={workflowLoading}
-                      >
-                        {workflowConfig ? t('imageGenPanel.editWorkflow') : t('imageGenPanel.importWorkflow')}
-                      </Button>
-                    </div>
-                  </div>
-                  {comfyCustomControls.length > 0 && (
-                    <div className={styles.workflowCustomFields}>
-                      {comfyCustomControls.map((control) => {
-                        const value = readComfyCustomControlValue(control)
-                        return (
-                            <FormField key={control.key} label={control.label} hint={t('imageGenPanel.exposedFromWorkflow')}>
-                            {control.options ? (
-                              <Select
-                                value={value}
-                                onChange={(next) => updateComfyCustomControl(control, next)}
-                                options={[
-                                  { value: '', label: t('imageGenPanel.workflowDefault') },
-                                  ...control.options,
-                                ]}
-                              />
-                            ) : (
-                              <TextInput
-                                type={control.kind === 'number' ? 'number' : 'text'}
-                                value={value}
-                                onChange={(next) => updateComfyCustomControl(control, next)}
-                                placeholder={normalizeComfyControlValue(control.defaultValue)}
-                              />
-                            )}
-                          </FormField>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {workflowError && <div className={styles.error}>{workflowError}</div>}
-                </EditorSection>
-              )}
-
-              {/* Main parameters */}
-              {paramGroups.main.map(([key, schema]) => (
-                <ParamField key={key} paramKey={key} schema={schema} value={genParams[key]} onChange={updateParam} activeConnection={activeConnection} />
-              ))}
-
-              {/* Advanced parameters */}
-              {paramGroups.advanced.length > 0 && (
-                <EditorSection title={t('imageGenPanel.advanced')} Icon={Settings2} defaultExpanded={false}>
-                  {paramGroups.advanced.map(([key, schema]) => (
-                    <ParamField key={key} paramKey={key} schema={schema} value={genParams[key]} onChange={updateParam} activeConnection={activeConnection} />
-                  ))}
-                </EditorSection>
-              )}
-
-              {/* Extra parameter groups (e.g. "models" for SwarmUI) */}
-              {paramGroups.extra.map(({ name, params }) => (
-                <EditorSection key={name} title={name.charAt(0).toUpperCase() + name.slice(1)} Icon={Settings2} defaultExpanded={false}>
-                  {params.map(([key, schema]) => (
-                    <ParamField key={key} paramKey={key} schema={schema} value={genParams[key]} onChange={updateParam} activeConnection={activeConnection} />
-                  ))}
-                </EditorSection>
-              ))}
-
-              {/* Reference / source images — NovelAI & NanoGPT style references,
-                  plus img2img init images for SwarmUI / ComfyUI / Gemini. */}
-              {supportsRefs && (
-                <EditorSection title={t(providerName === 'novelai' ? 'imageGenPanel.directorReferences' : 'imageGenPanel.references')} Icon={IconBrush} defaultExpanded={false}>
-                  {supportsImg2ImgSource && (
-                    <>
-                      <ToggleRow
-                        checked={!!genParams.includeCharacterAvatar}
-                        onChange={(checked) => updateParam('includeCharacterAvatar', checked)}
-                        label={t('imageGenPanel.includeCharacterAvatar')}
-                        hint={t('imageGenPanel.includeCharacterAvatarHint')}
-                      />
-                      <ToggleRow
-                        checked={!!genParams.includePersonaAvatar}
-                        onChange={(checked) => updateParam('includePersonaAvatar', checked)}
-                        label={t('imageGenPanel.includePersonaAvatar')}
-                        hint={t('imageGenPanel.includePersonaAvatarHint')}
-                      />
-                    </>
-                  )}
-                  {providerName === 'novelai' && (
-                    <>
-                      <ToggleRow
-                        checked={!!genParams.includeCharacterAvatar}
-                        onChange={(checked) => updateParam('includeCharacterAvatar', checked)}
-                        label={t('imageGenPanel.includeCharacterAvatar')}
-                        hint={t('imageGenPanel.includeCharacterAvatarHint')}
-                      />
-                      <ToggleRow
-                        checked={!!genParams.includePersonaAvatar}
-                        onChange={(checked) => updateParam('includePersonaAvatar', checked)}
-                        label={t('imageGenPanel.includePersonaAvatar')}
-                        hint={t('imageGenPanel.includePersonaAvatarHint')}
-                      />
-                      <LabeledRangeSlider
-                        label={t('imageGenPanel.referenceStrength')}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={genParams.referenceStrength ?? 0.5}
-                        formatValue={(v) => v.toFixed(2)}
-                        onCommit={(v) => updateParam('referenceStrength', v)}
-                      />
-                      <LabeledRangeSlider
-                        label={t('imageGenPanel.informationExtracted')}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={genParams.referenceInfoExtracted ?? 1}
-                        formatValue={(v) => v.toFixed(2)}
-                        onCommit={(v) => updateParam('referenceInfoExtracted', v)}
-                      />
-                      <LabeledRangeSlider
-                        label={t('imageGenPanel.referenceFidelity')}
-                        min={0}
-                        max={1}
-                        step={0.05}
-                        value={genParams.referenceFidelity ?? 1}
-                        formatValue={(v) => v.toFixed(2)}
-                        onCommit={(v) => updateParam('referenceFidelity', v)}
-                      />
-
-                      {(genParams.includeCharacterAvatar || genParams.includePersonaAvatar) && (
-                      <FormField label={t('imageGenPanel.avatarReferenceType')}>
-                          <Select
-                            value={genParams.avatarReferenceType || 'character'}
-                            onChange={(value) => updateParam('avatarReferenceType', value)}
-                            options={[
-                              { value: 'character', label: t('imageGenPanel.characterOnly') },
-                              { value: 'style', label: t('imageGenPanel.styleOnly') },
-                              { value: 'character&style', label: t('imageGenPanel.characterAndStyle') },
-                            ]}
-                          />
-                        </FormField>
-                      )}
-
-                      <FormField label={t('imageGenPanel.manualReferenceType')}>
-                        <Select
-                          value={genParams.referenceType || 'character&style'}
-                          onChange={(value) => updateParam('referenceType', value)}
-                          options={[
-                            { value: 'character&style', label: t('imageGenPanel.characterAndStyle') },
-                            { value: 'character', label: t('imageGenPanel.characterOnly') },
-                            { value: 'style', label: t('imageGenPanel.styleOnly') },
-                          ]}
-                        />
-                      </FormField>
-                    </>
-                  )}
-
-                  <FormField label={`${t('imageGenPanel.referenceImages')} (${currentRefs.length}/14)`} hint={t('imageGenPanel.referenceImagesHint')}>
-                    <div className={styles.refGrid}>
-                      {currentRefs.map((img, idx) => (
-                        <div key={idx} className={styles.refTile}>
-                          <img src={`data:${img.mimeType || 'image/png'};base64,${img.data}`} alt={t('imageGenPanel.referenceImageAlt', { index: idx + 1 })} />
-                          <button type="button" className={styles.refRemove} onClick={() => setCurrentRefs(currentRefs.filter((_, i) => i !== idx))}>
-                            <X size={12} />
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                    {currentRefs.length < 14 && (
-                      <Button variant="secondary" size="sm" icon={<Plus size={14} />} onClick={onPickRefs}>{t('imageGenPanel.addReference')}</Button>
-                    )}
-                  </FormField>
-                </EditorSection>
-              )}
-
-              {/* References group parameters from schema (if any future provider declares them) */}
-              {paramGroups.references.length > 0 && !supportsRefs && (
-                <EditorSection title={t('imageGenPanel.references')} Icon={IconBrush} defaultExpanded={false}>
-                  {paramGroups.references.map(([key, schema]) => (
-                    <ParamField key={key} paramKey={key} schema={schema} value={genParams[key]} onChange={updateParam} activeConnection={activeConnection} />
-                  ))}
-                </EditorSection>
-              )}
-            </>
-          )}
-
-          <input ref={refInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={onRefFiles} />
-
-          <EditorSection title={t('imageGenPanel.loraControls')} Icon={Settings2} defaultExpanded={false}>
-            <ToggleRow
-              checked={!!imageGeneration.bypassCharacterLora}
-              onChange={(checked) => updateTop({ bypassCharacterLora: checked })}
-              label={t('imageGenPanel.bypassCharacterLora')}
-              hint={t('imageGenPanel.bypassCharacterLoraHint')}
-            />
-            <ToggleRow
-              checked={!!imageGeneration.bypassActiveLoraPreset}
-              onChange={(checked) => updateTop({ bypassActiveLoraPreset: checked })}
-              label={t('imageGenPanel.bypassActiveLoraPreset')}
-              hint={t('imageGenPanel.bypassActiveLoraPresetHint')}
-            />
-            <LabeledRangeSlider
-              label={t('imageGenPanel.loraStrengthScale')}
-              hint={t('imageGenPanel.loraStrengthScaleHint')}
-              min={LORA_STRENGTH_SCALE_MIN}
-              max={LORA_STRENGTH_SCALE_MAX}
-              step={LORA_STRENGTH_SCALE_STEP}
-              value={imageGeneration.loraStrengthScale ?? 1}
-              formatValue={(value) => value.toFixed(2).replace(/\.?0+$/, '')}
-              onCommit={(value) => updateTop({ loraStrengthScale: value })}
-            />
-          </EditorSection>
-
-          <EditorSection title={t('imageGenPanel.sceneSettings')} Icon={IconBrush}>
-            <ToggleRow checked={!!imageGeneration.includeCharacters} onChange={(checked) => updateTop({ includeCharacters: checked })} label={t('imageGenPanel.includeCharacters')} hint={t('imageGenPanel.includeCharactersHint')} />
-            <ToggleRow checked={!!imageGeneration.includePersona} onChange={(checked) => updateTop({ includePersona: checked })} label={t('imageGenPanel.includePersona')} hint={t('imageGenPanel.includePersonaHint')} />
+            </FormField>}
+          <FormField className={styles.runtimeField} label={t('imageGenPanel.activeLoraPreset')}>
+            <div className={styles.inlineRow}>
+              <Select aria-label={t('imageGenPanel.activeLoraPreset')} value={imageGeneration.activeLoraPresetId || ''} onChange={value => loraEditor.pickLoraPreset(value || null)} options={loraEditor.loraPresetOptions} />
+              <Button variant="secondary" size="sm" onClick={() => setLoraStudioOpen(true)}>Edit</Button>
+            </div>
+          </FormField>
+          <div className={styles.actions}>
+            <Button variant="secondary" size="sm" onClick={() => setSettingsOpen(true)}>Configure Generation…</Button>
+            {imageGeneration.promptMode !== 'custom' && imageGeneration.promptMode !== 'parsed_custom' && <Button variant="secondary" size="sm" onClick={() => setPromptStudioOpen(true)}>Prompt Studio…</Button>}
+          </div>
+          <section className={styles.quickBehavior} aria-label="Quick Behavior"><h3>Quick Behavior</h3>
             <ToggleRow checked={imageGeneration.autoGenerate !== false} onChange={(checked) => updateTop({ autoGenerate: checked })} label={t('imageGenPanel.autoGenerateOnReply')} />
-            <ToggleRow checked={!!imageGeneration.forceGeneration} onChange={(checked) => updateTop({ forceGeneration: checked })} label={t('imageGenPanel.ignoreSceneChange')} />
             <ToggleRow
               checked={!!imageGeneration.previewPromptBeforeGenerate}
               onChange={(checked) => updateTop({ previewPromptBeforeGenerate: checked })}
               label={t('imageGenPanel.previewBeforeGenerate')}
               hint={t('imageGenPanel.previewBeforeGenerateHint')}
             />
-            <ToggleRow
-              checked={!!imageGeneration.recycleGeneratedImages}
-              onChange={(checked) => updateTop({ recycleGeneratedImages: checked })}
-              label={t('imageGenPanel.recycleGeneratedImages')}
-              hint={t('imageGenPanel.recycleGeneratedImagesHint')}
-            />
-            <ToggleRow
-              checked={imageGeneration.addToGallery !== false}
-              onChange={(checked) => updateTop({ addToGallery: checked })}
-              label={t('imageGenPanel.addGeneratedToGallery')}
-              hint={t('imageGenPanel.addGeneratedToGalleryHint')}
-            />
-            {imageGeneration.recycleGeneratedImages && (
-              <FormField label={t('imageGenPanel.generatedImagesResend')} hint={t('imageGenPanel.generatedImagesResendHint')}>
-                <TextInput
-                  type="number"
-                  min={1}
-                  max={20}
-                  value={String(imageGeneration.recycledImageLimit ?? 1)}
-                  onChange={(value) => {
-                    const parsed = Number(value)
-                    updateTop({ recycledImageLimit: Math.max(1, Math.min(20, Number.isFinite(parsed) ? Math.floor(parsed) : 1)) })
-                  }}
-                />
-              </FormField>
-            )}
-            <FormField label={t('imageGenPanel.contextMessageLimit')} hint={t('imageGenPanel.contextMessageLimitHint')}>
-              <TextInput
-                type="number"
-                min={1}
-                max={200}
-                value={String(imageGeneration.promptContextMessageLimit ?? 3)}
-                onChange={(value) => {
-                  const parsed = Number(value)
-                  updateTop({ promptContextMessageLimit: Math.max(1, Math.min(200, Number.isFinite(parsed) ? Math.floor(parsed) : 3)) })
-                }}
-              />
-            </FormField>
-            <LabeledRangeSlider
-              label={t('imageGenPanel.sceneChangeSensitivity')}
-              min={1}
-              max={5}
-              step={1}
-              integer
-              value={imageGeneration.sceneChangeThreshold || 2}
-              onCommit={(v) => updateTop({ sceneChangeThreshold: v })}
-            />
-          </EditorSection>
-
-          <EditorSection title={t('imageGenPanel.backgroundDisplay')} Icon={ImageIcon} defaultExpanded={false}>
-            <LabeledRangeSlider
-              label={t('imageGenPanel.opacity')}
-              min={5}
-              max={90}
-              step={5}
-              integer
-              value={Math.round((imageGeneration.backgroundOpacity || 0.35) * 100)}
-              formatValue={(v) => `${v}%`}
-              onCommit={(v) => updateTop({ backgroundOpacity: v / 100 })}
-            />
-            <LabeledRangeSlider
-              label={t('imageGenPanel.fadeDuration')}
-              min={200}
-              max={2000}
-              step={100}
-              integer
-              value={imageGeneration.fadeTransitionMs || 800}
-              formatValue={(v) => `${v}ms`}
-              onCommit={(v) => updateTop({ fadeTransitionMs: v })}
-            />
-          </EditorSection>
-
+            <ToggleRow checked={!!imageGeneration.includeCharacters} onChange={(checked) => updateTop({ includeCharacters: checked })} label={t('imageGenPanel.includeCharacters')} hint={t('imageGenPanel.includeCharactersHint')} />
+            <ToggleRow checked={!!imageGeneration.includePersona} onChange={(checked) => updateTop({ includePersona: checked })} label={t('imageGenPanel.includePersona')} hint={t('imageGenPanel.includePersonaHint')} />
+          </section>
+          <input ref={refInputRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={onRefFiles} />
           {currentJobId && <ImageGenProgressBar jobId={currentJobId} />}
 
           {previewSrc && <div className={styles.preview} onClick={() => setLightboxOpen(true)}><img src={previewSrc} alt={t('imageGenPanel.generatedPreview')} className={styles.previewImg} /></div>}
           {lastScene && <div className={styles.sceneInfo}><div><strong>{t('imageGenPanel.scene')}:</strong> {lastScene.environment}</div><div><strong>{t('imageGenPanel.time')}:</strong> {lastScene.time_of_day}</div><div><strong>{t('imageGenPanel.mood')}:</strong> {lastScene.mood}</div></div>}
 
-          <div className={styles.actions}>
-            <Button variant="primary" size="sm" icon={<ImageIcon size={14} />} {...generateNowTap} disabled={genDisabled}>{sceneGenerating ? t('imageGenPanel.generating') : t('imageGenPanel.generateNow')}</Button>
-            <Button variant="secondary" size="sm" icon={<IconBrush size={14} />} {...forceGenerateTap} disabled={genDisabled}>{t('imageGenPanel.forceGenerate')}</Button>
+          {previewSrc && <div className={styles.actions}>
             {generatedPreview && <Button variant="secondary" size="sm" onClick={() => { setSceneBackground(generatedPreview); setGeneratedPreview(null) }}>{t('imageGenPanel.useAsBackground')}</Button>}
             {previewSrc && <Button variant="danger" size="sm" icon={<Trash2 size={14} />} onClick={() => { setSceneBackground(null); setGeneratedPreview(null) }}>{t('imageGenPanel.clear')}</Button>}
-          </div>
+          </div>}
 
           {!activeImageGenConnectionId && (
             <div className={styles.error}>{t('imageGenPanel.selectConnectionError')}</div>
           )}
           {error && <div className={styles.error}>{error}</div>}
+          <div className={`${styles.actions} ${styles.generationActions}`} aria-label="Generation actions">
+            <Button variant="primary" size="sm" icon={<ImageIcon size={14} />} {...generateNowTap} disabled={genDisabled}>{sceneGenerating ? t('imageGenPanel.generating') : t('imageGenPanel.generateNow')}</Button>
+            <Button variant="secondary" size="sm" icon={<IconBrush size={14} />} {...forceGenerateTap} disabled={genDisabled}>{t('imageGenPanel.forceGenerate')}</Button>
+          </div>
         </>
       )}
 
+      <ImageGenPromptStudioModal isOpen={promptStudioOpen} onClose={() => setPromptStudioOpen(false)} editor={promptEditor} imageGeneration={imageGeneration} updateTop={updateTop} availableMacros={availableMacros} refreshMacros={refreshMacros} />
+      <ImageGenLoraStudioModal isOpen={loraStudioOpen} onClose={() => setLoraStudioOpen(false)} editor={loraEditor} imageGeneration={imageGeneration} updateTop={updateTop} availableMacros={availableMacros} refreshMacros={refreshMacros} />
+      <ImageGenSettingsModal nestedEditorOpen={workflowEditorOpen} isOpen={settingsOpen} onClose={() => setSettingsOpen(false)} imageGeneration={imageGeneration} updateTop={updateTop} controller={{
+        activeConnection, paramGroups, genParams, updateParam, providerName, isComfyUI, isNovelAIV5: !!isNovelAIV5, supportsRefs, supportsImg2ImgSource,
+        workflowConfig, workflowError, workflowLoading, comfyCustomControls, readComfyCustomControlValue, updateComfyCustomControl,
+        openWorkflow: () => { setWorkflowEditorOpen(true); void refreshActiveComfyWorkflow(true) }, currentRefs, setCurrentRefs, onPickRefs,
+      }} />
       {lightboxOpen && previewSrc && (
         <ImageLightbox
           src={previewSrc}

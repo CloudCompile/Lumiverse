@@ -38,6 +38,7 @@
     "saving": "保存中…"
   },
   "display": {
+    "zoom": { "title": "缩放", "desktopPinchZoom": "在桌面端使用双指缩放" },
     "longMessages": {
       "title": "长消息",
       "helper": "将较长的消息限制在舒适的高度，直到你将其展开。",
@@ -369,9 +370,12 @@
     "messagesPerPage": "每页消息数",
     "customValue": "自定义数值",
     "inputTitle": "输入",
-    "enterToSend": "按 Enter 发送",
+    "enterToSendDesktop": "在桌面端按 Enter 发送",
+    "enterToSendMobile": "在移动端按 Enter 发送",
     "saveDraft": "保存草稿输入",
     "saveDraftHint": "自动保存未发送的消息，在刷新页面或切换聊天后仍可恢复",
+    "defaultImpersonationMode": "默认代写模式",
+    "defaultImpersonationModeHint": "用于未指定自身代写模式的聊天和群聊。",
     "portraitSide": "立绘面板位置",
     "none": "无",
     "regenTitle": "重新生成反馈",
@@ -534,7 +538,7 @@
     "unlinking": "正在取消关联…",
     "unlink": "取消 LumiHub 关联",
     "instanceName": "实例名称",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "我的 Lumiverse",
     "instanceHint": "在 LumiHub 上标识此实例的标签（如「家用电脑」「笔记本」）",
     "waitingApproval": "等待批准…",

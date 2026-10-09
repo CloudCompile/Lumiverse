@@ -1,10 +1,11 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ExternalLink, RefreshCw, LogIn, Zap, Settings2, ChevronRight } from 'lucide-react'
 import { FormField, Select, Button } from '@/components/shared/FormComponents'
 import { Toggle } from '@/components/shared/Toggle'
 import { buildOpenRouterOAuthCallbackUrl, openrouterApi, type OpenRouterCreditsInfo, type OpenRouterConnectionSettings, type OpenRouterProviderEntry } from '@/api/openrouter'
 import { Spinner } from '@/components/shared/Spinner'
+import { startProviderOAuthPopup } from '@/lib/providerOAuthPopup'
 import type { ConnectionProfile } from '@/types/api'
 import MultiChipSelect from './MultiChipSelect'
 import styles from './OpenRouterSettings.module.css'
@@ -27,7 +28,12 @@ const QUANTIZATION_OPTIONS = [
 
 export default function OpenRouterSettings({ connectionId, connectionName, hasApiKey, settings, onChange, onApiKeySet, onConnectionCreated }: OpenRouterSettingsProps) {
   const { t } = useTranslation('panels')
+  const oauthCleanupRef = useRef<(() => void) | null>(null)
   const [credits, setCredits] = useState<OpenRouterCreditsInfo | null>(null)
+
+  useEffect(() => () => {
+    oauthCleanupRef.current?.()
+  }, [])
   const [creditsLoading, setCreditsLoading] = useState(false)
   const [oauthLoading, setOauthLoading] = useState(false)
   const [routingOpen, setRoutingOpen] = useState(false)
@@ -120,53 +126,31 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
     setOauthLoading(true)
     try {
       const callbackUrl = buildOpenRouterOAuthCallbackUrl()
-      const { auth_url, session_token } = await openrouterApi.initiateAuth(callbackUrl, connectionId
-        ? { connectionId }
-        : { connectionName: connectionName!.trim() }
-      )
-
-      const popup = window.open(auth_url, 'openrouter_auth', 'width=600,height=700,scrollbars=yes')
-
-      let handled = false
-      const cleanup = () => {
-        if (handled) return
-        handled = true
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-        setOauthLoading(false)
-      }
-
-      const onMessage = async (event: MessageEvent) => {
-        if (event.data?.type !== 'openrouter_oauth_code' || !event.data.code) return
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-
-        try {
-          const result = await openrouterApi.completeAuth(session_token, event.data.code)
-          if (result.created && result.profile) {
-            onConnectionCreated?.(result.profile)
-          } else {
-            onApiKeySet?.()
-            fetchCredits()
-          }
-        } catch (err) {
-          console.error('[OpenRouter] OAuth exchange failed:', err)
+      const flow = startProviderOAuthPopup({
+        provider: 'openrouter',
+        callbackUrl,
+        initiate: () => openrouterApi.initiateAuth(callbackUrl, connectionId
+          ? { connectionId }
+          : { connectionName: connectionName!.trim() }),
+      })
+      oauthCleanupRef.current = flow.cancel
+      const authorization = await flow.result
+      if (!authorization) return
+      try {
+        const result = await openrouterApi.completeAuth(authorization.sessionToken, authorization.code)
+        if (result.created && result.profile) {
+          onConnectionCreated?.(result.profile)
+        } else {
+          onApiKeySet?.()
+          fetchCredits()
         }
-        handled = true
-        setOauthLoading(false)
+      } catch (err) {
+        console.error('[OpenRouter] OAuth exchange failed:', err)
       }
-      window.addEventListener('message', onMessage)
-
-      const checkClosed = setInterval(() => {
-        if (!popup || popup.closed) {
-          clearInterval(checkClosed)
-          setTimeout(cleanup, 1500)
-        }
-      }, 500)
-
-      setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err) {
       console.error('[OpenRouter] OAuth init failed:', err)
+    } finally {
+      oauthCleanupRef.current = null
       setOauthLoading(false)
     }
   }, [connectionId, connectionName, onApiKeySet, onConnectionCreated, fetchCredits])

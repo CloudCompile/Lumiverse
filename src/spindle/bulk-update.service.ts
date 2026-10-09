@@ -65,6 +65,7 @@ export async function updateAllExtensions(opts: {
     opts.isPrivileged ? "owner" : "user"
   );
   const targets = all.filter((ext) =>
+    !ext.metadata?.illarin &&
     managerSvc.canManageExtension(
       ext,
       opts.userId,

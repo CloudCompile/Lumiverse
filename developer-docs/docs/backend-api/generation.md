@@ -216,7 +216,7 @@ That means an extension can opt out of host translation entirely by writing the 
 
 | Provider | `apiReasoning: true` produces | Effort handling |
 |---|---|---|
-| Anthropic (Claude 4.6–4.8 and Claude 5 adaptive) | `thinking: { type: "adaptive" }` + `output_config.effort` | `low \| medium \| high \| max` (+ `xhigh` on Opus 4.7) |
+| Anthropic (Opus 4.6+ and Claude 5 adaptive) | `thinking: { type: "adaptive" }` + `output_config.effort` | `low \| medium \| high \| max` (+ `xhigh` on Opus 4.7 and Opus 4.8+) |
 | Anthropic (legacy) | `thinking: { type: "enabled", budget_tokens: N }` | `low=2048, medium=8192, high=16384, max=32768` |
 | Google (Gemini / Vertex) | `thinkingConfig: { thinkingLevel, includeThoughts: true }` | `minimal \| low \| medium \| high` |
 | DeepSeek | `thinking: { type: "enabled" }` + `reasoning_effort` | `low/medium/high → "high"`, `max/xhigh → "max"` |

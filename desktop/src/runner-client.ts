@@ -53,7 +53,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 
 export class RunnerClient {
   private pending = new Map<string, Pending>();
-  private exitWaiters: Array<() => void> = [];
+  private exitWaiters = new Set<() => void>();
   private seq = 0;
 
   /** Server state pushed by the runner ({type:"state"} frames). */
@@ -71,7 +71,8 @@ export class RunnerClient {
         entry.reject(new Error("Runner exited"));
       }
       this.pending.clear();
-      for (const waiter of this.exitWaiters.splice(0)) waiter();
+      for (const waiter of this.exitWaiters) waiter();
+      this.exitWaiters.clear();
       this.onExit?.(event.payload);
     });
   }
@@ -90,15 +91,47 @@ export class RunnerClient {
     await invoke("runner_kill");
   }
 
-  /** Resolves when the runner process exits; rejects on timeout. */
-  waitForExit(timeoutMs: number): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Timed out waiting for runner exit")), timeoutMs);
-      this.exitWaiters.push(() => {
-        clearTimeout(timer);
+  /**
+   * Stop the runner and server, allowing a bounded graceful shutdown before
+   * forcing the process tree to exit. The deadline includes the alive probe
+   * and stdin write, and completion depends on process exit, not its quit ack.
+   */
+  async shutdown(timeoutMs = 15_000): Promise<void> {
+    let finished = false;
+    let didExit = false;
+    let onExit!: () => void;
+    const exited = new Promise<void>((resolve) => {
+      onExit = () => {
+        didExit = true;
         resolve();
-      });
+      };
+      this.exitWaiters.add(onExit);
     });
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("Timed out waiting for runner exit")), timeoutMs);
+    });
+
+    const graceful = async () => {
+      const alive = await this.alive();
+      // A late alive response must not send quit to a replacement runner after
+      // this shutdown has already timed out or observed the old runner exit.
+      if (!alive || finished || didExit) return;
+      const line = JSON.stringify({ type: "quit", id: `tray-${++this.seq}` });
+      await Promise.race([invoke("runner_send", { line }), exited]);
+      await exited;
+    };
+
+    try {
+      await Promise.race([graceful(), exited, deadline]);
+    } catch {
+      finished = true;
+      await this.kill();
+    } finally {
+      finished = true;
+      clearTimeout(timer!);
+      this.exitWaiters.delete(onExit);
+    }
   }
 
   /**

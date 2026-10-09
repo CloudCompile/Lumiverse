@@ -923,7 +923,7 @@ export default function ExpandedTextEditor({
  * Drop-in wrapper: renders the original textarea with an expand button overlay.
  * When expanded, opens a full-screen ExpandedTextEditor modal.
  */
-interface ExpandableTextareaProps extends Pick<TextareaHTMLAttributes<HTMLTextAreaElement>, 'name' | 'aria-label'> {
+interface ExpandableTextareaProps extends Pick<TextareaHTMLAttributes<HTMLTextAreaElement>, 'name' | 'aria-label' | 'disabled'> {
   value: string
   onChange: (value: string) => void
   title: string
@@ -959,6 +959,7 @@ export const ExpandableTextarea = forwardRef<HTMLTextAreaElement, ExpandableText
   markdownOnly,
   name,
   'aria-label': ariaLabel,
+  disabled,
 }, forwardedRef) {
   const { t } = useTranslation('shared', { keyPrefix: 'expandedTextEditor' })
   const [expanded, setExpanded] = useState(false)
@@ -998,11 +999,14 @@ export const ExpandableTextarea = forwardRef<HTMLTextAreaElement, ExpandableText
         spellCheck={spellCheck}
         name={name}
         aria-label={ariaLabel}
+        disabled={disabled}
       />
       <button
         className={s.expandBtn}
         onClick={handleExpand}
         title={t('expandEditor')}
+        aria-label={t('expandEditor')}
+        disabled={disabled}
         type="button"
       >
         <Maximize2 size={13} />

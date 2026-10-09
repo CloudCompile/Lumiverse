@@ -98,8 +98,8 @@ export const spindleApi = {
     return del<{ success: boolean }>(`/spindle/${id}`)
   },
 
-  enable(id: string) {
-    return post<{ success: boolean }>(`/spindle/${id}/enable`)
+  enable(id: string, approvedPermissions?: string[]) {
+    return post<{ success: boolean }>(`/spindle/${id}/enable`, approvedPermissions === undefined ? {} : { approved_permissions: approvedPermissions })
   },
 
   disable(id: string) {

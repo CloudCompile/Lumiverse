@@ -26,6 +26,46 @@ beforeAll(() => {
 beforeEach(() => { getDb().run("DELETE FROM settings"); });
 afterAll(closeDatabase);
 
+function prepare(patterns: unknown, context: Record<string, unknown> = {}) {
+  return app.request('http://localhost/activation-patterns', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preset_id: 'templated', chat_id: 'chat', patterns, ...context }),
+  });
+}
+
+describe('activation pattern preparation', () => {
+  test('prepares saved literal inputs and profile values without matching or writing state', async () => {
+    getDb().query("INSERT INTO settings (key, user_id, value) VALUES (?, 'user', ?)").run(
+      'presetProfile:chat:chat', JSON.stringify({ preset_id: 'templated', prompt_variables: { rules: { mode: 'peace.*' } } }),
+    );
+    const before = getDb().query('SELECT * FROM settings').all();
+    const response = await prepare(['^{{char}}/{{user}}:{{getchatvar::mode}}$', '^{{presetvar::rules::mode-id}}$', '(a+)+$']);
+    expect(response.status).toBe(200);
+    const rows = (await response.json()).patterns;
+    expect(new RegExp(rows[0].resolved).test('A.*/U+$:combat')).toBe(true);
+    expect(new RegExp(rows[0].resolved).test('Anything/User:combat')).toBe(false);
+    expect(new RegExp(rows[1].resolved).test('peace.*')).toBe(true);
+    expect(rows[2].resolved).toBe('(a+)+$');
+    expect(getDb().query('SELECT * FROM settings').all()).toEqual(before);
+  });
+
+  test('returns explicit per-pattern errors while retaining valid prepared patterns', async () => {
+    const response = await prepare(['{{char}}', '{{getchatvar::missing}}', '[{{user}}]', '{{setvar::x::bad}}']);
+    const rows = (await response.json()).patterns;
+    expect(rows[0].resolved).toBeString();
+    expect(rows.slice(1).every((row: any) => typeof row.error === 'string' && row.resolved === undefined)).toBe(true);
+  });
+
+  test('rejects foreign entities and bounded request violations', async () => {
+    for (const context of [{chat_id:'private'}, {persona_id:'private'}, {preset_id:'missing'}, {character_id:'missing'}, {chat_id:123}]) {
+      expect((await prepare(['{{char}}'], context)).status).toBe(400);
+    }
+    for (const patterns of [[], [1], ['x'.repeat(10001)], Array(101).fill('x'), Array(11).fill('x'.repeat(10000))]) {
+      expect((await prepare(patterns)).status).toBe(400);
+    }
+  });
+});
+
 function preview(overrides: Record<string, unknown> = {}) {
   return app.request("http://localhost/test-activation", {
     method: "POST", headers: { "Content-Type": "application/json" },

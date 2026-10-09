@@ -81,7 +81,7 @@ async function runExtraction(
     ],
     parameters: { temperature: 0.4 },
     signal,
-  });
+  }, { origin: { kind: "sidecar", name: "Weaver", operation: "seed extraction" } });
 
   const content = stripCodeFence((response.content ?? "").trim());
   let parsed: unknown;

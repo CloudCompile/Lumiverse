@@ -5,11 +5,28 @@ import * as adminSvc from "../services/tokenizer-admin.service";
 import * as tokenizerSvc from "../services/tokenizer.service";
 import * as resolveSvc from "../services/tokenizer-resolve.service";
 import * as hfSvc from "../services/huggingface.service";
+import { resolveConnection } from "../services/connections.service";
 
 const app = new Hono();
 const publicTokenizerBodyLimit = bodyLimit({
   maxSize: 256 * 1024,
   onError: (c) => c.json({ error: "Request body too large" }, 413),
+});
+
+app.post("/warm", publicTokenizerBodyLimit, async (c) => {
+  const body = await c.req.json();
+  if (!body || typeof body !== "object" || Array.isArray(body)
+    || (body.connection_id !== undefined && (typeof body.connection_id !== "string" || !body.connection_id || body.connection_id.length > 200))
+    || (body.chat_id !== undefined && (typeof body.chat_id !== "string" || body.chat_id.length > 200))) {
+    return c.json({ error: "Invalid connection_id or chat_id" }, 400);
+  }
+  const connection = resolveConnection(c.get("userId"), body.connection_id);
+  if (!connection) return c.json({ error: "Connection not found" }, 404);
+  // Keep selection responsive; the generation path joins any outstanding load.
+  void import("../services/tokenizer-warmup.service")
+    .then(({ warmAssemblyTokenizer }) => warmAssemblyTokenizer(connection.model, body.chat_id ?? null))
+    .catch(() => {});
+  return c.json({ queued: true }, 202);
 });
 
 // ---- Tokenizer Configs ----

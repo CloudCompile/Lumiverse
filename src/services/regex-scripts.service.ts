@@ -97,7 +97,7 @@ const VALID_SCOPES = new Set(["global", "character", "chat"]);
 const VALID_TARGETS = new Set(["prompt", "response", "display"]);
 const VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
 const VALID_MACRO_MODES = new Set(["none", "find", "raw", "escaped", "after"]);
-const MAX_PATTERN_LENGTH = 10_000;
+export const MAX_REGEX_PATTERN_LENGTH = 50_000;
 const MAX_REGEX_ACTIONS = 50;
 const MAX_REGEX_ACTION_FIELD_LENGTH = 10_000;
 const REGEX_ACTION_ID_RE = /^[A-Za-z][A-Za-z0-9_:.-]{0,63}$/;
@@ -117,12 +117,29 @@ interface RegexMutationContext {
   extensionFolderVersion?: unknown;
 }
 
+// Wording is intentionally unchanged from the pre-preset-link behaviour. The rule
+// behind it is now ownership-only, but extensions and other callers compare this
+// string verbatim, so the message is kept byte-identical and the semantics live in
+// the docs instead. Change it only with a deliberate breaking migration.
 const EXTENSION_REGEX_OWNERSHIP_ERROR = "Regex script is not an unbound script owned by this extension";
 
 function normalizeOptionalId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+/**
+ * A preset link is resolved by user whenever it is used: the deletion cascade
+ * (deleteRegexScriptsByPresetId) matches on user_id + preset_id, and preset
+ * activation reads the preset's own restore list. A link to an unknown preset,
+ * or to another user's preset, would therefore persist as an orphan row that no
+ * cascade can ever reach, so it is rejected instead of stored.
+ */
+function validateOwnedPresetLink(userId: string, presetId: string): string | null {
+  const preset = getDb().query("SELECT 1 AS found FROM presets WHERE id = ? AND user_id = ?")
+    .get(presetId, userId);
+  return preset ? null : "Linked preset not found";
 }
 
 function getPresetRegexSettingKey(presetId: string): string {
@@ -347,8 +364,15 @@ export function reportRegexScriptEvidence(
   return getRegexScript(userId, id);
 }
 
-function resolveCreateDisabledState(input: CreateRegexScriptInput, activePresetId: string | null): boolean {
+function resolveCreateDisabledState(
+  input: CreateRegexScriptInput,
+  activePresetId: string | null,
+  presetActivationManaged = true,
+): boolean {
   const requestedDisabled = !!input.disabled;
+  // Extension-owned rows are not driven by preset activation: the extension that
+  // created the row keeps its enabled state, even while it carries a preset link.
+  if (!presetActivationManaged) return requestedDisabled;
   const presetId = normalizeOptionalId(input.preset_id);
   if (!presetId) return requestedDisabled;
   if (presetId !== activePresetId) return true;
@@ -366,8 +390,11 @@ function applyPresetBoundActivationWithDb(
   userId: string,
   targetPresetId: string | null,
 ): { changedIds: string[]; restoredIds: string[] } {
+  // Extension-owned rows are excluded: their preset link is a lifecycle link, so
+  // preset activation neither disables an extension's row nor enables it against
+  // the extension's own `disabled` state.
   const rows = db
-    .query("SELECT id, preset_id, disabled FROM regex_scripts WHERE user_id = ? AND preset_id IS NOT NULL ORDER BY sort_order ASC, created_at ASC")
+    .query("SELECT id, preset_id, disabled FROM regex_scripts WHERE user_id = ? AND preset_id IS NOT NULL AND owner_extension_identifier IS NULL ORDER BY sort_order ASC, created_at ASC")
     .all(userId) as PresetBoundRowState[];
   if (rows.length === 0) return { changedIds: [], restoredIds: [] };
 
@@ -520,7 +547,7 @@ function validateRegex(
   substituteMacros: RegexScript["substitute_macros"] = "none",
   activation = false,
 ): string | null {
-  if (pattern.length > MAX_PATTERN_LENGTH) return "find_regex exceeds maximum length";
+  if (pattern.length > MAX_REGEX_PATTERN_LENGTH) return "find_regex exceeds maximum length";
   if (!validateFlags(flags)) return "Invalid flags — allowed: d, g, i, m, s, u, v, y";
   try {
     const compilePattern = activation ? activationPatternForValidation(pattern)
@@ -541,7 +568,7 @@ function validateInput(input: CreateRegexScriptInput | UpdateRegexScriptInput, i
     if (ci.find_regex === undefined || ci.find_regex === null) return "find_regex is required";
   }
 
-  if (input.find_regex !== undefined && input.find_regex.length > MAX_PATTERN_LENGTH) {
+  if (input.find_regex !== undefined && input.find_regex.length > MAX_REGEX_PATTERN_LENGTH) {
     return "find_regex exceeds maximum length";
   }
   if (input.actions !== undefined) {
@@ -769,12 +796,14 @@ export interface PresetBoundRegexAttribution {
   /** Legacy LumiHub call-site alias. */
   hubPresetId?: string | null;
   presetVersion?: string | null;
+  presetVersionNumber?: number;
   folderName?: string | null;
 }
 
 interface RemotePresetRegexAttribution {
   id: string | null;
   version: string | null;
+  versionNumber: number | null;
   folderName: string | null;
 }
 
@@ -797,8 +826,13 @@ function getRemotePresetRegexAttribution(
   if (!isPlainMetadataRecord(raw)) return null;
   const id = normalizeOptionalId(raw.id);
   const version = normalizeOptionalId(raw.version);
+  const versionNumber = normalizePresetVersionNumber(raw.versionNumber);
   const folderName = normalizeOptionalId(raw.folderName);
-  return id || version ? { id, version, folderName } : null;
+  return id || version || versionNumber ? { id, version, versionNumber, folderName } : null;
+}
+
+function normalizePresetVersionNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
 /**
@@ -824,9 +858,12 @@ function preparePresetBoundImportedScript<T extends Record<string, any>>(
       folderName: normalizeOptionalId(attribution.folderName),
     };
   } else if (attribution?.source === "illarin") {
+    delete metadata._lumiverse_lumihub_preset;
     metadata._lumiverse_illarin_preset = {
       id: normalizeOptionalId(attribution.remotePresetId),
       version: normalizeOptionalId(attribution.presetVersion),
+      ...(normalizePresetVersionNumber(attribution.presetVersionNumber) === null
+        ? {} : { versionNumber: attribution.presetVersionNumber }),
       folderName: normalizeOptionalId(attribution.folderName),
     };
   }
@@ -899,9 +936,28 @@ export function createRegexScript(
   context?: RegexMutationContext,
 ): RegexScript | string {
   const extensionIdentifier = normalizeOptionalId(context?.extensionIdentifier);
+  // Pack and character links stay host-owned. A preset link is the one binding an
+  // extension may install itself: it owns the row, so the host's preset-delete
+  // cascade must be able to reap it. The link is same-user-validated here and is
+  // treated as lifecycle-only — preset activation leaves extension-owned rows to
+  // their own `disabled` state (see applyPresetBoundActivationWithDb).
   let nextInput: CreateRegexScriptInput = extensionIdentifier
-    ? { ...input, pack_id: null, preset_id: null, character_id: null }
+    ? { ...input, pack_id: null, character_id: null }
     : { ...input };
+  if (extensionIdentifier) {
+    const rawPresetId = nextInput.preset_id;
+    // A silently-dropped link would leave the caller believing its row cascades
+    // with a preset it was never bound to, so a malformed value is rejected.
+    if (rawPresetId !== undefined && rawPresetId !== null && typeof rawPresetId !== "string") {
+      return "preset_id must be a string or null";
+    }
+    const presetId = normalizeOptionalId(rawPresetId);
+    nextInput.preset_id = presetId;
+    if (presetId) {
+      const presetError = validateOwnedPresetLink(userId, presetId);
+      if (presetError) return presetError;
+    }
+  }
   if (extensionIdentifier && context) {
     const folderVersionError = validateExtensionFolderVersion(context);
     if (folderVersionError) return folderVersionError;
@@ -918,7 +974,7 @@ export function createRegexScript(
   const id = crypto.randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const activePresetId = normalizeOptionalId(context?.activePresetId);
-  const disabled = resolveCreateDisabledState(nextInput, activePresetId);
+  const disabled = resolveCreateDisabledState(nextInput, activePresetId, !extensionIdentifier);
 
   try {
     getDb()
@@ -963,7 +1019,7 @@ export function createRegexScript(
   }
 
   const script = getRegexScript(userId, id)!;
-  if (script.preset_id && script.preset_id === activePresetId) {
+  if (!extensionIdentifier && script.preset_id && script.preset_id === activePresetId) {
     setPresetBoundScriptEnabledInRestoreList(userId, script.preset_id, script.id, !script.disabled);
   }
   eventBus.emit(EventType.REGEX_SCRIPT_CHANGED, { id, script }, userId);
@@ -980,10 +1036,11 @@ export function updateRegexScript(
   if (!existing) return null;
 
   const extensionIdentifier = normalizeOptionalId(context?.extensionIdentifier);
-  if (extensionIdentifier && (
-    existing.owner_extension_identifier !== extensionIdentifier
-    || existing.preset_id !== null
-  ) && !context?.allowUnownedMutation) {
+  // Ownership, not the preset link, decides mutability: a row this extension
+  // owns stays editable after it is bound to a preset.
+  const ownsRow = !!extensionIdentifier && existing.owner_extension_identifier === extensionIdentifier;
+  const presetActivationManaged = existing.owner_extension_identifier == null;
+  if (extensionIdentifier && !ownsRow && !context?.allowUnownedMutation) {
     return EXTENSION_REGEX_OWNERSHIP_ERROR;
   }
 
@@ -1004,8 +1061,9 @@ export function updateRegexScript(
       if (attribution) metadata[SPINDLE_EXTENSION_REGEX_METADATA_KEY] = attribution;
       nextInput.metadata = metadata;
     }
-    // These links are host-owned. A script that becomes preset-bound through a
-    // native flow automatically becomes read-only to its creating extension.
+    // Pack and character links are host-owned. A preset link is installed at
+    // creation only: an owner may edit the row it is attached to, but never
+    // re-points or clears the binding here.
     delete nextInput.pack_id;
     delete nextInput.preset_id;
     delete nextInput.character_id;
@@ -1028,10 +1086,12 @@ export function updateRegexScript(
   const nextPresetId = hasPresetIdUpdate ? normalizeOptionalId(nextInput.preset_id) : existing.preset_id;
   const mayPersistPresetEnablement = !!nextPresetId && nextPresetId === activePresetId;
 
-  if (isPresetBound && nextInput.disabled !== undefined && nextPresetId && !mayPersistPresetEnablement) {
+  if (isPresetBound && nextInput.disabled !== undefined && nextPresetId && !mayPersistPresetEnablement && presetActivationManaged) {
+    // The preset's own enable snapshot owns host rows; an extension-owned row is
+    // outside that snapshot, so its owner keeps control of `disabled`.
     delete nextInput.disabled;
   }
-  if (nextPresetId && nextPresetId !== activePresetId && hasPresetIdUpdate) {
+  if (nextPresetId && nextPresetId !== activePresetId && hasPresetIdUpdate && presetActivationManaged) {
     nextInput.disabled = true;
   }
 
@@ -1096,10 +1156,10 @@ export function updateRegexScript(
   }
 
   const updated = getRegexScript(userId, id)!;
-  if (existing.preset_id && existing.preset_id !== updated.preset_id) {
+  if (presetActivationManaged && existing.preset_id && existing.preset_id !== updated.preset_id) {
     setPresetBoundScriptEnabledInRestoreList(userId, existing.preset_id, updated.id, false);
   }
-  if (updated.preset_id && (hasPresetIdUpdate || (mayPersistPresetEnablement && nextInput.disabled !== undefined))) {
+  if (presetActivationManaged && updated.preset_id && (hasPresetIdUpdate || (mayPersistPresetEnablement && nextInput.disabled !== undefined))) {
     setPresetBoundScriptEnabledInRestoreList(userId, updated.preset_id, updated.id, !updated.disabled);
   }
   eventBus.emit(EventType.REGEX_SCRIPT_CHANGED, { id, script: updated }, userId);
@@ -1111,17 +1171,20 @@ export function deleteRegexScript(userId: string, id: string, context: RegexMuta
 export function deleteRegexScript(userId: string, id: string, context?: RegexMutationContext): boolean | string {
   const existing = getRegexScript(userId, id);
   const extensionIdentifier = normalizeOptionalId(context?.extensionIdentifier);
-  if (extensionIdentifier && existing && (
-    existing.owner_extension_identifier !== extensionIdentifier
-    || existing.preset_id !== null
-  ) && !context?.allowUnownedMutation) {
+  // A preset-bound row the extension owns is still the extension's row, so the
+  // host's preset-delete cascade is what removes it once the preset is gone.
+  const ownsRow = !!extensionIdentifier && existing?.owner_extension_identifier === extensionIdentifier;
+  if (extensionIdentifier && existing && !ownsRow && !context?.allowUnownedMutation) {
     return EXTENSION_REGEX_OWNERSHIP_ERROR;
   }
   const result = getDb()
     .query("DELETE FROM regex_scripts WHERE id = ? AND user_id = ?")
     .run(id, userId);
   if (result.changes > 0) {
-    if (existing?.preset_id) {
+    // Only host-owned rows are tracked by a preset's restore list. An
+    // extension-owned row is outside that snapshot, so deleting it must not
+    // rewrite (and thereby pin) the preset's saved enablement.
+    if (existing?.preset_id && existing.owner_extension_identifier == null) {
       setPresetBoundScriptEnabledInRestoreList(userId, existing.preset_id, existing.id, false);
     }
     eventBus.emit(EventType.REGEX_SCRIPT_DELETED, { id }, userId);
@@ -1141,8 +1204,12 @@ export function deleteRegexScripts(userId: string, ids: string[]): string[] {
   const db = getDb();
   const placeholders = ids.map(() => "?").join(", ");
   const existingRows = db
-    .query(`SELECT id, preset_id FROM regex_scripts WHERE user_id = ? AND id IN (${placeholders})`)
-    .all(userId, ...ids) as Array<{ id: string; preset_id?: string | null }>;
+    .query(`SELECT id, preset_id, owner_extension_identifier FROM regex_scripts WHERE user_id = ? AND id IN (${placeholders})`)
+    .all(userId, ...ids) as Array<{
+      id: string;
+      preset_id?: string | null;
+      owner_extension_identifier?: string | null;
+    }>;
   if (existingRows.length === 0) return [];
 
   const existingIds = existingRows.map((r) => r.id);
@@ -1155,7 +1222,7 @@ export function deleteRegexScripts(userId: string, ids: string[]): string[] {
   })();
 
   for (const row of existingRows) {
-    if (row.preset_id) {
+    if (row.preset_id && row.owner_extension_identifier == null) {
       setPresetBoundScriptEnabledInRestoreList(userId, row.preset_id, row.id, false);
     }
   }
@@ -1235,7 +1302,8 @@ export function toggleRegexScript(
   if (!existing) return null;
 
   const activePresetId = normalizeOptionalId(context?.activePresetId);
-  if (existing.preset_id && existing.preset_id !== activePresetId) {
+  const presetActivationManaged = existing.owner_extension_identifier == null;
+  if (presetActivationManaged && existing.preset_id && existing.preset_id !== activePresetId) {
     return existing;
   }
 
@@ -1244,14 +1312,19 @@ export function toggleRegexScript(
     .run(disabled ? 1 : 0, Math.floor(Date.now() / 1000), id, userId);
 
   const updated = getRegexScript(userId, id)!;
-  if (updated.preset_id) {
+  if (presetActivationManaged && updated.preset_id) {
     setPresetBoundScriptEnabledInRestoreList(userId, updated.preset_id, updated.id, !updated.disabled);
   }
   eventBus.emit(EventType.REGEX_SCRIPT_CHANGED, { id, script: updated }, userId);
   return updated;
 }
 
-type RegexToggleRow = { id: string; preset_id?: string | null; disabled: number };
+type RegexToggleRow = {
+  id: string;
+  preset_id?: string | null;
+  owner_extension_identifier?: string | null;
+  disabled: number;
+};
 
 function toggleRegexScriptRows(
   userId: string,
@@ -1264,14 +1337,15 @@ function toggleRegexScriptRows(
   const targets: Array<{ id: string; preset_id: string | null }> = [];
 
   for (const row of rows) {
-    if (row.preset_id && row.preset_id !== activePresetId) {
+    const presetActivationManaged = row.owner_extension_identifier == null;
+    if (presetActivationManaged && row.preset_id && row.preset_id !== activePresetId) {
       skippedIds.push(row.id);
       continue;
     }
     if (row.disabled === (disabled ? 1 : 0)) {
       continue;
     }
-    targets.push({ id: row.id, preset_id: row.preset_id ?? null });
+    targets.push({ id: row.id, preset_id: presetActivationManaged ? row.preset_id ?? null : null });
   }
 
   if (targets.length === 0) {
@@ -1319,7 +1393,7 @@ export function toggleRegexScriptsByIds(
 
   const placeholders = uniqueIds.map(() => "?").join(", ");
   const unorderedRows = getDb()
-    .query(`SELECT id, preset_id, disabled FROM regex_scripts WHERE user_id = ? AND id IN (${placeholders})`)
+    .query(`SELECT id, preset_id, owner_extension_identifier, disabled FROM regex_scripts WHERE user_id = ? AND id IN (${placeholders})`)
     .all(userId, ...uniqueIds) as RegexToggleRow[];
   const rowsById = new Map(unorderedRows.map((row) => [row.id, row]));
   const rows = uniqueIds.flatMap((id) => {
@@ -1345,7 +1419,7 @@ export function toggleRegexScriptsByFolder(
 ): { changedIds: string[]; skippedIds: string[] } {
   const activePresetId = normalizeOptionalId(context?.activePresetId);
   const rows = getDb()
-    .query("SELECT id, preset_id, disabled FROM regex_scripts WHERE user_id = ? AND folder = ?")
+    .query("SELECT id, preset_id, owner_extension_identifier, disabled FROM regex_scripts WHERE user_id = ? AND folder = ?")
     .all(userId, folder) as RegexToggleRow[];
 
   return toggleRegexScriptRows(userId, rows, disabled, activePresetId);
@@ -1463,7 +1537,9 @@ export function getPresetActivationScripts(
   const enabledIds = new Set(saved.ids);
   const scopeOrder = { global: 0, character: 1, chat: 2 };
   return scripts.filter((script) =>
-    (saved.exists ? enabledIds.has(script.id) : !script.disabled)
+    (script.owner_extension_identifier == null && saved.exists
+      ? enabledIds.has(script.id)
+      : !script.disabled)
     && readPromptActivation(script.metadata)
     && (script.scope === "global"
       || (script.scope === "chat" && script.scope_id === context.chatId)
@@ -1620,7 +1696,10 @@ function foldFingerprint(
 }
 
 function macroOptionsForRegexScript(script: RegexScript): EvaluateOptions | undefined {
-  if (script.preset_id) {
+  if (script.owner_extension_identifier) {
+    return { sourceOwner: { extensionIdentifier: script.owner_extension_identifier } };
+  }
+  if (script.preset_id && script.owner_extension_identifier == null) {
     return { sourceOwner: "host", sourceHint: "regex_script:preset" };
   }
   return undefined;
@@ -2210,7 +2289,9 @@ export function exportRegexScripts(userId: string, options?: string[] | RegexScr
     const stored = readStoredPresetRegexIdsRecord(userId, presetIdFilter);
     if (stored.exists) {
       const enabledIds = new Set(stored.ids);
-      normalizedRows = normalizedRows.map((s) => ({ ...s, disabled: !enabledIds.has(s.id) }));
+      normalizedRows = normalizedRows.map((s) => s.owner_extension_identifier == null
+        ? { ...s, disabled: !enabledIds.has(s.id) }
+        : s);
     }
   }
 
@@ -2263,6 +2344,8 @@ interface RetireRemotePresetRegexOptions {
   previousRemotePresetId?: string | null;
   previousVersion?: string | null;
   incomingVersion?: string | null;
+  previousVersionNumber?: number | null;
+  incomingVersionNumber?: number;
   presetName: string;
   preserveIds?: string[];
 }
@@ -2336,6 +2419,8 @@ function retireRemotePresetRegexScriptsForUpdate(
   const previousRemotePresetId = normalizeOptionalId(options.previousRemotePresetId);
   const previousVersion = normalizeOptionalId(options.previousVersion);
   const incomingVersion = normalizeOptionalId(options.incomingVersion);
+  const incomingVersionNumber = options.source === "illarin"
+    ? normalizePresetVersionNumber(options.incomingVersionNumber) : null;
   if (!remotePresetId) return { archivedIds: [], replacedIds: [] };
 
   const acceptedRemoteIds = new Set([remotePresetId, previousRemotePresetId].filter((id): id is string => !!id));
@@ -2343,6 +2428,7 @@ function retireRemotePresetRegexScriptsForUpdate(
   const rows = getRegexScriptsByPresetId(userId, options.presetId);
   const matching = rows.flatMap((script) => {
     if (preserveIds.has(script.id)) return [];
+    if (script.owner_extension_identifier != null) return [];
     const attribution = getRemotePresetRegexAttribution(script.metadata, options.source);
     if (attribution?.id && !acceptedRemoteIds.has(attribution.id)) return [];
 
@@ -2351,23 +2437,30 @@ function retireRemotePresetRegexScriptsForUpdate(
     // preset was already a tracked installation from the same remote source.
     if (!attribution?.id && !previousRemotePresetId) return [];
     const version = attribution?.version ?? previousVersion;
+    const versionNumber = attribution
+      ? attribution.versionNumber : normalizePresetVersionNumber(options.previousVersionNumber);
     return [{
       script,
       version,
+      versionNumber,
       folderName: getRemotePresetSourceFolder(script, attribution, options.presetName, version, options.source),
     }];
   });
 
-  const replaced = matching.filter(({ version }) => version === incomingVersion);
-  const archived = matching.filter(({ version }) => version !== incomingVersion);
+  const sameRelease = (entry: typeof matching[number]) => incomingVersionNumber === null
+    ? entry.version === incomingVersion
+    : entry.versionNumber === incomingVersionNumber;
+  const replaced = matching.filter(sameRelease);
+  const archived = matching.filter((entry) => !sameRelease(entry));
   const replacedIds = replaced.map(({ script }) => script.id);
   const archivedIds = archived.map(({ script }) => script.id);
   const replaceIdSet = new Set(replacedIds);
   const archiveGroups = new Map<string, { version: string | null; folderName: string; ids: Set<string> }>();
   const archiveKey = (version: string | null, folderName: string) => `${version ?? ""}\u0000${folderName}`;
-  for (const { script, version, folderName } of archived) {
-    const key = archiveKey(version, folderName);
-    const group = archiveGroups.get(key) ?? { version, folderName, ids: new Set<string>() };
+  for (const { script, version, versionNumber, folderName } of archived) {
+    const historyVersion = versionNumber === null ? version : String(versionNumber);
+    const key = archiveKey(historyVersion, folderName);
+    const group = archiveGroups.get(key) ?? { version: historyVersion, folderName, ids: new Set<string>() };
     group.ids.add(script.id);
     archiveGroups.set(key, group);
   }
@@ -2394,11 +2487,14 @@ function retireRemotePresetRegexScriptsForUpdate(
     const updateRow = db.query(
       "UPDATE regex_scripts SET disabled = 1, folder = ?, metadata = ?, updated_at = ? WHERE id = ? AND user_id = ?",
     );
-    for (const { script, version, folderName } of archived) {
+    for (const { script, version, versionNumber, folderName } of archived) {
       const metadata = isPlainMetadataRecord(script.metadata) ? { ...script.metadata } : {};
-      metadata[remotePresetMetadataKey(options.source)] = { id: remotePresetId, version, folderName };
+      metadata[remotePresetMetadataKey(options.source)] = {
+        id: remotePresetId, version, folderName,
+        ...(versionNumber === null ? {} : { versionNumber }),
+      };
       updateRow.run(
-        foldersByArchiveKey.get(archiveKey(version, folderName))!,
+        foldersByArchiveKey.get(archiveKey(versionNumber === null ? version : String(versionNumber), folderName))!,
         JSON.stringify(metadata),
         now,
         script.id,
@@ -2500,10 +2596,12 @@ export interface InstallIllarinPresetRegexOptions {
   presetName: string;
   assetId: string;
   presetVersion?: string | null;
+  presetVersionNumber?: number;
   scripts: any[];
   previous?: {
     assetId?: string | null;
     version?: string | null;
+    versionNumber?: number | null;
     presetName?: string | null;
   } | null;
 }
@@ -2514,10 +2612,12 @@ interface InstallRemotePresetRegexOptions {
   presetName: string;
   remotePresetId: string;
   presetVersion?: string | null;
+  presetVersionNumber?: number;
   scripts: any[];
   previous?: {
     remotePresetId?: string | null;
     version?: string | null;
+    versionNumber?: number | null;
     presetName?: string | null;
   } | null;
 }
@@ -2547,6 +2647,7 @@ function installRemotePresetRegexScripts(
           source: options.source,
           remotePresetId: options.remotePresetId,
           presetVersion: options.presetVersion,
+          presetVersionNumber: options.presetVersionNumber,
         },
       );
       newIds = getRegexScriptsByPresetId(userId, options.presetId)
@@ -2569,6 +2670,8 @@ function installRemotePresetRegexScripts(
           previousRemotePresetId: options.previous.remotePresetId,
           previousVersion: options.previous.version,
           incomingVersion: options.presetVersion,
+          previousVersionNumber: options.previous.versionNumber,
+          incomingVersionNumber: options.presetVersionNumber,
           presetName: normalizeOptionalId(options.previous.presetName) ?? options.presetName,
           preserveIds: newIds,
         })
@@ -2626,10 +2729,12 @@ export function installIllarinPresetRegexScripts(
     presetName: options.presetName,
     remotePresetId: options.assetId,
     presetVersion: options.presetVersion,
+    presetVersionNumber: options.presetVersionNumber,
     scripts: options.scripts,
     previous: options.previous ? {
       remotePresetId: options.previous.assetId,
       version: options.previous.version,
+      versionNumber: options.previous.versionNumber,
       presetName: options.previous.presetName,
     } : null,
   });
@@ -2659,7 +2764,7 @@ export function switchPresetBoundRegexScripts(
     if (previousPresetId) {
       const enabledRows = db
         .query(
-          "SELECT id FROM regex_scripts WHERE user_id = ? AND preset_id = ? AND disabled = 0 ORDER BY sort_order ASC, created_at ASC",
+          "SELECT id FROM regex_scripts WHERE user_id = ? AND preset_id = ? AND disabled = 0 AND owner_extension_identifier IS NULL ORDER BY sort_order ASC, created_at ASC",
         )
         .all(userId, previousPresetId) as Array<{ id: string }>;
       writeStoredPresetRegexIdsWithDb(db, userId, previousPresetId, enabledRows.map((row) => row.id));

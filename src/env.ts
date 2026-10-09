@@ -1,5 +1,6 @@
 import { networkInterfaces } from "os";
 import { resolve } from "path";
+import { parseStrictInteger } from "./utils/strict-integer";
 
 /** Returns all non-internal IPv4 addresses on the machine's LAN interfaces. */
 function getLanIPs(): string[] {
@@ -39,12 +40,10 @@ export interface EnvConfig {
   trustedOriginsSet: Set<string>;
   trustAnyOrigin: boolean;
   /**
-   * Reverse proxies (IPs or CIDRs) whose forwarded-client headers
-   * (Forwarded / X-Forwarded-For / X-Real-IP) may be trusted, as a strict
-   * allowlist. Empty = legacy behavior (trust headers from any private-range
-   * peer). When set, ONLY listed peers are trusted — this is how you safely
-   * honor headers from a cloud proxy with a public address, and how you close
-   * the "any LAN device can spoof X-Forwarded-For" hole.
+   * Reverse proxies (IPs or CIDRs) trusted to supply forwarded client IPs and,
+   * for explicitly listed peers only, the external auth host/protocol. Empty
+   * retains the legacy private-peer fallback for client IPs but never enables
+   * forwarded host/protocol trust.
    */
   trustedProxies: string[];
   /** Suppress user custom CSS and component overrides without deleting them. */
@@ -144,8 +143,8 @@ export function loadEnv(): EnvConfig {
   // Validate PORT — out-of-range values used to be silently passed to Bun.serve,
   // which then failed at bind time with a confusing native error.
   const portRaw = process.env.PORT || "7860";
-  const port = parseInt(portRaw, 10);
-  if (!Number.isFinite(port) || port < 1 || port > 65535) {
+  const port = parseStrictInteger(portRaw);
+  if (port === undefined || port < 1 || port > 65535) {
     throw new Error(`Invalid PORT "${portRaw}": must be an integer in 1..65535`);
   }
 

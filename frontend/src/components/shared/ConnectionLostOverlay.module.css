@@ -11,10 +11,25 @@
   justify-content: center;
   padding: 24px;
   background: rgba(7, 9, 16, 0.78);
-  /* Above ModalShell (10002) and WorkflowEditorModal (10003) so it blocks every
-     interactive surface in the app — including any modal already on screen. */
-  z-index: 10100;
+  /* This is a hard-stop, including over extension portals and context menus. */
+  z-index: 2147483647;
   pointer-events: auto;
+  touch-action: none;
+  overscroll-behavior: none;
+  user-select: none;
+  outline: none;
+}
+
+/* A desktop transport failure hard-stops application content, not the native-
+   style chrome. Keep the frameless window movable and its close/minimize
+   controls available while reconnecting or installing an update. */
+:global(html[data-tauri-desktop]) .backdrop {
+  top: var(--app-desktop-titlebar-height, 36px);
+  bottom: auto;
+  height: max(
+    0px,
+    calc(var(--app-scaled-viewport-height, 100vh) - var(--app-desktop-titlebar-height, 36px))
+  );
 }
 
 :global([data-glass]) .backdrop {

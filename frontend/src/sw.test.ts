@@ -1,10 +1,19 @@
 import { afterAll, beforeEach, describe, expect, mock, test } from 'bun:test'
 
 // Exercise the actual worker event handler; caching is unrelated to push.
+let navigationRouteDenylist: RegExp[] | undefined
+
 mock.module('workbox-precaching', () => ({
   precacheAndRoute() {}, cleanupOutdatedCaches() {}, createHandlerBoundToURL() {},
 }))
-mock.module('workbox-routing', () => ({ registerRoute() {}, NavigationRoute: class {} }))
+mock.module('workbox-routing', () => ({
+  registerRoute() {},
+  NavigationRoute: class {
+    constructor(_handler: unknown, options?: { denylist?: RegExp[] }) {
+      navigationRouteDenylist = options?.denylist
+    }
+  },
+}))
 mock.module('workbox-strategies', () => ({ CacheFirst: class {}, NetworkFirst: class {}, NetworkOnly: class {} }))
 mock.module('workbox-expiration', () => ({ ExpirationPlugin: class {} }))
 mock.module('workbox-background-sync', () => ({ BackgroundSyncPlugin: class {} }))
@@ -54,6 +63,25 @@ async function receivePush() {
   expect(completion).toBeDefined()
   await completion
 }
+
+function isSpaNavigation(url: string): boolean {
+  const parsed = new URL(url, 'https://lumiverse.local')
+  const pathAndSearch = parsed.pathname + parsed.search
+  return !navigationRouteDenylist?.some((pattern) => pattern.test(pathAndSearch))
+}
+
+describe('service worker navigation routing', () => {
+  test.each([
+    '/widget.html',
+    '/widget.html?desktopWidgetExtension=weather&desktopWidgetIndex=0',
+  ])('does not send the widget entry point through the SPA fallback: %s', (url) => {
+    expect(isSpaNavigation(url)).toBeFalse()
+  })
+
+  test('continues to send application routes through the SPA fallback', () => {
+    expect(isSpaNavigation('/chat/chat-1?panel=details')).toBeTrue()
+  })
+})
 
 describe('service worker push delivery', () => {
   test.each([

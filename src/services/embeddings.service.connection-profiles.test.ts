@@ -8,6 +8,8 @@ import {
   EmbeddingError,
   areProfileDimensionsCompatible,
   cachedEmbedTexts,
+  embedInBatches,
+  embedQuery,
   embedTexts,
   embeddingProfileSecretKey,
   getEmbeddingConfig,
@@ -115,6 +117,37 @@ afterEach(() => {
 });
 
 describe("embedding connection profiles", () => {
+  for (const status of [429, 503, 413]) {
+    test(`query embedding fails once on HTTP ${status} without shortening and resending`, async () => {
+      putCfg(enabledProfiles({ fallbackProfileIds: [] }));
+      secrets.set(sk(USER, embeddingProfileSecretKey(PRIMARY_ID)), "test-key");
+      const sent: unknown[] = [];
+      spies.push(spyOn(globalThis, "fetch").mockImplementation(asFetchStub(async (_input, init) => {
+        sent.push(JSON.parse(String(init?.body)));
+        return new Response("input too large or provider unavailable", { status });
+      })));
+      await expect(embedQuery(USER, "Long query. ".repeat(1000))).rejects.toBeInstanceOf(EmbeddingError);
+      expect(sent).toHaveLength(1);
+    });
+
+    test(`embedding batches fail once on HTTP ${status} without splitting and resending`, async () => {
+      putCfg(enabledProfiles({ fallbackProfileIds: [] }));
+      secrets.set(sk(USER, embeddingProfileSecretKey(PRIMARY_ID)), "test-key");
+      let calls = 0;
+      spies.push(spyOn(globalThis, "fetch").mockImplementation(asFetchStub(async () => {
+        calls++;
+        return new Response("input too large or provider unavailable", { status });
+      })));
+      const failed: string[][] = [];
+      const inputs = ["First passage", "Second passage", "Third passage"];
+      await embedInBatches(USER, inputs, 3, (text) => text,
+        async () => { throw new Error("Failed batches must not be persisted"); },
+        (batch) => { failed.push(batch); });
+      expect(calls).toBe(1);
+      expect(failed).toEqual([inputs]);
+    });
+  }
+
   test("persists the generated default profile so its connection id is stable", async () => {
     const first = await getEmbeddingConfig(USER);
     const second = await getEmbeddingConfig(USER);

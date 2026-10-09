@@ -19,6 +19,7 @@ import {
   readBoundedText,
   throwProviderResponseError,
 } from "../../utils/provider-errors";
+import { isClaudeOpusAtLeast } from "../../utils/claude-model";
 
 const API_VERSION = "2023-06-01";
 
@@ -26,9 +27,9 @@ export class AnthropicProvider implements LlmProvider {
   private static readonly PROMPT_PLACEHOLDER = "Let's get started.";
   private static readonly CACHE_TTLS = new Set(["5m", "1h"]);
 
-  readonly name = "anthropic";
-  readonly displayName = "Anthropic";
-  readonly defaultUrl = "https://api.anthropic.com";
+  readonly name: string = "anthropic";
+  readonly displayName: string = "Anthropic";
+  readonly defaultUrl: string = "https://api.anthropic.com";
 
   readonly capabilities: ProviderCapabilities = {
     parameters: {
@@ -71,13 +72,12 @@ export class AnthropicProvider implements LlmProvider {
   }
 
   /**
-   * Opus 4.7/4.8 and every direct Claude 5-family model ID (including
+   * Opus 4.7+ and every direct Claude 5-family model ID (including
    * point releases) use adaptive thinking and reject manual sampling params.
    */
   private omitsSamplingParams(model: string): boolean {
-    return /^claude-(?:opus-4-(?:7|8)|[a-z0-9][a-z0-9-]*-5)(?:$|[-.:@])/i.test(
-      (model || "").trim(),
-    );
+    return isClaudeOpusAtLeast(model, 4, 7) ||
+      /^claude-[a-z0-9][a-z0-9-]*-5(?:$|[-.:@])/i.test((model || "").trim());
   }
 
   private shouldSuppressThinking(request: GenerationRequest): boolean {
@@ -122,6 +122,19 @@ export class AnthropicProvider implements LlmProvider {
       headers["anthropic-beta"] = AnthropicProvider.INTERLEAVED_THINKING_BETA;
     }
     return headers;
+  }
+
+  /**
+   * Resolve the Messages request URL. Kept as a hook because Anthropic's
+   * Messages protocol is also exposed by cloud platforms (for example Vertex
+   * AI's publisher-model rawPredict endpoints) under a different path.
+   */
+  protected messagesUrl(
+    apiUrl: string,
+    _request: GenerationRequest,
+    _stream: boolean,
+  ): string {
+    return `${this.baseUrl(apiUrl)}/v1/messages`;
   }
 
   /**
@@ -243,7 +256,7 @@ export class AnthropicProvider implements LlmProvider {
     apiUrl: string,
     request: GenerationRequest,
   ): Promise<GenerationResponse> {
-    const url = `${this.baseUrl(apiUrl)}/v1/messages`;
+    const url = this.messagesUrl(apiUrl, request, false);
     const body = this.buildBody(request, false);
     const suppressThinking = this.shouldSuppressThinking(request);
 
@@ -251,7 +264,7 @@ export class AnthropicProvider implements LlmProvider {
       method: "POST",
       headers: this.requestHeaders(apiKey, request),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) {
       const rawBody = await readBoundedText(res);
@@ -317,7 +330,7 @@ export class AnthropicProvider implements LlmProvider {
     apiUrl: string,
     request: GenerationRequest,
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    const url = `${this.baseUrl(apiUrl)}/v1/messages`;
+    const url = this.messagesUrl(apiUrl, request, true);
     const body = this.buildBody(request, true);
     const suppressThinking = this.shouldSuppressThinking(request);
 
@@ -325,7 +338,7 @@ export class AnthropicProvider implements LlmProvider {
       method: "POST",
       headers: this.requestHeaders(apiKey, request),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) {
       const rawBody = await readBoundedText(res);
@@ -540,6 +553,7 @@ export class AnthropicProvider implements LlmProvider {
               terminalChunk = {
                 token: "",
                 finish_reason: finishReason,
+                stopReceivedAt: Date.now(),
                 stop_details: data.delta?.stop_details,
                 stop_sequence: data.delta?.stop_sequence,
                 tool_calls: toolCalls,
@@ -834,7 +848,7 @@ export class AnthropicProvider implements LlmProvider {
     "prompt_caching",
   ]);
 
-  private buildBody(request: GenerationRequest, stream: boolean): any {
+  protected buildBody(request: GenerationRequest, stream: boolean): any {
     const params = request.parameters || {};
     const omitSampling = this.omitsSamplingParams(request.model);
     const systemBlocks: Array<Record<string, unknown>> = [];

@@ -447,7 +447,7 @@ export function renameGalleryReference(
   return getGalleryItem(userId, itemId);
 }
 
-function getGalleryItem(
+export function getGalleryItem(
   userId: string,
   itemId: string
 ): CharacterGalleryItem | null {

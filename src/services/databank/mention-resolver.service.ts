@@ -1,33 +1,24 @@
 /**
  * Databank Mention Resolver — Resolves #document-name references in chat history.
  *
- * Refactored to a batch-oriented API so prompt assembly can:
+ * Batch-oriented API so prompt assembly can:
  *   1. Extract slugs from every user message (pure regex)
  *   2. Look up the union of slugs once (single sync pass — no duplicate DB hits)
  *   3. Strip resolved #mentions from every message in history (pure string ops)
- *   4. Run the expensive content fetch + vector search ONLY for the last user
- *      message's slugs (the only ones that contribute to the appendix)
+ *   4. Fetch the full content for the last user message's slugs (the only ones
+ *      that contribute to the appendix)
  *
- * Heavy resolution results are cached for 5 minutes keyed by
- * (userId, chatId, sortedSlugs, queryContext) so regens/swipes that re-trigger
- * assembly with the same trailing context hit the cache instead of re-embedding.
+ * Resolution results are cached for 5 minutes so regens/swipes do not rebuild
+ * the same document appendix. Explicit mentions always inject the entire
+ * document; semantic chunk retrieval is reserved for automatic databank recall.
  */
 
 import * as crud from "./databank-crud.service";
-import * as embeddingsSvc from "../embeddings.service";
 import { resolveActiveDatabankIds } from "./scope-resolver.service";
 import type { DatabankDocument, ResolvedMention } from "./types";
 
 /** Regex matching #slug in user messages. Slug = lowercase alphanumeric + hyphens. */
 const MENTION_PATTERN = /(?:^|\s)#([a-z0-9][a-z0-9-]*)/gi;
-
-/** Max tokens for direct document injection. Above this, use vector search. */
-const DIRECT_INJECT_TOKEN_BUDGET = 2000;
-
-/** Approximate token count for budget check. */
-function approxTokens(text: string): number {
-  return Math.ceil(text.split(/\s+/).filter(Boolean).length * 1.33);
-}
 
 // ─── Extraction & Stripping (pure) ────────────────────────────
 
@@ -98,10 +89,11 @@ export function lookupSlugsInScope(
   return { validSlugs, docs };
 }
 
-// ─── Heavy Resolution (async, cached) ─────────────────────────
+// ─── Full-document Resolution (async, cached) ───────────────────
 
 const RESOLVE_CACHE_TTL_MS = 5 * 60 * 1000;
 const RESOLVE_CACHE_MAX_ENTRIES = 256;
+const RESOLVE_CACHE_MAX_RESULT_CHARS = 256 * 1024;
 
 interface CachedResolve {
   result: ResolvedMention[];
@@ -114,10 +106,16 @@ function resolveCacheKey(
   userId: string,
   chatId: string,
   slugs: Iterable<string>,
-  queryContext: string,
+  docs: Map<string, DatabankDocument>,
 ): string {
-  const sorted = Array.from(slugs).sort().join(",");
-  return `${userId}:${chatId}:${Bun.hash(sorted).toString(36)}:${Bun.hash(queryContext).toString(36)}`;
+  const versions = Array.from(slugs)
+    .map((slug) => {
+      const doc = docs.get(slug);
+      return `${slug}:${doc?.id ?? ""}:${doc?.contentHash ?? ""}:${doc?.updatedAt ?? ""}`;
+    })
+    .sort()
+    .join(",");
+  return `${userId}:${chatId}:${Bun.hash(versions).toString(36)}`;
 }
 
 /** Drop cached resolutions for a user+chat (e.g. after a doc update). */
@@ -134,6 +132,14 @@ export function clearAllResolveCache(): void {
 }
 
 function cacheResolvedMentions(key: string, result: ResolvedMention[], now: number): void {
+  // Full documents can be up to the upload limit. Avoid retaining a second
+  // multi-megabyte copy solely for regen convenience.
+  const resultChars = result.reduce((total, mention) => total + mention.content.length, 0);
+  if (resultChars > RESOLVE_CACHE_MAX_RESULT_CHARS) {
+    resolveCache.delete(key);
+    return;
+  }
+
   for (const [cachedKey, cached] of resolveCache) {
     if (now - cached.cachedAt > RESOLVE_CACHE_TTL_MS) resolveCache.delete(cachedKey);
   }
@@ -156,27 +162,23 @@ export const __mentionResolveCacheTest = {
 };
 
 /**
- * Resolve a set of slugs to their injectable content.
- *  - Small docs (≤ DIRECT_INJECT_TOKEN_BUDGET): full text inline.
- *  - Large docs: a single vector search against the slug's databank, filtered
- *    to the document's chunks; falls back to the first ~3000 chars if no
- *    chunks return.
+ * Resolve a set of slugs to their full injectable content.
  *
- * Cached for 5 min by (userId, chatId, slug-set, queryContext) so regens/swipes
- * skip the embedding + LanceDB round trip when nothing material has changed.
+ * Explicit mentions are deterministic and bypass semantic retrieval. The
+ * document identity, content hash, and update time are part of the cache key so
+ * an edit cannot reuse an appendix built from an older document revision.
  */
 export async function resolveSlugContent(
   userId: string,
   chatId: string,
   slugs: Iterable<string>,
   docs: Map<string, DatabankDocument>,
-  queryContext: string,
   signal?: AbortSignal,
 ): Promise<ResolvedMention[]> {
   const slugArr = Array.from(slugs).filter((s) => docs.has(s));
   if (slugArr.length === 0) return [];
 
-  const key = resolveCacheKey(userId, chatId, slugArr, queryContext);
+  const key = resolveCacheKey(userId, chatId, slugArr, docs);
   const cached = resolveCache.get(key);
   if (cached && Date.now() - cached.cachedAt <= RESOLVE_CACHE_TTL_MS) {
     resolveCache.delete(key);
@@ -186,63 +188,17 @@ export async function resolveSlugContent(
   if (cached) resolveCache.delete(key);
 
   const resolved: ResolvedMention[] = [];
-  // Embedded lazily on the first large-doc miss, then reused for the rest of
-  // the batch — every large-doc search in a single call uses the same
-  // queryContext, so we only need one embedding round trip.
-  let queryVector: number[] | null = null;
-
   for (const slug of slugArr) {
     if (signal?.aborted) break;
     const doc = docs.get(slug)!;
     const fullText = crud.getFullDocumentText(userId, doc.id);
     if (!fullText) continue;
 
-    let content: string;
-    let truncated = false;
-
-    if (approxTokens(fullText) <= DIRECT_INJECT_TOKEN_BUDGET) {
-      content = fullText;
-    } else {
-      truncated = true;
-      try {
-        if (!queryVector) {
-          const [v] = await embeddingsSvc.cachedEmbedTexts(
-            userId,
-            [queryContext],
-            { signal, inputType: "query" },
-          );
-          if (signal?.aborted) break;
-          queryVector = v;
-        }
-        const results = await embeddingsSvc.searchDatabankChunks(
-          userId,
-          [doc.databankId],
-          queryVector,
-          4,
-          queryContext,
-          signal,
-        );
-        const docResults = results.filter((r) => {
-          try {
-            const meta = typeof r.metadata === "string" ? JSON.parse(r.metadata) : r.metadata;
-            return meta?.documentId === doc.id;
-          } catch {
-            return false;
-          }
-        });
-        content = docResults.length > 0
-          ? docResults.map((r) => r.content).join("\n---\n")
-          : fullText.slice(0, 3000);
-      } catch {
-        content = fullText.slice(0, 3000);
-      }
-    }
-
     resolved.push({
       slug,
       documentName: doc.name,
-      content,
-      truncated,
+      content: fullText,
+      truncated: false,
     });
   }
 

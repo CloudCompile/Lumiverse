@@ -60,6 +60,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE characters (
     id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '', scenario TEXT NOT NULL DEFAULT '', first_mes TEXT NOT NULL DEFAULT '',
@@ -98,6 +103,12 @@ function initTestDb(): void {
     -- (no migrations run here), so the column is mirrored LAST to match the
     -- ALTER TABLE append order.
     connection_id TEXT
+  )`);
+  db.run(`CREATE TABLE edit_and_send_requests (
+    id TEXT PRIMARY KEY, user_id TEXT NOT NULL, chat_id TEXT NOT NULL, request_id TEXT NOT NULL,
+    request_fingerprint TEXT NOT NULL, branch_chat_id TEXT NOT NULL, edited_message_id TEXT NOT NULL,
+    target_message_id TEXT, target_swipe_index INTEGER, generation_id TEXT NOT NULL, response TEXT NOT NULL,
+    cursor TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, UNIQUE (user_id, chat_id, request_id)
   )`);
   db.run(`CREATE TABLE settings (
     key TEXT NOT NULL, value TEXT NOT NULL, user_id TEXT NOT NULL,
@@ -170,6 +181,8 @@ function seedMessage(id: string, chatId: string, index: number, isUser: boolean)
 
 function insertOutbox(overrides: Record<string, string | number | null> = {}): string {
   const id = typeof overrides.id === "string" ? overrides.id : crypto.randomUUID();
+  const requestId = overrides.request_id ?? "req-1";
+  const generationId = overrides.generation_id ?? `gen-${id}`;
   const now = Date.now();
   getDb().query(
     `INSERT INTO generation_outbox (
@@ -181,12 +194,12 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
     ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
   ).run(
     id,
-    (overrides.request_id as SQLQueryBindings) ?? "req-1",
+    requestId,
     USER,
     "c1",
     "b1",
     "m1",
-    (overrides.generation_id as SQLQueryBindings) ?? `gen-${id}`,
+    generationId,
     (overrides.mode as SQLQueryBindings) ?? "normal",
     (overrides.status as SQLQueryBindings) ?? "pending",
     (overrides.lease_owner as SQLQueryBindings | null) ?? null,
@@ -194,6 +207,20 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
     (overrides.attempt_count as SQLQueryBindings) ?? 0,
     now,
     now,
+  );
+  // Dispatch requires the immutable cursor saved when the edit was committed.
+  getDb().query(`INSERT INTO edit_and_send_requests (
+    id, user_id, chat_id, request_id, request_fingerprint, branch_chat_id,
+    edited_message_id, target_message_id, target_swipe_index, generation_id,
+    response, cursor, created_at, updated_at
+  ) VALUES (?, ?, 'c1', ?, ?, 'b1', 'm1', NULL, NULL, ?, '{}', ?, ?, ?)`).run(
+    `request-${id}`, USER, requestId, `fingerprint-${id}`, generationId,
+    JSON.stringify({
+      chatId: "b1",
+      generationId,
+      editAndSendContext: { editedUserMessageId: "m1", committedRevision: 1 },
+    }),
+    now, now,
   );
   return id;
 }
@@ -523,7 +550,11 @@ describe("startGeneration origin gating — zero extra queries on interactive pa
 
     // The setting is seeded `true`, yet the bound profile still wins — and the
     // spy proves the read never happened, rather than asserting it in prose.
-    expect((input as { connection_id?: string }).connection_id).toBe("gate-bound");
+    expect(pool.getPoolEntry(input.generationId)).toMatchObject({
+      connectionName: "gate-bound",
+      model: BINDING_MODEL_OVERRIDE,
+    });
+    expect(input).not.toHaveProperty("connection_id");
     expect(getSettingSpy.mock.calls.map((call) => call[1])).not.toContain("quickToolbarSettings");
   });
 
@@ -541,8 +572,11 @@ describe("startGeneration origin gating — zero extra queries on interactive pa
     await generateSvc.startGeneration(input, { origin: "edit_and_send" })
       .catch(() => { /* assembly is stubbed out */ });
 
-    expect((input as { connection_id?: string }).connection_id).toBe("gate-active");
-    expect(pool.getPoolEntry("gen-gate-dispatch")?.model).toBe("model-active");
+    expect(pool.getPoolEntry(input.generationId)).toMatchObject({
+      connectionName: "gate-active",
+      model: "model-active",
+    });
+    expect(input).not.toHaveProperty("connection_id");
     expect(getSettingSpy.mock.calls.map((call) => call[1])).toContain("quickToolbarSettings");
   });
 });
@@ -679,6 +713,11 @@ describe("dispatcher — credential failures are terminal", () => {
       endedGenerationIds: ended.map((payload) => payload.generationId),
       endedNamesConnection: ended.every((payload) =>
         String(payload.error).includes("Unrelated Custom Endpoint")),
+      endedFailureMetadata: ended.map((payload) => ({
+        errorCode: payload.errorCode,
+        errorMessage: payload.errorMessage,
+        connectionName: payload.connectionName,
+      })),
     }).toEqual({
       status: "failed",
       terminalReason: "credential_unresolved",
@@ -688,6 +727,11 @@ describe("dispatcher — credential failures are terminal", () => {
       leaseOwner: null,
       endedGenerationIds: ["gen-credential"],
       endedNamesConnection: true,
+      endedFailureMetadata: [{
+        errorCode: "credential_unresolved",
+        errorMessage: credentialError().message,
+        connectionName: "Unrelated Custom Endpoint",
+      }],
     });
 
     // Never re-dispatched on any later tick or recovery pass.
@@ -701,7 +745,7 @@ describe("dispatcher — credential failures are terminal", () => {
     });
   });
 
-  test("a generic error still takes the unchanged backoff path", async () => {
+  test("a generic error is terminal so an uncertain provider dispatch is never replayed", async () => {
     const rowId = insertOutbox({ id: "row-generic", generation_id: "gen-generic" });
     dispatcher.setEditAndSendStartGeneration(async () => { throw new Error("provider_down"); });
 
@@ -714,14 +758,14 @@ describe("dispatcher — credential failures are terminal", () => {
       lastErrorCode: row?.last_error_code,
       nextAttemptAtSet: (row?.next_attempt_at ?? null) != null,
       dispatchedAt: row?.dispatched_at ?? null,
-      completedAt: row?.completed_at ?? null,
+      completedAtSet: row?.completed_at != null,
     }).toEqual({
-      status: "pending",
-      terminalReason: null,
+      status: "failed",
+      terminalReason: "dispatch_failed",
       lastErrorCode: "provider_down",
-      nextAttemptAtSet: true,
+      nextAttemptAtSet: false,
       dispatchedAt: null,
-      completedAt: null,
+      completedAtSet: true,
     });
     expect(dispatcher.getGenerationOutboxById(rowId)?.attempt_count).toBe(1);
   });

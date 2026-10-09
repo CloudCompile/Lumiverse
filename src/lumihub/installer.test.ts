@@ -232,6 +232,37 @@ describe("LumiHub preset installer metadata", () => {
     });
   });
 
+  test("marks Illarin-installed sealed blocks as protected remote content", async () => {
+    const result = await installPreset("illarin-sealed", {
+      source: "illarin",
+      presetId: "illarin-sealed-asset",
+      presetName: "Illarin sealed preset",
+      presetVersion: "3.0.0",
+      presetData: {
+        preset: {
+          name: "Illarin sealed preset",
+          blocks: [{
+            id: "publisher-instructions",
+            name: "Publisher instructions",
+            content: "private Illarin content",
+            sealed: true,
+            sealedKey: "publisher.instructions",
+          }],
+        },
+      },
+    });
+
+    expect(result.success).toBe(true);
+    expect(getPreset(USER_ID, result.presetId!)?.prompt_order[0]).toMatchObject({
+      content: "private Illarin content",
+      sealed: true,
+      sealedKey: "publisher.instructions",
+      sealedSource: "illarin",
+      sealedOriginPresetId: "illarin-sealed-asset",
+      sealedOriginVersion: "3.0.0",
+    });
+  });
+
   test("fails an Illarin install when its packaged regex set is incomplete", async () => {
     const result = await installPreset("illarin-invalid-regex", {
       source: "illarin",

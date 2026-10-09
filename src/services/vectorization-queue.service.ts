@@ -374,7 +374,11 @@ export function queuePendingChatChunkVectorization(userId: string, chatId: strin
     `SELECT id
      FROM chat_chunks
      WHERE chat_id = ? AND vectorized_at IS NULL
-     ORDER BY updated_at ASC, created_at ASC`,
+     ORDER BY updated_at ASC,
+              message_range_start IS NULL ASC,
+              message_range_start ASC,
+              message_range_end ASC,
+              id ASC`,
   ).all(chatId) as Array<{ id: string }>;
 
   for (const row of rows) {
@@ -390,7 +394,12 @@ export async function queueStaleChatChunkVectorization(limit = CHAT_CHUNK_REQUEU
      FROM chat_chunks cc
      JOIN chats c ON c.id = cc.chat_id
      WHERE cc.vectorized_at IS NULL
-     ORDER BY c.updated_at DESC, cc.updated_at ASC, cc.created_at ASC
+     ORDER BY c.updated_at DESC,
+              cc.updated_at ASC,
+              cc.message_range_start IS NULL ASC,
+              cc.message_range_start ASC,
+              cc.message_range_end ASC,
+              cc.id ASC
      LIMIT ?`,
   ).all(Math.max(1, limit)) as Array<{ id: string; chat_id: string; user_id: string }>;
 

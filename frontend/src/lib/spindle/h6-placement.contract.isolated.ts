@@ -338,6 +338,22 @@ describe('H6 float placement contract', () => {
     expect(placementStore.getState().floatWidgets).toHaveLength(0)
     expect(() => second.setSize(100, 100)).toThrow('PLACEMENT_DESTROYED')
   })
+
+  test('keeps an oversized widget inside the page viewport', () => {
+    // The resize matrix leaves the last ui scale behind; the fake window is
+    // 1600x900 in layout pixels.
+    currentUiScale = 1
+    const handle = createFloatWidgetHandle(extensionId, {
+      width: 100,
+      height: 80,
+      initialPosition: { x: 100, y: 100 },
+    }, () => {}, generation)
+    handles.push(handle)
+
+    handle.setSize(4000, 3000)
+
+    expect(placementStore.getState().floatWidgets[0]).toMatchObject({ width: 1600, height: 900 })
+  })
 })
 
 function scalesAndEdges<T extends { edge: string }>(cases: readonly T[]) {

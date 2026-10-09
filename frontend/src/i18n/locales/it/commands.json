@@ -79,7 +79,7 @@
       "description": "Configura ragionamento, catena del pensiero e comportamento dei prompt"
     },
     "panel-loom": {
-      "label": "Telaio",
+      "label": "Preset",
       "description": "Configura la struttura narrativa e i ritmi della storia"
     },
     "panel-dream-weaver": {

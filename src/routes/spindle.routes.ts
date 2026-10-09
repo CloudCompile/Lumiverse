@@ -19,6 +19,7 @@ import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { ifNoneMatchSatisfies } from "../utils/http-cache";
 import { getFrontendRuntimeCapabilities } from "../spindle/frontend-runtime-capabilities";
+import { reportLibraryRemovalToAll } from "../illarin/extensions";
 
 const app = new Hono();
 
@@ -270,6 +271,7 @@ app.post("/:id/update", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+    if (ext.metadata?.illarin) return c.json({ error: "Illarin extensions update through Illarin sends, not Git" }, 400);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -328,6 +330,9 @@ app.delete("/:id", async (c) => {
 
     managerSvc.remove(ext.identifier);
     updateCheckSvc.clearCachedExtensionUpdate(ext.id);
+    const source = ext.metadata?.illarin as { workId?: string; assetId?: string } | undefined;
+    const workId = source?.workId ?? source?.assetId;
+    if (workId) void reportLibraryRemovalToAll(workId);
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -347,6 +352,19 @@ app.post("/:id/enable", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+
+    const source = ext.metadata?.illarin as { permissionsApproved?: boolean } | undefined;
+    if (source && source.permissionsApproved === false) {
+      const body = await c.req.json().catch(() => null) as { approved_permissions?: unknown } | null;
+      const approved = body?.approved_permissions;
+      if (!Array.isArray(approved) ||
+          approved.length !== ext.permissions.length ||
+          !ext.permissions.every((permission) => approved.includes(permission))) {
+        return c.json({ error: "Approve every requested extension permission before its first run" }, 400);
+      }
+      for (const permission of ext.permissions) managerSvc.grantPermission(ext.identifier, permission);
+      managerSvc.setMetadataEntry(ext.identifier, "illarin", { ...source, permissionsApproved: true });
+    }
 
     eventBus.emit(EventType.SPINDLE_EXTENSION_STATUS, {
       extensionId: ext.id,
@@ -503,7 +521,12 @@ app.get("/:id/manifest", async (c) => {
 
     const manifest = await managerSvc.getManifest(ext.identifier);
     const frontendCacheKey = await managerSvc.getFrontendBundleCacheKey(ext.identifier);
-    return c.json(frontendCacheKey ? { ...manifest, frontend_cache_key: frontendCacheKey } : manifest);
+    const widgetFrontendCacheKey = await managerSvc.getWidgetFrontendBundleCacheKey(ext.identifier);
+    return c.json({
+      ...manifest,
+      ...(frontendCacheKey ? { frontend_cache_key: frontendCacheKey } : {}),
+      ...(widgetFrontendCacheKey ? { frontend_widget_cache_key: widgetFrontendCacheKey } : {}),
+    });
   } catch (err: any) {
     return c.json({ error: err.message }, 400);
   }
@@ -528,6 +551,7 @@ app.post("/:id/switch-branch", requireOwner, async (c) => {
     const ext = await getVisibleExtension(c, c.req.param("id"));
     if (!ext) return c.json({ error: "Not found" }, 404);
     if (!canManageExtension(c, ext)) return c.json({ error: "Forbidden" }, 403);
+    if (ext.metadata?.illarin) return c.json({ error: "Illarin extensions cannot switch Git branches" }, 400);
 
     const body = await c.req.json();
     if (!body.branch || typeof body.branch !== "string") {
@@ -566,6 +590,44 @@ app.get("/tools", async (c) => {
     (await managerSvc.listForUser(viewer.userId, viewer.role)).map((ext) => ext.id)
   );
   return c.json(toolRegistry.getTools().filter((tool) => visibleIds.has(tool.extension_id)));
+});
+
+// GET /api/v1/spindle/:id/frontend/widget — Serve the lightweight native-widget bundle
+app.get("/:id/frontend/widget", async (c) => {
+  const ext = await getVisibleExtension(c, c.req.param("id"));
+  if (!ext) return c.json({ error: "Not found" }, 404);
+
+  const bundlePath = await managerSvc.getWidgetFrontendBundlePath(ext.identifier);
+  if (!bundlePath || !(await Bun.file(bundlePath).exists())) {
+    return c.json({ error: "No widget frontend bundle" }, 404);
+  }
+
+  const cacheKey = await managerSvc.getWidgetFrontendBundleCacheKey(ext.identifier);
+  const etag = cacheKey ? `"spindle-widget-frontend-${ext.id}-${cacheKey}"` : undefined;
+  const versioned = !!cacheKey && c.req.query("v") === cacheKey;
+  const cacheControl = versioned
+    ? "private, max-age=31536000, immutable"
+    : "private, no-cache";
+
+  if (etag && ifNoneMatchSatisfies(c.req.header("if-none-match"), etag)) {
+    return new Response(null, {
+      status: 304,
+      headers: {
+        ETag: etag,
+        "Cache-Control": cacheControl,
+      },
+    });
+  }
+
+  const response = new Response(Bun.file(bundlePath), {
+    headers: {
+      "Content-Type": "application/javascript",
+      "Cache-Control": cacheControl,
+      "Content-Security-Policy": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; frame-src 'none'; child-src 'none'; object-src 'none'; base-uri 'none'; upgrade-insecure-requests;",
+    },
+  });
+  if (etag) response.headers.set("ETag", etag);
+  return response;
 });
 
 // GET /api/v1/spindle/:id/frontend — Serve the extension's frontend bundle

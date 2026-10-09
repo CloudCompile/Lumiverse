@@ -11,6 +11,10 @@ import { presetsApi } from '@/api/presets'
 import { ttsConnectionsApi } from '@/api/tts-connections'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import type { GroupResponseOrder } from '@/lib/groupResponseOrder'
+import {
+  resolveImpersonationModeOverride,
+  type ImpersonationPreference,
+} from '@/lib/impersonationPreset'
 import type { Character, Chat, PresetRegistryItem, VoiceRef } from '@/types/api'
 import styles from './GroupChatCreatorModal.module.css'
 
@@ -32,10 +36,12 @@ function readVoiceRef(value: unknown): VoiceRef | null {
 
 type GroupCardMode = 'swap' | 'merge_ignore_muted' | 'merge'
 type GroupLorebookMode = 'follow_card_mode' | 'active_character' | 'all_unmuted' | 'all'
+const IMPERSONATION_MODES: ImpersonationPreference[] = ['prompts', 'preset', 'oneliner']
 
 export default function GroupSettingsModal() {
   const { t } = useTranslation('modals', { keyPrefix: 'groupSettings' })
   const { t: tc } = useTranslation('common')
+  const { t: tChat } = useTranslation('chat', { keyPrefix: 'quickMenu' })
 
   const closeModal = useStore((s) => s.closeModal)
   const modalProps = useStore((s) => s.modalProps) as {
@@ -50,6 +56,7 @@ export default function GroupSettingsModal() {
   const ttsProfiles = useStore((s) => s.ttsProfiles)
   const setTtsProfiles = useStore((s) => s.setTtsProfiles)
   const setTtsProviders = useStore((s) => s.setTtsProviders)
+  const defaultImpersonationMode = useStore((s) => s.defaultImpersonationMode)
 
   const chatId = modalProps?.chatId ?? ''
   const metadata = modalProps?.metadata ?? {}
@@ -75,6 +82,9 @@ export default function GroupSettingsModal() {
   const [loadingPresets, setLoadingPresets] = useState(false)
   const [impersonationPresetId, setImpersonationPresetId] = useState<string>(
     typeof metadata.impersonation_preset_id === 'string' ? metadata.impersonation_preset_id : ''
+  )
+  const [impersonationMode, setImpersonationMode] = useState<ImpersonationPreference | null>(
+    resolveImpersonationModeOverride(metadata.impersonation_mode),
   )
   const [connectionProfileId, setConnectionProfileId] = useState<string>(
     typeof metadata.connection_profile_id === 'string' ? metadata.connection_profile_id : ''
@@ -171,6 +181,7 @@ export default function GroupSettingsModal() {
 
       const metadataPatch: Record<string, any> = {
         impersonation_preset_id: impersonationPresetId || null,
+        impersonation_mode: impersonationMode || null,
         connection_profile_id: connectionProfileId || null,
         connection_model: connectionProfileId && connectionModel.trim() ? connectionModel.trim() : null,
       }
@@ -220,7 +231,7 @@ export default function GroupSettingsModal() {
     } finally {
       setSaving(false)
     }
-  }, [saving, chatId, groupName, impersonationPresetId, connectionProfileId, connectionModel, isGroup, talkativenessOverrides, groupCardMode, groupLorebookMode, groupResponseOrder, scenarioMode, scenarioMemberId, scenarioCustom, chatCharacter, characterOverride, narratorOverride, initialVoiceOverrides, setActiveChatMetadata, modalProps, closeModal])
+  }, [saving, chatId, groupName, impersonationPresetId, impersonationMode, connectionProfileId, connectionModel, isGroup, talkativenessOverrides, groupCardMode, groupLorebookMode, groupResponseOrder, scenarioMode, scenarioMemberId, scenarioCustom, chatCharacter, characterOverride, narratorOverride, initialVoiceOverrides, setActiveChatMetadata, modalProps, closeModal])
 
   return (
     <ModalShell isOpen={true} onClose={closeModal} maxWidth={520}>
@@ -239,6 +250,60 @@ export default function GroupSettingsModal() {
               onChange={(e) => setGroupName(e.target.value)}
               placeholder={isGroup ? t('groupNamePlaceholder') : t('chatNamePlaceholder')}
             />
+          </div>
+
+          <div className={styles.fieldGroup}>
+            <label className={styles.fieldLabel}>{t('impersonationMode')}</label>
+            <div
+              className={styles.impersonationModeOptions}
+              role="radiogroup"
+              aria-label={t('impersonationMode')}
+            >
+              <button
+                type="button"
+                role="radio"
+                aria-checked={impersonationMode === null}
+                className={`${styles.impersonationModeOption} ${impersonationMode === null ? styles.impersonationModeOptionActive : ''}`}
+                onClick={() => setImpersonationMode(null)}
+              >
+                <span className={styles.impersonationModeTitle}>{t('useGlobalImpersonationMode')}</span>
+                <span className={styles.impersonationModeDescription}>
+                  {t('useGlobalImpersonationModeHint', {
+                    mode: defaultImpersonationMode === 'prompts'
+                      ? tChat('presetPrompts')
+                      : defaultImpersonationMode === 'preset'
+                        ? tChat('impersonationPreset')
+                        : tChat('oneLiner'),
+                  })}
+                </span>
+              </button>
+              {IMPERSONATION_MODES.map((mode) => {
+                const label = mode === 'prompts'
+                  ? tChat('presetPrompts')
+                  : mode === 'preset'
+                    ? tChat('impersonationPreset')
+                    : tChat('oneLiner')
+                const description = mode === 'prompts'
+                  ? tChat('presetPromptsDesc')
+                  : mode === 'preset'
+                    ? tChat('impersonationPresetDesc')
+                    : tChat('oneLinerDesc')
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={impersonationMode === mode}
+                    className={`${styles.impersonationModeOption} ${impersonationMode === mode ? styles.impersonationModeOptionActive : ''}`}
+                    onClick={() => setImpersonationMode(mode)}
+                  >
+                    <span className={styles.impersonationModeTitle}>{label}</span>
+                    <span className={styles.impersonationModeDescription}>{description}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className={styles.fieldHint}>{t('impersonationModeHint')}</div>
           </div>
 
           <div className={styles.fieldGroup}>

@@ -111,6 +111,14 @@ This is primarily useful when your macro has separate display-only and state-mut
 
 ---
 
+## Macro Interceptors
+
+`spindle.registerMacroInterceptor(handler, priority?, opts?)` requires the `macro_interceptor` permission. The async handler receives `ctx.template` and a read-only environment snapshot before native macro parsing. It returns a string, `{ text, touchedVars?, volatile? }`, or `void` to pass through. Lower priorities run first; the default is `100`. Registering again replaces your extension's previous handler.
+
+Set `opts.handlesOwnedSources: true` to exclusively resolve macro-bearing regex templates whose `owner_extension_identifier` matches your extension. These calls include `ctx.sourceOwner.extensionIdentifier` and receive the unmodified template. Return a string or a result object: the host uses its text verbatim without native evaluation or other interceptors. A missing result, thrown error, or timeout rejects the owned evaluation. Templates without macros skip dispatch; other templates retain normal chain behavior, which logs interceptor failures and continues.
+
+With this opt-in, stored messages on characters whose extension namespace has `display_owner: true` also remain verbatim for the extension's [display pipeline](../frontend-api/display-resolver.md#ownership).
+
 ## Resolving Macros Programmatically
 
 Resolve `{{macro}}` placeholders in arbitrary text using the full Lumiverse macro engine. Useful for extensions that build their own prompts and want to support the same macro syntax users are familiar with.

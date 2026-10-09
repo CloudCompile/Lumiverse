@@ -1,4 +1,9 @@
 import { ssoProvidersApi } from '@/api/sso-providers'
+import {
+  closeAuthorizationPopup,
+  navigateAuthorizationPopup,
+  reserveAuthorizationPopup,
+} from '@/lib/authorizationPopup'
 
 type SsoFlow = 'login' | 'link'
 
@@ -42,7 +47,10 @@ function isResult(value: unknown, flowId: string): value is SsoPopupResult {
 
 export function startSsoPopup({ providerId, flow, returnTo = '/' }: SsoPopupOptions): Promise<SsoPopupResult> {
   const flowId = crypto.randomUUID()
-  const popup = window.open('about:blank', `lumiverse_sso_${flow}_${providerId}`, popupFeatures())
+  const popup = reserveAuthorizationPopup({
+    name: `lumiverse_sso_${flow}_${providerId}`,
+    features: popupFeatures(),
+  })
   const callbackURL = completionUrl(flow, providerId, flowId, returnTo)
   const storageKey = `${STORAGE_PREFIX}${flowId}`
 
@@ -65,6 +73,11 @@ export function startSsoPopup({ providerId, flow, returnTo = '/' }: SsoPopupOpti
       if (settled) return
       settled = true
       cleanup()
+      // The desktop shell creates window.open targets as native WebviewWindows.
+      // Closing from the opener is the most reliable cross-platform lifecycle
+      // signal and also keeps the browser implementation symmetrical with the
+      // cancellation/error path below.
+      closeAuthorizationPopup(popup)
       resolve(result)
     }
 
@@ -72,7 +85,7 @@ export function startSsoPopup({ providerId, flow, returnTo = '/' }: SsoPopupOpti
       if (settled) return
       settled = true
       cleanup()
-      try { popup?.close() } catch {}
+      closeAuthorizationPopup(popup)
       reject(error)
     }
 
@@ -119,11 +132,14 @@ export function startSsoPopup({ providerId, flow, returnTo = '/' }: SsoPopupOpti
 
     starter.then(({ url }) => {
       if (settled) return
-      if (popup) {
-        popup.location.href = url
-        popup.focus()
-      } else {
-        window.location.assign(url)
+      const navigation = navigateAuthorizationPopup(popup, url, {
+        preserveOpener: true,
+        allowHttp: true,
+      })
+      if (navigation.status === 'invalid') {
+        fail(new Error('SSO provider returned an invalid authorization URL.'))
+      } else if (navigation.status === 'blocked') {
+        window.location.assign(navigation.url)
       }
     }).catch((err) => {
       fail(err instanceof Error ? err : new Error('Failed to start SSO authorization.'))

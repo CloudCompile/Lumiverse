@@ -12,7 +12,7 @@ import {
 } from "../utils/gallery-image-reference";
 import { getImage, getImageFilePath } from "./images.service";
 import { exportWorldBook, getWorldBook } from "./world-books.service";
-import { isNsfwExpressionLabel } from "./character-card.service";
+import { isNsfwExpressionLabel, stableCharxAlternateAvatarId } from "./character-card.service";
 import { getCharacterBoundScripts } from "./regex-scripts.service";
 import { getCharacterWorldBookIds } from "../utils/character-world-books";
 import { mapWithConcurrency } from "../utils/concurrency";
@@ -545,33 +545,36 @@ export async function exportAsCharx(
   }
 
   // Alternate avatars
-  const altAvatars: Array<{ id: string; label: string; path: string }> = [];
+  const altAvatarsByPosition = new Map<number, { id: string; label: string; path: string }>();
   const altAvatarEntries = character.extensions?.alternate_avatars;
   if (Array.isArray(altAvatarEntries)) {
-    for (const entry of altAvatarEntries) {
+    for (const [position, entry] of altAvatarEntries.entries()) {
       if (!entry.image_id || !entry.label) continue;
+      const stableId = stableCharxAlternateAvatarId(entry.id, position);
       assetTasks.push(async () => {
         const img = await readImageBytes(userId, entry.image_id);
         if (img) {
-          const archivePath = `assets/icon/image/${entry.id}${img.ext}`;
+          const archivePath = `assets/icon/image/${stableId}${img.ext}`;
           const cleaned = stripCardTextChunks(img.bytes);
           entries[archivePath] = new Uint8Array(cleaned);
-          altAvatars.push({ id: entry.id, label: entry.label, path: archivePath });
+          // Asset reads run concurrently. Key by the source position instead of
+          // pushing in completion order so re-import preserves the avatar strip.
+          altAvatarsByPosition.set(position, { id: stableId, label: entry.label, path: archivePath });
         }
       });
     }
   }
   // Landing perspective layers (ordered back → front)
   const landingLayers = normalizeLandingPerspectiveLayers(character.extensions?.[LANDING_PERSPECTIVE_LAYERS_KEY]);
-  const exportedLandingLayers: Array<{ id: string; label?: string; path: string; intensity: number }> = [];
-  for (const layer of landingLayers) {
+  const exportedLandingLayersByPosition = new Map<number, { id: string; label?: string; path: string; intensity: number }>();
+  for (const [position, layer] of landingLayers.entries()) {
     assetTasks.push(async () => {
       const img = await readImageBytes(userId, layer.image_id);
       if (!img) return;
       const safeName = sanitizeArchiveName(layer.label || layer.id || "layer");
       const archivePath = `assets/other/image/landing_layer_${safeName}_${layer.id}${img.ext}`;
       entries[archivePath] = img.bytes;
-      exportedLandingLayers.push({
+      exportedLandingLayersByPosition.set(position, {
         id: layer.id,
         ...(layer.label ? { label: layer.label } : {}),
         path: archivePath,
@@ -648,9 +651,15 @@ export async function exportAsCharx(
   if (Object.keys(groupMappings).length > 0) {
     modules.expression_groups = { groups: groupMappings };
   }
+  const altAvatars = [...altAvatarsByPosition.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, avatar]) => avatar);
   if (altAvatars.length > 0) {
     modules.alternate_avatars = altAvatars;
   }
+  const exportedLandingLayers = [...exportedLandingLayersByPosition.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, layer]) => layer);
   if (exportedLandingLayers.length > 0) {
     modules.landing_perspective_layers = exportedLandingLayers;
   }

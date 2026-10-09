@@ -108,6 +108,8 @@ interface StartupSettings {
   spindleSettings?: unknown;
   connectionsOrder?: Partial<Record<"llm" | "imageGen" | "stt" | "tts", string[]>>;
   activeProfileId?: string | null;
+  toastPosition?: "top-right" | "top-left" | "bottom-right" | "bottom-left" | "top" | "bottom";
+  defaultImpersonationMode?: "prompts" | "preset" | "oneliner";
 }
 
 const LIST_LIMIT_CONNECTIONS = 100;
@@ -132,6 +134,8 @@ export const STARTUP_SETTINGS_KEYS = [
   "spindleSettings",
   "connectionsOrder",
   "activeProfileId",
+  "toastPosition",
+  "defaultImpersonationMode",
 ] as const;
 
 /**
@@ -248,6 +252,29 @@ export function getStartupSettings(userId: string): StartupSettings {
     } else if (activeProfileId === null) {
       startupSettings.activeProfileId = null;
     }
+  }
+
+  // Toast placement must be known before the first toast can paint; any other
+  // stored value is dropped so the frontend default stays authoritative.
+  const toastPosition = rows.get("toastPosition");
+  if (
+    toastPosition === "top-right"
+    || toastPosition === "top-left"
+    || toastPosition === "bottom-right"
+    || toastPosition === "bottom-left"
+    || toastPosition === "top"
+    || toastPosition === "bottom"
+  ) {
+    startupSettings.toastPosition = toastPosition;
+  }
+
+  const defaultImpersonationMode = rows.get("defaultImpersonationMode");
+  if (
+    defaultImpersonationMode === "prompts"
+    || defaultImpersonationMode === "preset"
+    || defaultImpersonationMode === "oneliner"
+  ) {
+    startupSettings.defaultImpersonationMode = defaultImpersonationMode;
   }
 
   return startupSettings;

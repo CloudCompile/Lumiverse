@@ -24,6 +24,7 @@ export interface TtsConnectionVoicesPreviewInput {
   provider: string;
   api_url?: string;
   api_key?: string;
+  model?: string;
   metadata?: Record<string, any>;
 }
 
@@ -391,7 +392,9 @@ export async function listConnectionVoicesPreview(
       api_url: input.api_url ?? existing?.api_url ?? "",
       metadata,
     });
-    const voices = await provider.listVoices(apiKey || "", effectiveUrl);
+    const voices = await provider.listVoices(apiKey || "", effectiveUrl, {
+      model: input.model ?? existing?.model,
+    });
     return {
       voices: mergeStoredVoices(providerId, existing, voices),
       provider: providerId,

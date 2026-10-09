@@ -33,6 +33,7 @@ const homepageSettings = {
 }
 
 const storeState = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   homepageCharacterLibrarySettings: homepageSettings,
   characterTabDisplaySettings: { ...homepageSettings, useHomepageSettings: true },
   favorites: [] as string[],
@@ -44,6 +45,7 @@ const storeState = {
 }
 
 const useStore = <T,>(selector: (state: typeof storeState) => T): T => selector(storeState)
+useStore.getState = () => storeState
 const handlers = new Map<string, Set<(payload: unknown) => void>>()
 const unsubscribeEvents: string[] = []
 const wsOn = jest.fn((event: string, handler: (payload: unknown) => void) => {

@@ -4,11 +4,13 @@
   flex-direction: column;
   gap: 12px;
   padding: 14px;
-  margin-top: -2px;
-  background: color-mix(in srgb, var(--lumiverse-primary) 3%, var(--lumiverse-fill-subtle));
-  border: 1px solid var(--lumiverse-primary-020);
-  border-top: none;
-  border-radius: 0 0 10px 10px;
+  margin-top: 0;
+  --world-book-detail-bg: color-mix(in srgb, var(--lumiverse-bg-deep, var(--lumiverse-bg)) 65%, transparent);
+  container-type: inline-size;
+  container-name: wbEntryEditor;
+  background: var(--lumiverse-fill-subtle);
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 10px;
 }
 
 .compactEntryEditor {
@@ -20,7 +22,18 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   container-type: inline-size;
-  container-name: wbEntryEditorCompact;
+  container-name: wbEntryEditor wbEntryEditorCompact;
+}
+
+.compactEntryEditor.parentScrollEditor {
+  flex: 0 0 auto;
+  overflow: visible;
+  overscroll-behavior: auto;
+}
+
+.compactEntryEditor.parentScrollEditor .identityContentSection,
+.compactEntryEditor.parentScrollEditor .contentField {
+  flex: 0 0 auto;
 }
 
 .compactEntryEditor .entryFieldGroup {
@@ -60,8 +73,8 @@
 }
 
 .identityFields {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   min-width: 0;
 }
@@ -104,8 +117,8 @@
   font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
   color: var(--lumiverse-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--lumiverse-border);
 }
 
 .entryFieldGroup {
@@ -130,7 +143,7 @@
 }
 
 .entryFieldSmall {
-  flex: 0 0 90px;
+  flex: 1 1 80px;
 }
 
 .fieldLabel {
@@ -204,10 +217,10 @@
 }
 
 .toggleRow {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 10px;
-  align-items: center;
+  align-items: start;
 }
 
 .vectorStatusRow {
@@ -235,18 +248,18 @@
 }
 
 .vectorStatusPending {
-  background: rgba(255, 184, 0, 0.14);
-  color: #ffd16a;
+  background: var(--lumiverse-warning-015);
+  color: var(--lumiverse-warning);
 }
 
 .vectorStatusIndexed {
-  background: rgba(71, 201, 126, 0.16);
-  color: #8ef0b4;
+  background: var(--lumiverse-success-015);
+  color: var(--lumiverse-success);
 }
 
 .vectorStatusError {
   background: var(--lumiverse-danger-015);
-  color: #ff9b9b;
+  color: var(--lumiverse-danger);
 }
 
 .vectorStatusText {
@@ -280,8 +293,8 @@
   color: var(--lumiverse-text-muted);
   font-size: calc(11.5px * var(--lumiverse-font-scale, 1));
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  text-transform: none;
+  letter-spacing: normal;
   cursor: pointer;
   transition: color var(--lumiverse-transition-fast);
 }
@@ -331,14 +344,23 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .compactEntryEditor .entryFieldRow {
-    flex-direction: column;
+  .compactEntryEditor .injectionRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) 64px;
   }
 
-  .compactEntryEditor .entryFieldRow > .entryField,
-  .compactEntryEditor .entryFieldSmall {
-    width: 100%;
-    flex-basis: auto;
+  .compactEntryEditor .activationRow {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .compactEntryEditor .activationRow > .entryField:last-child {
+    grid-column: 1 / -1;
+  }
+
+  .compactEntryEditor .injectionRow > .entryField,
+  .compactEntryEditor .activationRow > .entryField {
+    min-width: 0;
   }
 
   .compactEntryEditor .groupToggle {
@@ -361,3 +383,29 @@
   border-radius: 6px;
   user-select: all;
 }
+
+.contentField .entryTextarea { min-height: 140px; }
+
+.matchingRules { display: flex; flex-direction: column; gap: 6px; }
+.entryFieldRow > .entryField { min-width: 80px; }
+.entryFieldRow > .entryField:has(.entrySelect) { flex-basis: 120px; }
+.readOnlyValue { overflow-wrap: anywhere; }
+
+.timingRow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.timingRow > .entryField { min-width: 0; }
+@container wbEntryEditor (max-width: 480px) { .timingRow { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+.groupRow { display: grid; grid-template-columns: minmax(0, 1fr) 90px; }
+.groupRow > .entryField { min-width: 0; }
+
+.toggleRow > label { min-width: 0; font-size: calc(12px * var(--lumiverse-font-scale, 1)); }
+.toggleRow > label > span { min-width: 0; overflow-wrap: anywhere; }
+
+.disclosureSection, .identityContentSection { padding: 8px; border: 1px solid var(--lumiverse-border); border-radius: 7px; background: var(--world-book-detail-bg); }
+.disclosureSection > .sectionHeading { display: block; margin-bottom: 8px; }
+.metadataRow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.metadataRow > .entryField { min-width: 0; }
+.metadataRow .entryInput { width: 100%; height: 30px; box-sizing: border-box; }
+
+.matchingRules .toggleRow { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+@container wbEntryEditor (max-width: 440px) { .matchingRules .toggleRow { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; } }

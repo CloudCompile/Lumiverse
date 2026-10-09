@@ -577,6 +577,7 @@ export async function deleteConnection(userId: string, id: string): Promise<bool
     // Cleanup the connection's secret
     secretsSvc.deleteSecret(userId, connectionSecretKey(id));
     settingsSvc.deleteSetting(userId, `presetProfile:connection:${id}`);
+    eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: `presetProfile:connection:${id}`, binding: null }, userId);
   }
   return deleted;
 }

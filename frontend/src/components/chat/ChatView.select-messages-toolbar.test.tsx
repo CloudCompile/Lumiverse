@@ -219,7 +219,7 @@ function nativeLabels(group: Element): string[] {
   return Array.from(group.querySelectorAll('button')).map((button) => button.getAttribute('aria-label') ?? '')
 }
 
-function expectCompleteToolbarAttributes(toolbar: Element, expectedSide: 'left' | 'right'): void {
+function expectCompleteToolbarAttributes(toolbar: Element, expectedSide: 'left' | 'right' | null): void {
   expect(toolbar.getAttribute('data-spindle-mount')).toBe('chat_top_dock')
   expect(toolbar.getAttribute('data-spindle-scope')).toBe('chat:chat-test:top-dock')
   expect(toolbar.getAttribute('data-dock-request')).toBe('strip')
@@ -240,6 +240,7 @@ describe('ChatView native select-messages toolbar', () => {
 
     expect(source).toContain("import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'")
     expect(source).toContain("const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))")
+    expect(source).toMatch(/const nativeDockActionSide = suiteExtensionEnabled[\s\S]*?: undefined/)
     expect(source).toContain('ListChecks')
     // Settings exposes the native flags with and without the Suite, so an absent
     // Suite no longer has to force them on for them to stay reachable.
@@ -267,6 +268,25 @@ describe('ChatView native select-messages toolbar', () => {
     expect(source.slice(gateIndex, selectBarIndex)).toContain('</button>')
   })
 
+  test('keeps Suite alignment out of the native core toolbar', async () => {
+    const css = await Bun.file(resolve(import.meta.dir, 'ChatView.module.css')).text()
+    const coreToolbar = css.match(/^\.chatToolbar\s*\{([^}]*)\}/m)?.[1] ?? ''
+    const suiteToolbar = css.match(/^\.chatToolbar\[data-native-action-side\]\s*\{([^}]*)\}/m)?.[1] ?? ''
+    const coreActions = css.match(/^\.nativeDockActions\s*\{([^}]*)\}/m)?.[1] ?? ''
+    const suiteActions = css.match(/^\.chatToolbar\[data-native-action-side\] \.nativeDockActions\s*\{([^}]*)\}/m)?.[1] ?? ''
+
+    expect(coreToolbar).toMatch(/justify-content:\s*flex-end;/)
+    expect(coreToolbar).toMatch(/padding:\s*6px 12px;/)
+    expect(coreToolbar).toMatch(/gap:\s*4px;/)
+    expect(suiteToolbar).toMatch(/justify-content:\s*flex-start;/)
+    expect(suiteToolbar).toMatch(/padding:\s*6px 8px;/)
+    expect(coreActions).toMatch(/gap:\s*4px;/)
+    expect(coreActions).not.toMatch(/order:|margin-inline-start:/)
+    expect(suiteActions).toMatch(/gap:\s*6px;/)
+    expect(suiteActions).toMatch(/order:\s*2;/)
+    expect(suiteActions).toMatch(/margin-inline-start:\s*auto;/)
+  })
+
   test('elects exactly one oldest-message owner and restores native ownership by default', () => {
     expect(quickToolbarOwnsOldestMessage(false, {
       enabled: true,
@@ -291,7 +311,9 @@ describe('ChatView native select-messages toolbar', () => {
           const toolbar = document.querySelector<HTMLElement>('[data-spindle-mount="chat_top_dock"]')
           expect(toolbar).not.toBeNull()
 
-          const expectedSide = suiteEnabled && persistedSide.value === 'left' ? 'left' : 'right'
+          const expectedSide = suiteEnabled
+            ? (persistedSide.value === 'left' ? 'left' : 'right')
+            : null
           expectCompleteToolbarAttributes(toolbar!, expectedSide)
 
           const nativeGroups = document.querySelectorAll('div[class*="nativeDockActions"]')
@@ -361,14 +383,16 @@ describe('ChatView native select-messages toolbar', () => {
     }
   })
 
-  test('InputArea removes the Suite connection picker and gear when the Suite is unavailable', async () => {
+  test('InputArea removes the Suite picker while retaining the native customizer', async () => {
     const source = await Bun.file(resolve(import.meta.dir, 'InputArea.tsx')).text()
 
     expect(source).toContain("const hasLumiverseSuite = useStore((state) => hasEnabledFrontendExtension(state.extensions, 'lumiverse_suite'))")
     expect(source).toMatch(/connectionsPicker:\s*hasLumiverseSuite\s*\?\s*\(\(\)\s*=>/)
     expect(source).toContain('enableReorder={hasLumiverseSuite && enableToolbarIconReorder}')
-    expect(source).toMatch(/\{hasLumiverseSuite && showComposerCustomizeGear && \(/)
-    expect(source).toMatch(/\{hasLumiverseSuite && customizeOpen && \(/)
+    expect(source).toMatch(/\{showComposerCustomizeGear && \(/)
+    expect(source).toMatch(/\{customizeOpen && \(/)
+    expect(source).not.toMatch(/\{hasLumiverseSuite && showComposerCustomizeGear && \(/)
+    expect(source).not.toMatch(/\{hasLumiverseSuite && customizeOpen && \(/)
   })
 })
 

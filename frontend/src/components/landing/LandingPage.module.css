@@ -395,10 +395,10 @@
   box-sizing: border-box;
 }
 
-.chatsLeaving {
+.routeLeaving {
   pointer-events: none;
-  /* One temporary compositor layer for the whole gallery is cheaper than
-     promoting every card independently. This class disappears on route exit. */
+  /* One temporary compositor layer for the whole landing surface keeps the
+     header, toolbar, search controls, and cards in the same route transition. */
   will-change: transform, opacity;
   backface-visibility: hidden;
   transform-origin: 50% 50%;

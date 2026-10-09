@@ -45,8 +45,10 @@ interface QueueTask<T> {
   revision: number | string | null;
   enqueuedAt: number;
   startedAt: number | null;
+  controller: AbortController;
+  supersededReason: string | null;
   preflight?: () => Promise<PreflightDecision> | PreflightDecision;
-  run: () => Promise<T>;
+  run: (signal: AbortSignal) => Promise<T>;
   resolve: (result: ChatPipelineTaskResult<T>) => void;
   reject: (reason?: unknown) => void;
 }
@@ -69,7 +71,7 @@ export interface EnqueueChatPipelineTaskOptions<T> {
   dedupeKey?: string;
   revision?: number | string | null;
   preflight?: () => Promise<PreflightDecision> | PreflightDecision;
-  run: () => Promise<T>;
+  run: (signal: AbortSignal) => Promise<T>;
 }
 
 const lanes = new Map<string, ChatPipelineLane>();
@@ -184,6 +186,20 @@ function supersedeQueuedDedupeMatch(
   lane.queue = survivors;
 }
 
+function preemptActiveCortexTask(
+  lane: ChatPipelineLane,
+  incomingKind: ChatPipelineTaskKind,
+): void {
+  if (incomingKind !== "chunk_rebuild") return;
+  const active = lane.activeTask;
+  if (!active || active.kind === "chunk_rebuild" || active.controller.signal.aborted) return;
+
+  const reason = `superseded_by_${incomingKind}`;
+  active.supersededReason = reason;
+  active.controller.abort(new DOMException(reason, "AbortError"));
+  touchLane(lane);
+}
+
 async function pumpLane(lane: ChatPipelineLane): Promise<void> {
   if (lane.processing) return;
   lane.processing = true;
@@ -200,15 +216,32 @@ async function pumpLane(lane: ChatPipelineLane): Promise<void> {
         if (task.preflight) {
           const decision = await task.preflight();
           if (decision.action === "skip") {
-            settleSkipped(task, decision.reason, lane);
+            if (task.supersededReason) {
+              settleSuperseded(task, task.supersededReason, lane);
+            } else {
+              settleSkipped(task, decision.reason, lane);
+            }
             continue;
           }
         }
 
-        const value = await task.run();
-        settleCompleted(task as QueueTask<unknown>, value, lane);
+        if (task.supersededReason) {
+          settleSuperseded(task, task.supersededReason, lane);
+          continue;
+        }
+
+        const value = await task.run(task.controller.signal);
+        if (task.supersededReason) {
+          settleSuperseded(task, task.supersededReason, lane);
+        } else {
+          settleCompleted(task as QueueTask<unknown>, value, lane);
+        }
       } catch (err) {
-        task.reject(err);
+        if (task.supersededReason) {
+          settleSuperseded(task, task.supersededReason, lane);
+        } else {
+          task.reject(err);
+        }
       } finally {
         lane.activeTask = null;
         touchLane(lane);
@@ -236,6 +269,8 @@ export function enqueueChatPipelineTask<T>(
       revision: options.revision ?? null,
       enqueuedAt: Date.now(),
       startedAt: null,
+      controller: new AbortController(),
+      supersededReason: null,
       preflight: options.preflight,
       run: options.run,
       resolve,
@@ -252,6 +287,8 @@ export function enqueueChatPipelineTask<T>(
     if (task.exclusive) {
       supersedeQueuedIngestions(lane, `superseded_by_${task.kind}`);
     }
+
+    preemptActiveCortexTask(lane, task.kind);
 
     lane.queue.push(task as QueueTask<unknown>);
     touchLane(lane);

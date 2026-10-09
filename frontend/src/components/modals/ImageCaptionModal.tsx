@@ -9,6 +9,7 @@ import styles from './ImageCaptionModal.module.css'
 
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif']
 const MAX_SIZE_BYTES = 20 * 1024 * 1024
+const PROMPT_COMMIT_DELAY_MS = 500
 
 async function fetchImageAsBase64(url: string): Promise<{ data: string; mime: string }> {
   const res = await fetch(url, { credentials: 'include' })
@@ -30,6 +31,8 @@ export default function ImageCaptionModal() {
   const activeModal = useStore((s) => s.activeModal)
   const closeModal = useStore((s) => s.closeModal)
   const promptPresets = useStore((s) => s.imageGeneration?.promptPresets || [])
+  const savedPrompt = useStore((s) => s.imageGeneration?.captionPrompt || '')
+  const setImageGenSettings = useStore((s) => s.setImageGenSettings)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const characters = useStore((s) => s.characters)
   const activePersonaId = useStore((s) => s.activePersonaId)
@@ -44,7 +47,7 @@ export default function ImageCaptionModal() {
 
   const [imageData, setImageData] = useState<string | null>(null)
   const [imageMime, setImageMime] = useState<string>('image/png')
-  const [prompt, setPrompt] = useState('')
+  const [prompt, setPrompt] = useState(savedPrompt)
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(null)
   const [caption, setCaption] = useState('')
   const [busy, setBusy] = useState(false)
@@ -53,6 +56,11 @@ export default function ImageCaptionModal() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [dragOver, setDragOver] = useState(false)
   const [loadingAvatar, setLoadingAvatar] = useState(false)
+  const promptRef = useRef(savedPrompt)
+  const savedPromptRef = useRef(savedPrompt)
+  const promptCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  savedPromptRef.current = savedPrompt
 
   const captioningPresets = promptPresets.filter(
     (p: ImageGenPromptPreset) => p.kind === 'captioning',
@@ -62,13 +70,47 @@ export default function ImageCaptionModal() {
     if (!isOpen) return
     setImageData(null)
     setImageMime('image/png')
-    setPrompt('')
+    promptRef.current = savedPromptRef.current
+    setPrompt(savedPromptRef.current)
     setSelectedPresetId(null)
     setCaption('')
     setError(null)
     setBusy(false)
     setCopied(false)
   }, [isOpen])
+
+  const commitPrompt = useCallback((nextPrompt: string) => {
+    if (nextPrompt === savedPromptRef.current) return
+    savedPromptRef.current = nextPrompt
+    setImageGenSettings({ captionPrompt: nextPrompt })
+  }, [setImageGenSettings])
+
+  const flushPromptCommit = useCallback(() => {
+    if (promptCommitTimerRef.current !== null) {
+      clearTimeout(promptCommitTimerRef.current)
+      promptCommitTimerRef.current = null
+    }
+    commitPrompt(promptRef.current)
+  }, [commitPrompt])
+
+  const updatePrompt = useCallback((nextPrompt: string) => {
+    promptRef.current = nextPrompt
+    setPrompt(nextPrompt)
+    if (promptCommitTimerRef.current !== null) clearTimeout(promptCommitTimerRef.current)
+    promptCommitTimerRef.current = setTimeout(() => {
+      promptCommitTimerRef.current = null
+      commitPrompt(nextPrompt)
+    }, PROMPT_COMMIT_DELAY_MS)
+  }, [commitPrompt])
+
+  // A close can happen before the debounce expires (including Escape or a
+  // backdrop click), so flush the latest local draft before this modal unmounts.
+  useEffect(() => () => flushPromptCommit(), [flushPromptCommit])
+
+  const handleClose = useCallback(() => {
+    flushPromptCommit()
+    closeModal()
+  }, [closeModal, flushPromptCommit])
 
   const loadFile = useCallback((file: File) => {
     if (!ACCEPTED_TYPES.includes(file.type)) {
@@ -146,6 +188,7 @@ export default function ImageCaptionModal() {
 
   const generate = async () => {
     if (!imageData) return
+    flushPromptCommit()
     setBusy(true)
     setError(null)
     setCopied(false)
@@ -180,7 +223,7 @@ export default function ImageCaptionModal() {
   if (!isOpen) return null
 
   return (
-    <ModalShell isOpen={isOpen} onClose={closeModal} maxWidth={560} maxHeight="90vh" className={styles.modal}>
+    <ModalShell isOpen={isOpen} onClose={handleClose} maxWidth={560} maxHeight="90vh" className={styles.modal}>
       <div className={styles.header}>
         <h3 className={styles.title}>Image Captioner</h3>
         <p className={styles.subtitle}>
@@ -271,7 +314,7 @@ export default function ImageCaptionModal() {
                   setSelectedPresetId(id)
                   if (id) {
                     const p = captioningPresets.find((pr) => pr.id === id)
-                    if (p) setPrompt(p.prompt)
+                    if (p) updatePrompt(p.prompt)
                   }
                 }}
               >
@@ -285,7 +328,7 @@ export default function ImageCaptionModal() {
           <textarea
             className={styles.textarea}
             value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
+            onChange={(e) => updatePrompt(e.target.value)}
             placeholder="Describe this image in detail using concise image-generation tags..."
             rows={3}
           />
@@ -315,7 +358,7 @@ export default function ImageCaptionModal() {
         {error && <p className={styles.error}>{error}</p>}
 
         <div className={styles.actions}>
-          <button type="button" className={`${styles.btn} ${styles.btnCancel}`} onClick={closeModal} disabled={busy}>
+          <button type="button" className={`${styles.btn} ${styles.btnCancel}`} onClick={handleClose} disabled={busy}>
             Close
           </button>
           <button

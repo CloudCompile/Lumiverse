@@ -8,7 +8,7 @@ const LONG: RequestOptions = { timeout: 120_000 }
 
 export type GenerationType = 'normal' | 'continue' | 'regenerate' | 'swipe' | 'impersonate' | 'quiet'
 
-export type ImpersonateMode = 'prompts' | 'oneliner' | 'sovereign_hand'
+export type ImpersonateMode = 'prompts' | 'preset' | 'oneliner' | 'sovereign_hand'
 
 export interface GenerateRequest {
   chat_id: string
@@ -60,6 +60,8 @@ export interface SummarizeRequest {
   chat_id: string
   /** Number of recent messages to include in the prompt. */
   message_context: number
+  /** Number of newest messages to exclude from the prompt. */
+  message_lag?: number
   /** Previously stored summary text (may be empty). */
   existingSummary?: string
   /** Active persona / user name. */
@@ -294,6 +296,9 @@ export interface GenerationStatusResponse {
   completedMessageId?: string
   completedAt?: number
   error?: string
+  errorCode?: string
+  errorMessage?: string
+  connectionName?: string
 }
 
 export interface ActiveGenerationEntry {

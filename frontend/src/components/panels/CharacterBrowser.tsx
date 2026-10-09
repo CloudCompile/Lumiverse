@@ -7,6 +7,8 @@ import { charactersApi } from '@/api/characters'
 import { worldBooksApi } from '@/api/world-books'
 import { toast } from '@/lib/toast'
 import { formatTagLibraryImportToastMessage } from '@/lib/tagLibraryImportToast'
+import { characterFilesFromDrop } from '@/lib/character-file-drop'
+import { subscribeWindowFileImport } from '@/lib/window-file-import'
 import { useStore } from '@/store'
 import CharacterToolbar from './character-browser/CharacterToolbar'
 import ChubExpressionBackfillBanner from './character-browser/ChubExpressionBackfillBanner'
@@ -241,12 +243,15 @@ export default function CharacterBrowser() {
   const [dragging, setDragging] = useState(false)
   const [tagLibraryImporting, setTagLibraryImporting] = useState(false)
   const dragCounterRef = useRef(0)
+  const importDroppedFiles = browser.importFiles
+
+  useEffect(() => subscribeWindowFileImport('character', (files) => importDroppedFiles(files)), [importDroppedFiles])
 
   // Drag and drop handlers
   const handleDragEnter = useCallback((e: React.DragEvent) => {
     e.preventDefault()
     dragCounterRef.current++
-    if (e.dataTransfer.types.includes('Files')) {
+    if (e.dataTransfer.types.length === 0 || e.dataTransfer.types.includes('Files')) {
       setDragging(true)
     }
   }, [])
@@ -268,9 +273,7 @@ export default function CharacterBrowser() {
       e.preventDefault()
       dragCounterRef.current = 0
       setDragging(false)
-      const files = Array.from(e.dataTransfer.files).filter((f) =>
-        /\.(json|png|charx|jpe?g)$/i.test(f.name)
-      )
+      const files = characterFilesFromDrop(e.dataTransfer.files)
       if (files.length > 0) {
         browser.importFiles(files)
       }

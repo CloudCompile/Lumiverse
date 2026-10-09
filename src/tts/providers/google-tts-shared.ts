@@ -1,10 +1,11 @@
-import type { TtsRequest, TtsStreamChunk } from "../types";
+import type { TtsRequest, TtsStreamChunk, TtsVoice } from "../types";
 
 /** Gemini text-to-speech models. TTS-only list: no text/generation models. */
-export const GOOGLE_TTS_MODELS = [
-  { id: "gemini-3.1-flash-tts-preview", label: "Gemini 3.1 Flash TTS (latest)" },
+export const GOOGLE_TTS_MODELS: Array<{ id: string; label: string }> = [
+  { id: "gemini-3.1-flash-tts-preview", label: "Gemini 3.1 Flash TTS (legacy)" },
   { id: "gemini-2.5-pro-preview-tts", label: "Gemini 2.5 Pro TTS (high quality)" },
-  { id: "gemini-2.5-flash-preview-tts", label: "Gemini 2.5 Flash TTS (fast)" },
+  { id: "gemini-3.8-flash-lite-tts", label: "Gemini 3.8 Flash Lite TTS (fast)" },
+  { id: "gemini-3.8-flash-tts", label: "Gemini 3.8 Flash TTS (latest)" },
 ];
 
 /** Keep a model ID only when it names a speech/TTS model. */
@@ -15,39 +16,42 @@ export function isTtsModelId(id: string): boolean {
 /**
  * Prebuilt Gemini voices, mapped to readable names with documented gender.
  * IDs are the API voice names; `language` marks the documented voice locale.
+ * Gender: https://docs.cloud.google.com/text-to-speech/docs/gemini-tts#voice_options
+ * Tone descriptions paraphrase Google's voice style labels:
+ * https://ai.google.dev/gemini-api/docs/speech-generation#voice_options
  */
 export const GOOGLE_TTS_VOICES = [
-  { id: "Achird", name: "Achird", language: "en-US", gender: "masculine" },
-  { id: "Achernar", name: "Achernar", language: "en-US", gender: "feminine" },
-  { id: "Algenib", name: "Algenib", language: "en-US", gender: "masculine" },
-  { id: "Algieba", name: "Algieba", language: "en-US", gender: "feminine" },
-  { id: "Alnilam", name: "Alnilam", language: "en-US", gender: "masculine" },
-  { id: "Aoede", name: "Aoede", language: "en-US", gender: "feminine" },
-  { id: "Autonoe", name: "Autonoe", language: "en-US", gender: "feminine" },
-  { id: "Callirrhoe", name: "Callirrhoe", language: "en-US", gender: "feminine" },
-  { id: "Charon", name: "Charon", language: "en-US", gender: "masculine" },
-  { id: "Despina", name: "Despina", language: "en-US", gender: "feminine" },
-  { id: "Enceladus", name: "Enceladus", language: "en-US", gender: "masculine" },
-  { id: "Erinome", name: "Erinome", language: "en-US", gender: "feminine" },
-  { id: "Fenrir", name: "Fenrir", language: "en-US", gender: "masculine" },
-  { id: "Gacrux", name: "Gacrux", language: "en-US", gender: "feminine" },
-  { id: "Iapetus", name: "Iapetus", language: "en-US", gender: "masculine" },
-  { id: "Kore", name: "Kore", language: "en-US", gender: "feminine" },
-  { id: "Laomedeia", name: "Laomedeia", language: "en-US", gender: "feminine" },
-  { id: "Leda", name: "Leda", language: "en-US", gender: "feminine" },
-  { id: "Orus", name: "Orus", language: "en-US", gender: "masculine" },
-  { id: "Pulcherrima", name: "Pulcherrima", language: "en-US", gender: "feminine" },
-  { id: "Puck", name: "Puck", language: "en-US", gender: "masculine" },
-  { id: "Rasalgethi", name: "Rasalgethi", language: "en-US", gender: "masculine" },
-  { id: "Sadachbia", name: "Sadachbia", language: "en-US", gender: "masculine" },
-  { id: "Sadaltager", name: "Sadaltager", language: "en-US", gender: "masculine" },
-  { id: "Schedar", name: "Schedar", language: "en-US", gender: "masculine" },
-  { id: "Sulafat", name: "Sulafat", language: "en-US", gender: "feminine" },
-  { id: "Umbriel", name: "Umbriel", language: "en-US", gender: "masculine" },
-  { id: "Vindemiatrix", name: "Vindemiatrix", language: "en-US", gender: "feminine" },
-  { id: "Zephyr", name: "Zephyr", language: "en-US", gender: "feminine" },
-  { id: "Zubenelgenubi", name: "Zubenelgenubi", language: "en-US", gender: "masculine" },
-];
+  { id: "Achird", name: "Achird", language: "en-US", gender: "masculine", description: "Friendly, approachable delivery." },
+  { id: "Achernar", name: "Achernar", language: "en-US", gender: "feminine", description: "Soft, delicate delivery." },
+  { id: "Algenib", name: "Algenib", language: "en-US", gender: "masculine", description: "Gravelly, textured voice." },
+  { id: "Algieba", name: "Algieba", language: "en-US", gender: "masculine", description: "Smooth, flowing delivery." },
+  { id: "Alnilam", name: "Alnilam", language: "en-US", gender: "masculine", description: "Firm, steady delivery." },
+  { id: "Aoede", name: "Aoede", language: "en-US", gender: "feminine", description: "Breezy, relaxed delivery." },
+  { id: "Autonoe", name: "Autonoe", language: "en-US", gender: "feminine", description: "Bright, buoyant tone." },
+  { id: "Callirrhoe", name: "Callirrhoe", language: "en-US", gender: "feminine", description: "Easygoing, relaxed delivery." },
+  { id: "Charon", name: "Charon", language: "en-US", gender: "masculine", description: "Informative, explanatory delivery." },
+  { id: "Despina", name: "Despina", language: "en-US", gender: "feminine", description: "Smooth, flowing delivery." },
+  { id: "Enceladus", name: "Enceladus", language: "en-US", gender: "masculine", description: "Breathy, airy voice." },
+  { id: "Erinome", name: "Erinome", language: "en-US", gender: "feminine", description: "Clear, articulate delivery." },
+  { id: "Fenrir", name: "Fenrir", language: "en-US", gender: "masculine", description: "Excitable, animated tone." },
+  { id: "Gacrux", name: "Gacrux", language: "en-US", gender: "feminine", description: "Mature, seasoned tone." },
+  { id: "Iapetus", name: "Iapetus", language: "en-US", gender: "masculine", description: "Clear, articulate delivery." },
+  { id: "Kore", name: "Kore", language: "en-US", gender: "feminine", description: "Firm, assured delivery." },
+  { id: "Laomedeia", name: "Laomedeia", language: "en-US", gender: "feminine", description: "Upbeat, cheerful tone." },
+  { id: "Leda", name: "Leda", language: "en-US", gender: "feminine", description: "Youthful, light tone." },
+  { id: "Orus", name: "Orus", language: "en-US", gender: "masculine", description: "Firm, assured delivery." },
+  { id: "Pulcherrima", name: "Pulcherrima", language: "en-US", gender: "feminine", description: "Forward, direct delivery." },
+  { id: "Puck", name: "Puck", language: "en-US", gender: "masculine", description: "Upbeat, cheerful tone." },
+  { id: "Rasalgethi", name: "Rasalgethi", language: "en-US", gender: "masculine", description: "Informative, explanatory delivery." },
+  { id: "Sadachbia", name: "Sadachbia", language: "en-US", gender: "masculine", description: "Lively, spirited tone." },
+  { id: "Sadaltager", name: "Sadaltager", language: "en-US", gender: "masculine", description: "Knowledgeable, considered delivery." },
+  { id: "Schedar", name: "Schedar", language: "en-US", gender: "masculine", description: "Even, balanced delivery." },
+  { id: "Sulafat", name: "Sulafat", language: "en-US", gender: "feminine", description: "Warm, welcoming tone." },
+  { id: "Umbriel", name: "Umbriel", language: "en-US", gender: "masculine", description: "Easygoing, relaxed delivery." },
+  { id: "Vindemiatrix", name: "Vindemiatrix", language: "en-US", gender: "feminine", description: "Gentle, soft delivery." },
+  { id: "Zephyr", name: "Zephyr", language: "en-US", gender: "feminine", description: "Bright, buoyant tone." },
+  { id: "Zubenelgenubi", name: "Zubenelgenubi", language: "en-US", gender: "masculine", description: "Casual, conversational delivery." },
+] satisfies TtsVoice[];
 
 export const GOOGLE_TTS_PARAMETERS = {
   language_code: {
@@ -95,15 +99,15 @@ function parsePcmRate(mimeType: string | undefined): number {
   return Number.isFinite(rate) && rate > 0 ? rate : 24000;
 }
 
-function base64ToBytes(base64: string): Uint8Array {
+function base64ToBytes(base64: string): Uint8Array<ArrayBuffer> {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes;
 }
 
-/** Wrap raw 16-bit mono PCM in a WAV container so browsers can play it. */
-export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
+/** Wrap raw 16-bit PCM in a WAV container so browsers can play it. */
+export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number, channels = 1): ArrayBuffer {
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
   const writeAscii = (offset: number, text: string) => {
@@ -115,10 +119,10 @@ export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
   writeAscii(12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
+  view.setUint16(22, channels, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
-  view.setUint16(32, 2, true);
+  view.setUint32(28, sampleRate * channels * 2, true);
+  view.setUint16(32, channels * 2, true);
   view.setUint16(34, 16, true);
   writeAscii(36, "data");
   view.setUint32(40, pcm.length, true);
@@ -128,6 +132,17 @@ export function wrapPcmInWav(pcm: Uint8Array, sampleRate: number): ArrayBuffer {
   return out.buffer;
 }
 
+function decodeGeminiTtsAudio(base64: string, mimeType: string | undefined): ArrayBuffer {
+  const bytes = base64ToBytes(base64);
+  const mediaType = (mimeType || "").split(";")[0].trim().toLowerCase();
+  const isWav = ["audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave"].includes(mediaType)
+    || (bytes.length >= 12
+      && String.fromCharCode(...bytes.subarray(0, 4)) === "RIFF"
+      && String.fromCharCode(...bytes.subarray(8, 12)) === "WAVE");
+
+  return isWav ? bytes.buffer : wrapPcmInWav(bytes, parsePcmRate(mimeType));
+}
+
 /** Extract the first inline audio payload from a generateContent response. */
 export function extractGeminiTtsAudio(data: any): { audioData: ArrayBuffer; contentType: string } {
   const parts: any[] = data?.candidates?.[0]?.content?.parts || [];
@@ -135,7 +150,7 @@ export function extractGeminiTtsAudio(data: any): { audioData: ArrayBuffer; cont
     const inline = part?.inlineData || part?.inline_data;
     if (inline?.data) {
       const mimeType: string | undefined = inline.mimeType || inline.mime_type;
-      const audioData = wrapPcmInWav(base64ToBytes(inline.data), parsePcmRate(mimeType));
+      const audioData = decodeGeminiTtsAudio(inline.data, mimeType);
       return { audioData, contentType: "audio/wav" };
     }
   }
@@ -149,7 +164,7 @@ export function* extractGeminiTtsAudioChunks(data: any): Generator<TtsStreamChun
     const inline = part?.inlineData || part?.inline_data;
     if (inline?.data) {
       const mimeType: string | undefined = inline.mimeType || inline.mime_type;
-      const audioData = wrapPcmInWav(base64ToBytes(inline.data), parsePcmRate(mimeType));
+      const audioData = decodeGeminiTtsAudio(inline.data, mimeType);
       yield {
         data: new Uint8Array(audioData),
         done: false,

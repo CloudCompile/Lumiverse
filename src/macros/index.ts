@@ -1,6 +1,12 @@
 export { evaluate } from "./MacroEvaluator";
 export { buildEnv, cloneEnv, mergeDynamicMacros, resolveGroupCharacterNames, resolvePersonaPronouns, withPromptBlockContext, type BuildEnvContext } from "./MacroEnv";
 export { registry } from "./MacroRegistry";
+export {
+  LITERAL_BRACE_CLOSE,
+  LITERAL_BRACE_OPEN,
+  restoreLiteralBraces,
+  shieldLiteralBraces,
+} from "./literal-braces";
 export type {
   MacroEnv,
   MacroHandler,
@@ -21,6 +27,7 @@ import { registerChatMacros } from "./definitions/conversation";
 import { registerTimeMacros } from "./definitions/temporal";
 import { registerRandomMacros } from "./definitions/entropy";
 import { registerVariableMacros } from "./definitions/vars";
+import { registerJsonMacros } from "./definitions/json";
 import { registerStateMacros } from "./definitions/runtime";
 import { registerReasoningMacros } from "./definitions/cot";
 import { registerLumiaMacros } from "./definitions/lumia";
@@ -57,6 +64,7 @@ export function initMacros(): void {
   registerTimeMacros();
   registerRandomMacros();
   registerVariableMacros();
+  registerJsonMacros();
   registerStateMacros();
   registerReasoningMacros();
   registerLumiaMacros();

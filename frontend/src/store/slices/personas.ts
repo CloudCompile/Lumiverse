@@ -120,6 +120,7 @@ export function resolveAutoPersonaBinding(params: {
 
 export const createPersonasSlice: StateCreator<PersonasSlice> = (set, get) => ({
   personas: [],
+  personasLoaded: false,
   activePersonaId: null,
   recentPersonaIds: [],
   characterPersonaBindings: {},
@@ -146,7 +147,7 @@ export const createPersonasSlice: StateCreator<PersonasSlice> = (set, get) => ({
         settingsApi.put('recentPersonaIds', recentPersonaIds).catch(() => {})
       }
 
-      return { personas, activePersonaId, recentPersonaIds }
+      return { personas, personasLoaded: true, activePersonaId, recentPersonaIds }
     }),
   setActivePersona: (id) => {
     const recentPersonaIds = id

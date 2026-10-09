@@ -3,8 +3,7 @@
  *
  * Per installation: refresh credentials if stale, and push a declaration
  * update when the backend version differs from the one last accepted by
- * Illarin. Names and scopes are immutable on update — they were fixed at
- * link time, so only version/capabilities/targets travel here.
+ * Illarin. Names and permissions cannot change through an update.
  */
 
 import { join } from "path";
@@ -26,18 +25,15 @@ export async function readBackendVersion(): Promise<string> {
 }
 
 function requestedScopes(instance: IllarinInstance): IllarinScope[] {
-  // The link-time declaration carries the requested scopes; the granted
-  // column is the server's answer and may be narrower. Fall back gracefully.
-  const declared = instance.lastDeclaration?.scopes;
+  const declared = instance.lastDeclaration?.permissions ?? instance.lastDeclaration?.scopes;
   if (Array.isArray(declared)) {
-    return declared.filter((s): s is IllarinScope => typeof s === "string");
+    return declared.flatMap((scope): IllarinScope[] => scope === "asset:receive" ? ["work:receive"] :
+      scope === "work:receive" || scope === "library:sync" ? [scope] : []);
   }
   return instance.scopes as IllarinScope[];
 }
 
 async function warmOne(instance: IllarinInstance, currentVersion: string): Promise<void> {
-  if (instance.lastDeclaration?.applicationVersion === currentVersion) return;
-
   const accessToken = await getValidAccessToken(instance.userId);
   if (!accessToken) return; // Torn down during refresh; event already emitted.
 
@@ -46,7 +42,9 @@ async function warmOne(instance: IllarinInstance, currentVersion: string): Promi
     instanceName: instance.instanceName,
     applicationVersion: currentVersion,
     scopes: requestedScopes(instance),
+    installsExtensions: svc.canInstallExtensions(instance.userId),
   });
+  if (JSON.stringify(instance.lastDeclaration) === JSON.stringify(declaration)) return;
   const update = buildDeclarationUpdate(declaration);
   try {
     await updateInstanceDeclaration(instance.illarinUrl, accessToken, update);

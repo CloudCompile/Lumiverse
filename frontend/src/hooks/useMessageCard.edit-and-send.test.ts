@@ -90,6 +90,8 @@ type MessageEditDraft = {
 }
 
 const storeState = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
+  showEditAndSend: true,
   editingMessageId: 'user-1' as string | null,
   messageEditDraft: null as MessageEditDraft | null,
   setEditingMessageId,
@@ -101,7 +103,12 @@ const storeState = {
   removeMessage: mock(() => {}),
   openModal: mock(() => {}),
   activeCharacterId: 'char-1',
-  characters: [] as Array<{ id: string; name: string }>,
+  characters: [] as Array<{ id: string; name: string; extensions?: Record<string, any> }>,
+  activeChatId: 'chat-1',
+  currentExpression: null as string | null,
+  currentExpressionImageId: null as string | null,
+  expressionCharacterId: null as string | null,
+  groupExpressions: {} as Record<string, { label: string; imageId: string }>,
   isStreaming: false,
   totalChatLength: 1,
   messages: [user] as Message[],
@@ -176,7 +183,7 @@ mock.module('@/i18n', () => ({
   default: { t: (key: string) => key },
 }))
 mock.module('@/lib/avatarUrls', () => ({
-  getCharacterAvatarThumbUrlById: () => '',
+  getCharacterAvatarThumbUrlById: (id: string) => `character-thumb:${id}`,
   getCharacterAvatarLargeUrlById: () => '',
   getCharacterAvatarUrlById: () => '',
   getPersonaAvatarThumbUrlById: () => '',
@@ -184,10 +191,10 @@ mock.module('@/lib/avatarUrls', () => ({
   getPersonaAvatarUrlById: () => '',
   getPersonaAvatarTiers: () => ({ sm: '', lg: '', full: '' }),
   getCharacterAvatarTiers: () => ({ sm: '', lg: '', full: '' }),
-  getImageTiers: () => ({ sm: '', lg: '', full: '' }),
+  getImageTiers: (id: string) => ({ sm: `image-small:${id}`, lg: `image-large:${id}`, full: `image:${id}` }),
 }))
 mock.module('@/api/images', () => ({
-  imagesApi: { largeUrl: () => '', smallUrl: () => '', url: () => '' },
+  imagesApi: { largeUrl: (id: string) => `image-large:${id}`, smallUrl: (id: string) => `image-small:${id}`, url: (id: string) => `image:${id}` },
 }))
 mock.module('@/lib/multiplayerMessageAuthor', () => ({
   resolveMultiplayerMessageAuthor: () => null,
@@ -250,6 +257,13 @@ async function unmount(root: Root): Promise<void> {
 
 describe('useMessageCard edit-and-send', () => {
   beforeEach(() => {
+    storeState.extensions = [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }]
+    storeState.showEditAndSend = true
+    storeState.characters = []
+    storeState.currentExpression = null
+    storeState.currentExpressionImageId = null
+    storeState.expressionCharacterId = null
+    storeState.groupExpressions = {}
     editAndSend.mockClear()
     editAndSend.mockResolvedValue({
       branchChatId: 'branch-1',
@@ -330,6 +344,18 @@ describe('useMessageCard edit-and-send', () => {
     expect(storeState.editingMessageId).toBeNull()
     expect(storeState.messageEditDraft).toBeNull()
     expect(navigate).toHaveBeenCalledWith('/chat/branch-1')
+  })
+
+  test('a retained edit-and-send handler does nothing after Suite becomes unavailable', async () => {
+    await renderHook(user)
+    const retainedHandler = hookSurface.handleEditAndSend
+    for (const extensions of [[], [{ identifier: 'lumiverse_suite', enabled: false, has_frontend: true }]]) {
+      storeState.extensions = extensions
+      await act(async () => { await retainedHandler() })
+    }
+    expect(editAndSend).not.toHaveBeenCalled()
+    expect(messagesUpdate).not.toHaveBeenCalled()
+    expect(clearMessageEdit).not.toHaveBeenCalled()
   })
 
   test('in-place mode submits the flag without navigating to a branch', async () => {
@@ -446,4 +472,38 @@ describe('useMessageCard edit-and-send', () => {
     expect(navigate).toHaveBeenCalledWith('/chat/branch-1')
     console.error = originalError
   })
+
+  test('message avatar reacts to expression state and reverts when opted out', async () => {
+    const config = { enabled: true, useAsAvatar: true, defaultExpression: 'neutral', mappings: { neutral: 'neutral-image', happy: 'happy-image' } }
+    storeState.characters = [{ id: 'char-1', name: 'Character', extensions: { expressions: config } }]
+    const assistant = { ...user, id: 'assistant-1', is_user: false, name: 'Character' }
+    storeState.messages = [assistant]
+    await renderHook(assistant)
+    expect(hookSurface.avatarUrl).toBe('image-small:neutral-image')
+    await act(async () => {
+      storeState.currentExpression = 'happy'
+      storeState.currentExpressionImageId = 'happy-image'
+      storeState.expressionCharacterId = 'char-1'
+      notifyStore()
+    })
+    expect(hookSurface.avatarUrl).toBe('image-small:happy-image')
+    expect(hookSurface.fullAvatarUrl).toBe('image:happy-image')
+    expect(hookSurface.avatar.cropped.sm).toBe('image-small:happy-image')
+    expect(hookSurface.avatar.original.full).toBe('image:happy-image')
+    await act(async () => {
+      config.useAsAvatar = false
+      notifyStore()
+    })
+    expect(hookSurface.avatarUrl).toBe('character-thumb:char-1')
+  })
+
+  test('expression avatars never replace a user/persona message avatar', async () => {
+    storeState.characters = [{ id: 'char-1', name: 'Character', extensions: {
+      expressions: { enabled: true, useAsAvatar: true, defaultExpression: 'neutral', mappings: { neutral: 'neutral-image' } },
+    } }]
+    await renderHook(user)
+    expect(hookSurface.avatarUrl).toBe('')
+    expect(hookSurface.avatar.cropped.sm).toBe('')
+  })
+
 })

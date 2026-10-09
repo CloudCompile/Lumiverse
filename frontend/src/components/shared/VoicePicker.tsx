@@ -4,6 +4,7 @@ import { useStore } from '@/store'
 import SearchableSelect from '@/components/shared/SearchableSelect'
 import ConnectionSelect from '@/components/shared/ConnectionSelect'
 import { ttsConnectionsApi } from '@/api/tts-connections'
+import { getTtsVoiceLabel, getTtsVoiceSublabel } from '@/lib/ttsVoiceLabels'
 import type { TtsVoice, VoiceRef } from '@/types/api'
 import styles from './VoicePicker.module.css'
 
@@ -105,8 +106,8 @@ export default function VoicePicker({
     const merged = dynamicVoices.length > 0 ? dynamicVoices : staticVoices
     const options = merged.map((v) => ({
       value: v.id,
-      label: v.name,
-      sublabel: v.language ?? undefined,
+      label: getTtsVoiceLabel(v),
+      sublabel: getTtsVoiceSublabel(v),
     }))
     // Preserve a manually-typed voice id that isn't in the list.
     if (value?.voice && !options.some((o) => o.value === value.voice)) {
@@ -155,6 +156,7 @@ export default function VoicePicker({
             value={value?.voice ?? ''}
             onChange={handleVoiceChange}
             options={voiceOptions}
+            showSelectedSublabel
             placeholder={voicesLoading ? t('loadingVoices') : t('selectVoice')}
             searchPlaceholder={t('searchVoices')}
             ariaLabel={t('voiceAria', { label: resolvedAriaLabel })}

@@ -144,7 +144,8 @@ describe('image connection hydration', () => {
     const saved = store.savedThemes[0]
     expect(saved.kind).toBe('pack')
     if (saved.kind !== 'pack') throw new Error('Expected a saved theme pack')
-    expect(saved.pack.theme).toEqual(currentTheme)
+    expect(saved.pack.name).toBe('Saved pack')
+    expect(saved.pack.theme).toEqual({ ...currentTheme, name: 'Saved pack' })
     expect(saved.pack.globalCSS).toBe('.current { color: blue; }')
     expect(saved.pack.components).toEqual({
       Message: { css: '.message {}', tsx: '', enabled: true },

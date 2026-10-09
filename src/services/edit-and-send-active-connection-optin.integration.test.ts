@@ -65,6 +65,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE characters (
     id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '', scenario TEXT NOT NULL DEFAULT '', first_mes TEXT NOT NULL DEFAULT '',
@@ -177,7 +182,7 @@ interface DispatchObservation {
    * make client-settable).
    */
   options: { origin?: string; connectionId?: string } | undefined;
-  /** The connection id the REAL resolution ladder settled on. */
+  /** The real pool's connection name, which equals the profile id in this fixture. */
   connectionId: string | undefined;
   /** The model the pool entry was registered with, when it got that far. */
   model: string | undefined;
@@ -197,11 +202,16 @@ function observeRealDispatches(): DispatchObservation[] {
   }));
   dispatcher.setEditAndSendStartGeneration(async (input, options) => {
     await generateSvc.startGeneration(input as never, options)
-      .catch(() => { /* the stubbed prompt assembly, not the resolution */ });
+      .catch((error: unknown) => {
+        if (!(error instanceof Error && error.message === "skip-assembly")) throw error;
+      });
+    const entry = pool.getPoolEntry(input.generationId);
+    expect(entry).toBeDefined();
+    expect(input).not.toHaveProperty("connection_id");
     observed.push({
-      options,
-      connectionId: (input as { connection_id?: string }).connection_id,
-      model: pool.getPoolEntry(input.generationId)?.model,
+      options: options && { origin: options.origin, connectionId: options.connectionId },
+      connectionId: entry?.connectionName,
+      model: entry?.model,
     });
     // Between paths, clear the in-memory generation state so a later dispatch
     // of a different row is resolved afresh rather than short-circuiting on a
@@ -366,7 +376,7 @@ describe("the committed connection survives live-state churn", () => {
     });
   });
 
-  test("switching activeProfileId after commit does not retarget a RETRY-TICK dispatch", async () => {
+  test("a failed legacy dispatch is never replayed by the periodic tick", async () => {
     seedSetting("quickToolbarSettings", { editAndSendAlwaysUseActiveConnection: true });
     const observed = observeRealDispatches();
 
@@ -384,15 +394,10 @@ describe("the committed connection survives live-state churn", () => {
     ).run(Date.now() - 60_000, USER, requestId);
 
     switchActiveProfileTo(BOUND);
-    expect(await dispatcher.dispatchPendingEditAndSendOutbox()).toBe(1);
-
-    expect(observed).toEqual([
-      {
-        options: { origin: "edit_and_send", connectionId: ACTIVE },
-        connectionId: ACTIVE,
-        model: "model-active",
-      },
-    ]);
+    expect(await dispatcher.dispatchPendingEditAndSendOutbox()).toBe(0);
+    dispatcher.reconcileEditAndSendOutbox();
+    expect(dispatcher.getGenerationOutboxByRequest(USER, "switch-retry", requestId)?.status).toBe("failed");
+    expect(observed).toEqual([]);
   });
 
   test("switching activeProfileId after commit does not retarget STARTUP RECOVERY", async () => {

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import { publishSsoCompletion } from '@/lib/ssoPopup'
 import styles from './LoginPage.module.css'
 
@@ -6,6 +7,17 @@ function sanitizeReturnTo(value: string | null): string {
   if (!value || !value.startsWith('/')) return '/'
   if (value.startsWith('//')) return '/'
   return value
+}
+
+function closeCompletionWindow() {
+  if ('__TAURI_INTERNALS__' in window) {
+    // A Tauri window.open target is a native WebviewWindow, which browser
+    // window.close() does not consistently destroy on every platform. The
+    // native command is deliberately restricted to the invoking SSO popup.
+    void invoke('close_current_sso_popup').catch(() => window.close())
+    return
+  }
+  window.close()
 }
 
 export default function SsoCompletePage() {
@@ -22,7 +34,7 @@ export default function SsoCompletePage() {
     publishSsoCompletion({ flow, providerId, flowId, ok: !error, error: error || undefined })
     const timer = window.setTimeout(() => {
       setCanClose(true)
-      window.close()
+      closeCompletionWindow()
       if (!window.opener) window.location.replace(returnTo)
     }, 350)
     return () => window.clearTimeout(timer)
@@ -36,7 +48,7 @@ export default function SsoCompletePage() {
         <p className={styles.ssoCompleteText}>
           {error || (canClose ? 'You can close this window and return to Lumiverse.' : 'Returning you to Lumiverse...')}
         </p>
-        {canClose && <button className={styles.ssoBtn} onClick={() => window.close()}>Close window</button>}
+        {canClose && <button className={styles.ssoBtn} onClick={closeCompletionWindow}>Close window</button>}
       </div>
     </div>
   )

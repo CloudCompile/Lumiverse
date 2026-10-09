@@ -27,14 +27,23 @@ import {
   type UpdateState,
 } from "./runner-client";
 import { loadSettings, saveSetting, type TraySettings } from "./settings";
+import { createDiscordPresenceRefreshQueue } from "./discord-presence";
+import { restoreDesktopSession, type DesktopUpdateResume } from "./update-resume";
+import { type InstanceConnection, LOCAL_INSTANCE_CONNECTION } from "./instance-connection";
+import {
+  pendingRemoteSnapshot,
+  type RemoteInstanceSnapshot,
+} from "./remote-instance";
 import trayMacIcon from "./assets/tray-mac.png";
 import trayWinIcon from "./assets/tray-win.png";
 
 const POLL_INTERVAL_MS = 15_000;
 // A cold Tauri build compiles the entire native dependency tree. This only
-// bounds the tray's wait; the runner enforces its own build deadline.
-const DESKTOP_REBUILD_TIMEOUT_MS = 35 * 60_000;
+// bounds the tray's wait; keep it above the runner's two-hour build deadline
+// so the request client can never become the earlier cutoff.
+const DESKTOP_REBUILD_TIMEOUT_MS = 2 * 60 * 60_000 + 5 * 60_000;
 const isMac = navigator.userAgent.includes("Mac");
+const isWindows = navigator.userAgent.includes("Windows");
 
 /**
  * Alerts and pickers go through Rust commands so they never parent to —
@@ -60,8 +69,45 @@ let updateState: UpdateState = { available: false, commitsBehind: 0, latestMessa
 // carrying desktop changes leaves this process running superseded code.
 let desktopShellStale = false;
 let desktopShellNoticeShown = false;
-let customFrontendUrl: string | null = null;
+let instanceConnection: InstanceConnection = LOCAL_INSTANCE_CONNECTION;
+let remoteSnapshot: RemoteInstanceSnapshot | null = null;
 let openIntegratedBrowserWhenReady = false;
+
+// ─── Discord Rich Presence ──────────────────────────────────────────────────
+// The tray fetches the active-chat snapshot on chat switches and polls the
+// instance's desktop API as a fallback. It relays each snapshot to the Rust
+// worker, which owns the Discord IPC connection. When
+// the Discord toggle is switched on without a usable desktop session, the
+// standard remote-instance OAuth sign-in runs once against the current
+// origin (local instances included) — always as a direct consequence of the
+// user's click, never from a background poll.
+
+interface DiscordPresenceSnapshot {
+  chatId: string | null;
+  characterName: string | null;
+  messageCount: number | null;
+  totalTokens: number | null;
+  model: string | null;
+  characterCount?: number | null;
+}
+
+type DiscordPresenceFetch =
+  | { state: "active"; snapshot: DiscordPresenceSnapshot }
+  | { state: "inactive" }
+  | { state: "disconnected" }
+  | { state: "reauth_required"; error: string | null }
+  | { state: "unreachable"; error: string | null };
+
+let discordPresenceEverActive = false;
+let discordPresenceIssueAlerted = false;
+
+function isRemoteMode(): boolean {
+  return instanceConnection.mode === "remote";
+}
+
+function remoteFrontendUrl(): string | null {
+  return instanceConnection.mode === "remote" ? instanceConnection.origin : null;
+}
 
 // ─── Menu items (created once, text/enabled updated in place) ───────────────
 
@@ -77,11 +123,22 @@ let checkUpdatesItem: MenuItem;
 let applyUpdateItem: MenuItem;
 let rebuildDesktopItem: MenuItem;
 let autoStartItem: CheckMenuItem;
+let discordRpcItem: CheckMenuItem;
 let loginItem: CheckMenuItem;
 let openIntegratedBrowserItem: MenuItem;
 let openDefaultBrowserItem: MenuItem;
 let reloadIntegratedBrowserItem: MenuItem;
-let floatingWidgetPocItem: Submenu;
+let remoteAuthItem: MenuItem;
+let remoteDisconnectItem: MenuItem;
+let desktopCaptureItem: MenuItem;
+let floatingWidgetsItem: Submenu;
+
+interface DesktopCaptureStatus {
+  enabled: boolean;
+  origin: string | null;
+  capabilities: { image: boolean; video: boolean; replay: boolean };
+  error: string | null;
+}
 
 interface DesktopWidgetCatalogEntry {
   id: string;
@@ -92,9 +149,36 @@ interface DesktopWidgetCatalogEntry {
   height: number;
 }
 
+interface DesktopWidgetPopoutState {
+  id: string;
+  poppedOut: boolean;
+}
+
 let desktopWidgetCatalog: DesktopWidgetCatalogEntry[] = [];
+const poppedOutWidgetIds = new Set<string>();
 
 function statusText(): string {
+  if (isRemoteMode()) {
+    const name = remoteSnapshot?.instance?.name ?? (
+      instanceConnection.mode === "remote"
+        ? instanceConnection.displayName ?? new URL(instanceConnection.origin).hostname
+        : "Remote instance"
+    );
+    switch (remoteSnapshot?.state) {
+      case "authorizing":
+        return `Signing in to ${name}…`;
+      case "connected":
+        return `${name} · connected`;
+      case "restricted":
+        return `${name} · status restricted`;
+      case "unreachable":
+        return `${name} · unreachable`;
+      case "reauth_required":
+        return `${name} · sign-in required`;
+      default:
+        return `${name} · sign-in required`;
+    }
+  }
   if (busyMessage) return busyMessage;
   // A dismissed dialog is easy to forget, and the symptom of a stale shell is
   // simply that the old behaviour persists. Keep the state visible in the
@@ -131,30 +215,44 @@ function formatUptime(startedAt: number | null): string {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+function formatElapsed(elapsedMs: number | null | undefined): string {
+  if (elapsedMs == null || elapsedMs < 0) return "—";
+  const totalMinutes = Math.floor(elapsedMs / 60_000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
 async function updateFrontendMenuText(): Promise<void> {
   const running = serverState === "running" || externalRunning;
-  const frontendAvailable = running || customFrontendUrl !== null;
+  const frontendAvailable = running || isRemoteMode();
   const visible = await invoke<boolean>("frontend_visible").catch(() => false);
   const exists = await invoke<boolean>("frontend_exists").catch(() => false);
 
-  await frontendItem.setText(visible ? "Close Lumiverse" : "Open Lumiverse");
-
+  await openIntegratedBrowserItem.setText(visible ? "Close Integrated Browser" : "Open Integrated Browser");
   await openIntegratedBrowserItem.setEnabled(frontendAvailable);
   await openDefaultBrowserItem.setEnabled(frontendAvailable);
   await reloadIntegratedBrowserItem.setEnabled(frontendAvailable && exists);
 }
 
 function frontendUrl(): string {
-  return customFrontendUrl ?? `http://127.0.0.1:${port}`;
+  // Keep the local browser and local auth callback on one host. Cookies are host
+  // scoped, so mixing 127.0.0.1 here with a localhost callback loses the
+  // newly-created SSO session when the provider returns.
+  return remoteFrontendUrl() ?? `http://localhost:${port}`;
 }
 
 async function updateMenu(): Promise<void> {
   const running = serverState === "running";
   const transitioning = serverState === "starting" || serverState === "stopping" || busyMessage !== null;
+  const remote = isRemoteMode();
 
   await statusItem.setText(statusText());
 
-  if (externalRunning) {
+  if (remote) {
+    await startStopItem.setText("Remote Instance");
+    await startStopItem.setEnabled(false);
+  } else if (externalRunning) {
     await startStopItem.setText("Stop Server");
     await startStopItem.setEnabled(false);
   } else {
@@ -164,20 +262,38 @@ async function updateMenu(): Promise<void> {
 
   await updateFrontendMenuText();
 
-  await statsPortItem.setText(`Port: ${port}`);
-  await statsPidItem.setText(`PID: ${lastStatus?.pid ?? "—"}`);
-  await statsUptimeItem.setText(`Uptime: ${running ? formatUptime(lastStatus?.startedAt ?? null) : "—"}`);
-  await statsBranchItem.setText(`Branch: ${lastStatus?.branch ?? "—"}`);
-  await statsVersionItem.setText(`Version: ${lastStatus?.version ?? "—"}`);
+  await remoteAuthItem.setText(
+    remoteSnapshot?.state === "connected" || remoteSnapshot?.state === "restricted"
+      ? "Reconnect Remote Instance…"
+      : "Sign In to Remote Instance…",
+  );
+  await remoteAuthItem.setEnabled(remote && remoteSnapshot?.state !== "authorizing");
+  await remoteDisconnectItem.setEnabled(
+    remote && remoteSnapshot !== null && remoteSnapshot.state !== "disconnected" && remoteSnapshot.state !== "authorizing",
+  );
 
-  await checkUpdatesItem.setEnabled(!busyMessage && !externalRunning);
+  const capture = await invoke<DesktopCaptureStatus>("desktop_capture_status");
+  await desktopCaptureItem.setText(capture.enabled
+    ? "Disable Extension Screen Capture"
+    : "Enable Extension Screen Capture…");
+  await desktopCaptureItem.setEnabled(capture.capabilities.image && !transitioning);
+
+  await statsPortItem.setText(`Port: ${remote ? (remoteSnapshot?.status?.port ?? "—") : port}`);
+  await statsPidItem.setText(`PID: ${remote ? (remoteSnapshot?.status?.pid ?? "—") : (lastStatus?.pid ?? "—")}`);
+  await statsUptimeItem.setText(`Uptime: ${remote
+    ? formatElapsed(remoteSnapshot?.status?.uptime)
+    : (running ? formatUptime(lastStatus?.startedAt ?? null) : "—")}`);
+  await statsBranchItem.setText(`Branch: ${remote ? (remoteSnapshot?.status?.branch ?? "—") : (lastStatus?.branch ?? "—")}`);
+  await statsVersionItem.setText(`Version: ${remote ? (remoteSnapshot?.status?.version ?? "—") : (lastStatus?.version ?? "—")}`);
+
+  await checkUpdatesItem.setEnabled(!remote && !busyMessage && !externalRunning);
   // The rebuild compiles from the configured checkout, so it needs one — but
   // unlike the update items it stays available when a server is running
   // externally, since it neither stops nor talks to that server.
   await rebuildDesktopItem.setEnabled(!busyMessage && repoDir !== null);
   if (updateState.available) {
     await applyUpdateItem.setText(`Apply Update (${updateState.commitsBehind} behind)`);
-    await applyUpdateItem.setEnabled(!busyMessage && !externalRunning);
+    await applyUpdateItem.setEnabled(!remote && !busyMessage && !externalRunning);
   } else {
     await applyUpdateItem.setText("Apply Update");
     await applyUpdateItem.setEnabled(false);
@@ -185,50 +301,35 @@ async function updateMenu(): Promise<void> {
 }
 
 async function updateFloatingWidgetMenu(): Promise<void> {
-  if (!floatingWidgetPocItem) return;
+  if (!floatingWidgetsItem) return;
 
-  const existingItems = await floatingWidgetPocItem.items();
+  const existingItems = await floatingWidgetsItem.items();
   for (const item of existingItems) {
-    await floatingWidgetPocItem.remove(item);
+    await floatingWidgetsItem.remove(item);
   }
 
   if (desktopWidgetCatalog.length === 0) {
-    await floatingWidgetPocItem.append(await MenuItem.new({
+    await floatingWidgetsItem.append(await MenuItem.new({
       text: "No registered extension widgets",
       enabled: false,
     }));
   } else {
     for (const widget of desktopWidgetCatalog) {
-      await floatingWidgetPocItem.append(await MenuItem.new({
-        text: `Pop Out ${widget.title}`,
+      const poppedOut = poppedOutWidgetIds.has(widget.id);
+      await floatingWidgetsItem.append(await MenuItem.new({
+        text: poppedOut ? `Return ${widget.title} to Page` : `Pop Out ${widget.title}`,
         action: action(async () => {
-          await invoke("show_extension_widget", { widgetId: widget.id });
-        }),
-      }));
-      await floatingWidgetPocItem.append(await MenuItem.new({
-        text: `Return ${widget.title} to Page`,
-        action: action(async () => {
-          // This command is invoked by the trusted tray rather than a remote
-          // frontend, so it does not need a child-window ownership check.
-          await invoke("return_extension_widget_from_tray", { widgetId: widget.id });
+          if (poppedOut) {
+            // This command is invoked by the trusted tray rather than a remote
+            // frontend, so it does not need a child-window ownership check.
+            await invoke("return_extension_widget_from_tray", { widgetId: widget.id });
+          } else {
+            await invoke("show_extension_widget", { widgetId: widget.id });
+          }
         }),
       }));
     }
   }
-
-  await floatingWidgetPocItem.append(await PredefinedMenuItem.new({ item: "Separator" }));
-  await floatingWidgetPocItem.append(await MenuItem.new({
-    text: "Show Native Widget POC",
-    action: action(async () => {
-      await invoke("show_widget_poc");
-    }),
-  }));
-  await floatingWidgetPocItem.append(await MenuItem.new({
-    text: "Toggle POC Click-Through",
-    action: action(async () => {
-      await invoke("toggle_widget_poc_click_through");
-    }),
-  }));
 }
 
 // ─── Runner orchestration ───────────────────────────────────────────────────
@@ -260,31 +361,40 @@ async function refreshStatus(): Promise<void> {
   }
 }
 
-async function startServer(): Promise<void> {
+async function startServer(reopenFrontend = true): Promise<void> {
+  if (isRemoteMode()) throw new Error("Switch to the local instance before starting its server.");
   await ensureRunner();
   // The runner acknowledges this request while the server is still starting.
   // Defer opening the native WebView until its `running` state notification.
-  openIntegratedBrowserWhenReady = true;
+  openIntegratedBrowserWhenReady = reopenFrontend;
   serverState = "starting";
   await updateMenu();
   await client.request("start-server");
   await refreshStatus();
   if (openIntegratedBrowserWhenReady && lastStatus?.state === "running") {
     openIntegratedBrowserWhenReady = false;
-    await invoke("show_frontend", { port, customUrl: customFrontendUrl });
+    await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
   }
   await updateMenu();
 }
 
 async function stopServer(): Promise<void> {
+  if (isRemoteMode()) throw new Error("Switch to the local instance before stopping its server.");
+  openIntegratedBrowserWhenReady = false;
   serverState = "stopping";
-  await updateMenu();
-  await client.request("stop-server", undefined, 30_000);
-  await refreshStatus();
-  await updateMenu();
+  updateMenuInBackground();
+  try {
+    await client.request("stop-server", undefined, 30_000);
+  } finally {
+    // Restore the actual state if the runner rejects the request (for example
+    // while an update is in progress), instead of leaving Stop disabled.
+    await refreshStatus();
+    updateMenuInBackground();
+  }
 }
 
 async function checkForUpdates(interactive: boolean): Promise<void> {
+  if (isRemoteMode()) throw new Error("Switch to the local instance before checking its checkout for updates.");
   await ensureRunner();
   const result = await client.request<UpdateState>("check-updates", undefined, 90_000);
   updateState = result;
@@ -352,7 +462,7 @@ async function refreshDesktopShellState(): Promise<void> {
         "until it is rebuilt.\n\n" +
         "Rebuild it now? You can keep using Lumiverse while it compiles. " +
         "Or later, from the tray menu: Rebuild Desktop App…\n\n" +
-        `Manual equivalent: cd ${repoDir}/desktop && bun run tauri build`,
+        `Manual equivalent: cd ${repoDir}/desktop && bun run tauri:finalized build`,
       okLabel: "Rebuild now",
       cancelLabel: "Later",
     });
@@ -361,6 +471,7 @@ async function refreshDesktopShellState(): Promise<void> {
 }
 
 async function applyUpdate(): Promise<void> {
+  if (isRemoteMode()) throw new Error("Switch to the local instance before updating its checkout.");
   await ensureRunner();
   busyMessage = "Applying update…";
   await updateMenu();
@@ -376,9 +487,9 @@ async function applyUpdate(): Promise<void> {
 /**
  * Compile the desktop shell from the configured checkout.
  *
- * This produces a bundle; it cannot replace the running app, because a process
- * cannot overwrite its own bundle. The build therefore ends by pointing the
- * user at what it made.
+ * Windows can hand the fresh NSIS bundle to a detached native helper, then
+ * gracefully exit so that helper can install it and relaunch the application.
+ * Other platforms retain the existing manual bundle handoff for now.
  */
 async function rebuildDesktop(): Promise<void> {
   await ensureRunner();
@@ -399,15 +510,63 @@ async function rebuildDesktop(): Promise<void> {
       await alert("Lumiverse", "The desktop app was rebuilt.");
       return;
     }
-    await alert(
-      "Desktop app rebuilt",
-      "The new build is ready. Quit Lumiverse Desktop and replace the " +
-        "installed app with it to finish updating.\n\n" +
-        result.bundlePath,
-    );
-    // Best-effort: a file manager that refuses to open must not turn a
-    // successful build into a reported failure.
-    await revealItemInDir(result.bundlePath).catch(() => {});
+
+    if (!isWindows) {
+      await alert(
+        "Desktop app rebuilt",
+        "The new build is ready. Quit Lumiverse Desktop and replace the " +
+          "installed app with it to finish updating.\n\n" +
+          result.bundlePath,
+      );
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    if (!repoDir) {
+      throw new Error("No Lumiverse checkout is configured for the desktop update.");
+    }
+
+    const restartNow = await invoke<boolean>("confirm", {
+      title: "Desktop app rebuilt",
+      message:
+        "The new desktop build is ready. Restart Lumiverse Desktop now to install it?\n\n" +
+        "The app will close, the NSIS installer will run silently, and Lumiverse Desktop " +
+        "will reopen automatically. Your checkout is not modified by this step.",
+      okLabel: "Install and restart",
+      cancelLabel: "Later",
+    });
+
+    if (!restartNow) {
+      // Keep the old escape hatch: the bundle remains usable for a manual
+      // install, and revealing it makes choosing Later non-destructive.
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      return;
+    }
+
+    try {
+      // Capture at handoff time, since the user can start/stop the server or
+      // hide the browser during a long build. Do not restart external servers.
+      const status = await client.fullStatus();
+      const reopenFrontend = await invoke<boolean>("frontend_visible");
+      await invoke("stage_desktop_update", {
+        artifactPath: result.bundlePath,
+        repoDir,
+        resumeServer: !isRemoteMode() && (status.state === "running" || status.state === "starting"),
+        reopenFrontend,
+      });
+    } catch (error) {
+      await revealItemInDir(result.bundlePath).catch(() => {});
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `The desktop build succeeded, but the automatic installer handoff failed: ${reason}\n\n` +
+          `The bundle is still available at:\n${result.bundlePath}`,
+      );
+    }
+
+    // The native helper is now independent of this process and waits for our
+    // PID to disappear before running NSIS. Use the normal graceful shutdown
+    // so the runner/server are not abandoned during the handoff.
+    await quit();
   } catch (err) {
     busyMessage = null;
     await updateMenu();
@@ -420,23 +579,20 @@ async function rebuildDesktop(): Promise<void> {
  * process tree if the handshake times out.
  */
 async function shutdownRunner(): Promise<void> {
-  if (!(await client.alive())) return;
-  try {
-    const exited = client.waitForExit(15_000);
-    await client.request("quit", undefined, 15_000).catch(() => {});
-    await exited;
-  } catch {
-    await client.kill();
-  }
+  openIntegratedBrowserWhenReady = false;
+  await client.shutdown();
 }
 
 async function quit(): Promise<void> {
-  if (await client.alive()) {
-    busyMessage = "Shutting down…";
-    await updateMenu();
+  busyMessage = "Shutting down…";
+  updateMenuInBackground();
+  try {
     await shutdownRunner();
+  } finally {
+    // The native command performs a final process cleanup even if the JS
+    // handshake or its force-kill invoke failed.
+    await invoke("quit_app");
   }
-  await invoke("quit_app");
 }
 
 /** Detect a server started outside the tray (start.sh / terminal). */
@@ -458,13 +614,202 @@ async function detectExternalServer(): Promise<void> {
   }
 }
 
+async function persistRemoteIdentity(snapshot: RemoteInstanceSnapshot): Promise<void> {
+  if (instanceConnection.mode !== "remote" || !snapshot.instance) return;
+  if (
+    instanceConnection.instanceId === snapshot.instance.id
+    && instanceConnection.displayName === snapshot.instance.name
+  ) return;
+  instanceConnection = {
+    ...instanceConnection,
+    instanceId: snapshot.instance.id,
+    displayName: snapshot.instance.name,
+  };
+  settings.instanceConnection = instanceConnection;
+  await saveSetting("instanceConnection", instanceConnection);
+}
+
+async function pollRemoteInstance(): Promise<void> {
+  if (instanceConnection.mode !== "remote" || remoteSnapshot?.state === "authorizing") return;
+  const origin = instanceConnection.origin;
+  const snapshot = await invoke<RemoteInstanceSnapshot>("remote_instance_poll", {
+    origin,
+  });
+  if (instanceConnection.mode !== "remote" || instanceConnection.origin !== origin) return;
+  remoteSnapshot = snapshot;
+  await persistRemoteIdentity(snapshot);
+}
+
+async function connectRemoteInstance(): Promise<void> {
+  if (instanceConnection.mode !== "remote" || remoteSnapshot?.state === "authorizing") return;
+  const origin = instanceConnection.origin;
+  remoteSnapshot = pendingRemoteSnapshot(origin);
+  await updateMenu();
+  try {
+    const snapshot = await invoke<RemoteInstanceSnapshot>("remote_instance_connect", { origin });
+    if (instanceConnection.mode !== "remote" || instanceConnection.origin !== origin) {
+      // The selection changed while the system browser was open. Remove the
+      // just-created credential instead of attaching it to an abandoned URL.
+      await invoke("remote_instance_disconnect", { origin }).catch(() => {});
+      return;
+    }
+    remoteSnapshot = snapshot;
+    await persistRemoteIdentity(snapshot);
+    if (!snapshot.credentialPersisted) {
+      await alert(
+        "Lumiverse Desktop",
+        "The remote instance is connected for this session, but its refresh credential could not be saved in the operating system credential store. You will need to sign in again after restarting Desktop.",
+      );
+    }
+  } catch (error) {
+    if (instanceConnection.mode !== "remote" || instanceConnection.origin !== origin) return;
+    remoteSnapshot = {
+      ...pendingRemoteSnapshot(origin),
+      state: "reauth_required",
+      error: error instanceof Error ? error.message : String(error),
+    };
+    throw error;
+  } finally {
+    await updateMenu();
+  }
+}
+
+async function disconnectRemoteInstance(): Promise<void> {
+  if (instanceConnection.mode !== "remote") return;
+  await invoke("remote_instance_disconnect", { origin: instanceConnection.origin });
+  remoteSnapshot = {
+    ...pendingRemoteSnapshot(instanceConnection.origin),
+    state: "disconnected",
+  };
+  await updateMenu();
+}
+
+async function toggleDesktopCapture(): Promise<void> {
+  const capture = await invoke<DesktopCaptureStatus>("desktop_capture_status");
+  if (capture.enabled) {
+    await invoke("desktop_capture_disconnect");
+  } else {
+    const origin = new URL(frontendUrl()).origin;
+    await invoke("desktop_capture_connect", { origin });
+    if (origin !== new URL(frontendUrl()).origin) {
+      await invoke("desktop_capture_disconnect");
+    }
+  }
+  await updateMenu();
+}
+
+// ─── Discord Rich Presence plumbing ─────────────────────────────────────────
+
+/** The instance origin the presence snapshot should be read from, if any. */
+function presenceOrigin(): string | null {
+  // Inline the mode check so TypeScript narrows `instanceConnection`.
+  if (instanceConnection.mode === "remote") return instanceConnection.origin;
+  if (serverState === "running" || externalRunning) return `http://localhost:${port}`;
+  return null;
+}
+
+/**
+ * Poll the active-chat snapshot once and relay it to the Discord worker.
+ * Never throws — a failed poll keeps the last known presence until the next
+ * tick. Returns "needs-auth" when the instance requires a desktop sign-in.
+ */
+async function pollDiscordPresence(): Promise<"ok" | "needs-auth"> {
+  if (!settings.discordRpcEnabled) return "ok";
+  try {
+    const origin = presenceOrigin();
+    if (!origin) {
+      await invoke("discord_rpc_update", { payload: null });
+      return "ok";
+    }
+    const result = await invoke<DiscordPresenceFetch>("discord_presence_fetch", { origin });
+    // A fetch for the old instance must not overwrite the new selection or
+    // restore activity after the user disables presence.
+    if (!settings.discordRpcEnabled || presenceOrigin() !== origin) return "ok";
+    switch (result.state) {
+      case "active":
+        discordPresenceEverActive = true;
+        await invoke("discord_rpc_update", { payload: result.snapshot });
+        return "ok";
+      case "inactive":
+        discordPresenceEverActive = true;
+        await invoke("discord_rpc_update", { payload: null });
+        return "ok";
+      case "unreachable":
+        await invoke("discord_rpc_update", { payload: null });
+        return "ok";
+      case "disconnected":
+      case "reauth_required":
+        await invoke("discord_rpc_update", { payload: null });
+        // A sign-in that lapsed mid-run is worth one mention so the missing
+        // presence is not mysterious. A user who never signed in stays silent
+        // — they were told how at toggle time.
+        if (discordPresenceEverActive && !discordPresenceIssueAlerted) {
+          discordPresenceIssueAlerted = true;
+          await alert(
+            "Discord Rich Presence",
+            "Lumiverse's desktop sign-in expired, so Discord presence is paused. Toggle Discord Rich Presence off and on in the tray menu to sign in again.",
+          );
+        }
+        return "needs-auth";
+    }
+  } catch {
+    return "ok";
+  }
+}
+
+const refreshDiscordPresence = createDiscordPresenceRefreshQueue(pollDiscordPresence);
+
+/**
+ * Run the standard desktop OAuth sign-in against the given origin so
+ * presence can flow. Opens the system browser — only call from the toggle
+ * action, never from a background poll.
+ */
+async function authorizeDiscordPresence(origin: string): Promise<void> {
+  await alert(
+    "Discord Rich Presence",
+    "Sign in to Lumiverse in your browser so the desktop app can read your active roleplay for Discord presence.",
+  );
+  // Drop any stale credential for this origin before the fresh sign-in.
+  await invoke("remote_instance_disconnect", { origin }).catch(() => {});
+  await invoke("remote_instance_connect", { origin });
+}
+
+async function toggleDiscordRpc(): Promise<void> {
+  const enabled = !settings.discordRpcEnabled;
+  settings.discordRpcEnabled = enabled;
+  await discordRpcItem.setChecked(enabled);
+  await saveSetting("discordRpcEnabled", enabled);
+  await invoke("discord_rpc_set_enabled", { enabled });
+  if (enabled) {
+    const origin = presenceOrigin();
+    if (!origin) {
+      await alert(
+        "Discord Rich Presence",
+        "Presence will start once your Lumiverse server is running. If you are not signed in yet, toggle Discord Rich Presence off and on after it starts to sign in.",
+      );
+    } else {
+      const outcome = await refreshDiscordPresence();
+      if (outcome === "needs-auth") {
+        await authorizeDiscordPresence(origin);
+        await refreshDiscordPresence();
+      }
+    }
+  }
+  await updateMenu();
+}
+
 // ─── Action wrapper ─────────────────────────────────────────────────────────
+
+function updateMenuInBackground(): void {
+  // Menu IPC must not gate server control or prevent an error being shown.
+  void updateMenu().catch((error) => console.warn("Unable to update tray menu", error));
+}
 
 function action(fn: () => Promise<void>): () => void {
   return () => {
     fn().catch(async (err) => {
       busyMessage = null;
-      await updateMenu();
+      updateMenuInBackground();
       await alert("Lumiverse", err instanceof Error ? err.message : String(err), true);
     });
   };
@@ -487,9 +832,9 @@ async function buildTray(): Promise<void> {
     action: action(async () => {
       const visible = await invoke<boolean>("frontend_visible");
       if (visible) {
-        await invoke("hide_frontend");
+        await invoke("close_frontend");
       } else {
-        await invoke("show_frontend", { port, customUrl: customFrontendUrl });
+        await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
       }
       await updateFrontendMenuText();
     }),
@@ -512,27 +857,46 @@ async function buildTray(): Promise<void> {
     }),
   });
 
+  remoteAuthItem = await MenuItem.new({
+    text: "Sign In to Remote Instance…",
+    enabled: false,
+    action: action(connectRemoteInstance),
+  });
+  remoteDisconnectItem = await MenuItem.new({
+    text: "Sign Out of Remote Instance",
+    enabled: false,
+    action: action(disconnectRemoteInstance),
+  });
+
+  desktopCaptureItem = await MenuItem.new({
+    text: "Enable Extension Screen Capture…",
+    enabled: false,
+    action: action(toggleDesktopCapture),
+  });
+
   const setFrontendUrlItem = await MenuItem.new({
-    text: "Frontend URL…",
+    text: "Instance Connection…",
     action: action(async () => {
       await invoke("show_frontend_url_settings");
     }),
   });
 
-  floatingWidgetPocItem = await Submenu.new({
+  floatingWidgetsItem = await Submenu.new({
     text: "Floating Widgets",
     items: [],
   });
   await updateFloatingWidgetMenu();
 
   frontendItem = await Submenu.new({
-    text: "Open Lumiverse",
+    text: "Browser",
     items: [
       openIntegratedBrowserItem,
       reloadIntegratedBrowserItem,
       openDefaultBrowserItem,
+      remoteAuthItem,
+      remoteDisconnectItem,
+      desktopCaptureItem,
       await PredefinedMenuItem.new({ item: "Separator" }),
-      floatingWidgetPocItem,
       setFrontendUrlItem,
     ],
   });
@@ -559,13 +923,18 @@ async function buildTray(): Promise<void> {
   });
 
   autoStartItem = await CheckMenuItem.new({
-    text: "Start Server at Launch",
+    text: "Start Local Server at Launch",
     checked: settings.autoStartServer,
     action: action(async () => {
       settings.autoStartServer = !settings.autoStartServer;
       await autoStartItem.setChecked(settings.autoStartServer);
       await saveSetting("autoStartServer", settings.autoStartServer);
     }),
+  });
+  discordRpcItem = await CheckMenuItem.new({
+    text: "Discord Rich Presence",
+    checked: settings.discordRpcEnabled,
+    action: action(toggleDiscordRpc),
   });
   loginItem = await CheckMenuItem.new({
     text: "Launch at Login",
@@ -597,7 +966,7 @@ async function buildTray(): Promise<void> {
       const wasRunning = hadRunner && serverState !== "stopped" && serverState !== "crashed";
       if (hadRunner) {
         busyMessage = "Switching folder…";
-        await updateMenu();
+        updateMenuInBackground();
         await shutdownRunner();
       }
 
@@ -627,6 +996,7 @@ async function buildTray(): Promise<void> {
       await separator(),
       startStopItem,
       frontendItem,
+      floatingWidgetsItem,
       statsSubmenu,
       await separator(),
       checkUpdatesItem,
@@ -634,6 +1004,7 @@ async function buildTray(): Promise<void> {
       rebuildDesktopItem,
       await separator(),
       autoStartItem,
+      discordRpcItem,
       loginItem,
       setFolderItem,
       await separator(),
@@ -652,6 +1023,7 @@ async function buildTray(): Promise<void> {
 }
 
 async function toggleServer(): Promise<void> {
+  if (isRemoteMode()) return;
   if (serverState === "running" || serverState === "starting") {
     await stopServer();
   } else {
@@ -662,6 +1034,13 @@ async function toggleServer(): Promise<void> {
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
 async function tick(): Promise<void> {
+  // Presence rides the shared tick; its polling handles its own errors.
+  void refreshDiscordPresence();
+  if (isRemoteMode()) {
+    await pollRemoteInstance();
+    await updateMenu();
+    return;
+  }
   if (await client.alive()) {
     await refreshStatus();
   } else {
@@ -672,18 +1051,53 @@ async function tick(): Promise<void> {
 
 async function boot(): Promise<void> {
   settings = await loadSettings();
-  customFrontendUrl = settings.customFrontendUrl;
+  instanceConnection = settings.instanceConnection;
 
-  await listen<{ url: string | null }>("frontend-url-changed", async ({ payload }) => {
-    customFrontendUrl = payload.url;
-    settings.customFrontendUrl = payload.url;
-    await saveSetting("customFrontendUrl", payload.url);
+  await listen<{ origin: string }>("discord-presence-changed", ({ payload }) => {
+    if (payload?.origin === presenceOrigin()) void refreshDiscordPresence();
+  });
+
+  await listen<{ connection: InstanceConnection }>("instance-connection-changed", async ({ payload }) => {
+    await invoke("desktop_capture_disconnect");
+    const previousOrigin = instanceConnection.mode === "remote" ? instanceConnection.origin : null;
+    instanceConnection = payload.connection;
+    remoteSnapshot = null;
+    settings.instanceConnection = payload.connection;
+    await saveSetting("instanceConnection", payload.connection);
+    if (previousOrigin && (payload.connection.mode !== "remote" || payload.connection.origin !== previousOrigin)) {
+      await invoke("remote_instance_disconnect", { origin: previousOrigin }).catch(() => {});
+    }
+    if (!isRemoteMode()) {
+      await refreshStatus();
+      await detectExternalServer();
+    } else {
+      void connectRemoteInstance().catch(async (error) => {
+        await alert("Lumiverse", error instanceof Error ? error.message : String(error), true);
+      });
+    }
+    // Re-target (or clear) presence for the newly selected instance.
+    void refreshDiscordPresence();
     await updateMenu();
   });
   await listen<DesktopWidgetCatalogEntry[]>("desktop-widget-catalog", ({ payload }) => {
     desktopWidgetCatalog = Array.isArray(payload) ? payload : [];
+    const catalogIds = new Set(desktopWidgetCatalog.map((widget) => widget.id));
+    for (const widgetId of poppedOutWidgetIds) {
+      if (!catalogIds.has(widgetId)) poppedOutWidgetIds.delete(widgetId);
+    }
     void updateFloatingWidgetMenu().catch((error) => {
       console.warn("Unable to update floating-widget menu", error);
+    });
+  });
+  await listen<DesktopWidgetPopoutState>("desktop-widget-popout-state", ({ payload }) => {
+    if (!payload || typeof payload.id !== "string" || typeof payload.poppedOut !== "boolean") return;
+    if (payload.poppedOut) {
+      poppedOutWidgetIds.add(payload.id);
+    } else {
+      poppedOutWidgetIds.delete(payload.id);
+    }
+    void updateFloatingWidgetMenu().catch((error) => {
+      console.warn("Unable to update floating-widget state", error);
     });
   });
 
@@ -693,10 +1107,13 @@ async function boot(): Promise<void> {
     if (state === "running" && openIntegratedBrowserWhenReady) {
       openIntegratedBrowserWhenReady = false;
       void refreshStatus()
-        .then(() => invoke("show_frontend", { port, customUrl: customFrontendUrl }))
+        .then(() => invoke("show_frontend", { port, customUrl: remoteFrontendUrl() }))
         .catch((err) => alert("Lumiverse", err instanceof Error ? err.message : String(err), true));
     } else if (state === "stopped" || state === "crashed") {
       openIntegratedBrowserWhenReady = false;
+      // The instance cannot serve a presence snapshot anymore — clear now
+      // rather than waiting for the next tick.
+      void refreshDiscordPresence();
     }
     if (state === "running" || state === "stopped" || state === "crashed") {
       busyMessage = null;
@@ -720,6 +1137,7 @@ async function boot(): Promise<void> {
     serverState = "stopped";
     lastStatus = null;
     busyMessage = null;
+    void refreshDiscordPresence();
     void updateMenu();
   };
 
@@ -736,21 +1154,64 @@ async function boot(): Promise<void> {
 
   await buildTray();
   await updateMenu();
+  if (settings.discordRpcEnabled) {
+    await invoke("discord_rpc_set_enabled", { enabled: true }).catch((error) => {
+      console.warn("Unable to resume Discord Rich Presence", error);
+    });
+    void refreshDiscordPresence();
+  }
+  await invoke("desktop_startup_ready");
+  const updateResume = await invoke<DesktopUpdateResume | null>("take_desktop_update_resume");
 
-  if (!repoDir && !customFrontendUrl) {
+  if (!repoDir && !isRemoteMode()) {
     await alert(
       "Lumiverse",
       "No Lumiverse folder is configured yet. Choose your Lumiverse checkout via “Set Lumiverse Folder…” in the tray menu.",
     );
   }
 
-  if (settings.autoStartServer && repoDir && bunPath) {
-    action(startServer)();
-  } else {
-    void detectExternalServer().then(updateMenu);
+  if (isRemoteMode()) {
+    void pollRemoteInstance().then(updateMenu).catch((error) => {
+      console.warn("Unable to restore remote instance authorization", error);
+    });
   }
+  action(async () => {
+    await restoreDesktopSession(updateResume, {
+      remote: isRemoteMode(),
+      canStartServer: Boolean(repoDir && bunPath),
+      autoStartServer: settings.autoStartServer,
+    }, {
+      startServer,
+      detectExternalServer,
+      showFrontend: async () => {
+        await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
+      },
+    });
+    await updateMenu();
+  })();
 
   setInterval(() => void tick(), POLL_INTERVAL_MS);
 }
 
-void boot();
+async function reportBootFailure(error: unknown): Promise<void> {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error("Lumiverse Desktop failed before its tray was ready", error);
+
+  try {
+    await alert(
+      "Lumiverse Desktop failed to start",
+      `${message}\n\nLaunch the app from a terminal to capture additional diagnostics.`,
+      true,
+    );
+  } catch (alertError) {
+    console.error("Unable to show the desktop startup error", alertError);
+  } finally {
+    // A failed tray bootstrap otherwise leaves only the invisible host window
+    // running, making every later launch look like it did nothing.
+    await invoke("quit_app").catch((quitError) => {
+      console.error("Unable to exit after the desktop startup failure", quitError);
+    });
+  }
+}
+
+void boot().catch(reportBootFailure);

@@ -2,9 +2,10 @@ import { useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Bookmark, Download, Upload, Code2 } from 'lucide-react'
 import { useStore } from '@/store'
+import { useThemePackActions } from '@/hooks/useThemePackActions'
 import { DEFAULT_THEME, normalizeTheme } from '@/theme/presets'
 import { resolveMode } from '@/hooks/useThemeApplicator'
-import type { ThemeConfig, ThemeMode, BaseColors } from '@/types/theme'
+import type { ThemeConfig, ThemeMode, BaseColors, RenderingMode } from '@/types/theme'
 import ModeSelector from './theme-panel/ModeSelector'
 import PresetGrid from './theme-panel/PresetGrid'
 import SavedThemes from './theme-panel/SavedThemes'
@@ -69,6 +70,7 @@ export default function ThemePanel() {
         ...preset,
         mode: latest.mode,
         desktopBackground: preset.desktopBackground ?? latest.desktopBackground,
+        renderingMode: preset.renderingMode ?? latest.renderingMode,
       })
     },
     [setTheme, getLatest, clearAllExtensionThemeOverrides]
@@ -104,6 +106,11 @@ export default function ThemePanel() {
     [update]
   )
 
+  const handleRenderingModeChange = useCallback(
+    (renderingMode: RenderingMode) => update({ renderingMode }),
+    [update]
+  )
+
   const resolvedMode = resolveMode(current)
 
   const handleBaseColorsChange = useCallback(
@@ -113,16 +120,7 @@ export default function ThemePanel() {
     [update, current.baseColorsByMode, resolvedMode]
   )
 
-  const handleExportTheme = useCallback(() => {
-    const json = JSON.stringify(current, null, 2)
-    const blob = new Blob([json], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `lumiverse-theme-${current.name?.toLowerCase().replace(/\s+/g, '-') || 'custom'}.json`
-    a.click()
-    URL.revokeObjectURL(url)
-  }, [current])
+  const { handleExportPack, handleImportPack } = useThemePackActions()
 
   const addSavedTheme = useStore((s) => s.addSavedTheme)
 
@@ -134,36 +132,6 @@ export default function ThemePanel() {
       theme: latest,
     })
   }, [getLatest, addSavedTheme])
-
-  const handleImportTheme = useCallback(() => {
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '.json'
-    input.onchange = async () => {
-      const file = input.files?.[0]
-      if (!file) return
-      try {
-        const text = await file.text()
-        const parsed = JSON.parse(text)
-        if (
-          typeof parsed === 'object' && parsed !== null &&
-          typeof parsed.mode === 'string' &&
-          typeof parsed.accent === 'object' && parsed.accent !== null
-        ) {
-          const importedTheme = { ...parsed, id: 'custom' } as ThemeConfig
-          const appliedTheme = {
-            ...importedTheme,
-            desktopBackground: importedTheme.desktopBackground ?? getLatest().desktopBackground,
-          }
-          const baseName = file.name.replace(/\.json$/i, '').replace(/^lumiverse-theme-/i, '')
-          const name = parsed.name || baseName || t('themePanel.importedTheme')
-          addSavedTheme({ kind: 'config', name, theme: { ...importedTheme, name } })
-          setTheme(appliedTheme)
-        }
-      } catch { /* ignore invalid files */ }
-    }
-    input.click()
-  }, [setTheme, addSavedTheme, getLatest, t])
 
   return (
     <div className={styles.panel}>
@@ -213,6 +181,8 @@ export default function ThemePanel() {
           showDesktopBackgroundControls={isTauriDesktop}
           desktopBackground={current.desktopBackground}
           onDesktopBackgroundChange={handleDesktopBackgroundChange}
+          renderingMode={current.renderingMode}
+          onRenderingModeChange={handleRenderingModeChange}
         />
       </section>
 
@@ -228,10 +198,10 @@ export default function ThemePanel() {
       </section>
 
       <div className={styles.themeActions}>
-        <button type="button" className={styles.actionBtn} onClick={handleExportTheme}>
+        <button type="button" className={styles.actionBtn} onClick={handleExportPack}>
           <Download size={12} /> {t('themePanel.exportTheme')}
         </button>
-        <button type="button" className={styles.actionBtn} onClick={handleImportTheme}>
+        <button type="button" className={styles.actionBtn} onClick={handleImportPack}>
           <Upload size={12} /> {t('themePanel.importTheme')}
         </button>
         <button type="button" className={styles.actionBtn} onClick={handleSaveTheme}>

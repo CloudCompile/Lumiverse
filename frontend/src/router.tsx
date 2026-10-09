@@ -6,6 +6,7 @@ import CharacterBrowser from './components/panels/CharacterBrowser'
 import CharacterProfile from './components/panels/CharacterProfile'
 import LoginPage from './components/auth/LoginPage'
 import SsoCompletePage from './components/auth/SsoCompletePage'
+import OAuthConsentPage from './components/auth/OAuthConsentPage'
 import StreamDeckHandoffPage from './components/StreamDeckHandoffPage'
 import DesktopPwaTitlebar from './components/shared/DesktopPwaTitlebar'
 import { isDesktopFloatingWidgetWindow } from './lib/desktop-floating-widget'
@@ -30,6 +31,10 @@ const routes = [
       {
         path: '/sso-complete',
         element: <SsoCompletePage />,
+      },
+      {
+        path: '/oauth/consent',
+        element: <OAuthConsentPage />,
       },
       {
         path: '/stream-deck/open/chat/:chatId',

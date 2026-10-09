@@ -178,6 +178,7 @@ mock.module('./useQuickToolbarActions', () => ({
 }))
 
 const storeState = {
+  extensions: [{ identifier: 'lumiverse_suite', enabled: true, has_frontend: true }],
   drawerOpen: false,
   drawerTab: '',
   settingsModalOpen: false,

@@ -3,9 +3,11 @@
 !!! warning "Permission required: `push_notification`"
     This is a privileged permission. The user must explicitly grant it from the Extensions panel.
 
-Send OS-level push notifications to users' devices. Notifications are delivered even when the Lumiverse app is closed or backgrounded — ideal for alerting users to completed tasks, character activity, or time-sensitive events.
+Send OS-level push notifications to users' devices. Browser Web Push destinations can receive while the Lumiverse page is closed or backgrounded; native desktop destinations receive while the Lumiverse Desktop companion is running. This is ideal for completed tasks, character activity, or time-sensitive events.
 
-Notifications are automatically **suppressed** on the server when any of the user's connected sessions reports the app as visible. This applies across devices and to test notifications. Presence is refreshed after each WebSocket connection and authentication, including PWA resume.
+Notifications are automatically **suppressed** on the server when any of the user's connected sessions reports the app as visible. Presence is refreshed after each WebSocket connection and authentication, including PWA resume. User-triggered, per-destination test notifications bypass this suppression so they can be verified from the open Settings page.
+
+Registered destinations may be browser Web Push subscriptions or Lumiverse Desktop native destinations. The desktop companion's Rust host maintains the notification-only socket and heartbeat independently of its WebViews, then presents the payload through the operating system; it never joins the user's general event channel.
 
 Once a push has been sent, the service worker displays it even if the app returns to the foreground before delivery. [WebKit requires every received push to display a notification](https://webkit.org/blog/12945/meet-web-push/); silently discarding it can revoke the subscription.
 
@@ -62,12 +64,14 @@ Check if push notifications are available for a user.
 
 **Returns:** `Promise<{ available: boolean; subscriptionCount: number }>`
 
-- `available`: `true` if the user has at least one registered push subscription
+- `available`: `true` if the user has at least one registered browser or desktop notification destination
 - `subscriptionCount`: number of registered devices
 
 ## Attribution
 
 Every push notification title is automatically prefixed with your extension name: **"Your Extension: Your Title"**. This ensures users always know which extension triggered the notification and cannot be spoofed.
+
+Notification titles and bodies are always converted to plain text at dispatch. Formatting tags are removed, block elements and `<br>` become readable line breaks, HTML entities are decoded, and non-visible content such as `<script>` and `<style>` is discarded. Titles are limited to 100 characters and bodies to 500 characters after normalization.
 
 ## Checking Before Sending
 
@@ -111,6 +115,17 @@ The `imageUrl` returned from `spindle.imageGen.generate()` is a public (unauthen
 ```ts
 image: `${result.imageUrl}?size=lg`   // ~700px thumbnail
 ```
+
+### Native desktop rich media
+
+The desktop companion downloads `image` in its native Rust host and presents it through the operating system's notification API. If `image` is absent, `icon` is used as a thumbnail attachment. `image` therefore takes precedence when both fields are present.
+
+- PNG, JPEG, and WebP inputs are supported. The companion validates, bounds, resizes, and normalizes them to a cached PNG for consistent native rendering.
+- Media URLs must be same-server relative paths. Redirects and cross-origin URLs are rejected.
+- Public assets such as image-generation results are fetched directly. User-owned `/api/v1/characters/{id}/avatar` and `/api/v1/images/{id}` assets are resolved through a notification-only authenticated endpoint; the desktop credential is never sent to a general media URL.
+- Built-in generation-complete notifications automatically use the chat character's avatar as their thumbnail when one is available.
+- An unavailable or invalid image never suppresses the notification: delivery falls back to title and body only.
+- The final placement, crop, and size are controlled by macOS, Windows, or the Linux notification daemon. The Lumiverse application identity icon remains unchanged, especially on macOS where it cannot be replaced per notification.
 
 ## Example: Character "Bugging" the User
 

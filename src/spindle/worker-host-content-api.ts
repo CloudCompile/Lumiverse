@@ -84,8 +84,11 @@ export function canExtensionMutateRegexScript(
   extensionIdentifier: string,
   hasUnrestrictedAccess = false,
 ): boolean {
-  return hasUnrestrictedAccess || (script.owner_extension_identifier === extensionIdentifier
-    && script.preset_id == null);
+  // Ownership alone decides mutability. `preset_id` is deliberately ignored: an
+  // extension may bind a row it owns to a preset so the host's preset-delete
+  // cascade reaps it, and it must keep managing that row while the link exists.
+  // Host-owned rows (owner null) and rows owned by another extension stay locked.
+  return hasUnrestrictedAccess || script.owner_extension_identifier === extensionIdentifier;
 }
 
 export function prepareSpindleRegexMutation(
@@ -2423,6 +2426,11 @@ export class WorkerHostContentApi {
       sort_order: s.sort_order,
       description: s.description || "",
       folder: s.folder || "",
+      // The preset link is stored on the row and projected back to callers. It is
+      // declared in lumiverse-spindle-types alongside this change; until that
+      // types release is pinned here, the assertion below keeps the extra field
+      // out of the compile-time contract.
+      preset_id: s.preset_id ?? null,
       folder_version: regexScriptsSvc.getSpindleExtensionRegexFolderVersion(s),
       metadata: s.metadata || {},
       created_at: s.created_at,

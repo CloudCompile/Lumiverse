@@ -17,7 +17,9 @@ import {
   stopServer,
   killServerSync,
   setIPCHandler,
+  setLogSessionStartHandler,
   setStateChangeHandler,
+  type ServerLogSession,
   type ServerState,
 } from "./runner/server-manager.js";
 import { handleIPCMessage, setDevMode, setLastUpdateState, getLastUpdateState } from "./runner/ipc-handler.js";
@@ -27,29 +29,19 @@ import { getCurrentBranch } from "./runner/lib/git.js";
 import { UPDATE_CHECK_INTERVAL_MS } from "./runner/lib/constants.js";
 import { goodbyeLines } from "./runner/goodbye-lines.js";
 import { attachHeadlessBridge, type HeadlessBridge } from "./runner/headless-bridge.js";
+import { bootstrapBunRuntime } from "../src/runtime/bun-runtime.js";
+import { PROJECT_ROOT } from "./runner/lib/constants.js";
 
-function pickRandomGoodbyeLine(lines: string[]): string {
+function pickRandomGoodbyeLine(lines: readonly string[]): string {
   if (lines.length === 0) return "Goodbye.";
   const index = Math.floor(Math.random() * lines.length);
   return lines[index] ?? "Goodbye.";
 }
 
 // ─── Bun version gate ───────────────────────────────────────────────────────
-// Checked before anything else so the operator sees a clear message.
-{
-  const [M = 0, m = 0, p = 0] = Bun.version
-    .split(".")
-    .map((part) => Number.parseInt(part, 10) || 0);
-  const minimum: readonly [number, number, number] = [1, 4, 0];
-  const [requiredM, requiredMnr, requiredP] = minimum;
-  const isTooOld = M < requiredM
-    || (M === requiredM && (m < requiredMnr || (m === requiredMnr && p < requiredP)));
-  if (isTooOld) {
-    console.error(`\n  Bun ${Bun.version} is too old — Lumiverse requires Bun >= ${minimum.join(".")} on this platform.`);
-    console.error(`  Update with ${process.platform === "win32" ? ".\\start.ps1" : "./start.sh"}.\n`);
-    process.exit(1);
-  }
-}
+// Keep the old process as a stdio proxy when Windows has locked its executable;
+// this preserves both terminal and desktop-supervisor ownership across re-exec.
+await bootstrapBunRuntime(PROJECT_ROOT);
 
 // ─── Parse arguments ────────────────────────────────────────────────────────
 
@@ -113,6 +105,19 @@ function openBrowser(url: string): void {
   }
 }
 
+function openServerBrowser(): void {
+  const config = readEnvConfig();
+  if (!config.browserUrl) {
+    console.log(
+      `${C.dim}[runner]${C.reset} ${C.yellow}Direct TLS is enabled, but its SAN hostname cannot be inferred. `
+        + `Set AUTH_BASE_URL to the public HTTPS origin or open that origin manually.${C.reset}`,
+    );
+    return;
+  }
+  console.log(`${C.dim}[runner]${C.reset} Opening ${config.browserUrl}...`);
+  openBrowser(config.browserUrl);
+}
+
 // ─── Keyboard input ─────────────────────────────────────────────────────────
 
 function setupKeyboard(): void {
@@ -133,10 +138,7 @@ function setupKeyboard(): void {
 
     // 'o'/'O' — open browser
     if (key === "o" || key === "O") {
-      const config = readEnvConfig();
-      const url = `http://localhost:${config.port}`;
-      console.log(`${C.dim}[runner]${C.reset} Opening ${url}...`);
-      openBrowser(url);
+      openServerBrowser();
       return;
     }
   });
@@ -147,6 +149,10 @@ function setupKeyboard(): void {
 let shuttingDown = false;
 let openedAtStartup = false;
 let bridge: HeadlessBridge | null = null;
+
+setLogSessionStartHandler((session: ServerLogSession) => {
+  bridge?.startLogSession(session);
+});
 
 async function shutdown(): Promise<void> {
   if (shuttingDown) return;
@@ -179,10 +185,7 @@ setStateChangeHandler((state: ServerState) => {
       console.log(`${C.dim}[${ts}]${C.reset} ${C.green}Server is running.${C.reset}`);
       if (autoOpen && !openedAtStartup) {
         openedAtStartup = true;
-        const config = readEnvConfig();
-        const url = `http://localhost:${config.port}`;
-        console.log(`${C.dim}[runner]${C.reset} Opening ${url}...`);
-        openBrowser(url);
+        openServerBrowser();
       }
       break;
     case "crashed":
@@ -232,5 +235,5 @@ if (isHeadless) {
 } else {
   printBanner();
   setupKeyboard();
-  startServer(isDev);
+  await startServer(isDev);
 }

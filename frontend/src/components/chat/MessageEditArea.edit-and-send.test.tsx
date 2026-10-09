@@ -88,6 +88,8 @@ async function render(props: {
   editAndSendDisabled?: boolean
   editAndSendSide?: string
   suiteEnabled?: boolean
+  editReasoning?: string
+  onChangeReasoning?: (value: string) => void
 }): Promise<HTMLDivElement> {
   mockSuiteEnabled = props.suiteEnabled !== false
   mockQuickToolbarSettings = props.editAndSendSide === undefined
@@ -106,6 +108,8 @@ async function render(props: {
       onEditAndSend: props.onEditAndSend,
       messageId: props.messageId,
       editAndSendDisabled: props.editAndSendDisabled,
+      editReasoning: props.editReasoning,
+      onChangeReasoning: props.onChangeReasoning,
     }))
     await Promise.resolve()
     await Promise.resolve()
@@ -228,5 +232,34 @@ describe('MessageEditArea edit-and-send', () => {
     expect(onCancel).not.toHaveBeenCalled()
     expect(onSave).not.toHaveBeenCalled()
     expect(onEditAndSend).not.toHaveBeenCalled()
+  })
+
+  test('keeps reasoning collapsed by default and places it above message content', async () => {
+    const host = await render({
+      editContent: 'Visible response',
+      editReasoning: 'Hidden thought process',
+      onChangeReasoning: () => {},
+    })
+    const toggle = host.querySelector('[data-reasoning-toggle="true"]') as HTMLButtonElement
+
+    expect(toggle).not.toBeNull()
+    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    expect(host.querySelector('textarea[name="message-edit-reasoning"]')).toBeNull()
+    const content = host.querySelector('textarea[name="message-edit-content"]') as HTMLTextAreaElement | null
+    expect(content).not.toBeNull()
+    expect(content?.value).toBe('Visible response')
+    expect(toggle.compareDocumentPosition(content!) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0)
+
+    await act(async () => {
+      toggle.click()
+    })
+
+    expect(toggle.getAttribute('aria-expanded')).toBe('true')
+    const textareas = [...host.querySelectorAll('textarea')]
+    expect(textareas.map((textarea) => textarea.getAttribute('name'))).toEqual([
+      'message-edit-reasoning',
+      'message-edit-content',
+    ])
+    expect((textareas[0] as HTMLTextAreaElement).value).toBe('Hidden thought process')
   })
 })

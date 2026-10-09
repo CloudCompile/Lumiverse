@@ -18,10 +18,12 @@ In council mode, individual council members can each contribute their own OOC co
 
 ## Enabling OOC
 
-1. Open the **OOC Panel** (or find it in the Prompt Panel settings)
+1. Open **Council → OOC** in the drawer
 2. Toggle **Enable OOC comments** on
 3. Select a **display style**
 4. Optionally set an **OOC interval**
+
+When OOC is disabled, the tab shows a short description of the feature. OOC settings are independent of the **Feedback** tab, which shows Council tool results.
 
 ---
 

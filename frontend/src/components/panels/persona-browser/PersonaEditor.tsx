@@ -107,8 +107,6 @@ export default function PersonaEditor({
   const personaTagBindings = useStore((s) => s.personaTagBindings)
   const setCharacterPersonaBinding = useStore((s) => s.setCharacterPersonaBinding)
   const setPersonaTagBinding = useStore((s) => s.setPersonaTagBinding)
-  const messages = useStore((s) => s.messages)
-  const setMessages = useStore((s) => s.setMessages)
   const allPersonas = useStore((s) => s.personas)
   const [worldBooks, setWorldBooks] = useState<WorldBook[]>([])
   const [availableTags, setAvailableTags] = useState<TagCount[]>([])
@@ -308,20 +306,20 @@ export default function PersonaEditor({
     if (!activeChatId || reattributing) return
     setReattributing(true)
     try {
+      const messageIds = new Set(useStore.getState().messages.filter((m) => m.is_user).map((m) => m.id))
       await chatsApi.reattributeUserMessages(activeChatId, persona.id)
-      const patched = messages.map((m) =>
-        m.is_user
+      useStore.setState((state) => state.activeChatId !== activeChatId ? state : {
+        messages: state.messages.map((m) => m.is_user && messageIds.has(m.id)
           ? { ...m, name: persona.name, extra: { ...(m.extra || {}), persona_id: persona.id } }
-          : m
-      )
-      setMessages(patched)
+          : m),
+      })
       setShowReattributeConfirm(false)
     } catch (err) {
       console.error('[PersonaEditor] Failed to re-attribute chat messages:', err)
     } finally {
       setReattributing(false)
     }
-  }, [activeChatId, reattributing, persona.id, persona.name, messages, setMessages])
+  }, [activeChatId, reattributing, persona.id, persona.name])
 
   // Character-persona binding
   const activeCharName = activeCharacterId ? characters.find((c) => c.id === activeCharacterId)?.name : null

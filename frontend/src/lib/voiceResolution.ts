@@ -13,7 +13,7 @@
  */
 
 import type { TextSegment, SegmentAction } from '@/lib/speechDetection'
-import type { Character, Message, VoiceRef, GroupChatMetadata } from '@/types/api'
+import type { Character, Message, VoiceRef, GroupChatMetadata, TtsConnectionProfile } from '@/types/api'
 import type { VoiceSettings } from '@/types/store'
 
 export interface ResolvedSpeaker {
@@ -71,13 +71,14 @@ export function resolveMessageSpeaker({
 }
 
 export interface ResolveVoiceInput {
-  segment: TextSegment
+  segment: Pick<TextSegment, 'action'>
   speaker: ResolvedSpeaker
   /** The character record for the resolved speaker, if available. */
   character: Pick<Character, 'extensions'> | null
   /** Chat metadata for the active chat. May be a group chat or a single-char chat. */
   chatMetadata: Record<string, any> | null
   voiceSettings: VoiceSettings
+  ttsProfiles?: Pick<TtsConnectionProfile, 'id' | 'is_default'>[]
 }
 
 /**
@@ -120,10 +121,22 @@ function characterVoice(character: ResolveVoiceInput['character']): VoiceRef | n
   return readVoiceRef(character.extensions.ttsVoice)
 }
 
-function globalSpeechVoice(voiceSettings: VoiceSettings): VoiceRef | null {
-  if (!voiceSettings.ttsConnectionId) return null
+/** An explicit global selection takes precedence over the default profile. */
+export function resolveTtsConnectionId(
+  voiceSettings: Pick<VoiceSettings, 'ttsConnectionId'>,
+  ttsProfiles: Pick<TtsConnectionProfile, 'id' | 'is_default'>[],
+): string | null {
+  return voiceSettings.ttsConnectionId || ttsProfiles.find((profile) => profile.is_default)?.id || null
+}
+
+function globalSpeechVoice(
+  voiceSettings: VoiceSettings,
+  ttsProfiles: NonNullable<ResolveVoiceInput['ttsProfiles']>,
+): VoiceRef | null {
+  const connectionId = resolveTtsConnectionId(voiceSettings, ttsProfiles)
+  if (!connectionId) return null
   return {
-    connectionId: voiceSettings.ttsConnectionId,
+    connectionId,
     voice: '',
   }
 }
@@ -141,6 +154,7 @@ function globalSpeechVoice(voiceSettings: VoiceSettings): VoiceRef | null {
  *   - 'speech'                           → chat character override
  *                                         → character.extensions.ttsVoice
  *                                         → global ttsConnectionId
+ *                                         → default TTS connection
  */
 export function resolveSegmentVoice({
   segment,
@@ -148,6 +162,7 @@ export function resolveSegmentVoice({
   character,
   chatMetadata,
   voiceSettings,
+  ttsProfiles = [],
 }: ResolveVoiceInput): ResolvedVoice {
   const action = segment.action
   if (action === 'skip') {
@@ -164,7 +179,7 @@ export function resolveSegmentVoice({
   const speech =
     chatCharOverride
     ?? characterVoice(character)
-    ?? globalSpeechVoice(voiceSettings)
+    ?? globalSpeechVoice(voiceSettings, ttsProfiles)
 
   // Thoughts belong to the character — read in their own speech voice. The
   // action tag is preserved so future UX (e.g. a dedicated thought voice or
@@ -174,8 +189,29 @@ export function resolveSegmentVoice({
   }
 
   // narration
-  const narrator = chatNarrator ?? voiceSettings.narrationVoice ?? speech
+  const narrator = chatNarrator ?? readVoiceRef(voiceSettings.narrationVoice) ?? speech
   return { voice: narrator, action }
+}
+
+/** Resolve both playback voices once, including the message's group speaker. */
+export function resolveMessageVoices(input: Omit<ResolveSpeakerInput, 'characters'> & {
+  characters: Pick<Character, 'id' | 'name' | 'extensions'>[]
+  chatMetadata: ResolveVoiceInput['chatMetadata']
+  voiceSettings: VoiceSettings
+  ttsProfiles: NonNullable<ResolveVoiceInput['ttsProfiles']>
+}): { speech: VoiceRef | null; narration: VoiceRef | null } {
+  const speaker = resolveMessageSpeaker(input)
+  const context = {
+    speaker,
+    character: input.characters.find((character) => character.id === speaker.characterId) ?? null,
+    chatMetadata: input.chatMetadata,
+    voiceSettings: input.voiceSettings,
+    ttsProfiles: input.ttsProfiles,
+  }
+  return {
+    speech: resolveSegmentVoice({ ...context, segment: { action: 'speech' } }).voice,
+    narration: resolveSegmentVoice({ ...context, segment: { action: 'narration' } }).voice,
+  }
 }
 
 /**

@@ -1,4 +1,4 @@
-import { get, post, put, del, upload } from './client'
+import { get, post, put, del, upload, uploadRaw } from './client'
 import type { TagLibraryImportResult } from '@/types/api'
 
 // ─── Connection config types ────────────────────────────────────────────────
@@ -70,6 +70,12 @@ export interface ScanResult {
   personas: number
 }
 
+export interface StBackupUploadResult {
+  uploadId: string
+  fileName: string
+  counts: ScanResult
+}
+
 export interface MigrationScope {
   characters: boolean
   worldBooks: boolean
@@ -137,7 +143,8 @@ export const stMigrationApi = {
   },
 
   execute(params: {
-    dataDir: string
+    dataDir?: string
+    uploadId?: string
     targetUserId: string
     scope: MigrationScope
     connection?: FileConnectionConfig
@@ -154,6 +161,19 @@ export const stMigrationApi = {
 
   status() {
     return get<MigrationStatus>('/st-migration/status')
+  },
+
+  uploadBackup(file: File) {
+    const filename = encodeURIComponent(file.name)
+    return uploadRaw<StBackupUploadResult>(
+      `/st-migration/backup?filename=${filename}`,
+      file,
+      { timeout: 0, contentType: 'application/zip' },
+    )
+  },
+
+  discardBackup(uploadId: string) {
+    return del<void>(`/st-migration/backup/${encodeURIComponent(uploadId)}`)
   },
 
   importTagLibrary(file: File, targetUserId: string) {

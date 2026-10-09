@@ -91,7 +91,7 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set, getState) => ({
     set({ isAuthLoading: true, authError: null })
     let responseMeta: AuthErrorResponseMeta | null = null
     try {
-      const { data } = await authClient.getSession({
+      const { data, error } = await authClient.getSession({
         query: {},
         fetchOptions: {
           onError: async (ctx) => {
@@ -104,6 +104,14 @@ export const createAuthSlice: StateCreator<AuthSlice> = (set, getState) => ({
         || mutationGeneration !== authMutationGeneration
         || requestGeneration !== sessionCheckGeneration
       ) return
+
+      // BetterAuth returns HTTP failures as a resolved `{ data: null, error }`
+      // result (only transport failures reject). Do not mistake a proxy/backend
+      // outage for an authoritative empty session and send an established user
+      // to /login; the catch path retains that user while the websocket drives
+      // the connection-lost overlay. A successful `{ data: null, error: null }`
+      // still clears the session below.
+      if (error) throw error
 
       if (data?.user) {
         const currentUserId = getState().user?.id

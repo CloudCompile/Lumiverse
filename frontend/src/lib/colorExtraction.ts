@@ -589,9 +589,9 @@ function analyzePixels(data: Uint8ClampedArray): PixelAnalysis {
   }
 
   let best: BucketStats | null = null
-  buckets.forEach((bucket) => {
+  for (const bucket of buckets.values()) {
     if (!best || bucket.count > best.count) best = bucket
-  })
+  }
 
   if (!best || best.count === 0) {
     const grey = { r: 128, g: 128, b: 128 }

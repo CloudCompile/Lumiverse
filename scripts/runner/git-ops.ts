@@ -1,5 +1,5 @@
-import { delimiter, join } from "path";
-import { homedir } from "os";
+import { delimiter, dirname, join, win32 } from "path";
+import { homedir, platform } from "os";
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "fs";
 import { runGit, getUpstreamRef, getCurrentBranch } from "./lib/git.js";
 import {
@@ -15,6 +15,8 @@ import {
 } from "./lib/constants.js";
 import { spawnAsync } from "./lib/spawn-async.js";
 import { npmCmd } from "./lib/termux-cli.js";
+import { resolveWindowsMsvc, windowsMsvcCommand } from "../windows-msvc.js";
+import { configuredBunExecutable, ensureBunRuntime } from "../../src/runtime/bun-runtime.js";
 
 export interface UpdateState {
   available: boolean;
@@ -162,12 +164,53 @@ export function bunInstallCmd(
     // A proot-distro shell already provides syscall interception.
     return ["bun", ...installArgs];
   }
+  const bunExecutable = env.LUMIVERSE_BUN_EXECUTABLE || "bun";
   if (platform === "win32") {
     // Windows normally hardlinks packages from Bun's cache. Filesystem filters
     // can leave those package directories empty even though install exits 0.
-    return ["bun", "install", "--backend=copyfile"];
+    return [bunExecutable, "install", "--backend=copyfile"];
   }
-  return ["bun", "install"];
+  return [bunExecutable, "install"];
+}
+
+export function bunRuntimeCmd(
+  args: string[],
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  if (env.LUMIVERSE_IS_TERMUX === "true") {
+    const bunPath = env.LUMIVERSE_BUN_PATH || "bun";
+    const method = env.LUMIVERSE_BUN_METHOD;
+    if (method === "direct") return [bunPath, ...args];
+    if (method === "grun") return ["grun", bunPath, ...args];
+
+    const prefix = env.PREFIX || "/data/data/com.termux/files/usr";
+    return [
+      "proot", "--link2symlink", "-0",
+      `${prefix}/glibc/lib/ld-linux-aarch64.so.1`,
+      "--library-path", `${prefix}/glibc/lib`,
+      bunPath, ...args,
+    ];
+  }
+  return [env.LUMIVERSE_BUN_EXECUTABLE || "bun", ...args];
+}
+
+// glibc-runner/grun currently word-splits argv containing spaces on Termux.
+// Keep eval probes whitespace-free so fallback runtimes receive one intact -e arg.
+const BACKEND_DEPENDENCY_PROBE =
+  "await(import('better-auth'));await(import('@better-auth/oauth-provider'))";
+
+export function backendDependencyProbeCmd(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return bunRuntimeCmd(["-e", BACKEND_DEPENDENCY_PROBE], env);
+}
+
+const FRONTEND_DEPENDENCY_PROBE = "await(import('@better-auth/oauth-provider/client'))";
+
+export function frontendDependencyProbeCmd(
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  return bunRuntimeCmd(["-e", FRONTEND_DEPENDENCY_PROBE], env);
 }
 
 export function bunInstallTimeoutMs(
@@ -367,12 +410,21 @@ export async function runWithServerStopped(
 
 async function runCommandOrThrow(
   cmd: string[],
-  opts: { cwd: string; timeoutMs: number; label: string; env?: Record<string, string | undefined> }
+  opts: {
+    cwd: string;
+    timeoutMs: number;
+    label: string;
+    env?: Record<string, string | undefined>;
+    windowsVerbatimArguments?: boolean;
+    onOutput?: (source: "stdout" | "stderr", text: string) => void;
+  }
 ): Promise<void> {
   const result = await spawnAsync(cmd, {
     cwd: opts.cwd,
     timeoutMs: opts.timeoutMs,
     env: opts.env,
+    windowsVerbatimArguments: opts.windowsVerbatimArguments,
+    onOutput: opts.onOutput,
   });
 
   if (result.exitCode === 0) return;
@@ -532,6 +584,7 @@ export async function applyUpdate(
       log("Could not inspect changed files; conservatively installing dependencies and rebuilding the frontend.");
     }
 
+    await ensureBunRuntime(PROJECT_ROOT);
     await ensureChangedDependencies(frontendDir, changedFiles, reportProgress, {
       fromRef: previousHead,
       toRef: currentHead,
@@ -588,6 +641,7 @@ export async function switchBranch(
       log("Could not inspect changed files; conservatively installing dependencies and rebuilding the frontend.");
     }
 
+    await ensureBunRuntime(PROJECT_ROOT);
     await ensureChangedDependencies(frontendDir, changedFiles, reportProgress, {
       fromRef: previousHead,
       toRef: currentHead,
@@ -806,6 +860,106 @@ async function installDependenciesForDir(
   }
 }
 
+type DependencyTreeLabel = "backend" | "frontend";
+
+class DependencyValidationError extends Error {
+  constructor(
+    readonly dependencyTree: DependencyTreeLabel,
+    message: string,
+  ) {
+    super(message);
+    this.name = "DependencyValidationError";
+  }
+}
+
+async function verifyBackendDependencies(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(backendDependencyProbeCmd(), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "backend dependency validation",
+    });
+  } catch (error) {
+    throw new DependencyValidationError("backend", errorMessage(error));
+  }
+}
+
+async function verifyFrontendDependencies(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(frontendDependencyProbeCmd(), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "frontend dependency validation",
+    });
+  } catch (error) {
+    throw new DependencyValidationError("frontend", errorMessage(error));
+  }
+}
+
+async function clearBunInstallCacheForRepair(dir: string): Promise<void> {
+  try {
+    await runCommandOrThrow(bunRuntimeCmd(["pm", "cache", "rm"]), {
+      cwd: dir,
+      timeoutMs: 60_000,
+      label: "Bun package cache clear",
+    });
+  } catch (error) {
+    log(`Could not clear Bun's package cache before dependency repair: ${errorMessage(error)}`);
+  }
+}
+
+async function repairDependencies(
+  dir: string,
+  label: DependencyTreeLabel,
+  installCmd: string[],
+  postInstall: () => Promise<void>,
+): Promise<void> {
+  const nodeModules = join(dir, "node_modules");
+  const backupDir = join(
+    dir,
+    `${INSTALL_BACKUP_PREFIX}dependency-repair-${Date.now()}-${process.pid}`,
+  );
+
+  log(`${label[0]?.toUpperCase() ?? ""}${label.slice(1)} dependency validation failed; clearing the package cache and reinstalling from a clean tree...`);
+  try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+  if (existsSync(nodeModules)) renameSync(nodeModules, backupDir);
+
+  try {
+    await clearBunInstallCacheForRepair(dir);
+    await installDependenciesForDir(
+      dir,
+      label,
+      installCmd,
+      postInstall,
+    );
+    try { rmSync(backupDir, { recursive: true, force: true }); } catch {}
+    log(`${label[0]?.toUpperCase() ?? ""}${label.slice(1)} dependency tree repaired.`);
+  } catch (error) {
+    try { rmSync(nodeModules, { recursive: true, force: true }); } catch {}
+    if (existsSync(backupDir)) renameSync(backupDir, nodeModules);
+    throw error;
+  }
+}
+
+async function finishFrontendDependencyInstall(frontendDir: string): Promise<void> {
+  await repairTermuxFrontendNativeDeps(frontendDir);
+  await verifyFrontendDependencies(frontendDir);
+}
+
+async function ensureFrontendDependencyTreeHealthy(frontendDir: string): Promise<void> {
+  try {
+    await verifyFrontendDependencies(frontendDir);
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "frontend") throw error;
+    await repairDependencies(
+      frontendDir,
+      "frontend",
+      bunInstallCmd(),
+      async () => finishFrontendDependencyInstall(frontendDir),
+    );
+  }
+}
+
 export async function ensureDependencies(frontendDir: string): Promise<void> {
   await ensureBackendDependencies();
   await ensureFrontendDependencies(frontendDir);
@@ -813,14 +967,31 @@ export async function ensureDependencies(frontendDir: string): Promise<void> {
 
 export async function ensureBackendDependencies(): Promise<void> {
   clearBunInstallCacheIfTermux();
-  await installDependenciesForDir(PROJECT_ROOT, "backend", bunInstallCmd());
+  const installCmd = bunInstallCmd();
+  const postInstall = async (): Promise<void> => verifyBackendDependencies(PROJECT_ROOT);
+  try {
+    await installDependenciesForDir(
+      PROJECT_ROOT,
+      "backend",
+      installCmd,
+      postInstall,
+    );
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "backend") throw error;
+    await repairDependencies(PROJECT_ROOT, "backend", installCmd, postInstall);
+  }
 }
 
 export async function ensureFrontendDependencies(frontendDir: string): Promise<void> {
   clearBunInstallCacheIfTermux();
-  await installDependenciesForDir(frontendDir, "frontend", bunInstallCmd(), async () => {
-    await repairTermuxFrontendNativeDeps(frontendDir);
-  });
+  const installCmd = bunInstallCmd();
+  const postInstall = async (): Promise<void> => finishFrontendDependencyInstall(frontendDir);
+  try {
+    await installDependenciesForDir(frontendDir, "frontend", installCmd, postInstall);
+  } catch (error) {
+    if (!(error instanceof DependencyValidationError) || error.dependencyTree !== "frontend") throw error;
+    await repairDependencies(frontendDir, "frontend", installCmd, postInstall);
+  }
 }
 
 async function ensureChangedDependencies(
@@ -867,12 +1038,12 @@ export const FRONTEND_BUILD_STEPS = [
   {
     label: "frontend component metadata extraction",
     progress: "Extracting frontend component metadata...",
-    command: ["bun", "run", "extract-props"],
+    command: ["bun", "run", "scripts/extract-props.ts"],
   },
   {
     label: "frontend CSS variable extraction",
     progress: "Extracting frontend CSS variables...",
-    command: ["bun", "run", "extract-css-vars"],
+    command: ["bun", "run", "scripts/extract-css-vars.ts"],
   },
   {
     label: "frontend Vite bundling",
@@ -880,6 +1051,15 @@ export const FRONTEND_BUILD_STEPS = [
     command: ["bun", "run", "scripts/build-frontend.ts"],
   },
 ] as const;
+
+function desktopInstallBundleArgs(): string[] {
+  switch (platform()) {
+    case "darwin": return ["--bundles", "app"];
+    case "win32": return ["--bundles", "nsis"];
+    case "linux": return ["--bundles", "appimage"];
+    default: return [];
+  }
+}
 
 export const DESKTOP_BUILD_STEPS = [
   {
@@ -892,25 +1072,35 @@ export const DESKTOP_BUILD_STEPS = [
   {
     label: "desktop Tauri build",
     progress: "Compiling the desktop app — this can take several minutes...",
-    command: ["bun", "run", "tauri", "build"],
+    // The scripted workflow installs the native app artifact directly. Avoid
+    // also building optional distributable media (notably macOS DMGs), whose
+    // Finder/mount tooling can fail after the usable .app already succeeded.
+    command: ["bun", "run", "tauri:finalized", "build", ...desktopInstallBundleArgs()],
   },
 ] as const satisfies ReadonlyArray<{ label: string; progress: string; command: readonly string[] | null }>;
 
-/**
- * PATH for the build steps. The tray is a GUI app and launches the runner with
- * the minimal PATH GUI apps receive, plus bun's own directory — cargo is not on
- * it. `tauri build` shells out to cargo, so without this the toolchain check
- * passes (it finds `~/.cargo/bin` itself) and the build then fails to find the
- * very tool it just confirmed. Mirrors the tray's `prepend_bun_dir_to_path`.
- */
-function desktopBuildEnv(): Record<string, string | undefined> {
-  const cargoBin = join(homedir(), ".cargo", "bin");
-  const current = process.env.PATH ?? "";
-  const alreadyPresent = current.split(delimiter).includes(cargoBin);
-  return {
-    ...process.env,
-    PATH: alreadyPresent ? current : [cargoBin, current].filter(Boolean).join(delimiter),
-  };
+/** Keep the Bun running this build and cargo available to every child process. */
+export function desktopBuildEnv(
+  env: Record<string, string | undefined> = process.env,
+  bunExecutable = configuredBunExecutable(env),
+  cargoBin = join(homedir(), ".cargo", "bin"),
+  target: NodeJS.Platform = process.platform,
+): Record<string, string | undefined> {
+  const separator = target === "win32" ? ";" : delimiter;
+  const pathKeys = Object.keys(env).filter((key) => target === "win32" ? key.toLowerCase() === "path" : key === "PATH");
+  const current = pathKeys.map((key) => env[key]).filter(Boolean).join(separator);
+  const bunBin = (target === "win32" ? win32.dirname : dirname)(bunExecutable);
+  const seen = new Set<string>();
+  const paths = [bunBin, cargoBin, ...current.split(separator)].filter((entry) => {
+    if (!entry) return false;
+    const key = target === "win32" ? entry.toLowerCase() : entry;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const buildEnv = { ...env };
+  for (const key of pathKeys) delete buildEnv[key];
+  return { ...buildEnv, PATH: paths.join(separator) };
 }
 
 /**
@@ -979,7 +1169,10 @@ export function selectDesktopBundleArtifact(bundleRoot: string): string | null {
  * Note this cannot replace the running tray — it produces a bundle, and
  * installing it is a separate step.
  */
-export async function rebuildDesktopShell(reportProgress?: ProgressReporter): Promise<string | null> {
+export async function rebuildDesktopShell(
+  reportProgress?: ProgressReporter,
+  options: { mirrorOutput?: boolean } = {},
+): Promise<string | null> {
   const desktopDir = join(PROJECT_ROOT, "desktop");
   if (!existsSync(join(desktopDir, "src-tauri"))) {
     throw new Error("This checkout has no desktop/src-tauri directory to build");
@@ -988,6 +1181,8 @@ export async function rebuildDesktopShell(reportProgress?: ProgressReporter): Pr
   log("Rebuilding the desktop shell...");
   const deadline = Date.now() + TIMEOUT_DESKTOP_BUILD_MS;
   const env = desktopBuildEnv();
+  const msvc = process.platform === "win32" ? await resolveWindowsMsvc({ env }) : null;
+  if (msvc && !msvc.ready) throw new Error(`MSVC build tools: ${msvc.detail}`);
 
   for (const step of DESKTOP_BUILD_STEPS) {
     const timeoutMs = deadline - Date.now();
@@ -999,11 +1194,19 @@ export async function rebuildDesktopShell(reportProgress?: ProgressReporter): Pr
 
     reportProgress?.(step.progress);
     log(step.progress);
-    await runCommandOrThrow(step.command ? [...step.command] : bunInstallCmd(), {
+    const command = step.command ? [...step.command] : bunInstallCmd();
+    const buildCommand = step.command && msvc?.vcvarsall && msvc.architecture
+      ? windowsMsvcCommand(command, msvc.vcvarsall, msvc.architecture, env)
+      : command;
+    await runCommandOrThrow(buildCommand, {
       cwd: desktopDir,
       timeoutMs,
       label: step.label,
       env,
+      windowsVerbatimArguments: buildCommand !== command,
+      onOutput: options.mirrorOutput
+        ? (source, text) => (source === "stdout" ? process.stdout : process.stderr).write(text)
+        : undefined,
     });
   }
 
@@ -1015,6 +1218,7 @@ export async function rebuildFrontend(
   frontendDir: string,
   reportProgress?: ProgressReporter,
 ): Promise<void> {
+  await ensureFrontendDependencyTreeHealthy(frontendDir);
   log("Rebuilding frontend...");
   const deadline = Date.now() + TIMEOUT_BUN_BUILD_MS;
 
@@ -1028,7 +1232,7 @@ export async function rebuildFrontend(
 
     reportProgress?.(step.progress);
     log(step.progress);
-    await runCommandOrThrow([...step.command], {
+    await runCommandOrThrow(bunRuntimeCmd([...step.command].slice(1)), {
       cwd: frontendDir,
       timeoutMs,
       label: step.label,

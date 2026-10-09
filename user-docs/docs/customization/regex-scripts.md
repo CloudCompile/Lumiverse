@@ -42,6 +42,14 @@ This converts `*italic text*` into `<em>italic text</em>`.
 
 ---
 
+## Organizing Scripts in Folders
+
+Folders start collapsed when you open the Regex Scripts panel. Click or tap a folder header to expand it.
+
+Right-click a folder header, or press and hold it on touch devices, to rename the folder, enable or disable its scripts, export them, or delete them. When a Loom preset is selected, the menu also offers preset binding. Renaming updates every script in the folder, including scripts hidden by the current scope filter. Press Enter or click the checkmark to save the name; press Escape or click the cancel button to cancel.
+
+---
+
 ## Placement
 
 **Placement** controls which parts of the text the script runs on:

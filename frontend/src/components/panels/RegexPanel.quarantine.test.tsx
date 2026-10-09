@@ -65,6 +65,12 @@ const evidenceReports: Array<{ id: string; payload: Record<string, unknown> }> =
 let reportEvidenceImpl: (id: string, payload: Record<string, unknown>) => Promise<unknown> = async () => ({})
 const successToasts: string[] = []
 const errorToasts: string[] = []
+let storedRegexFolders: string[] = []
+const putSetting = jest.fn(async (key: string, value: unknown) => {
+  if (key === 'regexScriptFolders' && Array.isArray(value)) {
+    storedRegexFolders = value as string[]
+  }
+})
 
 mock.module('@/api/regex', () => ({
   regexApi: {
@@ -78,8 +84,8 @@ mock.module('@/api/regex', () => ({
 }))
 mock.module('@/api/settings', () => ({
   settingsApi: {
-    get: async () => ({ value: [] }),
-    put: async () => ({}),
+    get: async (key: string) => ({ value: key === 'regexScriptFolders' ? storedRegexFolders : [] }),
+    put: putSetting,
   },
 }))
 mock.module('@/lib/toast', () => ({
@@ -92,7 +98,7 @@ mock.module('@/lib/toast', () => ({
 }))
 
 const loadRegexScripts = jest.fn(async () => {})
-const updateRegexScript = jest.fn(async () => {})
+const updateRegexScript = jest.fn(async (_id: string, _updates: Partial<RegexScript>) => {})
 
 let storeState: Record<string, unknown> = {}
 
@@ -182,6 +188,42 @@ function byAriaLabel(host: HTMLElement, label: string): HTMLElement | null {
   return host.querySelector<HTMLElement>(`[aria-label="${label}"]`)
 }
 
+function folderHeader(host: HTMLElement, name: string): HTMLElement {
+  const header = [...host.querySelectorAll<HTMLElement>('[role="button"][aria-expanded]')]
+    .find((element) => element.textContent?.startsWith(name))
+  expect(header).toBeDefined()
+  return header!
+}
+
+async function openFolderMenu(host: HTMLElement, name: string) {
+  await act(async () => {
+    folderHeader(host, name).dispatchEvent(new domWindow.MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, clientX: 80, clientY: 100,
+    }))
+  })
+}
+
+function menuButton(label: string): HTMLButtonElement {
+  const button = [...document.body.querySelectorAll<HTMLButtonElement>('button')]
+    .find((element) => element.textContent?.trim() === label)
+  expect(button).toBeDefined()
+  return button!
+}
+
+async function changeInput(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+    input.dispatchEvent(new domWindow.Event('input', { bubbles: true }))
+  })
+}
+
+async function rerender(host: HTMLElement) {
+  const { root } = mountedRoots.find((mounted) => mounted.host === host)!
+  await act(async () => {
+    root.render(<I18nextProvider i18n={englishI18n}><RegexPanel /></I18nextProvider>)
+  })
+}
+
 const QUARANTINE_DETAIL = panels.regexPanel.quarantinedDetail
 const CLEAR_ARIA = 'Clear the quarantine on hung-script and run it again'
 
@@ -211,6 +253,8 @@ afterEach(async () => {
   evidenceReports.length = 0
   successToasts.length = 0
   errorToasts.length = 0
+  storedRegexFolders = []
+  putSetting.mockClear()
   reportEvidenceImpl = async () => ({})
   loadRegexScripts.mockClear()
   updateRegexScript.mockClear()
@@ -222,6 +266,7 @@ describe('RegexPanel quarantine recovery', () => {
     storeState = baseStoreState([hung])
 
     const host = await mount(<RegexPanel />)
+    await click(folderHeader(host, panels.regexPanel.uncategorized))
 
     // Collapsed row: the badge is announced, not colour-only.
     const badge = byAriaLabel(host, QUARANTINE_DETAIL)
@@ -258,6 +303,7 @@ describe('RegexPanel quarantine recovery', () => {
     storeState = baseStoreState([script('healthy-script')])
 
     const host = await mount(<RegexPanel />)
+    await click(folderHeader(host, panels.regexPanel.uncategorized))
 
     expect(byAriaLabel(host, QUARANTINE_DETAIL)).toBeNull()
     expect(host.textContent).not.toContain(QUARANTINE_DETAIL)
@@ -272,11 +318,361 @@ describe('RegexPanel quarantine recovery', () => {
     }
 
     const host = await mount(<RegexPanel />)
+    await click(folderHeader(host, panels.regexPanel.uncategorized))
     await click(byAriaLabel(host, QUARANTINE_DETAIL)!)
     await click(byAriaLabel(host, CLEAR_ARIA)!)
 
     expect(evidenceReports).toEqual([{ id: 'hung-script', payload: { quarantined: false } }])
     expect(errorToasts).toEqual(['Script is read-only'])
     expect(successToasts).toEqual([])
+  })
+})
+
+describe('RegexPanel folders', () => {
+  test('folders start collapsed, including folders loaded after mounting', async () => {
+    storedRegexFolders = ['Empty folder']
+    storeState = baseStoreState([])
+    const host = await mount(<RegexPanel />)
+    expect(folderHeader(host, 'Empty folder').getAttribute('aria-expanded')).toBe('false')
+
+    storeState.regexScripts = [
+      script('first-script', { folder: 'First folder' }),
+      script('second-script', { folder: 'Second folder' }),
+      script('uncategorized-script'),
+    ]
+    await rerender(host)
+
+    for (const name of ['First folder', 'Second folder', panels.regexPanel.uncategorized]) {
+      expect(folderHeader(host, name).getAttribute('aria-expanded')).toBe('false')
+    }
+    expect(host.textContent).not.toContain('first-script')
+    expect(host.textContent).not.toContain('second-script')
+    expect(host.textContent).not.toContain('uncategorized-script')
+
+    await click(folderHeader(host, 'First folder'))
+    expect(host.textContent).toContain('first-script')
+    expect(host.textContent).not.toContain('second-script')
+
+    storeState.regexScripts = [
+      ...(storeState.regexScripts as RegexScript[]),
+      script('third-script', { folder: 'Third folder' }),
+    ]
+    await rerender(host)
+    expect(folderHeader(host, 'First folder').getAttribute('aria-expanded')).toBe('true')
+    expect(folderHeader(host, 'Third folder').getAttribute('aria-expanded')).toBe('false')
+    await click(folderHeader(host, 'First folder'))
+    expect(host.textContent).not.toContain('first-script')
+  })
+
+  test('adding a script opens its folder and editor', async () => {
+    const newScript = script('new-script')
+    const addRegexScript = jest.fn(async () => {
+      storeState.regexScripts = [newScript]
+      return newScript
+    })
+    storeState = { ...baseStoreState([]), addRegexScript }
+    const host = await mount(<RegexPanel />)
+
+    await click(host.querySelector<HTMLElement>('button[title="Add"]')!)
+    await click(menuButton(panels.regexPanel.newScript))
+
+    expect(folderHeader(host, panels.regexPanel.uncategorized).getAttribute('aria-expanded')).toBe('true')
+    expect(host.querySelector<HTMLInputElement>('input[value="new-script"]')).not.toBeNull()
+  })
+
+  test('right-click offers rename and the existing folder actions without expanding', async () => {
+    storeState = {
+      ...baseStoreState([script('folder-script', { folder: 'Reusable targets' })]),
+      activeLoomPresetId: 'preset-1',
+    }
+    const host = await mount(<RegexPanel />)
+    await openFolderMenu(host, 'Reusable targets')
+
+    for (const label of [
+      'Rename Reusable targets',
+      'Disable all scripts in "Reusable targets"',
+      'Bind "Reusable targets" to active preset',
+      'Export scripts in "Reusable targets"',
+      'Delete all scripts in "Reusable targets"',
+    ]) {
+      expect(menuButton(label)).toBeDefined()
+    }
+    expect(folderHeader(host, 'Reusable targets').getAttribute('aria-expanded')).toBe('false')
+    // The buttons on the header remain available too.
+    expect(byAriaLabel(host, 'Disable all scripts in Reusable targets')).not.toBeNull()
+    expect(byAriaLabel(host, 'Export scripts in Reusable targets')).not.toBeNull()
+
+    await click(menuButton('Disable all scripts in "Reusable targets"'))
+    expect(storeState.toggleRegexFolder).toHaveBeenCalledWith('Reusable targets', true)
+    expect(document.body.textContent).not.toContain('Rename Reusable targets')
+
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Bind "Reusable targets" to active preset'))
+    expect(updateRegexScript).toHaveBeenCalledWith('folder-script', { preset_id: 'preset-1' })
+
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Delete all scripts in "Reusable targets"'))
+    expect(document.body.textContent).toContain('Delete all 1 regex scripts in "Reusable targets"?')
+    expect(storeState.bulkRemoveRegexScripts).not.toHaveBeenCalled()
+  })
+
+  test('touch hold opens the folder menu and suppresses the release click', async () => {
+    storeState = baseStoreState([script('folder-script', { folder: 'Reusable targets' })])
+    const host = await mount(<RegexPanel />)
+    const header = folderHeader(host, 'Reusable targets')
+    await act(async () => {
+      header.dispatchEvent(new domWindow.TouchEvent('touchstart', {
+        bubbles: true, cancelable: true,
+        touches: [{ clientX: 80, clientY: 100 } as Touch],
+      }))
+      await new Promise((resolve) => setTimeout(resolve, 550))
+    })
+
+    expect(menuButton('Rename Reusable targets')).toBeDefined()
+    const release = new domWindow.TouchEvent('touchend', { bubbles: true, cancelable: true })
+    await act(async () => { header.dispatchEvent(release) })
+    expect(release.defaultPrevented).toBe(true)
+    expect(header.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  test('renaming a folder updates scripts across scopes and preserves its expanded state', async () => {
+    storedRegexFolders = ['Reusable targets']
+    const renameScript = jest.fn(async (id: string, updates: Partial<RegexScript>) => {
+      storeState.regexScripts = (storeState.regexScripts as RegexScript[])
+        .map((existing) => existing.id === id ? { ...existing, ...updates } : existing)
+    })
+    storeState = {
+      ...baseStoreState([
+        script('global-script', { folder: 'Reusable targets' }),
+        script('character-script', { folder: 'Reusable targets', scope: 'character', scope_id: 'char-1' }),
+        script('other-script', { folder: 'Other folder' }),
+      ]),
+      updateRegexScript: renameScript,
+    }
+    const host = await mount(<RegexPanel />)
+    await click(menuButton(panels.regexPanel.scopeGlobal))
+    await click(folderHeader(host, 'Reusable targets'))
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Rename Reusable targets'))
+
+    const input = byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement
+    expect(input.value).toBe('Reusable targets')
+    expect(document.activeElement).toBe(input)
+    await changeInput(input, '  Updated targets  ')
+    await act(async () => {
+      input.dispatchEvent(new domWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
+    })
+
+    expect(renameScript.mock.calls).toEqual([
+      ['global-script', { folder: 'Updated targets' }],
+      ['character-script', { folder: 'Updated targets' }],
+    ])
+    expect(folderHeader(host, 'Updated targets').getAttribute('aria-expanded')).toBe('true')
+    expect(host.textContent).toContain('global-script')
+    expect(host.textContent).not.toContain('character-script')
+    expect(host.textContent).not.toContain('Reusable targets')
+    expect(byAriaLabel(host, panels.regexPanel.folderName)).toBeNull()
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(storedRegexFolders).toEqual(['Updated targets'])
+  })
+
+  test('renames a persisted empty folder and keeps it collapsed', async () => {
+    storedRegexFolders = ['Reusable targets']
+    storeState = baseStoreState([])
+    const host = await mount(<RegexPanel />)
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Rename Reusable targets'))
+    await changeInput(byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement, 'Updated targets')
+    await click(byAriaLabel(host, shared.folderDropdown.confirmRename)!)
+
+    expect(folderHeader(host, 'Updated targets').getAttribute('aria-expanded')).toBe('false')
+    expect(host.textContent).not.toContain('Reusable targets')
+    expect(updateRegexScript).not.toHaveBeenCalled()
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)) })
+    expect(storedRegexFolders).toEqual(['Updated targets'])
+  })
+
+  test('blank names cannot be submitted and Escape cancels renaming', async () => {
+    storeState = baseStoreState([script('folder-script', { folder: 'Reusable targets' })])
+    const host = await mount(<RegexPanel />)
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Rename Reusable targets'))
+    const input = byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement
+    await changeInput(input, '   ')
+    expect((byAriaLabel(host, shared.folderDropdown.confirmRename) as HTMLButtonElement).disabled).toBe(true)
+    await act(async () => {
+      input.dispatchEvent(new domWindow.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    })
+
+    expect(byAriaLabel(host, panels.regexPanel.folderName)).toBeNull()
+    expect(folderHeader(host, 'Reusable targets').getAttribute('aria-expanded')).toBe('false')
+    expect(updateRegexScript).not.toHaveBeenCalled()
+  })
+
+  test('keyboard users can open the menu and cancel without submitting a rename', async () => {
+    storeState = baseStoreState([script('folder-script', { folder: 'Reusable targets' })])
+    const host = await mount(<RegexPanel />)
+    await act(async () => {
+      folderHeader(host, 'Reusable targets').dispatchEvent(new domWindow.KeyboardEvent('keydown', {
+        key: 'F10', shiftKey: true, bubbles: true, cancelable: true,
+      }))
+    })
+    await click(menuButton('Rename Reusable targets'))
+    await changeInput(byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement, 'Updated targets')
+    const cancel = byAriaLabel(host, shared.folderDropdown.cancelRename)!
+    await act(async () => {
+      cancel.dispatchEvent(new domWindow.KeyboardEvent('keydown', {
+        key: 'Enter', bubbles: true, cancelable: true,
+      }))
+    })
+    // JSDOM does not synthesize the button's click after Enter.
+    await click(cancel)
+
+    expect(updateRegexScript).not.toHaveBeenCalled()
+    expect(byAriaLabel(host, panels.regexPanel.folderName)).toBeNull()
+    expect(folderHeader(host, 'Reusable targets').getAttribute('aria-expanded')).toBe('false')
+  })
+
+  test('a failed rename keeps the original folder and editor available for retry', async () => {
+    storedRegexFolders = ['Reusable targets']
+    const renameScript = jest.fn(async () => {
+      throw Object.assign(new Error('request failed'), { body: { error: 'Unable to rename script' } })
+    })
+    storeState = {
+      ...baseStoreState([script('folder-script', { folder: 'Reusable targets' })]),
+      updateRegexScript: renameScript,
+    }
+    const host = await mount(<RegexPanel />)
+    await openFolderMenu(host, 'Reusable targets')
+    await click(menuButton('Rename Reusable targets'))
+    await changeInput(byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement, 'Updated targets')
+    await click(byAriaLabel(host, shared.folderDropdown.confirmRename)!)
+
+    expect(errorToasts).toEqual(['Unable to rename script'])
+    expect(storedRegexFolders).toEqual(['Reusable targets'])
+    expect((byAriaLabel(host, panels.regexPanel.folderName) as HTMLInputElement).disabled).toBe(false)
+    expect(putSetting).not.toHaveBeenCalled()
+  })
+
+  test('scoped views omit folders that contain no matching scripts', async () => {
+    storedRegexFolders = ['Empty folder']
+    storeState = {
+      ...baseStoreState([
+        script('global-script', { folder: 'Global folder' }),
+        script('matching-chat-script', { folder: 'Matching chat folder', scope: 'chat', scope_id: 'chat-1' }),
+        script('other-chat-script', { folder: 'Other chat folder', scope: 'chat', scope_id: 'chat-2' }),
+      ]),
+      activeChatId: 'chat-1',
+    }
+
+    const host = await mount(<RegexPanel />)
+
+    expect(host.textContent).toContain('Empty folder')
+    expect(host.textContent).toContain('Global folder')
+    expect(host.textContent).toContain('Matching chat folder')
+    expect(host.textContent).toContain('Other chat folder')
+
+    const chatScopeButton = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent === panels.regexPanel.scopeThisChat)
+    expect(chatScopeButton).not.toBeUndefined()
+    await click(chatScopeButton!)
+
+    expect(host.textContent).toContain('Matching chat folder')
+    expect(host.textContent).not.toContain('Empty folder')
+    expect(host.textContent).not.toContain('Global folder')
+    expect(host.textContent).not.toContain('Other chat folder')
+  })
+
+  test('creating a folder with no scripts renders a blank folder target', async () => {
+    storeState = baseStoreState([])
+    const host = await mount(<RegexPanel />)
+
+    expect(host.textContent).toContain(panels.regexPanel.noScripts)
+
+    await click(host.querySelector<HTMLElement>('button[title="Add"]')!)
+    const newFolderButton = [...host.querySelectorAll<HTMLButtonElement>('button')]
+      .find((button) => button.textContent?.includes(panels.regexPanel.newFolder))
+    expect(newFolderButton).not.toBeUndefined()
+    await click(newFolderButton!)
+
+    const folderInput = host.querySelector<HTMLInputElement>(`input[placeholder="${panels.regexPanel.folderName}"]`)
+    expect(folderInput).not.toBeNull()
+    await act(async () => {
+      const setValue = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, 'value')?.set
+      setValue?.call(folderInput, 'Post-processing')
+      folderInput!.dispatchEvent(new domWindow.Event('input', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await act(async () => {
+      folderInput!.dispatchEvent(new domWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await Promise.resolve()
+    })
+
+    expect(host.textContent).toContain('Post-processing')
+    expect(host.textContent).not.toContain(panels.regexPanel.noScripts)
+    expect(host.querySelector('[role="button"]')?.textContent).toContain('Post-processing0')
+  })
+
+  test('renders a previously persisted folder when the regex library is empty', async () => {
+    storedRegexFolders = ['Reusable targets']
+    storeState = baseStoreState([])
+
+    const host = await mount(<RegexPanel />)
+
+    expect(host.textContent).toContain('Reusable targets')
+    expect(host.textContent).not.toContain(panels.regexPanel.noScripts)
+  })
+
+  test('deletes a persisted empty folder after confirmation', async () => {
+    storedRegexFolders = ['Reusable targets']
+    storeState = baseStoreState([])
+
+    const host = await mount(<RegexPanel />)
+    await click(byAriaLabel(host, 'Delete all scripts in Reusable targets')!)
+    await click(document.querySelector<HTMLButtonElement>('button[type="submit"]')!)
+
+    expect(host.textContent).not.toContain('Reusable targets')
+    expect(host.textContent).toContain(panels.regexPanel.noScripts)
+  })
+
+  test('removes a populated folder from settings after all scripts are deleted', async () => {
+    storedRegexFolders = ['Reusable targets']
+    const folderScript = script('folder-script', { folder: 'Reusable targets' })
+    const bulkRemoveRegexScripts = jest.fn(async () => 1)
+    storeState = {
+      ...baseStoreState([folderScript]),
+      bulkRemoveRegexScripts,
+    }
+
+    const host = await mount(<RegexPanel />)
+    await click(byAriaLabel(host, 'Delete all scripts in Reusable targets')!)
+    await click(document.querySelector<HTMLButtonElement>('button[type="submit"]')!)
+
+    expect(bulkRemoveRegexScripts).toHaveBeenCalledWith(['folder-script'])
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    })
+    expect(storedRegexFolders).toEqual([])
+  })
+
+  test('keeps a populated folder in settings when some scripts cannot be deleted', async () => {
+    storedRegexFolders = ['Reusable targets']
+    const scripts = [
+      script('deletable-script', { folder: 'Reusable targets' }),
+      script('protected-script', { folder: 'Reusable targets' }),
+    ]
+    const bulkRemoveRegexScripts = jest.fn(async () => 1)
+    storeState = {
+      ...baseStoreState(scripts),
+      bulkRemoveRegexScripts,
+    }
+
+    const host = await mount(<RegexPanel />)
+    await click(byAriaLabel(host, 'Delete all scripts in Reusable targets')!)
+    await click(document.querySelector<HTMLButtonElement>('button[type="submit"]')!)
+
+    expect(bulkRemoveRegexScripts).toHaveBeenCalledWith(['deletable-script', 'protected-script'])
+    expect(storedRegexFolders).toEqual(['Reusable targets'])
+    expect(errorToasts).toEqual(['1 scripts could not be deleted'])
   })
 })

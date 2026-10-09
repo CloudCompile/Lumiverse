@@ -20,7 +20,7 @@ const store = {
   setImageGenProfiles() {},
   setImageGenProviders() {},
   setPacks() {},
-  setPersonas() {},
+  setPersonas() { calls.push('personas') },
   setRegexScripts() {},
   setLandingRecentChats() {
     calls.push('recent-chats')
@@ -96,5 +96,28 @@ describe('useAppInit bootstrap activeProfileId', () => {
     )
     expect(calls[0]).toBe('hydrate:landing-profile')
     expect(calls[1]).toBe('recent-chats')
+  })
+
+  test('only installs a complete persona bootstrap page', () => {
+    const payload = {
+      startupSettings: {},
+      llm: { connections: emptyPage(), providers: [] },
+      stt: { connections: emptyPage(), providers: [] },
+      tts: { connections: emptyPage(), providers: [] },
+      imageGen: { connections: emptyPage(), providers: [] },
+      packs: emptyPage(), personas: { ...emptyPage(), total: 2 },
+      regexScripts: emptyPage(), council: { settings: { members: [], toolsSettings: {} }, tools: [] },
+      spindle: { extensions: [], isPrivileged: false, tools: [] },
+    } as unknown as BootstrapPayload
+    calls.length = 0
+    applyBootstrap(payload, {}, {})
+    expect(calls).not.toContain('personas')
+    payload.personas.total = 0
+    calls.length = 0
+    applyBootstrap(payload, {}, {})
+    expect(calls).toContain('personas')
+    calls.length = 0
+    applyBootstrap(payload, { personas: 'unavailable' }, {})
+    expect(calls).not.toContain('personas')
   })
 })

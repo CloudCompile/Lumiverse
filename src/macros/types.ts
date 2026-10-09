@@ -54,6 +54,8 @@ export interface ScopedMacroNode {
   args: AstNode[][];
   flags: MacroFlags;
   body: AstNode[];
+  /** Exact source text between the opening and closing tags when available. */
+  bodySource?: string;
   raw: string;
   offset: number;
 }
@@ -113,6 +115,8 @@ export interface MacroExecContext {
   commit: boolean;
   isScoped: boolean;
   body: string;
+  /** Exact, unevaluated scoped body text when the parser retained its span. */
+  bodySource: string;
   bodyRaw: AstNode[];
   offset: number;
   globalOffset: number;

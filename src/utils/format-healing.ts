@@ -1,3 +1,5 @@
+import { findTopLevelJsonBlocks } from "../macros/json-blocks";
+
 const FENCED_CODE_RE = /(^|\n)(`{3,}|~{3,})[^\n]*\n[\s\S]*?\n\2(?=\n|$)/g;
 const INLINE_CODE_RE = /(`+)([\s\S]*?)\1/g;
 const FONT_QUOTE_EDGE_RE = /(<font\b[^>]*>)(["“”«»])([\s\S]*?)(<\/font>)(["“”«»])/gi;
@@ -198,18 +200,38 @@ function healAroundMatches(text: string, pattern: RegExp): string {
   return healed + healUnshieldedSegment(text.slice(cursor));
 }
 
+/**
+ * Heals the prose around top-level `<json>` blocks, which are data and stay as
+ * written. Generated replies are healed before any macro pass holds their
+ * blocks out, so the healer skips them itself, by the rules the pass and the
+ * display healer use: a block inside a macro tag is the tag's text and heals
+ * with it, and the text past the scan's rejection cap is unclassified, so it
+ * stays as written, as the pass leaves a message it stopped in.
+ */
+function healOutsideJsonBlocks(text: string): string {
+  const { blocks, stoppedAt } = findTopLevelJsonBlocks(text);
+  let healed = "";
+  let cursor = 0;
+  for (const block of blocks) {
+    healed += healAroundMatches(text.slice(cursor, block.start), INLINE_CODE_RE) + block.source;
+    cursor = block.end;
+  }
+  return healed + healAroundMatches(text.slice(cursor, stoppedAt), INLINE_CODE_RE) + text.slice(stoppedAt);
+}
+
 export function healFormattingArtifacts(text: string): string {
   if (!text) return text;
 
   // Process fenced blocks first so inline-code matching cannot see their
-  // backticks. Inline spans are then protected in each prose segment.
+  // backticks. Top-level <json> blocks and inline spans are then protected in
+  // each prose segment.
   let healed = "";
   let cursor = 0;
   for (const match of text.matchAll(FENCED_CODE_RE)) {
     const index = match.index!;
-    healed += healAroundMatches(text.slice(cursor, index), INLINE_CODE_RE);
+    healed += healOutsideJsonBlocks(text.slice(cursor, index));
     healed += match[0];
     cursor = index + match[0].length;
   }
-  return healed + healAroundMatches(text.slice(cursor), INLINE_CODE_RE);
+  return healed + healOutsideJsonBlocks(text.slice(cursor));
 }

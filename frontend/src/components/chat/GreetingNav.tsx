@@ -156,6 +156,7 @@ export default function GreetingNav({ message, chatId, variant = 'minimal' }: Gr
         <GreetingPickerModal
           character={character}
           activeContent={message.content}
+          activeGreetingIndex={message.extra?.greeting_index}
           onSelect={handleSelect}
           onCancel={() => setPickerOpen(false)}
         />

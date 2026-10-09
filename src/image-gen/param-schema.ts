@@ -12,6 +12,8 @@ export interface ImageParameterSchema {
   options?: Array<{ id: string; label: string }>;
   /** UI grouping — parameters with the same group render together (e.g. "advanced", "references") */
   group?: string;
+  /** Optional model-id prefixes that control when this parameter is shown. */
+  modelPrefixes?: string[];
   /**
    * When set, the UI should offer a model picker populated by fetching
    * `GET /image-gen-connections/:id/models/:modelSubtype` for this field.

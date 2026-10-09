@@ -22,7 +22,6 @@ import {
 } from 'lucide-react'
 import { IconVersions } from '@tabler/icons-react'
 import {
-  DndContext,
   KeyboardSensor,
   MouseSensor,
   TouchSensor,
@@ -46,7 +45,7 @@ import SpindleSettings from './SpindleSettings'
 import { Spinner } from '@/components/shared/Spinner'
 import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { getSafeHttpsUrl } from '@/lib/navigationSafety'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import {
   getExtensionMountPointsVersion,
   hasExtensionMountPoint,
@@ -373,14 +372,19 @@ export default function SpindlePanel() {
       if (ext.enabled) {
         await disableExtension(ext.id)
       } else {
-        await enableExtension(ext.id)
+        const firstRun = (ext.metadata as any)?.illarin?.permissionsApproved === false
+        if (firstRun && !window.confirm(t('spindlePanel.illarinFirstRunApproval', {
+          name: ext.name,
+          permissions: ext.permissions.length ? ext.permissions.join(', ') : t('spindlePanel.illarinNoPermissions'),
+        }))) return
+        await enableExtension(ext.id, firstRun ? ext.permissions : undefined)
       }
     } catch (err: any) {
       console.error('[Spindle] Toggle failed:', err)
     } finally {
       setLoadingAction(null)
     }
-  }, [enableExtension, disableExtension])
+  }, [enableExtension, disableExtension, t])
 
   const handleUpdate = useCallback(async (ext: ExtensionInfo) => {
     // Set status optimistically — don't wait for the WS round-trip from the
@@ -861,6 +865,9 @@ export default function SpindlePanel() {
                             </span>
                           )}
                         </span>
+                        {((ext.metadata as any)?.illarin?.takenDownAt || (ext.metadata as any)?.illarin?.withheldAt) && (
+                          <span className={styles.extensionMeta}>{t('spindlePanel.illarinWithheld')}</span>
+                        )}
                         {extensionViewMode === 'list' && allPerms.length > 0 && (
                           <span className={styles.extensionMeta}>
                             {t('spindlePanel.permissionsCompact', {

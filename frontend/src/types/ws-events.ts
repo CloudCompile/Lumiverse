@@ -118,6 +118,7 @@ export enum EventType {
 
   // Expressions
   EXPRESSION_CHANGED = 'EXPRESSION_CHANGED',
+  MULTI_CHARACTER_EXPRESSIONS_CHANGED = 'MULTI_CHARACTER_EXPRESSIONS_CHANGED',
 
   // Avatar
   CHARACTER_AVATAR_CHANGED = 'CHARACTER_AVATAR_CHANGED',
@@ -388,6 +389,10 @@ export interface GenerationMetrics {
   wasStreaming: boolean
   model?: string
   provider?: string
+  /** Preset identity captured when this swipe was generated. */
+  presetId?: string
+  /** Preset display name captured when this swipe was generated. */
+  presetName?: string
 }
 
 export interface GenerationEndedPayload {
@@ -396,6 +401,9 @@ export interface GenerationEndedPayload {
   messageId?: string
   content?: string
   error?: string
+  errorCode?: string
+  errorMessage?: string
+  connectionName?: string
   finish_reason?: string
   stop_details?: { type: string; category?: string | null; explanation?: string | null } | null
   stop_sequence?: string | null
@@ -406,7 +414,7 @@ export interface GenerationEndedPayload {
 
 /**
  * Follow-up to GENERATION_ENDED carrying the deferred metrics (token count,
- * TTFT/TPS, model/provider) once they've been computed and persisted. `swipeId`
+ * TTFT/TPS, model/provider/preset) once they've been computed and persisted. `swipeId`
  * is the swipe these metrics belong to, so the client can avoid patching them
  * onto a different swipe the user navigated to mid-stream.
  */

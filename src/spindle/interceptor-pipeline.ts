@@ -1,6 +1,7 @@
 import type { InterceptorMatchDTO, LlmMessageDTO } from "lumiverse-spindle-types";
 import { DEFAULT_INTERCEPTOR_TIMEOUT_MS } from "../services/spindle-settings.service";
 import { emitSpindlePreGenerationActivity } from "./pre-generation-activity";
+import { readOwnPresetMetadata } from "./preset-metadata-context";
 import {
   collectSourceMessageMetadata,
   restoreSourceMessageMetadata,
@@ -22,12 +23,15 @@ export interface InterceptorResult {
 }
 
 export interface Interceptor {
+  required?: boolean;
   extensionId: string;
   extensionName?: string;
   userId?: string | null;
   priority: number; // lower = runs first
   /** Optional host-side filter supplied when the interceptor was registered. */
   match?: InterceptorMatchDTO;
+  /** Manifest identifier whose preset metadata namespace `match.presetField` reads. */
+  presetMetadataNamespace?: string;
   /**
    * Called immediately before each invocation to determine the wall-clock
    * budget for this interceptor. Resolving per-run (instead of at
@@ -38,7 +42,8 @@ export interface Interceptor {
   resolveTimeoutMs?: () => number;
   handler: (
     messages: LlmMessageDTO[],
-    context: unknown
+    context: unknown,
+    signal?: AbortSignal,
   ) => Promise<InterceptorResult>;
 }
 
@@ -48,7 +53,7 @@ function getChatId(context: unknown): string | null {
   return typeof chatId === "string" && chatId ? chatId : null;
 }
 
-function matchesInterceptorContext(match: InterceptorMatchDTO | undefined, context: unknown): boolean {
+function matchesInterceptorContext(match: InterceptorMatchDTO | undefined, context: unknown, presetMetadataNamespace?: string): boolean {
   if (!match) return true;
   if (!context || typeof context !== "object") return false;
   const value = context as Record<string, unknown>;
@@ -62,7 +67,7 @@ function matchesInterceptorContext(match: InterceptorMatchDTO | undefined, conte
 
   const presetField = match.presetField;
   if (!presetField) return true;
-  let field: unknown = value.presetMetadata;
+  let field: unknown = readOwnPresetMetadata(value, presetMetadataNamespace);
   for (const key of presetField.path) {
     if (!field || typeof field !== "object" || Array.isArray(field)) {
       field = undefined;
@@ -111,7 +116,7 @@ class InterceptorPipeline {
       if (interceptor.userId && interceptor.userId !== userId) {
         continue;
       }
-      if (!matchesInterceptorContext(interceptor.match, context)) {
+      if (!matchesInterceptorContext(interceptor.match, context, interceptor.presetMetadataNamespace)) {
         continue;
       }
       if (signal?.aborted) {
@@ -139,24 +144,28 @@ class InterceptorPipeline {
       });
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let abortHandler: (() => void) | undefined;
+      const controller = new AbortController();
       try {
         restoreSourceMessageMetadata(result, sourceMessageMetadata);
         const output = await Promise.race([
-          interceptor.handler(result, context),
+          interceptor.handler(result, context, controller.signal),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Interceptor from ${interceptor.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`
-                  )
-                ),
+              () => {
+                const error = new Error(`Interceptor from ${interceptor.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`);
+                controller.abort(error);
+                reject(error);
+              },
               timeoutMs,
             );
             if (signal) {
-              abortHandler = () =>
-                reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+              abortHandler = () => {
+                const error = signal.reason ?? new DOMException("Aborted", "AbortError");
+                controller.abort(error);
+                reject(error);
+              };
               signal.addEventListener("abort", abortHandler, { once: true });
+              if (signal.aborted) abortHandler();
             }
           }),
         ]);
@@ -200,6 +209,7 @@ class InterceptorPipeline {
           `[Spindle] Interceptor error from ${interceptor.extensionId}:`,
           err
         );
+        if (interceptor.required) throw err;
         // Continue with previous result on error
       } finally {
         if (timeout) clearTimeout(timeout);

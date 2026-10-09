@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useNavigate, useParams } from 'react-router'
-import { ArrowUp, List, ListChecks, LoaderCircle, Pencil, UserRound } from 'lucide-react'
+import { ArrowUp, List, ListChecks, LoaderCircle, Pencil, UserRound, X } from 'lucide-react'
 import { useStore } from '@/store'
 import { toast } from '@/lib/toast'
 import { chatsApi, messagesApi } from '@/api/chats'
@@ -61,13 +61,13 @@ import { holdImagesForTransition } from '@/lib/imageDecodeCache'
 import { takeChatNavigationSnapshot } from '@/lib/chatNavigationSnapshot'
 import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import { resolveChatContentWidthPx } from '@/lib/chatContentWidth'
-
-interface CortexNotice {
-  variant: 'processing' | 'error'
-  title: string
-  detail: string
-  percent?: number
-}
+import {
+  buildCortexNotice,
+  cortexErrorNoticeRemainingMs,
+  hideDismissedCortexError,
+  normalizeRebuildStatus,
+  type CortexRebuildStatus,
+} from './cortexNotice'
 
 interface SpindleNotice {
   variant: 'processing' | 'error'
@@ -101,116 +101,6 @@ function findExtensionChild(anchor: HTMLElement): Element | null {
   return null
 }
 
-interface CortexRebuildStatus {
-  chatId?: string
-  status: string
-  current?: number
-  total?: number
-  percent?: number
-  error?: string
-  source?: string
-}
-
-function formatChunkProgress(payload: CortexRebuildStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const current = payload.current ?? 0
-  const total = payload.total ?? 0
-  return total > 0 ? t('chatView.cortexChunks', { current, total }) : ''
-}
-
-function formatIngestionDetail(status: CortexIngestionStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const phaseDetail: Record<CortexIngestionStatus['phase'], string> = {
-    queued: t('chatView.cortexQueued'),
-    font: t('chatView.cortexFont'),
-    heuristics: t('chatView.cortexHeuristics'),
-    sidecar: t('chatView.cortexSidecar'),
-    persisting: t('chatView.cortexPersisting'),
-    complete: t('chatView.cortexComplete'),
-    error: formatCortexError(status.error, t, 'chatView.cortexProcessingFailed'),
-  }
-
-  return phaseDetail[status.phase] + (status.pendingJobs > 1 ? t('chatView.cortexJobsPending', { count: status.pendingJobs }) : '')
-}
-
-function formatCortexError(
-  error: string | undefined,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-  fallbackKey: string,
-): string {
-  // Sidecar status codes are internal implementation details. They arrive via
-  // the progress socket rather than a user-facing error contract, so never
-  // render values such as "sidecar_failed" in the memory notice.
-  if (/^sidecar(?:[_\s-].*)?$/i.test(error?.trim() ?? '')) {
-    return t(fallbackKey)
-  }
-  return error || t(fallbackKey)
-}
-
-function formatRebuildDetail(payload: CortexRebuildStatus, t: (key: string, opts?: Record<string, unknown>) => string): string {
-  const action = payload.source === 'warmup'
-    ? t('chatView.cortexPreparingMemory')
-    : t('chatView.cortexRebuildingMemory')
-
-  return action + formatChunkProgress(payload, t)
-}
-
-function buildCortexNotice(
-  ingestionStatus: CortexIngestionStatus | null,
-  rebuildStatus: CortexRebuildStatus | null,
-  t: (key: string, opts?: Record<string, unknown>) => string,
-): CortexNotice | null {
-  if (rebuildStatus?.status === 'error') {
-    return {
-      variant: 'error',
-      title: t('chatView.memory'),
-      detail: formatCortexError(rebuildStatus.error, t, 'chatView.memoryRebuildFailed'),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (ingestionStatus?.status === 'error') {
-    return {
-      variant: 'error',
-      title: t('chatView.memory'),
-      detail: formatCortexError(ingestionStatus.error, t, 'chatView.backgroundMemoryFailed'),
-    }
-  }
-
-  const rebuildProcessing = rebuildStatus?.status === 'processing'
-  const ingestionProcessing = ingestionStatus?.status === 'processing'
-
-  if (rebuildProcessing && ingestionProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: t('chatView.cortexCombined', { chunks: formatChunkProgress(rebuildStatus, t) }),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (rebuildProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: formatRebuildDetail(rebuildStatus, t),
-      percent: rebuildStatus.percent,
-    }
-  }
-
-  if (ingestionProcessing) {
-    return {
-      variant: 'processing',
-      title: t('chatView.memory'),
-      detail: formatIngestionDetail(ingestionStatus, t),
-    }
-  }
-
-  return null
-}
-
-function normalizeRebuildStatus(payload: CortexRebuildStatus | null): CortexRebuildStatus | null {
-  if (!payload) return null
-  return payload.status === 'idle' || payload.status === 'complete' ? null : payload
-}
 
 function buildSpindleNotice(payload: SpindlePreGenerationActivityPayload, t: (key: string, opts?: Record<string, unknown>) => string): SpindleNotice {
   const phaseLabel: Record<SpindlePreGenerationActivityPayload['phase'], string> = {
@@ -245,6 +135,7 @@ export default function ChatView() {
   const spindleVisibleAtRef = useRef<number | null>(null)
   const [ingestionStatus, setIngestionStatus] = useState<CortexIngestionStatus | null>(null)
   const [rebuildStatus, setRebuildStatus] = useState<CortexRebuildStatus | null>(null)
+  const [dismissedCortexErrorKey, setDismissedCortexErrorKey] = useState<string | null>(null)
   const [spindleNotice, setSpindleNotice] = useState<SpindleNotice | null>(null)
   const [chatFindOpen, setChatFindOpen] = useState(false)
   const [chatFindFocusRequest, setChatFindFocusRequest] = useState(0)
@@ -264,9 +155,12 @@ export default function ChatView() {
   const togglePortraitPanel = useStore((s) => s.togglePortraitPanel)
   const portraitPanelSide = useStore((s) => s.portraitPanelSide)
   const suiteExtensionEnabled = useStore((s) => hasEnabledFrontendExtension(s.extensions, 'lumiverse_suite'))
-  const [portraitSurfaceOccupied, setPortraitSurfaceOccupied] = useState(false)
+  const [portraitSurfaceMounted, setPortraitSurfaceMounted] = useState(false)
+  const portraitSurfaceOccupied = suiteExtensionEnabled && portraitSurfaceMounted
   const quickToolbarSettings = useStore((s) => s.quickToolbarSettings)
-  const nativeDockActionSide = suiteExtensionEnabled && quickToolbarSettings?.nativeDockActionSide === 'left' ? 'left' : 'right'
+  const nativeDockActionSide = suiteExtensionEnabled
+    ? (quickToolbarSettings?.nativeDockActionSide === 'left' ? 'left' : 'right')
+    : undefined
   const quickToolbarPlacement = readQuickToolbarPlacement(quickToolbarSettings)
   // Native chat-top visibility follows the persisted flags in both Suite states.
   // Settings exposes these checkboxes with and without the Suite, so an absent
@@ -301,8 +195,8 @@ export default function ChatView() {
       // therefore miss the live owner and briefly restore the native dock. The
       // host-surface marker is unique to the extension-owned Portrait Dock, so it
       // is the ownership authority regardless of which current anchor contains it.
-      setPortraitSurfaceOccupied(Boolean(
-        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"]'),
+      setPortraitSurfaceMounted(Boolean(
+        document.querySelector('[data-spindle-host-surface="portrait_dock.workspace"] [data-surface-id="portrait_dock.workspace"]'),
       ))
       // Same authority rule for the shared oldest-message action: the rendered
       // control decides ownership, not the persisted toolbar setting. The
@@ -323,8 +217,10 @@ export default function ChatView() {
   const wallpaper = useStore((s) => s.wallpaper)
   const useCharacterBackground = useStore((s) => s.useCharacterBackground)
   const chatWidthMode = useStore((s) => s.chatWidthMode)
+  const centerChatWithSidebar = useStore((s) => s.centerChatWithSidebar)
   const chatContentMaxWidth = useStore((s) => s.chatContentMaxWidth)
   const videoRef = useRef<HTMLVideoElement>(null)
+  const chatBodyRef = useRef<HTMLDivElement>(null)
   const chatColumnInnerRef = useRef<HTMLDivElement>(null)
   const chatColumnTopRef = useRef<HTMLDivElement>(null)
   const chatTopDockRef = useRef<HTMLDivElement>(null)
@@ -525,6 +421,16 @@ export default function ChatView() {
   }, [chatId, completeNavigateHome])
 
   const cortexNotice = useMemo(() => buildCortexNotice(ingestionStatus, rebuildStatus, t), [ingestionStatus, rebuildStatus, t])
+  const visibleCortexNotice = hideDismissedCortexError(cortexNotice, dismissedCortexErrorKey)
+
+  useEffect(() => {
+    if (cortexNotice?.variant !== 'error' || !cortexNotice.errorKey) return
+    const errorKey = cortexNotice.errorKey
+    const timer = window.setTimeout(() => {
+      setDismissedCortexErrorKey(errorKey)
+    }, cortexErrorNoticeRemainingMs(cortexNotice))
+    return () => window.clearTimeout(timer)
+  }, [cortexNotice])
 
   useEffect(() => {
     if (!spindleNotice || spindleNotice.variant !== 'error') return
@@ -592,6 +498,7 @@ export default function ChatView() {
 
     setIngestionStatus(null)
     setRebuildStatus(null)
+    setDismissedCortexErrorKey(null)
     resetSpindleNotice()
 
     Promise.all([
@@ -603,6 +510,9 @@ export default function ChatView() {
       setRebuildStatus(normalizeRebuildStatus(rebuild))
     })
 
+    // This passive request may also queue ordinary LTCM embedding work. Do not
+    // synthesize a notice from its response: only actual Cortex progress events
+    // below represent heuristic or sidecar analysis.
     memoryCortexApi.warm(chatId).catch(() => {})
 
     const offIngestion = wsClient.on(EventType.CORTEX_INGESTION_PROGRESS, (payload: any) => {
@@ -739,6 +649,7 @@ export default function ChatView() {
     if (!chatId) return
 
     let cancelled = false
+    let stopPersonaResolution = () => {}
 
     const loadChat = async () => {
       // Multiplayer peers don't own this chat — the host's instance can't be
@@ -829,6 +740,17 @@ export default function ChatView() {
           useStore.getState().clearGroupExpressions()
         }
 
+        // Restore the visible sprite set for cards that represent multiple
+        // named characters. This is independent of Lumiverse group chats.
+        const savedMultiCharacterExprs = chat.metadata?.multi_character_expressions as
+          | Record<string, { label: string; imageId: string }>
+          | undefined
+        if (savedMultiCharacterExprs) {
+          useStore.getState().setMultiCharacterExpressions(savedMultiCharacterExprs)
+        } else {
+          useStore.getState().clearMultiCharacterExpressions()
+        }
+
         // Restore active expression from chat metadata (async, fire-and-forget)
         const savedExpr = chat.metadata?.active_expression as string | undefined
         if (savedExpr && chat.character_id) {
@@ -886,69 +808,82 @@ export default function ChatView() {
         // character/tag auto-bindings, then the default persona. Temporary
         // chats are persona-less — leave the global persona alone.
         if (chat.metadata?.temporary !== true) {
-          const {
-            characterPersonaBindings,
-            personaTagBindings,
-            personas: allPersonas,
-            setActivePersona,
-            activePersonaId,
-            setActiveChatMetadata,
-          } = useStore.getState()
-          const resolvedPersona = resolveChatPersonaSelection({
-            metadata: chat.metadata,
-            characterId: chat.character_id,
-            characterTags: openedCharacter?.tags ?? [],
-            personas: allPersonas,
-            characterPersonaBindings,
-            personaTagBindings,
-          })
-          const resolvedChatPersona = resolvedPersona.personaId
-            ? allPersonas.find((p) => p.id === resolvedPersona.personaId) ?? null
-            : null
-
-          if (resolvedPersona.persistedPersonaStale) {
-            const nextMetadata = setPersistedChatPersonaId(chat.metadata, null)
-            chat.metadata = nextMetadata ?? {}
-            if (!cancelled) {
-              setActiveChatMetadata(nextMetadata)
+          const resolvePersona = () => {
+            const state = useStore.getState()
+            if (cancelled || state.activeChatId !== chatId) {
+              stopPersonaResolution()
+              return
             }
-            chatsApi.patchMetadata(chatId, { [CHAT_PERSONA_METADATA_KEY]: null }).catch(() => {})
-          }
+            if (!state.personasLoaded || !state.fullSettingsLoaded) return
+            stopPersonaResolution()
+            chat.metadata = state.activeChatMetadata ?? {}
+            if (chat.metadata.temporary === true) return
+            const {
+              characterPersonaBindings,
+              personaTagBindings,
+              personas: allPersonas,
+              setActivePersona,
+              activePersonaId,
+              setActiveChatMetadata,
+            } = useStore.getState()
+            const resolvedPersona = resolveChatPersonaSelection({
+              metadata: chat.metadata,
+              characterId: chat.character_id,
+              characterTags: openedCharacter?.tags ?? [],
+              personas: allPersonas,
+              characterPersonaBindings,
+              personaTagBindings,
+            })
+            const resolvedChatPersona = resolvedPersona.personaId
+              ? allPersonas.find((p) => p.id === resolvedPersona.personaId) ?? null
+              : null
 
-          if (!cancelled && activePersonaId !== resolvedPersona.personaId) {
-            setActivePersona(resolvedPersona.personaId)
-            if (resolvedChatPersona && resolvedPersona.source !== 'default') {
-              toast.info(t('chatView.switchedPersona', { name: personaToastName(resolvedChatPersona) }))
+            if (resolvedPersona.persistedPersonaStale) {
+              const nextMetadata = setPersistedChatPersonaId(chat.metadata, null)
+              chat.metadata = nextMetadata ?? {}
+              if (!cancelled) {
+                setActiveChatMetadata(nextMetadata)
+              }
+              chatsApi.patchMetadata(chatId, { [CHAT_PERSONA_METADATA_KEY]: null }).catch(() => {})
             }
-          }
 
-          if (
-            (resolvedPersona.source === 'character' || resolvedPersona.source === 'tag') &&
-            resolvedChatPersona &&
-            resolvedPersona.addonStates &&
-            Object.keys(resolvedPersona.addonStates).length > 0 &&
-            !cancelled
-          ) {
-            // Apply the binding's add-on snapshot so the bound selections take
-            // effect and are visible in this chat. Seed only when the chat has
-            // no per-chat states for the persona yet, so a fresh chat picks up
-            // the binding while later in-chat tweaks are never clobbered.
+            if (!cancelled && activePersonaId !== resolvedPersona.personaId) {
+              setActivePersona(resolvedPersona.personaId)
+              if (resolvedChatPersona && resolvedPersona.source !== 'default') {
+                toast.info(t('chatView.switchedPersona', { name: personaToastName(resolvedChatPersona) }))
+              }
+            }
+
             if (
+              (resolvedPersona.source === 'character' || resolvedPersona.source === 'tag') &&
+              resolvedChatPersona &&
               resolvedPersona.addonStates &&
-              Object.keys(resolvedPersona.addonStates).length > 0
+              Object.keys(resolvedPersona.addonStates).length > 0 &&
+              !cancelled
             ) {
-              const existing = (chat.metadata?.persona_addon_states ?? {}) as Record<string, Record<string, boolean>>
-              if (!existing[resolvedChatPersona.id]) {
-                const nextStates = { ...existing, [resolvedChatPersona.id]: { ...resolvedPersona.addonStates } }
-                // Fold into chat.metadata and re-publish the snapshot (the
-                // canonical publish already happened alongside setMessages);
-                // persist for future opens.
-                chat.metadata = { ...(chat.metadata ?? {}), persona_addon_states: nextStates }
-                useStore.getState().setActiveChatMetadata(chat.metadata)
-                chatsApi.patchMetadata(chatId, { persona_addon_states: nextStates }).catch(() => {})
+              // Apply the binding's add-on snapshot so the bound selections take
+              // effect and are visible in this chat. Seed only when the chat has
+              // no per-chat states for the persona yet, so a fresh chat picks up
+              // the binding while later in-chat tweaks are never clobbered.
+              if (
+                resolvedPersona.addonStates &&
+                Object.keys(resolvedPersona.addonStates).length > 0
+              ) {
+                const existing = (chat.metadata?.persona_addon_states ?? {}) as Record<string, Record<string, boolean>>
+                if (!existing[resolvedChatPersona.id]) {
+                  const nextStates = { ...existing, [resolvedChatPersona.id]: { ...resolvedPersona.addonStates } }
+                  // Fold into chat.metadata and re-publish the snapshot (the
+                  // canonical publish already happened alongside setMessages);
+                  // persist for future opens.
+                  chat.metadata = { ...(chat.metadata ?? {}), persona_addon_states: nextStates }
+                  useStore.getState().setActiveChatMetadata(chat.metadata)
+                  chatsApi.patchMetadata(chatId, { persona_addon_states: nextStates }).catch(() => {})
+                }
               }
             }
           }
+          stopPersonaResolution = useStore.subscribe(resolvePersona)
+          resolvePersona()
         }
 
         // Auto-apply loadout if a binding exists for this chat/character
@@ -1012,6 +947,7 @@ export default function ChatView() {
 
     return () => {
       cancelled = true
+      stopPersonaResolution()
     }
   }, [chatId, setActiveChat, setMessages, t])
 
@@ -1134,10 +1070,11 @@ export default function ChatView() {
   }, [bubbleDisableHover, bubbleHideAvatarBg, bubbleOpacity])
 
   useLayoutEffect(() => {
+    const chatBody = chatBodyRef.current
     const chatColumnInner = chatColumnInnerRef.current
     const chatColumnTop = chatColumnTopRef.current
     const chatTopDock = chatTopDockRef.current
-    if (!chatColumnInner || !chatColumnTop || !chatTopDock) return
+    if (!chatBody || !chatColumnInner || !chatColumnTop || !chatTopDock) return
 
     const syncComposerAnchor = () => {
       const composerAbove = chatColumnInner.querySelector<HTMLSpanElement>(
@@ -1162,9 +1099,14 @@ export default function ChatView() {
       if (child && childRequest !== null && child.getAttribute('data-dock-request') !== childRequest) child.setAttribute('data-dock-request', childRequest)
     }
 
+    // The fill dock is `position: fixed`, and the half-editor host is a sibling of
+    // `.chatColumn` under `.body`. Publishing the measured rail height on the shared
+    // body is what lets both the fill-only padding and the desktop half-editor
+    // z-index rung read the real strip height; on `.chatColumnInner` the sibling
+    // subtree cannot see the variable at all.
     const syncTopDockHeight = () => {
       const height = measureLayoutHeight(chatTopDock)
-      chatColumnInner.style.setProperty('--lcs-top-dock-height', `${height}px`)
+      chatBody.style.setProperty('--lcs-top-dock-height', `${height}px`)
     }
 
     const sync = () => {
@@ -1208,7 +1150,7 @@ export default function ChatView() {
       chatColumnTop.removeAttribute('data-dock-request')
       chatTopDock.removeAttribute('data-dock-request')
       chatComposerAboveRef.current?.removeAttribute('data-dock-request')
-      chatColumnInner.style.removeProperty('--lcs-top-dock-height')
+      chatBody.style.removeProperty('--lcs-top-dock-height')
       chatComposerAboveRef.current = null
     }
   }, [chatId, dockQuickToolbar, keepFloatingDockHost, quickToolbarSettings])
@@ -1252,7 +1194,7 @@ export default function ChatView() {
         }}
       />
       <div className={clsx(styles.wallpaperTransitionLayer, wallpaperTransitioning && !sceneBackground && styles.wallpaperTransitionLayerActive)} />
-      <div className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
+      <div ref={chatBodyRef} className={styles.body} data-lumiverse-surface="chat-body" data-chat-width-mode={chatWidthMode} {...(chatWidthMode !== 'full' ? { 'data-chat-constrained': '' } : {})}>
         <div data-spindle-mount="chat_sidebar_left" data-spindle-scope={`chat:${chatId}:sidebar-left`} style={{ display: 'contents' }} />
         {!portraitSurfaceOccupied && portraitPanelSide !== 'none' && portraitPanelSide === 'left' && (
           <div className={clsx(styles.portraitSide, styles.portraitSideLeft, portraitPanelOpen && styles.portraitSideOpen)}>
@@ -1268,8 +1210,8 @@ export default function ChatView() {
           </div>
         )}
 
-        <div className={styles.chatColumn} data-lumiverse-surface="chat-column">
-          {(spindleNotice || cortexNotice) && (
+        <div className={clsx(styles.chatColumn, centerChatWithSidebar && styles.chatColumnCentered)} data-lumiverse-surface="chat-column">
+          {(spindleNotice || visibleCortexNotice) && (
             <div className={styles.noticeDock} aria-live="polite" aria-atomic="true">
               {spindleNotice && (
                 <div className={clsx(styles.cortexNotice, styles.spindleNotice, spindleNotice.variant === 'error' && styles.cortexNoticeError)}>
@@ -1283,16 +1225,27 @@ export default function ChatView() {
                   </span>
                 </div>
               )}
-              {cortexNotice && (
-                <div className={clsx(styles.cortexNotice, cortexNotice.variant === 'error' && styles.cortexNoticeError)}>
+              {visibleCortexNotice && (
+                <div className={clsx(styles.cortexNotice, visibleCortexNotice.variant === 'error' && styles.cortexNoticeError)}>
                   <span className={styles.cortexNoticeStatus} aria-hidden="true" />
-                  <span className={styles.cortexNoticeTitle}>{cortexNotice.title}</span>
+                  <span className={styles.cortexNoticeTitle}>{visibleCortexNotice.title}</span>
                   <span className={styles.cortexNoticeSeparator} aria-hidden="true">•</span>
-                  <span className={styles.cortexNoticeDetail}>{cortexNotice.detail}</span>
-                  <span className={styles.cortexNoticePercent}>{typeof cortexNotice.percent === 'number' ? `${cortexNotice.percent}%` : ''}</span>
-                  {typeof cortexNotice.percent === 'number' && (
+                  <span className={styles.cortexNoticeDetail}>{visibleCortexNotice.detail}</span>
+                  <span className={styles.cortexNoticePercent}>{typeof visibleCortexNotice.percent === 'number' ? `${visibleCortexNotice.percent}%` : ''}</span>
+                  {visibleCortexNotice.variant === 'error' && visibleCortexNotice.errorKey && (
+                    <button
+                      type="button"
+                      className={styles.cortexNoticeDismiss}
+                      onClick={() => setDismissedCortexErrorKey(visibleCortexNotice.errorKey ?? null)}
+                      aria-label={t('chatView.dismissMemoryNotice')}
+                      title={t('chatView.dismissMemoryNotice')}
+                    >
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  )}
+                  {typeof visibleCortexNotice.percent === 'number' && (
                     <span className={styles.cortexNoticeBar} aria-hidden="true">
-                      <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, cortexNotice.percent / 100))})` }} />
+                      <span className={styles.cortexNoticeFill} style={{ transform: `scaleX(${Math.max(0, Math.min(1, visibleCortexNotice.percent / 100))})` }} />
                     </span>
                   )}
                 </div>
@@ -1359,7 +1312,7 @@ export default function ChatView() {
               findTarget={chatFindTarget}
               findQuery={chatFindQuery}
             />
-            <ScrollToBottom />
+            <ScrollToBottom key={chatId} displayReady={!chatChromeEntering} />
             <CouncilPill />
             {messageSelectMode && <MessageSelectBar chatId={chatId} />}
             <div data-spindle-mount="chat_bottom_dock" data-spindle-scope={`chat:${chatId}:bottom-dock`} data-dock-request="strip" />

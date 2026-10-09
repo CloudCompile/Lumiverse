@@ -12,6 +12,7 @@ import clsx from 'clsx'
 interface GreetingPickerModalProps {
   character: Character
   activeContent?: string
+  activeGreetingIndex?: number
   onSelect: (greetingIndex: number) => void
   onCancel: () => void
 }
@@ -19,6 +20,7 @@ interface GreetingPickerModalProps {
 export default function GreetingPickerModal({
   character,
   activeContent,
+  activeGreetingIndex,
   onSelect,
   onCancel,
 }: GreetingPickerModalProps) {
@@ -37,7 +39,11 @@ export default function GreetingPickerModal({
   ]
 
   const activeIndex = activeContent !== undefined
-    ? greetings.findIndex((g) => g.content === activeContent)
+    ? typeof activeGreetingIndex === 'number'
+      && Number.isInteger(activeGreetingIndex)
+      && greetings[activeGreetingIndex]?.content === activeContent
+      ? activeGreetingIndex
+      : greetings.findIndex((g) => g.content === activeContent)
     : -1
 
   const listRef = useRef<HTMLDivElement>(null)

@@ -15,15 +15,10 @@ export type SegmentType = 'asterisked' | 'quoted' | 'undecorated'
 export type SegmentAction = 'speech' | 'narration' | 'thought' | 'skip'
 
 /**
- * Tags whose inner text is prose that SHOULD be spoken. Any tag not in this
- * set is treated as meta/scaffolding (reasoning, loom state, tool calls,
- * status cards, tracker blocks, custom structured output — anything the
- * author's prompt-craft can produce) and is dropped along with its contents.
- *
- * The list is intentionally limited to standard HTML elements that carry
- * narrative prose. Anything like `<tracker>`, `<stats>`, `<status>`,
- * `<state>`, `<thinking>`, `<loom_sum>`, etc. falls through the allowlist
- * and gets stripped wholesale.
+ * HTML wrappers whose inner text is prose that SHOULD be spoken. Their
+ * markers and attributes are stripped. Other paired tags are treated as
+ * metadata and dropped with their contents; standalone non-HTML markers
+ * can be inline audio cues.
  */
 const PROSE_TAGS = new Set<string>([
   // Block containers that typically hold prose
@@ -49,19 +44,44 @@ const PROSE_TAGS = new Set<string>([
   'label', 'legend', 'fieldset',
 ])
 
-/** Paired tag — `<TAG...>…</TAG>`. Non-greedy so the innermost pair matches first. */
-const PAIRED_TAG_RE = /<([a-z][\w-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1\s*>/gi
+/** HTML elements with no inner content. Removing them must not truncate prose. */
+const VOID_HTML_TAGS = new Set([
+  'area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'link',
+  'meta', 'param', 'source', 'track', 'wbr',
+])
+
+/** HTML that isn't spoken prose and must never be mistaken for an audio cue. */
+const NON_PROSE_HTML_TAGS = new Set([
+  'html', 'head', 'body', 'title', 'script', 'style', 'noscript', 'template',
+  'slot', 'canvas', 'svg', 'math', 'details', 'summary', 'dialog',
+  'form', 'button', 'select', 'option', 'optgroup', 'textarea', 'datalist',
+  'output', 'progress', 'meter', 'audio', 'video', 'picture', 'map',
+  'object', 'iframe', 'frameset', 'frame', 'noframes', 'applet', 'basefont',
+  'center',
+])
+
+/** Known metadata also needs filtering when a response leaves a block unclosed. */
+const METADATA_TAG_RE = /^(?:think|thinking|reasoning|analysis|redacted_thinking|tracker|stats|status|state|(?:loom|tool|function)(?:[_-][\w-]+)?)$/i
+/** Cue names are open-ended; HTML attributes and dialogue delimiters aren't cues. */
+const AUDIO_CUE_RE = /^<[a-z][\w-]*(?:\s+[^<>=\/"*]+)?\s*\/?>$/i
+
+/** Quoted attribute values can themselves contain `>` characters. */
+const TAG_ATTRIBUTES = String.raw`(?:\s+(?:"[^"]*"|'[^']*'|[^'">])*)?`
+/** Match inner pairs first when metadata nests another block with the same name. */
+const PAIRED_TAG_RE = new RegExp(String.raw`<([a-z][\w-]*)${TAG_ATTRIBUTES}>((?:(?!<\1${TAG_ATTRIBUTES}>)[\s\S])*?)<\/\1\s*>`, 'gi')
 /** Self-closing: requires a `/` before the closing `>`. */
-const SELF_CLOSING_RE = /<([a-z][\w-]*)(?:\s[^>]*?)?\s*\/\s*>/gi
+const SELF_CLOSING_RE = new RegExp(String.raw`<([a-z][\w-]*)${TAG_ATTRIBUTES}\s*\/\s*>`, 'gi')
 /** Any opening tag (used to find the first unclosed non-prose tag). */
-const OPENING_TAG_RE = /<([a-z][\w-]*)(?:\s[^>]*)?>/gi
+const OPENING_TAG_RE = new RegExp(String.raw`<([a-z][\w-]*)${TAG_ATTRIBUTES}>`, 'gi')
 /** Closing marker `</TAG>`. */
 const CLOSING_TAG_RE = /<\/([a-z][\w-]*)\s*>/gi
-/** Any remaining tag marker (allowlisted tags after their contents are kept). */
-const ANY_TAG_MARKER_RE = /<\/?[a-z][\w-]*(?:\s[^>]*)?\s*\/?>/gi
+/** HTML or cue marker; whether it survives depends on its syntax and context. */
+const ANY_TAG_MARKER_RE = new RegExp(String.raw`<\/?([a-z][\w-]*)${TAG_ATTRIBUTES}\s*\/?>`, 'gi')
 
 const FENCED_CODE_RE = /```[\s\S]*?```/g
 const INLINE_CODE_RE = /`[^`\n]*`/g
+const HTML_COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g
+const DOCTYPE_RE = /<!doctype\b[^>]*>/gi
 const MD_IMAGE_RE = /!\[[^\]]*]\([^)]*\)/g
 const MD_LINK_RE = /\[([^\]]+)]\([^)]+\)/g
 
@@ -86,6 +106,21 @@ function isProse(tag: string): boolean {
   return PROSE_TAGS.has(tag.toLowerCase())
 }
 
+function isAudioCue(marker: string, tag: string): boolean {
+  const name = tag.toLowerCase()
+  return !isProse(name)
+    && !VOID_HTML_TAGS.has(name)
+    && !NON_PROSE_HTML_TAGS.has(name)
+    && !METADATA_TAG_RE.test(name)
+    && AUDIO_CUE_RE.test(marker)
+}
+
+/** Strip retained inline cues when a segment uses a plain-text TTS provider. */
+export function stripTtsAudioCues(text: string): string {
+  return text.replace(ANY_TAG_MARKER_RE, (match, tag) => isAudioCue(match, tag) ? ' ' : match)
+    .replace(/\s+/g, ' ').trim()
+}
+
 /**
  * Iteratively drop paired non-prose tags along with their contents. Iteration
  * handles the rare case where sibling tag removal exposes a newly-completable
@@ -105,19 +140,21 @@ function stripNonProsePairedTags(text: string): string {
 
 /** Drop self-closing non-prose tags (`<tracker/>`, `<loom_state />`, etc.). */
 function stripNonProseSelfClosingTags(text: string): string {
-  return text.replace(SELF_CLOSING_RE, (match, tag) => (isProse(tag as string) ? match : ' '))
+  return text.replace(SELF_CLOSING_RE, (match, tag) => (isProse(tag) || isAudioCue(match, tag) ? match : ' '))
 }
 
 /**
- * If an unpaired (never-closed) non-prose tag remains — typical of streams
- * that were cut off mid-meta-block — drop from that tag to end-of-input.
- * Walks left-to-right so prose that precedes the meta-block is preserved.
+ * Drop unfinished metadata from its opening tag to end-of-input. Standalone
+ * cue markers are exempt; walk past them to find any actual metadata block.
  */
 function stripTrailingUnclosedNonProseTag(text: string): string {
+  // A paired block remaining after the bounded sweep is still metadata, even
+  // if its unknown name could otherwise look like a standalone cue.
+  const closingTags = new Set(Array.from(text.matchAll(CLOSING_TAG_RE), (match) => match[1].toLowerCase()))
   OPENING_TAG_RE.lastIndex = 0
   let match: RegExpExecArray | null
   while ((match = OPENING_TAG_RE.exec(text)) !== null) {
-    if (!isProse(match[1])) {
+    if (!isProse(match[1]) && (!isAudioCue(match[0], match[1]) || closingTags.has(match[1].toLowerCase()))) {
       return text.slice(0, match.index)
     }
   }
@@ -132,20 +169,26 @@ function stripStrayNonProseClosings(text: string): string {
 /**
  * Remove anything that reads poorly (or nonsensically) when spoken.
  *
- * Strategy: maintain an allowlist of prose HTML tags. Paired tags whose name
- * is NOT on the allowlist (including every custom `<tracker>`, `<stats>`,
- * `<status>`, reasoning tag, loom tag, `<details>` card, etc.) are removed
- * together with their contents. Self-closing and stray-closing variants are
- * dropped. Unclosed non-prose tags (interrupted streams) are dropped from
- * the tag to end-of-input. Finally, allowlisted tag markers are stripped so
- * their inner text is preserved.
+ * Unwrap prose HTML, then drop metadata blocks and non-prose HTML. Standalone
+ * non-HTML markers without attributes are audio cues, regardless of their
+ * names. They never truncate the message and are retained only when requested
+ * by a provider that understands them. Unfinished metadata still drops the
+ * remainder of the message.
  */
-export function sanitizeForTts(text: string): string {
+export function sanitizeForTts(text: string, options: { preserveAudioCues?: boolean } = {}): string {
   let out = text
 
   // 1. Strip code first so `<` inside code can't be misread as tag syntax.
   out = out.replace(FENCED_CODE_RE, ' ')
   out = out.replace(INLINE_CODE_RE, ' ')
+  out = out.replace(HTML_COMMENT_RE, ' ')
+  out = out.replace(DOCTYPE_RE, ' ')
+
+  // Unwrap HTML before block sweeps so nested font/span wrappers don't hide
+  // metadata inside prose containers. Void elements have no contents to drop.
+  out = out.replace(ANY_TAG_MARKER_RE, (match, tag) => (
+    isProse(tag) || VOID_HTML_TAGS.has(tag.toLowerCase()) ? ' ' : match
+  ))
 
   // 2. Tag sweeps. Paired → self-closing → unclosed trailing → stray closings.
   out = stripNonProsePairedTags(out)
@@ -157,9 +200,10 @@ export function sanitizeForTts(text: string): string {
   out = out.replace(MD_IMAGE_RE, ' ')
   out = out.replace(MD_LINK_RE, '$1')
 
-  // 4. Strip any remaining tag markers (only prose tags at this point); the
-  //    inner text survives because only the marker is removed.
-  out = out.replace(ANY_TAG_MARKER_RE, ' ')
+  // 4. Only standalone cue markers can survive the HTML/metadata sweeps.
+  out = out.replace(ANY_TAG_MARKER_RE, (match, tag) => (
+    options.preserveAudioCues && isAudioCue(match, tag) ? match : ' '
+  ))
 
   // 5. Decode a handful of common HTML entities so they're pronounced, not spelled.
   out = out.replace(HTML_ENTITY_RE, (m) => HTML_ENTITY_MAP[m] ?? m)

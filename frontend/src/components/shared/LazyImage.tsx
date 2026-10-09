@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef, type CSSProperties, type ReactNode, type SyntheticEvent } from 'react'
 import { Spinner } from '@/components/shared/Spinner'
 import { isImageDecoded, onImageDecoded, rememberImageDecoded } from '@/lib/imageDecodeCache'
+import { isMacTauriWebView } from '@/lib/desktopWebView'
 
 interface LazyImageProps {
   src?: string | null
@@ -33,32 +34,42 @@ export default function LazyImage({
   onError,
   ...props
 }: LazyImageProps) {
+  // A detached image decode is only a metadata hint. WKWebView can report that
+  // decode as complete while a newly mounted <img> still has no paintable
+  // backing surface, which briefly exposes a black image layer. On macOS
+  // desktop, keep this particular element hidden until its own load and decode.
+  const requiresMountedDecode = isMacTauriWebView()
   // Skip the spinner when the image is already decoded in the cache — it'll
   // paint within one frame, so showing/hiding a spinner just adds flicker.
   const [isLoading, setIsLoading] = useState(() => {
     if (!src) return false
+    if (requiresMountedDecode) return true
     if (isImageDecoded(src)) return false
     return true
   })
   const [showLoadingIndicator, setShowLoadingIndicator] = useState(false)
   const [hasError, setHasError] = useState(false)
   const prevSrcRef = useRef(src)
+  const imageRef = useRef<HTMLImageElement>(null)
+  const currentSrcRef = useRef(src)
+  currentSrcRef.current = src
 
   useEffect(() => {
     if (src !== prevSrcRef.current) {
       prevSrcRef.current = src
-      const decoded = Boolean(src && isImageDecoded(src))
+      const decoded = Boolean(src && !requiresMountedDecode && isImageDecoded(src))
       setIsLoading(!decoded)
       setShowLoadingIndicator(false)
       setHasError(false)
     }
-  }, [src])
+  }, [requiresMountedDecode, src])
 
   // A near-viewport prefetch may finish before this element's load event.
   // Subscribe to that decode, but do not launch a second detached image here:
   // the mounted <img> is already doing the required fetch and decode.
   useEffect(() => {
     if (!src || !isLoading) return
+    if (requiresMountedDecode) return
     if (isImageDecoded(src)) {
       setIsLoading(false)
       return
@@ -69,7 +80,7 @@ export default function LazyImage({
         setShowLoadingIndicator(false)
       }
     })
-  }, [src, isLoading])
+  }, [requiresMountedDecode, src, isLoading])
 
   // Cached images commonly settle within a frame or two. Avoid flashing a
   // spinner for that fast path while still providing feedback for real waits.
@@ -79,14 +90,30 @@ export default function LazyImage({
     return () => window.clearTimeout(timer)
   }, [isLoading, src])
 
-  const handleLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
+  const finishLoad = useCallback((image: HTMLImageElement) => {
+    if (imageRef.current !== image || currentSrcRef.current !== src) return
     if (src) {
       rememberImageDecoded(src)
     }
     setIsLoading(false)
     setShowLoadingIndicator(false)
+  }, [src])
+
+  const handleLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
     onLoad?.(event)
-  }, [onLoad, src])
+    const image = event.currentTarget
+    if (!requiresMountedDecode || typeof image.decode !== 'function') {
+      finishLoad(image)
+      return
+    }
+
+    // decode() belongs to the mounted element here, rather than the detached
+    // prefetch object. It therefore gates presentation without expanding the
+    // set of images WKWebView chooses to lazy-load near the viewport.
+    void image.decode().catch(() => {}).then(() => {
+      window.requestAnimationFrame(() => finishLoad(image))
+    })
+  }, [finishLoad, onLoad, requiresMountedDecode])
   const handleError = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
     setIsLoading(false)
     setShowLoadingIndicator(false)
@@ -120,6 +147,7 @@ export default function LazyImage({
         </div>
       )}
       <img
+        ref={imageRef}
         src={src}
         alt={alt}
         draggable={false}
@@ -127,9 +155,12 @@ export default function LazyImage({
           width: '100%',
           height: '100%',
           objectFit: 'cover',
-          transition: 'opacity 0.2s ease, transform var(--lazy-image-transform-transition, 0ms)',
+          transition: requiresMountedDecode
+            ? 'transform var(--lazy-image-transform-transition, 0ms)'
+            : 'opacity 0.2s ease, transform var(--lazy-image-transform-transition, 0ms)',
           objectPosition,
-          opacity: isLoading ? 0 : 1,
+          opacity: requiresMountedDecode ? 1 : isLoading ? 0 : 1,
+          visibility: requiresMountedDecode && isLoading ? 'hidden' : 'visible',
           ...style,
         }}
         className={className}

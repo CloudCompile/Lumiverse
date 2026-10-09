@@ -2,6 +2,7 @@ import { presetsApi } from '@/api/presets'
 import type { Preset, UpdatePresetInput } from '@/types/api'
 import { looksLikeLoomPresetData, marshalUpdate, unmarshalPreset } from './service'
 import type { LoomPreset } from './types'
+import { activeTab } from '@/lib/active-tab'
 
 const PENDING_LOOM_PRESETS_KEY = '__lumiverse_pending_loom_presets'
 const PENDING_LOOM_PRESET_ENVELOPE_KEY = '__lumiverse_pending_loom_preset_v2'
@@ -478,6 +479,7 @@ function readPendingEntries(scope: string | null): Record<string, unknown> {
 }
 
 function writePendingEntries(scope: string | null, entries: Record<string, unknown>): boolean {
+  if (activeTab.signal.aborted) return false
   if (typeof window === 'undefined') return false
   try {
     if (Object.keys(entries).length === 0) {

@@ -90,6 +90,33 @@ describe("parseToolCallResults", () => {
 });
 
 describe("extractBatchWithSidecar", () => {
+  test("a failed batch does not fan out into more provider requests", async () => {
+    let calls = 0;
+    const result = await extractBatchWithSidecar([
+      { index: 0, content: "Mara found the map." },
+      { index: 1, content: "Tovin crossed the river." },
+    ], async () => {
+      calls++;
+      throw new Error("429 rate limited");
+    }, "sidecar-test");
+    expect(calls).toBe(1);
+    expect(result).toEqual([null, null]);
+  });
+
+  test("missing passages stay null without re-extraction", async () => {
+    let calls = 0;
+    const result = await extractBatchWithSidecar([
+      { index: 0, content: "Mara found the map." },
+      { index: 1, content: "Tovin crossed the river." },
+    ], async () => {
+      calls++;
+      return { content: JSON.stringify([{ index: 0, importance: 5, entities_present: [], key_facts: [] }]) };
+    }, "sidecar-test");
+    expect(calls).toBe(1);
+    expect(result[0]?.score).toBe(0.5);
+    expect(result[1]).toBeNull();
+  });
+
   test("ignores sparse tool-call entries from a provider", async () => {
     const result = await extractBatchWithSidecar([
       { index: 0, content: "Mara found the missing map." },

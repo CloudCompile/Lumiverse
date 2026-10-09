@@ -3,8 +3,8 @@ import { useStore } from '@/store'
 import {
   generateSummary,
   getLastSummarizedInfo,
-  shouldAutoSummarize,
 } from '@/lib/summary/service'
+import { shouldAutoSummarize } from '@/lib/summary/scheduling'
 import { generateApi } from '@/api/generate'
 import { scheduleLowPriorityTask } from '@/lib/low-priority-task'
 
@@ -31,6 +31,7 @@ export function useAutoSummarization() {
   const messageCount = useStore((s) => s.totalChatLength)
   const mode = useStore((s) => s.summarization.mode)
   const autoInterval = useStore((s) => s.summarization.autoInterval)
+  const autoMessageLag = useStore((s) => s.summarization.autoMessageLag)
   const isStreaming = useStore((s) => s.isStreaming)
   const lastGenerationType = useStore((s) => s.lastCompletedGenerationType)
 
@@ -81,6 +82,7 @@ export function useAutoSummarization() {
     const chatId = activeChatId
     const capturedMessageCount = messageCount
     const capturedAutoInterval = autoInterval
+    const capturedAutoMessageLag = autoMessageLag
 
     // Don't re-enter for the same (chat, count) if we already tried at this
     // exact state — prevents streaming-flag flips / unrelated renders from
@@ -107,7 +109,7 @@ export function useAutoSummarization() {
         const info = await getLastSummarizedInfo(chatId)
         const lastCount = info?.messageCount ?? 0
 
-        if (!shouldAutoSummarize(capturedMessageCount, lastCount, capturedAutoInterval)) return
+        if (!shouldAutoSummarize(capturedMessageCount, lastCount, capturedAutoInterval, capturedAutoMessageLag)) return
 
         // Record the trigger so the effect won't re-enter for the same (chat, count).
         lastTriggerCountRef.current = { chatId, count: capturedMessageCount }
@@ -130,10 +132,12 @@ export function useAutoSummarization() {
             chatId,
             connectionId,
             messageContext: current.autoMessageContext,
+            messageLag: current.autoMessageLag,
             userName,
             characterName,
             systemPromptOverride: current.systemPromptOverride,
             userPromptOverride: current.userPromptOverride,
+            requestTimeoutMs: current.requestTimeoutMs,
           })
         } catch (err) {
           console.error('[useAutoSummarization] Summary generation failed:', err)
@@ -153,5 +157,5 @@ export function useAutoSummarization() {
     }
 
     scheduleLowPriorityTask(kickoff, { label: 'auto summarization kickoff' })
-  }, [activeChatId, messageCount, mode, autoInterval, isStreaming, lastGenerationType])
+  }, [activeChatId, messageCount, mode, autoInterval, autoMessageLag, isStreaming, lastGenerationType])
 }

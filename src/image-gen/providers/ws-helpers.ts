@@ -14,6 +14,56 @@ export function formatWsError(e: unknown): string {
   return "connection failed (likely refused / DNS / non-WS endpoint)"
 }
 
+type BunPausableWebSocket = WebSocket & {
+  pause(): boolean
+  resume(): boolean
+}
+
+export interface WebSocketReceiveBackpressure {
+  enqueued(queueLength: number): void
+  dequeued(queueLength: number): void
+  release(): void
+}
+
+/**
+ * Bound an async consumer's decoded-message queue with Bun's WebSocket receive
+ * backpressure. Bun may deliver messages decoded just before pause(), so this
+ * is a high/low-water controller rather than a hard queue-size limit.
+ */
+export function createWebSocketReceiveBackpressure(
+  ws: WebSocket,
+  options: { highWaterMark?: number; lowWaterMark?: number } = {},
+): WebSocketReceiveBackpressure {
+  const highWaterMark = options.highWaterMark ?? 16
+  const lowWaterMark = options.lowWaterMark ?? 4
+  if (lowWaterMark < 0 || highWaterMark <= lowWaterMark) {
+    throw new RangeError("WebSocket backpressure requires 0 <= lowWaterMark < highWaterMark")
+  }
+
+  const socket = ws as BunPausableWebSocket
+  let pausedByController = false
+
+  const resume = () => {
+    if (!pausedByController) return
+    try {
+      socket.resume()
+    } finally {
+      pausedByController = false
+    }
+  }
+
+  return {
+    enqueued(queueLength) {
+      if (pausedByController || queueLength < highWaterMark) return
+      pausedByController = socket.pause()
+    },
+    dequeued(queueLength) {
+      if (queueLength <= lowWaterMark) resume()
+    },
+    release: resume,
+  }
+}
+
 // Opens a WS with a timeout; cleans up listeners on settle so we don't keep
 // the event loop alive or leak handlers after resolution. `headers` uses
 // Bun's WebSocket constructor extension (WHATWG WebSocket can't set headers).

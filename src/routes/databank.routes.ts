@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import * as databank from "../services/databank";
+import { getChat } from "../services/chats.service";
 import { parsePagination } from "../services/pagination";
 import * as filesSvc from "../services/files.service";
 import type { DatabankScope } from "../services/databank/types";
@@ -76,6 +77,8 @@ app.put("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const userId = c.get("userId");
   const id = c.req.param("id");
+
+  if (!databank.getDatabank(userId, id)) return c.json({ error: "Not found" }, 404);
 
   databank.abortDatabankProcessing(id);
 
@@ -271,6 +274,8 @@ app.delete("/:id/documents/:docId", async (c) => {
   const userId = c.get("userId");
   const docId = c.req.param("docId");
 
+  if (!databank.getDocument(userId, docId)) return c.json({ error: "Not found" }, 404);
+
   databank.abortDocumentProcessing(docId);
 
   // Delete vectors from LanceDB
@@ -343,6 +348,8 @@ app.post("/:id/documents/:docId/reprocess", async (c) => {
   const doc = databank.getDocument(userId, docId);
   if (!doc) return c.json({ error: "Not found" }, 404);
 
+  databank.abortDocumentProcessing(docId);
+
   // Delete old vectors
   await databank.deleteDocumentVectors(userId, docId);
 
@@ -367,6 +374,7 @@ app.post("/attach-to-chat", async (c) => {
 
   if (!file) return c.json({ error: "No file provided" }, 400);
   if (!chatId) return c.json({ error: "chat_id is required" }, 400);
+  if (!getChat(userId, chatId)) return c.json({ error: "Chat not found" }, 404);
 
   if (!databank.isSupportedFormat(file.name)) {
     return c.json({ error: `Unsupported file format. Supported: ${databank.getSupportedExtensions().join(", ")}` }, 400);
@@ -433,7 +441,7 @@ app.get("/mentions/autocomplete", (c) => {
 app.post("/mentions/resolve", async (c) => {
   const userId = c.get("userId");
   const body = await c.req.json();
-  const { slug, chatId, characterId, maxTokens } = body;
+  const { slug } = body;
 
   if (!slug) return c.json({ error: "slug is required" }, 400);
 
@@ -443,24 +451,11 @@ app.post("/mentions/resolve", async (c) => {
   const content = databank.getFullDocumentText(userId, doc.id);
   if (!content) return c.json({ error: "Document has no content" }, 404);
 
-  // Clamp maxTokens to a sane range. Without this, negative values turn the
-  // slice into a tail-strip ("0, -4000" → "" on small docs) and very large
-  // values let a caller request a huge buffer allocation. Treat anything
-  // unparseable as "use the default" rather than failing the request.
-  const MAX_RESOLVE_TOKENS = 100_000;
-  let effectiveMax = 2000;
-  if (typeof maxTokens === "number" && Number.isFinite(maxTokens) && maxTokens > 0) {
-    effectiveMax = Math.min(Math.floor(maxTokens), MAX_RESOLVE_TOKENS);
-  }
-  const limit = effectiveMax * 4;
-  const truncated = content.length > limit;
-  const resultContent = truncated ? content.slice(0, limit) : content;
-
   return c.json({
     slug: doc.slug,
     documentName: doc.name,
-    content: resultContent,
-    truncated,
+    content,
+    truncated: false,
   });
 });
 

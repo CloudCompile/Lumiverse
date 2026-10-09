@@ -173,4 +173,49 @@ describe('generation recovery races', () => {
     expect(store.getState().streamingSwipeId).toBeNull()
     expect(store.getState().messages).toEqual([original])
   })
+
+  test('ignores a poll after a newer generation has both started and finished', async () => {
+    const status = deferred<GenerationStatusResponse>()
+    getStatus = mock(() => status.promise)
+    const recovery = recoverPooledGeneration('chat')
+    store.getState().beginStreaming()
+    store.getState().startStreaming('next')
+    store.getState().endStreaming()
+    const current = store.getState()
+    status.resolve(completed)
+    await recovery
+    expect(store.getState()).toBe(current)
+    expect(list).not.toHaveBeenCalled()
+  })
+
+  test('ignores a message refresh after a newer generation has both started and finished', async () => {
+    const fresh = deferred<PaginatedResult<Message>>()
+    const requested = deferred<void>()
+    list = mock(() => { requested.resolve(); return fresh.promise })
+    const recovery = recoverPooledGeneration('chat')
+    await requested.promise
+    store.getState().beginStreaming()
+    store.getState().startStreaming('next')
+    store.getState().endStreaming()
+    const current = store.getState()
+    fresh.resolve({ data: [], total: 0, offset: 0, limit: 50 })
+    await recovery
+    expect(store.getState()).toBe(current)
+  })
+
+  test('an in-flight active poll cannot restore buffers after a terminal row was adopted', async () => {
+    store.getState().startStreaming('generation', undefined, 'continue')
+    const status = deferred<GenerationStatusResponse>()
+    getStatus = mock(() => status.promise)
+    const recovery = recoverPooledGeneration('chat')
+    const edited = { ...original, content: 'Completed with status', swipes: ['Completed with status'], revision: 3 }
+    store.getState().markGenerationEnded('generation')
+    store.getState().endStreaming(edited)
+    const current = store.getState()
+    status.resolve({ ...active, generationType: 'continue' })
+    await recovery
+    expect(store.getState()).toBe(current)
+    expect(store.getState().messages[0]).toEqual(edited)
+    expect(store.getState().getStreamBuffers()).toEqual({ content: '', reasoning: '' })
+  })
 })

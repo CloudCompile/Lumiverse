@@ -15,24 +15,30 @@ interface ModalShellProps {
   children: ReactNode
   className?: string
   style?: CSSProperties
+  /** Use the available viewport without desktop size caps. */
+  fullscreen?: boolean
   /** Allow a modal body with form controls to scroll when the viewport is short. */
   scrollable?: boolean
   modalId?: string
+  /** Stable theme scope for a caller whose content is portalled. */
+  'data-component'?: string
 }
 
 export function ModalShell({
   isOpen,
   onClose,
   maxWidth = 560,
-  maxHeight = '85vh',
+  maxHeight = 'calc(85dvh / var(--lumiverse-ui-scale, 1))',
   zIndex = 10002,
   closeOnBackdrop = true,
   closeOnEscape = true,
   children,
   className,
   style,
+  fullscreen = false,
   scrollable = false,
   modalId = 'shell',
+  'data-component': dataComponent,
 }: ModalShellProps) {
   const backdropPointerDownRef = useRef<EventTarget | null>(null)
 
@@ -70,7 +76,8 @@ export function ModalShell({
     <AnimatePresence>
       {isOpen && (
         <motion.div
-          className={styles.backdrop}
+          className={clsx(styles.backdrop, fullscreen && styles.fullscreenBackdrop)}
+          data-modal={dataComponent}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
@@ -80,12 +87,19 @@ export function ModalShell({
           style={{ zIndex }}
         >
           <motion.div
-            className={clsx(styles.modal, scrollable && styles.scrollable, className)}
+            className={clsx(styles.modal, fullscreen && styles.fullscreenModal, scrollable && styles.scrollable, className)}
+            data-component={dataComponent}
             initial={{ opacity: 0, scale: 0.95, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 10 }}
             transition={{ duration: 0.2, ease: [0.4, 0, 0.2, 1] }}
-            style={{ maxWidth, maxHeight, ...style }}
+            // A caller's viewport-unit limit also needs to fit the available
+            // backdrop at larger UI scales and while a keyboard is open.
+            style={{
+              maxWidth: fullscreen ? undefined : maxWidth,
+              maxHeight: fullscreen ? undefined : `min(${typeof maxHeight === 'number' ? `${maxHeight}px` : maxHeight}, 100%)`,
+              ...style,
+            }}
           >
             <span data-spindle-mount="modal_header_actions" data-spindle-scope={`modal:${modalId}:header-actions`} style={{ display: 'contents' }} />
             {children}

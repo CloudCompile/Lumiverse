@@ -5,16 +5,13 @@ import { Download, Upload, X, Paintbrush, Code2, ChevronDown, ChevronUp, ShieldA
 import { ModalShell } from '@/components/shared/ModalShell'
 import useIsMobile from '@/hooks/useIsMobile'
 import { CUSTOM_CSS_DOCK_BREAKPOINT } from '@/lib/custom-css-dock'
-import { themeAssetsApi } from '@/api/theme-assets'
 import { useStore } from '@/store'
+import { useThemePackActions } from '@/hooks/useThemePackActions'
 import { validateCSS, sanitizeCSS } from '@/lib/cssValidator'
 import { validateTSX } from '@/lib/componentTranspiler'
 import { CSS_MODULE_REGISTRY, generateSelector, type CSSModuleEntry } from '@/lib/cssModuleRegistry'
 import { getComponentTemplate, type PropDoc } from '@/lib/componentTemplates'
-import { createThemePack, exportThemePack, importThemePack, packSummary, type ThemePackAsset } from '@/lib/themePack'
-import { disableImportedThemePackTsx } from '@/lib/componentOverrideSecurity'
 import { toast } from '@/lib/toast'
-import { generateUUID } from '@/lib/uuid'
 import { css, cssLanguage } from '@codemirror/lang-css'
 import { javascript, javascriptLanguage } from '@codemirror/lang-javascript'
 import { type CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
@@ -140,20 +137,6 @@ function createCssThemeVarsCompletionSource() {
   }
 }
 
-async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer()
-  let binary = ''
-  const bytes = new Uint8Array(buffer)
-  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i])
-  return btoa(binary)
-}
-
-function base64ToFile(dataBase64: string, filename: string, mimeType: string): File {
-  const binary = atob(dataBase64)
-  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0))
-  return new File([bytes], filename, { type: mimeType })
-}
-
 type CustomCSSEditorPresentation = 'modal' | 'dock'
 
 interface CustomCSSEditorProps {
@@ -186,9 +169,6 @@ export function CustomCSSEditor({
   const setComponentTSX = useStore((s) => s.setComponentTSX)
   const toggleComponentOverride = useStore((s) => s.toggleComponentOverride)
   const resetAllOverrides = useStore((s) => s.resetAllOverrides)
-  const applyThemePack = useStore((s) => s.applyThemePack)
-  const addSavedTheme = useStore((s) => s.addSavedTheme)
-  const theme = useStore((s) => s.theme)
   const openModal = useStore((s) => s.openModal)
 
   const {
@@ -287,23 +267,6 @@ export function CustomCSSEditor({
 
   const assetBundleId = customCSS.bundleId
 
-  const buildPackAssets = useCallback(async (): Promise<ThemePackAsset[]> => {
-    const bundleId = customCSS.bundleId
-    if (!bundleId) return []
-    const assets = await themeAssetsApi.list(bundleId)
-    return Promise.all(assets.map(async (asset) => {
-      const blob = await themeAssetsApi.getBlob(asset.id)
-      return {
-        slug: asset.slug,
-        originalFilename: asset.original_filename,
-        mimeType: asset.mime_type,
-        tags: asset.tags,
-        metadata: asset.metadata || {},
-        dataBase64: await blobToBase64(blob),
-      }
-    }))
-  }, [customCSS.bundleId])
-
   // ── Export / Import ──
   const handleExport = useCallback(() => {
     const content = activeTab === 'css' ? currentCSS : currentTSX
@@ -334,54 +297,7 @@ export function CustomCSSEditor({
   }, [activeTab, handleCSSChange, handleTSXChange])
 
   // ── Pack-level export / import / reset ──
-  const handleExportPack = useCallback(async () => {
-    try {
-      const assets = await buildPackAssets()
-      const pack = createThemePack(theme, customCSS, componentOverrides, assets, {
-        name: theme?.name || t('customThemeName'),
-      })
-      exportThemePack(pack)
-      toast.success(t('exportSuccess'))
-    } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || t('exportFailed'))
-    }
-  }, [buildPackAssets, theme, customCSS, componentOverrides, t])
-
-  const handleImportPack = useCallback(async () => {
-    const result = await importThemePack()
-    if (!result) {
-      toast.info(t('importCancelled'))
-      return
-    }
-    if (result.error) {
-      toast.error(result.error.message)
-      return
-    }
-    const imported = disableImportedThemePackTsx(result.pack)
-    const pack = imported.pack
-    const localBundleId = generateUUID()
-    const localizedPack = { ...pack, bundleId: localBundleId }
-    try {
-      for (const asset of localizedPack.assets) {
-        const file = base64ToFile(asset.dataBase64, asset.originalFilename, asset.mimeType)
-        await themeAssetsApi.upload(file, {
-          bundleId: localBundleId,
-          slug: asset.slug,
-          tags: asset.tags,
-          metadata: asset.metadata,
-        })
-      }
-      const summary = packSummary(localizedPack)
-      applyThemePack(localizedPack)
-      addSavedTheme({ kind: 'pack', name: pack.name || t('importedThemeName'), pack: localizedPack })
-      const disabledNote = imported.disabledCount > 0
-        ? t('tsxDisabledNote', { count: imported.disabledCount })
-        : ''
-      toast.success(t('appliedFromBundle', { name: pack.name, summary: summary.join(', ') }) + disabledNote)
-    } catch (err: any) {
-      toast.error(err?.body?.error || err?.message || t('importFailed'))
-    }
-  }, [applyThemePack, addSavedTheme, t])
+  const { handleExportPack, handleImportPack } = useThemePackActions()
 
   const handleResetAll = useCallback(() => {
     openModal('confirm', {

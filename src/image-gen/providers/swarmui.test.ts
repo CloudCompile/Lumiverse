@@ -241,6 +241,40 @@ describe("SwarmUIImageProvider — rawRequestOverride", () => {
   });
 });
 
+describe("SwarmUIImageProvider — generation failures", () => {
+  let fetchStub: InstalledFetch;
+  afterEach(() => fetchStub?.restore());
+
+  for (const status of [200, 400]) {
+    test(`does not resend a stale-session generation with HTTP ${status}`, async () => {
+      const base = uniqueBase();
+      let sessions = 0;
+      let generations = 0;
+      fetchStub = installFetch((call) => {
+        if (call.url === `${base}/API/GetNewSession`) {
+          return Response.json({ session_id: `session-${++sessions}` });
+        }
+        if (call.url === `${base}/API/GenerateText2Image`) {
+          generations++;
+          if (generations === 1) return Response.json({ error_id: "invalid_session_id", error: "Invalid session" }, { status });
+          return Response.json({ images: ["View/local/raw/out.png"] });
+        }
+        return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/png" } });
+      });
+      const provider = new SwarmUIImageProvider();
+      const error = await captureProviderError(provider.generate("", base, req({})));
+      expect(error.code).toBe("invalid_session_id");
+      expect(generations).toBe(1);
+      expect(sessions).toBe(1);
+
+      // A separate user request obtains a fresh session and sends once.
+      await provider.generate("", base, req({}));
+      expect(generations).toBe(2);
+      expect(sessions).toBe(2);
+    });
+  }
+});
+
 describe("SwarmUIImageProvider — model discovery", () => {
   let fetchStub: InstalledFetch;
 

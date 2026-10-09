@@ -213,6 +213,7 @@ function migratePreset(preset: LoomPreset): LoomPreset {
     : null
   preset.lumihubMeta = isRecord(preset.lumihubMeta) ? preset.lumihubMeta : null
   preset.passthroughMetadata = isRecord(preset.passthroughMetadata) ? preset.passthroughMetadata : {}
+  const installedSource = preset.lumihubMeta?._lumiverse_install_source
   if (Array.isArray(preset.blocks)) {
     for (const block of preset.blocks) {
       if (!Array.isArray(block.injectionTrigger)) {
@@ -226,7 +227,12 @@ function migratePreset(preset: LoomPreset): LoomPreset {
       block.savedChildEnabled = block.marker === 'category' && isRecord(block.savedChildEnabled)
         ? Object.fromEntries(Object.entries(block.savedChildEnabled).filter((entry): entry is [string, boolean] => typeof entry[0] === 'string' && typeof entry[1] === 'boolean'))
         : undefined
-      if (block.sealedSource === 'lumihub') {
+      // Older Illarin deliveries carried the sealed flag/key but predated the
+      // per-block source marker. Backfill it from authoritative install metadata.
+      if (block.sealed === true && block.sealedSource == null && installedSource === 'illarin') {
+        block.sealedSource = 'illarin'
+      }
+      if (isProtectedSealedSource(block.sealedSource)) {
         block.sealed = true
       }
       if (block.sealed !== true) {
@@ -296,6 +302,11 @@ export function shouldShowLumiHubPresetBadge(
 }
 
 export type RemotePresetOrigin = 'lumihub' | 'illarin'
+
+/** Sources whose installed sealed blocks must never export materialized content. */
+export function isProtectedSealedSource(source: unknown): source is RemotePresetOrigin {
+  return source === 'lumihub' || source === 'illarin'
+}
 
 /** Resolve explicit provenance, retaining the legacy LumiHub-version fallback. */
 export function getRemotePresetOrigin(
@@ -640,20 +651,25 @@ export function marshalUpdate(loom: LoomPreset): UpdatePresetInput {
   }
 }
 
-export function sanitizeLumiHubSealedBlocksForExport<T extends LoomPreset>(loom: T): T {
-  const manifestKeys = getLumiHubSealedManifestKeys(loom)
-  if (!manifestKeys.size && !loom.blocks.some((block) => isLumiHubSealedBlock(block))) return loom
+export function sanitizeRemoteSealedBlocksForExport<T extends LoomPreset>(loom: T): T {
+  const manifestKeys = getSealedManifestKeys(loom)
+  const inferIllarinSource = loom.lumihubMeta?._lumiverse_install_source === 'illarin'
+  if (!manifestKeys.size && !loom.blocks.some((block) => (
+    isProtectedInstalledSealedBlock(block) || (inferIllarinSource && block.sealed === true)
+  ))) return loom
 
   return {
     ...loom,
     blocks: loom.blocks.map((block) => {
-      const key = getLumiHubSealedExportKey(block, manifestKeys)
+      const inferredIllarinBlock = inferIllarinSource && block.sealed === true
+      const key = getProtectedSealedExportKey(block, manifestKeys, inferredIllarinBlock)
       if (!key) return block
       return {
         ...block,
         content: sealedPresetBlockPlaceholder(key),
         sealed: true,
         sealedKey: key,
+        ...(inferredIllarinBlock ? { sealedSource: 'illarin' } : {}),
       }
     }),
   }
@@ -661,14 +677,22 @@ export function sanitizeLumiHubSealedBlocksForExport<T extends LoomPreset>(loom:
 
 /** Remove the installation-local identity before a Loom preset leaves this library. */
 export function createPortableLoomPresetExport(loom: LoomPreset): Omit<LoomPreset, 'id'> {
-  const sanitized = sanitizeLumiHubSealedBlocksForExport(loom)
+  const sanitized = sanitizeRemoteSealedBlocksForExport(loom)
   const { id: _localPresetId, ...portable } = sanitized
   return portable
 }
 
-function getLumiHubSealedExportKey(block: PromptBlock, manifestKeys: Set<string>): string | null {
+function getProtectedSealedExportKey(
+  block: PromptBlock,
+  manifestKeys: Set<string>,
+  inferredIllarinBlock: boolean,
+): string | null {
   const sealedKey = typeof block.sealedKey === 'string' && block.sealedKey.trim() ? block.sealedKey.trim() : null
-  if (sealedKey && (block.sealedSource === 'lumihub' || manifestKeys.has(sealedKey))) return sealedKey
+  if (sealedKey && (
+    isProtectedSealedSource(block.sealedSource)
+    || manifestKeys.has(sealedKey)
+    || inferredIllarinBlock
+  )) return sealedKey
 
   const placeholderKey = extractExactSealedPlaceholder(block.content || '')
   if (placeholderKey && manifestKeys.has(placeholderKey)) return placeholderKey
@@ -676,11 +700,11 @@ function getLumiHubSealedExportKey(block: PromptBlock, manifestKeys: Set<string>
   return null
 }
 
-function isLumiHubSealedBlock(block: PromptBlock): boolean {
-  return block.sealedSource === 'lumihub'
+function isProtectedInstalledSealedBlock(block: PromptBlock): boolean {
+  return isProtectedSealedSource(block.sealedSource)
 }
 
-function getLumiHubSealedManifestKeys(loom: LoomPreset): Set<string> {
+function getSealedManifestKeys(loom: LoomPreset): Set<string> {
   const sealedPreset = isRecord(loom.lumihubMeta?._lumiverse_sealed_preset)
     ? loom.lumihubMeta._lumiverse_sealed_preset
     : null
@@ -1657,7 +1681,7 @@ function assignSTCategoryGroups(blocks: PromptBlock[]): PromptBlock[] {
  * and flattens behavior/sampler settings to ST root-level fields.
  */
 export function exportToSTPreset(loom: LoomPreset): Record<string, any> {
-  const exportLoom = sanitizeLumiHubSealedBlocksForExport(loom)
+  const exportLoom = sanitizeRemoteSealedBlocksForExport(loom)
   const prompts: Array<Record<string, any>> = []
   const orderEntries: Array<{ identifier: string; enabled: boolean }> = []
 

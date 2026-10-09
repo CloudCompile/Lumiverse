@@ -18,6 +18,11 @@ import {
 } from "../db/maintenance";
 import { getAutomaticDatabaseMaintenanceStatus } from "../db/maintenance-scheduler";
 import { getGitMetadata } from "../utils/git-metadata";
+import {
+  onRunnerMessage,
+  runnerChannelAvailable,
+  sendRunnerMessage,
+} from "./runner-channel";
 
 // ─── Static metadata helpers ────────────────────────────────────────────────
 
@@ -50,14 +55,14 @@ class OperatorService {
   private batchPending: LogEntry[] = [];
   private batchTimer: ReturnType<typeof setTimeout> | null = null;
   private currentOperation: string | null = null;
+  private removeRunnerMessageHandler: (() => void) | null = null;
 
   // Cached values that don't change during server lifetime
   private readonly version = readVersion();
 
   constructor() {
     const hasRunnerEnv = process.env.LUMIVERSE_RUNNER_IPC === "1";
-    const hasProcessSend = typeof process.send === "function";
-    this.ipcAvailable = hasRunnerEnv && hasProcessSend;
+    this.ipcAvailable = hasRunnerEnv && runnerChannelAvailable;
     this.ipcReason = this.ipcAvailable
       ? "connected"
       : hasRunnerEnv
@@ -67,7 +72,7 @@ class OperatorService {
     this.logBuffer = new RingBuffer(150);
 
     if (this.ipcAvailable) {
-      process.on("message", (msg: IPCMessage) => this.handleRunnerMessage(msg));
+      this.removeRunnerMessageHandler = onRunnerMessage((msg) => this.handleRunnerMessage(msg));
     }
 
     this.interceptConsole();
@@ -243,7 +248,11 @@ class OperatorService {
       }, timeoutMs);
 
       this.pendingRequests.set(id, { resolve, reject, timer });
-      process.send!({ type, id, payload });
+      if (!sendRunnerMessage({ type, id, payload } as IPCMessage)) {
+        this.pendingRequests.delete(id);
+        clearTimeout(timer);
+        reject(new Error("Runner control channel is unavailable"));
+      }
     });
   }
 
@@ -374,6 +383,8 @@ class OperatorService {
   // ── Cleanup ───────────────────────────────────────────────────────────
 
   cleanup(): void {
+    this.removeRunnerMessageHandler?.();
+    this.removeRunnerMessageHandler = null;
     if (this.batchTimer) {
       clearTimeout(this.batchTimer);
       this.batchTimer = null;

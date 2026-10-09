@@ -486,6 +486,7 @@ export default function ManageChatsModal() {
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={(e) => clearSearchOnEscape(e, search, () => setSearch(''))}
                 placeholder={t('searchPlaceholder')}
+                aria-label={t('searchPlaceholder')}
               />
               {search && (
                 <button type="button" className={styles.searchClear} onClick={() => setSearch('')} aria-label={tc('actions.clear')}>
@@ -628,7 +629,8 @@ export default function ManageChatsModal() {
                           event.stopPropagation()
                           toggleChatSelection(chat.id)
                         }}
-                        aria-label={t(selected ? 'deselectChat' : 'selectChat', { name: displayName })}
+                        aria-label={t('selectChat', { name: displayName })}
+                        aria-pressed={selected}
                       >
                         {selected ? <CheckSquare size={18} /> : <Square size={18} />}
                       </button>
@@ -636,6 +638,7 @@ export default function ManageChatsModal() {
                       <MessageSquare
                         size={18}
                         className={clsx(styles.cardIcon, isActive && styles.cardIconActive)}
+                        aria-hidden
                       />
                     )}
 
@@ -646,6 +649,7 @@ export default function ManageChatsModal() {
                           type="text"
                           className={styles.editInput}
                           value={renameValue}
+                          aria-label={`${t('renameChat')}: ${displayName}`}
                           onChange={(e) => setRenameValue(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleConfirmRename(chat.id)
@@ -663,12 +667,12 @@ export default function ManageChatsModal() {
                       )}
                       <div className={styles.cardMeta}>
                         <span className={styles.cardMetaItem}>
-                          <FileText size={11} />
-                          {chat.message_count}
+                          <FileText size={11} aria-hidden />
+                          {t('messageCount', { count: chat.message_count })}
                         </span>
                         <span className={styles.cardMetaItem}>
-                          <Clock size={11} />
-                          {formatRelativeTime(chat.updated_at)}
+                          <Clock size={11} aria-hidden />
+                          {t('updated', { time: formatRelativeTime(chat.updated_at) })}
                         </span>
                         {chat.multiplayer && (
                           <span className={styles.cardMetaItem} style={{ color: 'var(--lumiverse-accent, #6366f1)', fontWeight: 600 }}>
@@ -688,6 +692,7 @@ export default function ManageChatsModal() {
                           className={styles.actionBtnPrimary}
                           onClick={() => handleSwitch(chat.id)}
                           title={t('switchChat')}
+                          aria-label={`${t('switchChat')}: ${displayName}`}
                           icon={<ArrowRight size={14} />}
                         />
                       )}
@@ -698,6 +703,7 @@ export default function ManageChatsModal() {
                           className={styles.actionBtnPrimary}
                           onClick={() => handleConfirmRename(chat.id)}
                           title={t('confirmRename')}
+                          aria-label={`${t('confirmRename')}: ${displayName}`}
                           icon={<Check size={14} />}
                         />
                       ) : (
@@ -706,6 +712,7 @@ export default function ManageChatsModal() {
                           variant="ghost"
                           onClick={() => handleStartRename(chat)}
                           title={t('renameChat')}
+                          aria-label={`${t('renameChat')}: ${displayName}`}
                           icon={<Pencil size={14} />}
                         />
                       )}
@@ -714,6 +721,7 @@ export default function ManageChatsModal() {
                         variant="ghost"
                         onClick={() => handleExport(chat.id, displayName)}
                         title={t('exportChat')}
+                        aria-label={`${t('exportChat')}: ${displayName}`}
                         icon={<Download size={14} />}
                       />
                       {!isActive && (
@@ -722,6 +730,7 @@ export default function ManageChatsModal() {
                           variant="danger-ghost"
                           onClick={() => setDeleteTarget(chat)}
                           title={t('deleteChat')}
+                          aria-label={`${t('deleteChat')}: ${displayName}`}
                           icon={<Trash2 size={14} />}
                         />
                       )}

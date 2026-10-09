@@ -85,6 +85,7 @@
     "confirm": "Confirm"
   },
   "searchableSelect": {
+    "selectedCount": "{{count}} selected",
     "placeholder": "Select…",
     "searchPlaceholder": "Search…",
     "emptyMessage": "No options available",

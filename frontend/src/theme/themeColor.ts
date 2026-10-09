@@ -118,3 +118,15 @@ export function toOpaqueRgb(color: string): string | null {
   const channels = toOpaqueRgbChannels(color)
   return channels ? `rgb(${channels[0]}, ${channels[1]}, ${channels[2]})` : null
 }
+
+/**
+ * Recolor a CSS surface while retaining the opacity selected for another
+ * surface. This lets live palette theming follow the artwork hue without
+ * changing the user's desktop translucency preference.
+ */
+export function withPreservedAlpha(color: string, alphaSource: string): string | null {
+  const tint = parseThemeColor(color)
+  const source = parseThemeColor(alphaSource)
+  if (!tint || !source) return null
+  return `rgb(${tint.r} ${tint.g} ${tint.b} / ${source.a})`
+}

@@ -48,6 +48,7 @@ import {
 } from './preset-editor-helper'
 import { destroyComponentsForTarget } from './components-helper'
 import { getLiveRootRecordExact, registerLiveRoot, unregisterLiveRoot } from './live-root-registry'
+import { assertTouchScrollMode, setWidgetTouchScrollMode, type WidgetTouchScrollMode } from './widget-touch-scroll'
 import type { FloatWidgetState, DockPanelState, SettingsTabState } from '@/store/slices/spindle-placement'
 import {
   clampLayoutRect,
@@ -59,6 +60,7 @@ import {
 import type { PlacementGeometryBounds, SurfaceRectPrefs } from '@/types/store'
 import { placementGeometryKey as makePlacementGeometryKey } from '@/store/slices/spindle-placement'
 import { stampExtensionRoot } from './extension-root-stamp'
+import { DESKTOP_WIDGET_MAX_SIZE, isDesktopFloatingWidgetWindow } from '@/lib/desktop-floating-widget'
 
 export type PlacementGuard = () => void
 
@@ -227,6 +229,7 @@ function getStore() {
 type GeometryRect = SurfaceRectPrefs
 
 type H6FloatWidgetOptions = SpindleFloatWidgetOptions & {
+  touchScrollMode?: WidgetTouchScrollMode
   resizable?: boolean
   bounds?: Partial<PlacementGeometryBounds>
   aspectLock?: boolean | number
@@ -263,8 +266,27 @@ function layoutViewportBounds(): GeometryRect {
   }
 }
 
+/**
+ * Placement region for float geometry. The page viewport keeps in-page widgets
+ * reachable and caps them. A native desktop pop-out inverts that relationship:
+ * the host sizes its window from the widget, so the pop-out viewport is a
+ * consequence of the requested bounds rather than a limit on them. Bounding the
+ * widget by its own window would pin the pop-out to whatever size it opened at,
+ * so the host's widget envelope bounds it instead.
+ */
+function resolvePlacementRegion(): GeometryRect {
+  if (!isDesktopFloatingWidgetWindow()) return layoutViewportBounds()
+  return {
+    x: 0,
+    y: 0,
+    width: DESKTOP_WIDGET_MAX_SIZE.width,
+    height: DESKTOP_WIDGET_MAX_SIZE.height,
+  }
+}
+
 interface ResolvedGeometryBounds {
-  viewport: GeometryRect
+  /** Clamp region: the page viewport, or the desktop widget envelope in a pop-out. */
+  region: GeometryRect
   minWidth: number
   minHeight: number
   maxWidth: number
@@ -295,17 +317,17 @@ function isResizeEdge(value: unknown): value is ResizeEdge {
 }
 
 function resolveGeometryBounds(bounds?: Partial<PlacementGeometryBounds>): ResolvedGeometryBounds {
-  const viewport = layoutViewportBounds()
+  const region = resolvePlacementRegion()
   const requestedMinWidth = Math.max(1, finiteOr(bounds?.minWidth, 1))
   const requestedMinHeight = Math.max(1, finiteOr(bounds?.minHeight, 1))
-  const requestedMaxWidth = Math.max(requestedMinWidth, finiteOr(bounds?.maxWidth, viewport.width))
-  const requestedMaxHeight = Math.max(requestedMinHeight, finiteOr(bounds?.maxHeight, viewport.height))
-  const maxWidth = Math.min(viewport.width, requestedMaxWidth)
-  const maxHeight = Math.min(viewport.height, requestedMaxHeight)
+  const requestedMaxWidth = Math.max(requestedMinWidth, finiteOr(bounds?.maxWidth, region.width))
+  const requestedMaxHeight = Math.max(requestedMinHeight, finiteOr(bounds?.maxHeight, region.height))
+  const maxWidth = Math.min(region.width, requestedMaxWidth)
+  const maxHeight = Math.min(region.height, requestedMaxHeight)
   const minWidth = Math.min(requestedMinWidth, maxWidth)
   const minHeight = Math.min(requestedMinHeight, maxHeight)
   return {
-    viewport,
+    region,
     minWidth,
     minHeight,
     maxWidth,
@@ -352,11 +374,11 @@ function clampGeometryRect(
     height = Math.min(Math.max(height, resolved.minHeight), resolved.maxHeight)
   }
   return clampLayoutRect({
-    x: finiteOr(rect.x, resolved.viewport.x),
-    y: finiteOr(rect.y, resolved.viewport.y),
+    x: finiteOr(rect.x, resolved.region.x),
+    y: finiteOr(rect.y, resolved.region.y),
     width,
     height,
-  }, resolved.viewport, { minSize: { width: resolved.minWidth, height: resolved.minHeight } })
+  }, resolved.region, { minSize: { width: resolved.minWidth, height: resolved.minHeight } })
 }
 
 function readPersistedGeometry(
@@ -427,6 +449,7 @@ export function createDrawerTabHandle(
     assertActive()
     getStore().registerDrawerTab({
     id: tabId,
+    contributionId: options.id,
     extensionId,
     title: options.title,
     shortName: options.shortName,
@@ -923,10 +946,11 @@ export function createFloatWidgetHandle(
   options?: H6FloatWidgetOptions,
   assertActive: PlacementGuard = () => {},
   generation?: number,
-): SpindleFloatWidgetHandle {
+): SpindleFloatWidgetHandle & { setTouchScrollMode(mode: WidgetTouchScrollMode): void } {
   assertPlacementRegistrationAllowed(extensionId, 'ui_panels')
   assertActive()
   const floatOptions = options ?? {}
+  assertTouchScrollMode(floatOptions.touchScrollMode ?? 'guarded')
   const widgetId = nextId(extensionId, 'float')
   const geometryKey = makePlacementGeometryKey(extensionId, 'float', floatOptions.persistGeometry)
   const root = document.createElement('div')
@@ -984,7 +1008,7 @@ export function createFloatWidgetHandle(
       },
       onChange: updateRect,
       onCommit: commitRect,
-      bounds: () => geometryBounds().viewport,
+      bounds: () => geometryBounds().region,
       minSize: { width: resolved.minWidth, height: resolved.minHeight },
       maxSize: { width: resolved.maxWidth, height: resolved.maxHeight },
       aspectLock: normalizedAspectLock,
@@ -1016,6 +1040,7 @@ export function createFloatWidgetHandle(
     destroyed = true
     if (!registered) disposedDuringRegistration = true
     runCleanupSteps(
+      () => setWidgetTouchScrollMode(root, 'guarded'),
       () => window.removeEventListener('spindle:float-resize-handle-ready', handleResizeHandleReady),
       () => window.removeEventListener('spindle:float-drag-end', handleDragEndEvent),
       () => {
@@ -1064,9 +1089,16 @@ export function createFloatWidgetHandle(
     throw error
   }
 
+  setWidgetTouchScrollMode(root, floatOptions.touchScrollMode ?? 'guarded')
+
   return {
     root,
     widgetId,
+    setTouchScrollMode(mode: WidgetTouchScrollMode) {
+      assertActive()
+      assertPlacementUsable(destroyed)
+      setWidgetTouchScrollMode(root, mode)
+    },
     moveTo(newX: number, newY: number) {
       assertPlacementUsable(destroyed)
       const widget = getStore().floatWidgets.find((entry) => entry.id === widgetId)
@@ -1145,7 +1177,7 @@ export function createFloatWidgetHandle(
       dragEndHandlers.add(handler)
       return () => { dragEndHandlers.delete(handler) }
     },
-  } as SpindleFloatWidgetHandle
+  } as SpindleFloatWidgetHandle & { setTouchScrollMode(mode: WidgetTouchScrollMode): void }
 }
 
 export function notifyFloatWidgetDragEnd(widgetId: string, pos: { x: number; y: number }) {

@@ -1,5 +1,7 @@
 import type { AstNode, MacroNode } from "../types";
 import { registry } from "../MacroRegistry";
+import { registerDataMacro } from "../data-input";
+import { shieldLiteralBraces } from "../literal-braces";
 import { evaluateMacroCondition } from "../conditions";
 
 const ELSE_MARKER = "\x00ELSE_MARKER\x00";
@@ -78,6 +80,28 @@ export function registerCoreMacros(): void {
 
   registry.registerMacro({
     builtIn: true,
+    terminal: true,
+    // The body has to reach the handler un-resolved: a plain scoped macro is
+    // handed an already-evaluated body, which is exactly what this block must
+    // prevent. delayArgResolution keeps ctx.body as the body's source text.
+    delayArgResolution: true,
+    name: "escape",
+    category: "Core",
+    description:
+      "Emit the enclosed text literally — macros inside it do not run. Usage: {{#escape}}...{{/escape}}",
+    returnType: "string",
+    handler: (ctx) => {
+      if (!ctx.isScoped) return "";
+      // Shield the braces so the later macro passes (this evaluation's own
+      // convergence loop and prompt assembly's post-regex pass) cannot expand
+      // the body; prompt assembly restores them once every pass is done.
+      // Risu's optional `::keep` form is accepted: the body is always verbatim.
+      return shieldLiteralBraces(ctx.bodySource);
+    },
+  });
+
+  registry.registerMacro({
+    builtIn: true,
     name: "input",
     category: "Core",
     description: "Resolves to the raw user input (last user message)",
@@ -85,7 +109,7 @@ export function registerCoreMacros(): void {
     handler: (ctx) => ctx.env.chat.lastUserMessage,
   });
 
-  registry.registerMacro({
+  registerDataMacro({
     builtIn: true,
     terminal: true,
     name: "reverse",

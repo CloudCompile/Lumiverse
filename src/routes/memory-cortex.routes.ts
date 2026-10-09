@@ -18,6 +18,7 @@ import { enqueueChatPipelineTask, getChatPipelineStatus } from "../services/chat
 import * as connectionsSvc from "../services/connections.service";
 import * as embeddingsSvc from "../services/embeddings.service";
 import * as memoryCortex from "../services/memory-cortex";
+import { parsePagination } from "../services/pagination";
 import * as vectorizationQueue from "../services/vectorization-queue.service";
 import { ChatLinkError } from "../services/memory-cortex/vault";
 import { getCharacter } from "../services/characters.service";
@@ -369,7 +370,7 @@ function launchTrackedCortexRebuild(
           ? { action: "skip", reason: "aborted_before_start" }
           : { action: "run" }
       ),
-      run: () => memoryCortex.rebuildCortex(
+      run: (laneSignal) => memoryCortex.rebuildCortex(
         userId,
         chatId,
         characterNames,
@@ -390,7 +391,11 @@ function launchTrackedCortexRebuild(
           }, userId);
         },
         descriptionAliases,
-        { resumable: source === "warmup", warmupSignature: snapshot.rebuildSignature, signal: abort.signal },
+        {
+          resumable: source === "warmup",
+          warmupSignature: snapshot.rebuildSignature,
+          signal: AbortSignal.any([abort.signal, laneSignal]),
+        },
       ),
     }).then((scheduled) => {
       if (scheduled.status !== "completed" || !scheduled.value) return;
@@ -415,6 +420,7 @@ function launchTrackedCortexRebuild(
       eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
         chatId,
         status: "error",
+        updatedAt: Date.now(),
         ...(source ? { source } : {}),
         error: err?.message || (source === "warmup" ? "Warmup failed" : "Rebuild failed"),
       }, userId);
@@ -1543,7 +1549,7 @@ app.post("/chats/:chatId/entities/merge", async (c) => {
   memoryCortex.mergeEntitiesInternal(sourceId, targetId);
 
   const now = Math.floor(Date.now() / 1000);
-  getDb().query("UPDATE memory_entities SET user_edited_at = ? WHERE id = ?").run(now, targetId);
+  getDb().query("UPDATE memory_entities SET user_edited_at = ? WHERE id = ? AND chat_id = ?").run(now, targetId, chatId);
 
   const merged = memoryCortex.getEntities(chatId).find((e) => e.id === targetId);
   return c.json(merged);
@@ -1945,7 +1951,11 @@ function enrichConsolidationsWithMessageReferences(
        JOIN json_each(leaf.source_chunk_ids)
        JOIN chat_chunks cc ON cc.id = json_each.value AND cc.chat_id = ?
        WHERE leaf.chat_id = ?
-       ORDER BY source_tree.root_id, cc.created_at ASC`,
+       ORDER BY source_tree.root_id,
+                cc.message_range_start IS NULL ASC,
+                cc.message_range_start ASC,
+                cc.message_range_end ASC,
+                cc.id ASC`,
     ).all(chatId, ...ids, chatId, chatId, chatId) as Array<{ root_id: string; message_ids: string | null }>;
 
     for (const row of rows) {
@@ -1973,8 +1983,8 @@ app.get("/chats/:chatId/chunks", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const { limit: requestedLimit, offset } = parsePagination(c.req.query("limit"), c.req.query("offset"));
+  const limit = Math.min(requestedLimit, 200);
 
   const { getDb } = require("../db/connection");
   const db = getDb();
@@ -1986,7 +1996,10 @@ app.get("/chats/:chatId/chunks", (c) => {
             cc.message_ids, cc.created_at, cc.updated_at
      FROM chat_chunks cc
      WHERE cc.chat_id = ?
-     ORDER BY cc.created_at DESC
+     ORDER BY cc.message_range_start IS NULL ASC,
+              cc.message_range_start DESC,
+              cc.message_range_end DESC,
+              cc.id DESC
      LIMIT ? OFFSET ?`,
   ).all(chatId, limit, offset);
 
@@ -2007,8 +2020,8 @@ app.get("/chats/:chatId/salience", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const limit = Math.min(parseInt(c.req.query("limit") || "50", 10), 200);
-  const offset = parseInt(c.req.query("offset") || "0", 10);
+  const { limit: requestedLimit, offset } = parsePagination(c.req.query("limit"), c.req.query("offset"));
+  const limit = Math.min(requestedLimit, 200);
 
   const { getDb } = require("../db/connection");
   const db = getDb();

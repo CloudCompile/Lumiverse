@@ -2,6 +2,7 @@ import { describe, test, expect, beforeAll } from "bun:test";
 import { evaluate } from "./MacroEvaluator";
 import { parse } from "./MacroParser";
 import { registry } from "./MacroRegistry";
+import { withJsonBlocksProtected } from "./json-blocks";
 import { initMacros, withPromptBlockContext } from "./index";
 import type { MacroEnv } from "./types";
 
@@ -952,6 +953,10 @@ Test String
     expect(await ev("{{truncate::hello::100}}")).toBe("hello");
   });
 
+  test("truncate with zero tokens returns empty text", async () => {
+    expect(await ev("{{truncate::hello world::0}}")).toBe("");
+  });
+
   test("truncate long text", async () => {
     const longText = "word ".repeat(100).trim(); // 499 chars
     const result = await ev(`{{truncate::${longText}::10}}`); // 10 tokens ≈ 40 chars
@@ -999,6 +1004,12 @@ describe("Math macros", () => {
 
   test("calc empty expression", async () => {
     expect(await ev("{{calc::}}")).toBe("0");
+  });
+
+  test("calc rejects trailing or incomplete expressions", async () => {
+    expect(await ev("{{calc::2 + 3xyz}}")).toBe("0");
+    expect(await ev("{{calc::2(3)}}")).toBe("0");
+    expect(await ev("{{calc::(2 + 3}}")).toBe("0");
   });
 
   test("calc with nested macro", async () => {
@@ -1295,6 +1306,11 @@ describe("Chat Utils macros", () => {
   test("messagesBy name with 1 result", async () => {
     const result = await ev("{{messagesBy::Bob::1}}");
     expect(result).toBe("The forest is dark.");
+  });
+
+  test("messagesBy zero or negative count returns no messages", async () => {
+    expect(await ev("{{messagesBy::Bob::0}}")).toBe("");
+    expect(await ev("{{messagesBy::Bob::-1}}")).toBe("");
   });
 
   test("chatAge returns a duration string", async () => {
@@ -2048,6 +2064,16 @@ describe("foreach macro", () => {
     expect(await ev("{{foreach::a, b , ,c}}[{{.item}}]{{/foreach}}")).toBe("[a][b][c]");
   });
 
+  test("the # flag keeps item whitespace and blank items", async () => {
+    expect(await ev("{{#foreach::a, b , ,c}}[{{.item}}]{{/foreach}}")).toBe("[a][ b ][ ][c]");
+    expect(await ev("{{#foreach::x§§ y ::v::§}}[{{.v}}]{{/foreach}}")).toBe("[x][][ y ]");
+    expect(await ev("{{#map::a, b::v}}<{{.v}}>{{/map}}")).toBe("<a>, < b>");
+  });
+
+  test("the # flag still loops nothing over an empty list", async () => {
+    expect(await ev("{{#foreach::}}body{{/foreach}}")).toBe("");
+  });
+
   test("exposes 0-based index and 1-based number", async () => {
     expect(await ev("{{foreach::x,y,z}}{{.item_index}}:{{.item_number}} {{/foreach}}")).toBe(
       "0:1 1:2 2:3 ",
@@ -2442,6 +2468,11 @@ describe("foreachMessage macro", () => {
     );
   });
 
+  test("zero count returns nothing and negative count selects the last N", async () => {
+    expect(await ev("{{foreachMessage::0}}x{{/foreachMessage}}")).toBe("");
+    expect(await ev("{{foreachMessage::-2}}[{{.msg_name}}]{{/foreachMessage}}")).toBe("[Bob][Alice]");
+  });
+
   test("non-numeric first arg is the loop variable name", async () => {
     expect(await ev("{{foreachMessage::m}}{{.m_number}}{{/foreachMessage}}")).toBe("12345");
   });
@@ -2546,5 +2577,524 @@ describe("Temporal macros", () => {
   test("{{idle_duration}} alias works", async () => {
     const env = makeEnv({ lastMessageTime: Date.now() - 90_000 });
     expect(await ev("{{idle_duration}}", env)).toBe("1 minute");
+  });
+});
+
+describe("JSON macros", () => {
+  const STATE = '{"party":[{"name":"Ann","hp":0,"tags":null}],"flag":false,"title":"Hi","note":""}';
+  const DOC = "{{getvar::doc}}";
+
+  test("read macros and their snake_case aliases", async () => {
+    const env = makeEnv({ localVars: { doc: STATE } });
+    expect(await ev(`{{jsonGet::${DOC}::party[0].name}}|{{json_get::${DOC}::party[-1].hp}}`, env)).toBe("Ann|0");
+    expect(await ev(`{{jsonGet::${DOC}::party[0]}}`, env)).toBe('{"name":"Ann","hp":0,"tags":null}');
+    expect(await ev(`{{jsonGet::${DOC}::party[0].tags}}|{{jsonGet::${DOC}::nope}}`, env)).toBe("|");
+    expect(
+      await ev(
+        `{{jsonHas::${DOC}::party[0].tags}}|{{json_has::${DOC}::flag}}|{{jsonHas::${DOC}::party[0].hp}}|` +
+          `{{jsonHas::${DOC}::note}}|{{jsonHas::${DOC}::nope}}`,
+        env,
+      ),
+    ).toBe("true|true|true|true|false");
+    expect(await ev(`{{jsonKeys::${DOC}}}|{{json_keys::${DOC}::party}}`, env)).toBe("party, flag, title, note|0");
+    expect(
+      await ev(
+        `{{jsonLength::${DOC}::party}}|{{json_length::${DOC}::title}}|{{jsonLength::${DOC}::flag}}|` +
+          `{{jsonLength::${DOC}::nope}}`,
+        env,
+      ),
+    ).toBe("1|2|0|0");
+  });
+
+  test("write macros return updated JSON, or the untouched input on failure", async () => {
+    const env = makeEnv({ localVars: { doc: STATE } });
+    expect(JSON.parse(await ev(`{{jsonSet::${DOC}::party[0].hp::7}}`, env)).party[0].hp).toBe(7);
+    expect(
+      JSON.parse(await ev(`{{json_set::${DOC}::party[]}}{"name":"Bo","hp":{"cur":3}}{{/json_set}}`, env)).party[1],
+    ).toEqual({ name: "Bo", hp: { cur: 3 } });
+    expect(JSON.parse(await ev(`{{jsonDelete::${DOC}::party[0]}}`, env)).party).toEqual([]);
+    expect(await ev(`{{json_delete::${DOC}::nope}}`, env)).toBe(STATE);
+
+    const failed = await evaluate(`{{jsonSet::${DOC}::party[5].hp::1}}`, env, registry);
+    expect(failed.text).toBe(STATE);
+    expect(failed.diagnostics.some((d) => d.level === "warn" && d.macroName === "jsonSet")).toBe(true);
+    expect(env.variables.local.get("doc")).toBe(STATE);
+  });
+
+  test("jsonPretty and jsonEscape", async () => {
+    const env = makeEnv({ localVars: { doc: '{"a":[1,{"b":"{x}"}]}' } });
+    expect(await ev("{{jsonPretty::{{getvar::doc}}}}", env)).toBe(
+      '{\n  "a": [\n    1,\n    {\n      "b": "\\u007bx\\u007d"\n    }\n  ]\n}',
+    );
+    expect(await ev("{{json_pretty::not json}}")).toBe("not json");
+    expect(await ev('{{jsonEscape::He said "hi"}}')).toBe('He said \\"hi\\"');
+    // A bare }} in body text is plain text, not the end of a macro.
+    expect(await ev("{{json_escape}}line {{user}}\n}} end{{/json_escape}}")).toBe("line Alice\\n\\u007d\\u007d end");
+  });
+
+  test("JSON travels in a scoped body; an inline }} cuts it short with a warning", async () => {
+    const env = makeEnv();
+    expect(
+      await ev('{{setchatvar::state}}{"a":{"b":1}}{{/setchatvar}}{{jsonGet::{{getchatvar::state}}::a.b}}', env),
+    ).toBe("1");
+
+    const cut = await evaluate('{{jsonGet::{"a":{"b":1}}::a.b}}', makeEnv(), registry);
+    expect(cut.text).toBe("::a.b}}");
+    expect(cut.diagnostics.some((d) => d.level === "warn" && d.macroName === "jsonGet")).toBe(true);
+
+    const write = await evaluate('{{setvarkey::s::a::{"x":{"y":1}}}}', env, registry);
+    expect(write.text).toBe("}}");
+    expect(JSON.parse(env.variables.local.get("s")!)).toEqual({ a: '{"x":{"y":1' });
+    expect(write.diagnostics.some((d) => d.level === "warn" && d.message.includes("starts like JSON"))).toBe(true);
+  });
+
+  test("JSON stored by {{#escape}} or written with \\{ escapes parses", async () => {
+    const env = makeEnv();
+    await ev('{{setchatvar::state}}{{#escape}}{"a":{"b":"{{user}}"}}{{/escape}}{{/setchatvar}}', env);
+    expect(await ev("{{getchatvarkey::state::a.b}}|{{jsonGet::{{getchatvar::state}}::a.b}}", env)).toBe(
+      "{{user}}|{{user}}",
+    );
+    expect(await ev('{{jsonGet::\\{"a":\\{"b":1\\}\\}::a.b}}')).toBe("1");
+    expect(await ev('{{setvarkey::s::a::\\{"b":\\{"c":[1]\\}\\}}}{{getvarkey::s::a.b.c[0]}}')).toBe("1");
+    expect(await ev('{{jsonGet::{"{x}":1}::["\\{x\\}"]}}|{{jsonEscape::\\{a\\}}}')).toBe(String.raw`1|\u007ba\u007d`);
+  });
+
+  test("data stays data: a stored macro opener never runs", async () => {
+    const stored = String.raw`{"s":"\u007b\u007bsetvar::x::pwned\u007d\u007d"}`;
+    const env = makeEnv({ chatVars: { state: stored }, localVars: { x: "safe" } });
+    // {{notAMacro}} survives the first iteration, so the evaluator re-parses the
+    // whole output after {{setvar}} has already changed state.
+    const result = await evaluate(
+      "{{jsonGet::{{getchatvar::state}}::s}}|{{getchatvarkey::state::s}}|{{setvar::x::still-safe}}{{notAMacro}}",
+      env,
+      registry,
+    );
+    expect(result.text).toBe("{{setvar::x::pwned}}|{{setvar::x::pwned}}|{{notAMacro}}");
+    expect(env.variables.local.get("x")).toBe("still-safe");
+
+    // Prompt assembly evaluates the output once more after regex scripts.
+    const deferred = await evaluate("{{getchatvarkey::state::s}}", env, registry, { deferLiteralBraceRestore: true });
+    expect((await evaluate(`${deferred.text}|{{user}}`, env, registry)).text).toBe("{{setvar::x::pwned}}|Alice");
+    expect(env.variables.local.get("x")).toBe("still-safe");
+
+    // The plain getters still return the stored text and ignore a second argument.
+    expect(await ev("{{getchatvar::state}}|{{getchatvar::state::s}}|{{@state}}", env)).toBe(
+      `${stored}|${stored}|${stored}`,
+    );
+  });
+
+  test("jsonBlock picks valid blocks by index", async () => {
+    const env = makeEnv({
+      localVars: {
+        msg: 'Intro <json>{"n":1}</json> <json>not json</json> <JSON>[2,{"t":"{x}"}]</JSON> <json>{"n":3}</json> end',
+      },
+    });
+    const msg = "{{getvar::msg}}";
+    expect(await ev(`{{jsonBlock::${msg}}}`, env)).toBe('{"n":1}');
+    expect(await ev(`{{jsonBlock::${msg}::1}}`, env)).toBe(String.raw`[2,{"t":"\u007bx\u007d"}]`);
+    expect(await ev(`{{json_block::${msg}::-1}}`, env)).toBe('{"n":3}');
+    expect(await ev(`{{jsonBlock::${msg}::3}}|{{jsonBlock::no blocks here}}`, env)).toBe("|");
+  });
+
+  test("JSON macros read a held-out scoped body; a block in an argument is the argument's text", async () => {
+    const env = makeEnv();
+    const content =
+      '{{setchatvarkey::state::stats}}<json>{"str":5}</json>{{/setchatvarkey}}|' +
+      // An argument block reads as JSON until it holds `}}`, which closes the macro, as in presets.
+      '{{jsonGet::<json>{"hp":3}</json>::hp}}|{{jsonGet::<json>{"a":{"b":1}}</json>::a.b}}|' +
+      '<json>{"keep":"{{user}}"}</json>';
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe('|3|</json>::a.b}}|<json>{"keep":"{{user}}"}</json>');
+    expect(env.variables.chat.get("state")).toBe('{"stats":{"str":5}}');
+  });
+
+  test("stray openers before a valid block in a message leave the block protected", async () => {
+    const env = makeEnv();
+    // Each stray opener starts like JSON and shares the block's closer.
+    const content = `${"<json>0 ".repeat(16)}<json>{"x":"{{setchatvar::owned::yes}}"}</json>`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(content);
+    expect([...env.variables.local, ...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("a block whose strings hold <json> stays protected in a message", async () => {
+    const env = makeEnv();
+    const content = '<json>{"tag":"<json>","x":"{{setchatvar::owned::yes}}"}</json>';
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(content);
+    expect([...env.variables.local, ...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("past the rejected-candidate cap, a message runs nothing and stays as written", async () => {
+    const env = makeEnv();
+    // The 256th rejected candidate stops the block scan before the block after it.
+    const content = `${"<json>bad</json>".repeat(256)}<json>{"x":"{{setchatvar::owned::yes}}"}</json>`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(content);
+    expect([...env.variables.local, ...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("a capped message stays whole, so no scoped macro is split where the scan stopped", async () => {
+    const env = makeEnv();
+    // Holding out only the text after the stop would hide {{/if}} and leak HIDDEN.
+    const content = `{{if::false}}${"<json>bad</json>".repeat(256)}HIDDEN{{/if}}`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(content);
+  });
+
+  test("a capped message runs no macro before where the scan stopped either", async () => {
+    const env = makeEnv();
+    const content = `{{setchatvar::s}}x{{/setchatvar}}${"<json>bad</json>".repeat(256)}`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(content);
+    expect([...env.variables.local, ...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("a block after a tag that a block inside it closed stays protected in a message", async () => {
+    const env = makeEnv();
+    const block = '<json>{"x":"{{setchatvar::owned::yes}}"}</json>';
+    // The lexer closes {{setvar}} at the first block's `}}`, so the second block is outside every tag.
+    const content = `{{setvar::v::<json>{"a":{}}</json>${block}`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(`</json>${block}`);
+    expect([...env.variables.local]).toEqual([["v", '<json>{"a":{']]);
+    expect([...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("an opener left in a block's string after its tag closed starts a protected block", async () => {
+    const env = makeEnv();
+    // The lexer closes {{setvar}} at the `}}` in the string after its <json>, so the <json> later in that string is outside every tag.
+    const block = '<json>["]</json>{{setchatvar::owned::yes}}"]</json>';
+    const content = `{{setvar::v::<json>["}}${block}`;
+    const output = await withJsonBlocksProtected(content, env, async (text) => (await evaluate(text, env, registry)).text);
+    expect(output).toBe(block);
+    expect([...env.variables.local]).toEqual([["v", '<json>["']]);
+    expect([...env.variables.chat, ...env.variables.global]).toEqual([]);
+  });
+
+  test("a stored block reads as JSON when a string in it holds </json>; two blocks in a row never do", async () => {
+    const env = makeEnv({
+      chatVars: { state: '<json>{"tag":"</json>","hp":3}</json>', pair: '<json>{"hp":1}</json><json>{"hp":2}</json>' },
+    });
+    expect(await ev("{{jsonGet::{{getchatvar::state}}::hp}}", env)).toBe("3");
+    const pair = await evaluate("{{jsonGet::{{getchatvar::pair}}::hp}}", env, registry);
+    expect(pair.text).toBe("");
+    expect(pair.diagnostics.some((d) => d.level === "warn" && d.macroName === "jsonGet")).toBe(true);
+  });
+
+  test("a source read from a variable or message is data: nothing in it runs", async () => {
+    // Raw JSON, as the model or an extension might store it, with macro text in a value and a key.
+    const stored = '{"s":"{{setchatvar::owned::yes}}","{{setchatvar::alsoOwned::yes}}":1}';
+    const env = makeEnv({ chatVars: { state: stored } });
+    env.chat.lastCharMessage = `Done. <json>${stored}</json>`;
+    // {{notAMacro}} survives the first iteration, so the evaluator parses the whole output again.
+    const result = await evaluate(
+      "{{jsonGet::{{getchatvar::state}}::s}}|{{jsonKeys::{{@state}}}}|{{jsonBlock::{{lastCharMessage}}}}{{notAMacro}}",
+      env,
+      registry,
+    );
+    expect(result.text).toBe(
+      "{{setchatvar::owned::yes}}|s, {{setchatvar::alsoOwned::yes}}|" +
+        String.raw`{"s":"\u007b\u007bsetchatvar::owned::yes\u007d\u007d","\u007b\u007bsetchatvar::alsoOwned::yes\u007d\u007d":1}` +
+        "{{notAMacro}}",
+    );
+    expect(env.variables.chat.has("owned")).toBe(false);
+    expect(env.variables.chat.has("alsoOwned")).toBe(false);
+    expect(env._chatVarsDirty).toBeUndefined();
+    expect(result.touchedVars.has("chat:state")).toBe(true);
+
+    // Outside a JSON source, the getter still expands what it returns.
+    expect(await ev("{{getchatvar::state}}", env)).toBe('{"s":"","":1}');
+    expect(env.variables.chat.get("owned")).toBe("yes");
+    expect(env.variables.chat.get("alsoOwned")).toBe("yes");
+  });
+
+  test("a getter with an operand or extra argument, and messageAt without an index, read data unexpanded", async () => {
+    const owned = "{{setchatvar::owned::yes}}";
+    const stored = JSON.stringify({ s: owned });
+    const env = makeEnv({
+      localVars: { state: stored },
+      chatVars: { state: stored },
+      globalVars: { state: stored },
+      messages: [{ content: stored, name: "Bob", is_user: false }],
+    });
+    // {{notAMacro}} survives the first iteration, so the evaluator parses the whole output again.
+    const result = await evaluate(
+      "{{jsonGet::{{@state || 0}}::s}}|{{jsonGet::{{.state ?? x}}::s}}|{{jsonGet::{{$state}}::s}}|" +
+        "{{jsonGet::{{getchatvar::state::ignored}}::s}}|{{jsonGet::{{messageAt}}::s}}{{notAMacro}}",
+      env,
+      registry,
+    );
+    expect(result.text).toBe(`${Array(5).fill(owned).join("|")}{{notAMacro}}`);
+    expect(env.variables.chat.has("owned")).toBe(false);
+
+    // An argument the getter ignores still runs, as it does when the getter resolves normally.
+    expect(await ev("{{jsonGet::{{getchatvar::state::{{setvar::ran::yes}}}}::s}}", env)).toBe(owned);
+    expect(env.variables.local.get("ran")).toBe("yes");
+    expect(env.variables.chat.has("owned")).toBe(false);
+  });
+
+  test("arguments laid out over several lines lose their framing, as eager arguments do", async () => {
+    const env = makeEnv({ chatVars: { state: '{"hp":1}' } });
+    await ev("{{setchatvar::state::{{jsonSet::\n  {{getchatvar::state}}\n::\n  note\n::\n  two words\n}}}}", env);
+    expect(env.variables.chat.get("state")).toBe('{"hp":1,"note":"two words"}');
+  });
+
+  test("a scoped jsonSet value is resolved before it is written", async () => {
+    const env = makeEnv({ localVars: { doc: '{"hp":1}', who: "Ann" } });
+    expect(
+      await ev('{{jsonSet::{{getvar::doc}}::party[]}}{"name":"{{getvar::who}}","by":"{{user}}"}{{/jsonSet}}', env),
+    ).toBe('{"hp":1,"party":[{"name":"Ann","by":"Alice"}]}');
+  });
+
+  test("a legacy tag in a JSON string survives later passes", async () => {
+    const env = makeEnv({ chatVars: { state: '{"tag":"<user>"}' }, localVars: { raw: "<char>" } });
+    // Rewriting the tag to a name holding a quote would break the JSON.
+    env.names.user = 'A"B';
+    await ev("{{setchatvarkey::state::hp::1}}", env);
+    expect(env.variables.chat.get("state")).toBe(String.raw`{"tag":"\u003cuser>","hp":1}`);
+
+    // {{notAMacro}} makes the evaluator parse its output again, and prompt
+    // assembly evaluates that output once more after regex scripts.
+    const first = await evaluate(
+      "{{getchatvarkey::state}}|{{jsonSet::{{getchatvar::state}}::hp::2}}|{{jsonEscape::{{.raw}}}}{{notAMacro}}",
+      env,
+      registry,
+      { deferLiteralBraceRestore: true },
+    );
+    const second = await ev(`${first.text} {{user}}`, env);
+    expect(second).toBe(
+      String.raw`{"tag":"\u003cuser>","hp":1}|{"tag":"\u003cuser>","hp":2}|\u003cchar>{{notAMacro}} A"B`,
+    );
+    expect(JSON.parse(second.split("|")[0])).toEqual({ tag: "<user>", hp: 1 });
+  });
+
+  test("a no-op or failed edit returns valid JSON in its own formatting, its strings inert", async () => {
+    const state = '{"tag":"<user>", "n":1.50}';
+    const env = makeEnv({ chatVars: { state } });
+    // Rewriting the tag to a name holding a quote would break the JSON.
+    env.names.user = 'A"B';
+    // {{notAMacro}} makes the evaluator parse its output again, and prompt
+    // assembly evaluates that output once more after regex scripts.
+    const first = await evaluate(
+      "{{jsonDelete::{{getchatvar::state}}::missing}}|{{jsonSet::{{getchatvar::state}}::tag.x::1}}{{notAMacro}}",
+      env,
+      registry,
+      { deferLiteralBraceRestore: true },
+    );
+    const second = await ev(`${first.text} {{user}}`, env);
+    const inert = String.raw`{"tag":"\u003cuser>", "n":1.50}`;
+    expect(second).toBe(`${inert}|${inert}{{notAMacro}} A"B`);
+    expect(JSON.parse(inert)).toEqual({ tag: "<user>", n: 1.5 });
+    expect(first.diagnostics.filter((d) => d.level === "warn").map((d) => d.macroName)).toEqual(["jsonSet"]);
+    expect(env.variables.chat.get("state")).toBe(state);
+  });
+
+  test("a number too large to store is rejected, never written as null", async () => {
+    const big = '{"n":1e999,"hp":1}';
+    const env = makeEnv({ chatVars: { big } });
+    env.chat.lastCharMessage = '<json>{"n":[1e999]}</json> <json>{"n":1}</json>';
+    const result = await evaluate(
+      "{{setchatvarkey::state::amounts::[1e999]}}{{setchatvarkey::big::hp::2}}" +
+        "{{jsonSet::{{getchatvar::big}}::hp::2}}|{{jsonBlock::{{lastCharMessage}}}}",
+      env,
+      registry,
+    );
+    // Like any value that only looks like JSON, it is written as text.
+    expect(env.variables.chat.get("state")).toBe('{"amounts":"[1e999]"}');
+    expect(env.variables.chat.get("big")).toBe(big);
+    expect(result.text).toBe(`${big}|{"n":1}`);
+    const warnings = result.diagnostics.filter((d) => d.level === "warn").map((d) => d.message);
+    expect(warnings).toHaveLength(3);
+    expect(warnings[0]).toContain("starts like JSON");
+    expect(warnings[1]).toContain("a number is out of range");
+    expect(warnings[2]).toContain("a number is out of range");
+  });
+});
+
+describe("Variable JSON paths", () => {
+  test("all three scopes write, read, test and delete by path", async () => {
+    const env = makeEnv();
+    await ev(
+      "{{setvarkey::inv::items[]::sword}}{{setchatvarkey::state::party[0].name::Ann}}{{setgvarkey::prefs::theme.dark::true}}",
+      env,
+    );
+    expect(env.variables.local.get("inv")).toBe('{"items":["sword"]}');
+    expect(env.variables.chat.get("state")).toBe('{"party":[{"name":"Ann"}]}');
+    expect(env.variables.global.get("prefs")).toBe('{"theme":{"dark":true}}');
+
+    expect(
+      await ev("{{getvarkey::inv::items[0]}}|{{getchatvarkey::state::party[0].name}}|{{getgvarkey::prefs::theme.dark}}", env),
+    ).toBe("sword|Ann|true");
+    expect(await ev("{{getchatvarkey::state::party[0]}}|{{getchatvarkey::state}}", env)).toBe(
+      '{"name":"Ann"}|{"party":[{"name":"Ann"}]}',
+    );
+    expect(
+      await ev("{{hasvarkey::inv::items}}|{{haschatvarkey::state::party[1]}}|{{hasgvarkey::prefs::theme}}", env),
+    ).toBe("true|false|true");
+    expect(await ev("{{getvarkey::missing::a}}|{{haschatvarkey::missing::a}}", env)).toBe("|false");
+
+    await ev(
+      "{{deletevarkey::inv::items[0]}}{{deletechatvarkey::state::party[0].name}}{{deletegvarkey::prefs::theme.dark}}",
+      env,
+    );
+    expect(env.variables.local.get("inv")).toBe('{"items":[]}');
+    expect(env.variables.chat.get("state")).toBe('{"party":[{}]}');
+    expect(env.variables.global.get("prefs")).toBe('{"theme":{}}');
+  });
+
+  test("SillyTavern-style aliases", async () => {
+    const env = makeEnv();
+    await ev("{{setvarindex::list::[]::a}}{{setvarindex::list::[]::b}}", env);
+    expect(await ev("{{getvarindex::list::1}}|{{getvarindex::list::-2}}", env)).toBe("b|a");
+    await ev("{{setglobalvarkey::g::n::1}}{{setglobalvarindex::g::list[]::x}}", env);
+    expect(await ev("{{getglobalvarkey::g::n}}|{{getglobalvarindex::g::list[0]}}", env)).toBe("1|x");
+    expect(await ev("{{addglobalvarkey::g::n::2}}|{{hasglobalvarkey::g::n}}", env)).toBe("3|true");
+    await ev("{{deleteglobalvarkey::g::n}}", env);
+    expect(env.variables.global.get("g")).toBe('{"list":["x"]}');
+  });
+
+  test("getchatvarkey reports the variable it read", async () => {
+    const env = makeEnv({ chatVars: { state: '{"hp":3}' } });
+    const result = await evaluate("{{getchatvarkey::state::hp}}", env, registry);
+    expect(result.text).toBe("3");
+    expect(result.touchedVars.has("chat:state")).toBe(true);
+  });
+
+  test("a scoped body is the value, with }} and :: kept as text", async () => {
+    const env = makeEnv();
+    await ev("{{setchatvarkey::state::bio}}Line with }} and :: inside{{/setchatvarkey}}", env);
+    expect(env.variables.chat.get("state")).toBe(String.raw`{"bio":"Line with \u007d\u007d and :: inside"}`);
+    expect(await ev("{{getchatvarkey::state::bio}}", env)).toBe("Line with }} and :: inside");
+  });
+
+  test("a failed write leaves the variable byte-identical", async () => {
+    const notJson = "plain text, not JSON";
+    const spaced = '{ "hp": 5, "list": [] }';
+    const env = makeEnv({ chatVars: { notes: notJson, state: spaced } });
+    const result = await evaluate(
+      "{{setchatvarkey::notes::a::1}}" +
+        "{{setchatvarkey::state::hp.max::9}}" +
+        "{{setchatvarkey::state::list[2]::x}}" +
+        "{{setchatvarkey::state::a..b::1}}" +
+        "{{addchatvarkey::state::hp::abc}}" +
+        "{{addchatvarkey::state::list::1}}" +
+        "{{deletechatvarkey::notes::a}}",
+      env,
+      registry,
+    );
+    expect(result.text).toBe("");
+    expect(env.variables.chat.get("notes")).toBe(notJson);
+    expect(env.variables.chat.get("state")).toBe(spaced);
+    expect(env._chatVarsDirty).toBeUndefined();
+    expect(result.diagnostics.filter((d) => d.level === "warn")).toHaveLength(7);
+  });
+
+  test("chat writers mark chat vars dirty only when they change something", async () => {
+    const env = makeEnv({ chatVars: { state: '{"hp":5}' } });
+    await ev(
+      "{{getchatvarkey::state::hp}}{{haschatvarkey::state::hp}}{{deletechatvarkey::state::missing}}" +
+        "{{setchatvarkey::state::hp::5}}",
+      env,
+    );
+    expect(env._chatVarsDirty).toBeUndefined();
+    await ev("{{setchatvarkey::state::hp::6}}", env);
+    expect(env._chatVarsDirty).toBe(true);
+    expect(env.variables.chat.get("state")).toBe('{"hp":6}');
+
+    const deleting = makeEnv({ chatVars: { state: '{"hp":5}' } });
+    await ev("{{deletechatvarkey::state::hp}}", deleting);
+    expect(deleting._chatVarsDirty).toBe(true);
+    expect(deleting.variables.chat.get("state")).toBe("{}");
+
+    const otherScopes = makeEnv();
+    await ev("{{setvarkey::a::b::1}}{{setgvarkey::c::d::1}}{{addvarkey::e::f::1}}", otherScopes);
+    expect(otherScopes._chatVarsDirty).toBeUndefined();
+  });
+
+  test("add*key adds numbers and [] appends", async () => {
+    const env = makeEnv({ chatVars: { state: '{"hp":10,"tags":["a"],"gone":null}' } });
+    expect(await ev("{{addchatvarkey::state::hp::-3}}", env)).toBe("7");
+    expect(await ev("{{addchatvarkey::state::gold::2.5}}", env)).toBe("2.5");
+    expect(await ev("{{addchatvarkey::state::gone::1}}", env)).toBe("1");
+    await ev("{{setchatvarkey::state::tags[]::b}}", env);
+    await ev('{{setchatvarkey::state::tags[]}}{"c":{"d":1}}{{/setchatvarkey}}', env);
+    expect(JSON.parse(env.variables.chat.get("state")!)).toEqual({
+      hp: 7,
+      tags: ["a", "b", { c: { d: 1 } }],
+      gone: 1,
+      gold: 2.5,
+    });
+
+    expect(await ev("{{addvarkey::counter::n::1}}", env)).toBe("1");
+    expect(await ev("{{addvarkey::counter::n::1}}", env)).toBe("2");
+    expect(await ev("{{addgvarkey::totals::[]::4}}", env)).toBe("4");
+    expect(env.variables.global.get("totals")).toBe("[4]");
+  });
+
+  test("an empty name warns and does nothing", async () => {
+    const env = makeEnv();
+    const result = await evaluate("{{setvarkey::::a::1}}{{getchatvarkey}}", env, registry);
+    expect(result.text).toBe("");
+    expect(env.variables.local.size).toBe(0);
+    expect(result.diagnostics.filter((d) => d.level === "warn")).toHaveLength(2);
+  });
+});
+
+describe("Chat messages as JSON sources", () => {
+  // Macro text, an escaped brace, and a legacy tag that no pass may run, unescape, or rewrite.
+  const NOTE = String.raw`{{setvar::x::pwned}} \{ <user>`;
+  const REPLY = `{{user}} opens the chest. <json>${JSON.stringify({ gold: 4, note: NOTE })}</json>`;
+  const BLOCK_JSON = String.raw`{"gold":4,"note":"\u007b\u007bsetvar::x::pwned\u007d\u007d \\\u007b \u003cuser>"}`;
+
+  test("jsonBlock reads the reply's block as written and runs nothing", async () => {
+    const env = makeEnv();
+    env.names.user = 'A"B';
+    env.chat.lastCharMessage = REPLY;
+    await ev("{{setvar::synced}}{{jsonBlock::{{lastCharMessage}}}}{{/setvar}}", env);
+    expect(env.variables.local.get("synced")).toBe(BLOCK_JSON);
+    expect(JSON.parse(BLOCK_JSON)).toEqual({ gold: 4, note: NOTE });
+
+    // Prompt assembly evaluates the output once more after regex scripts.
+    const first = await evaluate("{{jsonBlock::{{lastCharMessage}}::-1}}", env, registry, {
+      deferLiteralBraceRestore: true,
+    });
+    expect(await ev(`${first.text} {{user}}`, env)).toBe(`${BLOCK_JSON} A"B`);
+    expect(env.variables.local.has("x")).toBe(false);
+  });
+
+  test("messageAt and input are read the same way", async () => {
+    const env = makeEnv({ messages: [{ content: REPLY, name: "Bob", is_user: false }] });
+    env.chat.lastUserMessage = NOTE;
+    expect(await ev("{{jsonBlock::{{messageAt::0}}}}|{{jsonEscape::{{input}}}}", env)).toBe(
+      `${BLOCK_JSON}|${String.raw`\u007b\u007bsetvar::x::pwned\u007d\u007d \\\u007b \u003cuser>`}`,
+    );
+    expect(env.variables.local.has("x")).toBe(false);
+  });
+});
+
+
+describe("JSON string composition", () => {
+  test.each([
+    ["lower", "a {b}"], ["upper", "A {B}"], ["len", "5"], ["reverse", "}B{ A"],
+  ])("%s sees the actual characters of a JSON read", async (operation, expected) => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "A {B}" }) } });
+    expect(await ev(`{{${operation}::{{getchatvarkey::state::note}}}}`, env)).toBe(expected);
+    expect(await ev(`{{${operation}::{{jsonGet::{{getchatvar::state}}::note}}}}`, env)).toBe(expected);
+  });
+
+  test("substring and replacement operate on literal braces without exposing markers", async () => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "A {B}" }) } });
+    expect(await ev("{{substr::{{getchatvarkey::state::note}}::2::5}}", env)).toBe("{B}");
+    expect(await ev(String.raw`{{replace::\{::[::{{getchatvarkey::state::note}}}}`, env)).toBe("A [B}");
+    await ev("{{setchatvarkey::state::copy::{{lower::{{getchatvarkey::state::note}}}}}}", env);
+    expect(JSON.parse(env.variables.chat.get("state")!).copy).toBe("a {b}");
+  });
+
+  test("transforming a JSON read keeps macro-looking data inert across prompt passes", async () => {
+    const env = makeEnv({ chatVars: { state: JSON.stringify({ note: "{{SETCHATVAR::owned::yes}}" }) } });
+    const first = await evaluate("{{lower::{{getchatvarkey::state::note}}}}", env, registry, { deferLiteralBraceRestore: true });
+    expect((await evaluate(`${first.text}|{{user}}`, env, registry)).text).toBe("{{setchatvar::owned::yes}}|Alice");
+    expect(env.variables.chat.has("owned")).toBe(false);
   });
 });

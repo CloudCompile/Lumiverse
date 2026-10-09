@@ -148,3 +148,22 @@ These helpers reject when the server cannot resolve the requested model context.
 
 !!! note
     For user-scoped extensions, the user context is inferred automatically. For operator-scoped extensions, pass `options.userId` when counting text or message arrays. `countChat(chatId)` derives ownership from the chat itself and rejects if you provide a mismatched `userId`. Passing an explicit `model` does not require connection access permissions because token counting only uses Lumiverse's tokenizer mapping, not API keys or live provider calls.
+
+## Tokenizer loading and prompt assembly
+
+The application warms the selected connection's tokenizer after selection or a model edit, in the runtime that will assemble the next prompt. Assembly also starts loading as soon as it resolves its connection. Generation joins any pending load. Workers prefer an idle runtime that already holds the requested tokenizer, retaining chat affinity when possible.
+
+Authenticated clients can request this preparation with `POST /api/v1/tokenizers/warm`, passing `{ "connection_id": "...", "chat_id": "..." }`. The optional chat ID is a worker-routing hint. The connection must belong to the caller; omitting the connection ID uses their default. A `202` response with `{ "queued": true }` acknowledges best-effort scheduling, not completion. Tokenizer administration still requires owner/admin access.
+
+Downloaded tokenizer files live in `DATA_DIR/cache/tokenizers-v1`. The cache survives restarts and worker eviction, expires resources after seven days, and prunes old entries toward a 512 MiB budget during downloads. Individual resources are limited to 128 MiB. Cache keys include source URLs, tokenizer configuration, and hashed authentication identity; startup timestamps do not invalidate them. Changing source/configuration selects a new cache key. Writes are atomic, concurrent runtimes coordinate downloads, and worker termination releases that worker's file leases. An unavailable disk cache falls back to downloading.
+
+Independent model/config downloads run concurrently, with a 30-second deadline covering body consumption. Failed instance loads have a 15-second retry cooldown. Config edits invalidate main/worker state, and asynchronous loads cannot reinstall an obsolete encoding. Counts include configuration and artifact revisions in their cache identity. Single-text and batch requests can reuse memoized counts after instance eviction without rebuilding the tokenizer.
+
+Each runtime retains up to five tokenizer instances. Assembly workers expire after ten idle minutes by default; set `LUMIVERSE_PROMPT_ASSEMBLY_IDLE_MS` to a value between 30,000 and 1,800,000 to adjust this. Memory-pressure notifications can release idle workers sooner. Extension macros/interceptors that require the main process continue using the main-process tokenizer cache.
+
+Slow-operation logs distinguish the work previously grouped under `context-clip`:
+
+- `tokenizer-load`: module import, disk/network resources, parsing, construction, runtime, and failure state.
+- `context-clip`: `tokenizer-wait`, `count-and-clip`, encoding time, instance-cache status, and content-cache hit/miss counts. Encoding time is a component of `count-and-clip`; do not add the overlapping phases together.
+
+The existing `LUMIVERSE_PROMPT_PHASE_WARN_MS` and `LUMIVERSE_PROMPT_TOTAL_WARN_MS` thresholds apply. Logs do not include prompt text. Kimi/tiktoken counting uses a count-only BPE implementation with the configured vocabulary, split pattern, and special-token policy; OpenAI encodings use `gpt-tokenizer`'s count-only API.

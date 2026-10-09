@@ -5,6 +5,7 @@ import { ModalShell } from '@/components/shared/ModalShell'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { Button } from '@/components/shared/FormComponents'
 import { worldBooksApi } from '@/api/world-books'
+import { worldBookPayloadFromFile } from '@/lib/world-book-file-import'
 import type { WorldBook } from '@/types/api'
 import styles from './ImportWorldBookModal.module.css'
 import clsx from 'clsx'
@@ -43,15 +44,7 @@ export default function ImportWorldBookModal({ onImport, onClose }: Props) {
     setFileError(null)
     setFileLoading(true)
     try {
-      const text = await file.text()
-      const payload = JSON.parse(text)
-      if (!payload.name) {
-        payload.originalName = file.name.replace(/\.[^.]+$/, '')
-      }
-      if (!payload.description) {
-        payload.description = `Uploaded at ${new Date().toLocaleString()}`
-      }
-      const result = await worldBooksApi.importJson(payload)
+      const result = await worldBooksApi.importJson(await worldBookPayloadFromFile(file))
       onImport(result)
     } catch (e: any) {
       setFileError(e.message || t('importFailed'))

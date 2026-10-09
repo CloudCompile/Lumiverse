@@ -49,7 +49,7 @@ describe("importCharacterFile", () => {
   test.each([
     "https://lumi.spot/@creator",
     "https://lumi.spot/characters/card-id",
-    "https://illarin.xyz/a/card-id/card-name",
+    "https://illarin.com/a/card-id/card-name",
   ])("preserves original source %s through card export and reimport", async (url) => {
     const extensions = { _lumiverse_source_url: url, unrelated: { keep: true } };
     const imported = await importCharacterFile("user-1", jsonCard("source.json", "Source Test", extensions), {

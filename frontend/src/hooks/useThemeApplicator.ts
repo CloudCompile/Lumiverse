@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useStore } from '@/store'
 import { generateThemeVariables } from '@/theme/engine'
 import { DEFAULT_THEME, PRESETS } from '@/theme/presets'
-import { toOpaqueRgb, toOpaqueRgbChannels } from '@/theme/themeColor'
+import { toOpaqueRgb, toOpaqueRgbChannels, withPreservedAlpha } from '@/theme/themeColor'
 import type { CharacterThemeOverlay, ResolvedMode, ThemeConfig } from '@/types/theme'
 
 const THEME_TRANSITION_MS = 280
@@ -213,20 +213,44 @@ function syncThemeColorMeta(vars: Record<string, string>) {
   meta.content = color
 }
 
-function cacheDesktopStartupAppearance(config: ThemeConfig, mode: ResolvedMode, vars: Record<string, string>) {
+export function resolveDesktopSurfaceColor(
+  config: ThemeConfig,
+  vars: Record<string, string>,
+  hasPaletteOverride: boolean,
+): string {
+  const configuredBackground = config.desktopBackground?.color
+  if (!configuredBackground) return vars['--lumiverse-bg-deep'] || '#0a0812'
+
+  // A palette supplies a complete, mode-aware background family. Preserve the
+  // user's configured translucency while replacing only the tint color.
+  if (hasPaletteOverride && vars['--lumiverse-bg-deep']) {
+    return withPreservedAlpha(vars['--lumiverse-bg-deep'], configuredBackground) ?? configuredBackground
+  }
+  return configuredBackground
+}
+
+function cacheDesktopStartupAppearance(
+  config: ThemeConfig,
+  mode: ResolvedMode,
+  vars: Record<string, string>,
+  hasPaletteOverride: boolean,
+) {
   if (!('__TAURI_INTERNALS__' in window) || new URLSearchParams(window.location.search).has('desktopWidgetExtension')) return
 
-  const background = config.desktopBackground?.color || vars['--lumiverse-bg-deep'] || '#0a0812'
+  const efficiencyMode = config.renderingMode === 'efficiency'
+  const configuredBackground = resolveDesktopSurfaceColor(config, vars, hasPaletteOverride)
+  const background = efficiencyMode ? (toOpaqueRgb(configuredBackground) ?? configuredBackground) : configuredBackground
   const nativeColor = toOpaqueRgbChannels(background) ?? [10, 8, 18]
   const snapshot = {
     background,
     border: vars['--lumiverse-border'] || 'rgba(255, 255, 255, 0.08)',
     textMuted: vars['--lumiverse-text-muted'] || 'rgba(255, 255, 255, 0.64)',
     primary: vars['--lumiverse-primary'] || '#9370db',
-    blur: Boolean(config.desktopBackground?.color && config.desktopBackground.blur),
+    blur: Boolean(!efficiencyMode && config.desktopBackground?.color && config.desktopBackground.blur),
     dark: mode === 'dark',
     blurIntensity: config.desktopBackground?.blurIntensity ?? 'balanced',
     nativeColor,
+    highRefresh: config.renderingMode === 'quality',
   }
   const serialized = JSON.stringify(snapshot)
   if (serialized === cachedStartupAppearance) return
@@ -238,9 +262,17 @@ function cacheDesktopStartupAppearance(config: ThemeConfig, mode: ResolvedMode, 
   })
 }
 
-function syncDesktopBackground(config: ThemeConfig, mode: ResolvedMode, vars: Record<string, string>) {
+function syncDesktopBackground(
+  config: ThemeConfig,
+  mode: ResolvedMode,
+  vars: Record<string, string>,
+  hasPaletteOverride: boolean,
+) {
   const root = document.documentElement
   const background = config.desktopBackground
+  const efficiencyMode = config.renderingMode === 'efficiency'
+
+  root.setAttribute('data-rendering-mode', config.renderingMode ?? 'balanced')
 
   if (!('__TAURI_INTERNALS__' in window)) {
     root.removeAttribute('data-desktop-background')
@@ -251,23 +283,33 @@ function syncDesktopBackground(config: ThemeConfig, mode: ResolvedMode, vars: Re
     return
   }
 
-  cacheDesktopStartupAppearance(config, mode, vars)
+  cacheDesktopStartupAppearance(config, mode, vars, hasPaletteOverride)
 
-  if (background?.color) {
+  const desktopSurfaceColor = background?.color
+    ? resolveDesktopSurfaceColor(config, vars, hasPaletteOverride)
+    : null
+  if (desktopSurfaceColor) {
     root.setAttribute('data-desktop-background', '')
-    root.style.setProperty('--lumiverse-desktop-background', background.color)
+    root.style.setProperty(
+      '--lumiverse-desktop-background',
+      efficiencyMode ? (toOpaqueRgb(desktopSurfaceColor) ?? desktopSurfaceColor) : desktopSurfaceColor,
+    )
   } else {
     root.removeAttribute('data-desktop-background')
     root.style.removeProperty('--lumiverse-desktop-background')
   }
 
-  if (background?.color && background.blur) {
+  if (!efficiencyMode && background?.color && background.blur) {
     root.setAttribute('data-desktop-background-blur', '')
   } else {
     root.removeAttribute('data-desktop-background-blur')
   }
 
-  const blur = Boolean(background?.color && background.blur)
+  // A widget WebView owns only its transparent child surface. Never let its
+  // independently hydrated theme reconfigure the primary window's material.
+  if (new URLSearchParams(window.location.search).has('desktopWidgetExtension')) return
+
+  const blur = Boolean(!efficiencyMode && background?.color && background.blur)
   const dark = mode === 'dark'
   const blurIntensity = background?.blurIntensity ?? 'balanced'
   const appearance = `${blur}:${dark}:${blurIntensity}`
@@ -351,13 +393,13 @@ function buildColorInterpolator(from: string, to: string): ((t: number) => strin
 /** Threshold: if an extension override provides this many variables, it IS the theme. */
 const FULL_THEME_MIN_KEYS = 40
 
-function buildResolvedThemeVars(
+export function buildResolvedThemeVars(
   theme: ThemeConfig | null,
   characterThemeOverlay: CharacterThemeOverlay | null,
   extensionThemeOverrides: ReturnType<typeof useStore.getState>['extensionThemeOverrides'],
   mutedExtensionThemes: ReturnType<typeof useStore.getState>['mutedExtensionThemes'],
   modeOverride?: ResolvedMode,
-): { config: ThemeConfig; mode: ResolvedMode; vars: Record<string, string>; hasOverrides: boolean } {
+): { config: ThemeConfig; mode: ResolvedMode; vars: Record<string, string>; hasOverrides: boolean; hasPaletteOverride: boolean } {
   const config = theme ?? DEFAULT_THEME
   const mode = modeOverride ?? resolveMode(config)
 
@@ -368,6 +410,11 @@ function buildResolvedThemeVars(
     (o) => !mutedExtensionThemes[o.extensionId]
   )
   const hasOverrides = activeOverrides.length > 0
+  const activeCharacterPalette = config.characterAware && !hasOverrides
+    ? characterThemeOverlay
+    : null
+  const hasPaletteOverride = activeCharacterPalette !== null
+    || activeOverrides.some((override) => !!override.paletteAccent)
 
   // Check if any extension provides a full theme-sized override (e.g. via
   // applyPalette). Even then, still layer it on top of the user's resolved
@@ -387,14 +434,14 @@ function buildResolvedThemeVars(
     }
   }
 
-  const effectiveConfig = config.characterAware && !hasOverrides && characterThemeOverlay
+  const effectiveConfig = activeCharacterPalette
     ? {
         ...config,
-        accent: characterThemeOverlay.accent,
+        accent: activeCharacterPalette.accent,
         baseColorsByMode: {
           ...config.baseColorsByMode,
-          dark: { ...config.baseColorsByMode?.dark, ...characterThemeOverlay.baseColors },
-          light: { ...config.baseColorsByMode?.light, ...characterThemeOverlay.baseColorsLight },
+          dark: { ...config.baseColorsByMode?.dark, ...activeCharacterPalette.baseColors },
+          light: { ...config.baseColorsByMode?.light, ...activeCharacterPalette.baseColorsLight },
         },
       }
     : config
@@ -410,6 +457,7 @@ function buildResolvedThemeVars(
         ...fullThemeVars,
       },
       hasOverrides: true,
+      hasPaletteOverride,
     }
   }
 
@@ -432,7 +480,7 @@ function buildResolvedThemeVars(
     }
   }
 
-  return { config: effectiveConfig, mode, vars, hasOverrides }
+  return { config: effectiveConfig, mode, vars, hasOverrides, hasPaletteOverride }
 }
 
 export function useThemeApplicator() {
@@ -453,12 +501,14 @@ export function useThemeApplicator() {
     }
   }, [])
 
-  useEffect(() => {
+  // Apply dimensions before paint; the resize notification below lets portal
+  // positioning and other geometry consumers update against the new scale.
+  useLayoutEffect(() => {
     const root = document.documentElement
     const motionMq = window.matchMedia('(prefers-reduced-motion: reduce)')
 
     const applyResolvedTheme = (modeOverride?: ResolvedMode) => {
-      const { config, mode, vars, hasOverrides } = buildResolvedThemeVars(theme, characterThemeOverlay, extensionThemeOverrides, mutedExtensionThemes, modeOverride)
+      const { config, mode, vars, hasOverrides, hasPaletteOverride } = buildResolvedThemeVars(theme, characterThemeOverlay, extensionThemeOverrides, mutedExtensionThemes, modeOverride)
       const nextKeys = Object.keys(vars)
 
       for (const key of prevKeysRef.current) {
@@ -533,16 +583,11 @@ export function useThemeApplicator() {
       hadOverridesRef.current = hasOverrides
       broadcastThemeToParent(mode, vars)
       syncThemeColorMeta(vars)
-      syncDesktopBackground(config, mode, vars)
+      syncDesktopBackground(config, mode, vars, hasPaletteOverride)
 
-      if (!root.hasAttribute('data-pwa')) {
-        const us = parseFloat(vars['--lumiverse-ui-scale'] ?? '1') || 1
-        const vh = window.visualViewport?.height ?? window.innerHeight
-        root.style.setProperty('--app-shell-height', `${Math.round(vh / us)}px`)
-      }
       window.dispatchEvent(new Event('resize'))
 
-      if (config.enableGlass && !motionMq.matches) {
+      if (config.enableGlass && config.renderingMode !== 'efficiency' && !motionMq.matches) {
         root.setAttribute('data-glass', '')
       } else {
         root.removeAttribute('data-glass')
@@ -556,7 +601,7 @@ export function useThemeApplicator() {
 
     const updateGlass = () => {
       const latest = buildResolvedThemeVars(theme, characterThemeOverlay, extensionThemeOverrides, mutedExtensionThemes)
-      if (latest.config.enableGlass && !motionMq.matches) {
+      if (latest.config.enableGlass && latest.config.renderingMode !== 'efficiency' && !motionMq.matches) {
         root.setAttribute('data-glass', '')
       } else {
         root.removeAttribute('data-glass')

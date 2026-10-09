@@ -214,6 +214,7 @@ export function registerSidecarEndpoint(id: string, endpoint: HostSidecarEndpoin
 
 export type CortexGenerateRawFn = (opts: {
   connectionId: string;
+  requestPurpose?: string;
   messages: Array<{ role: string; content: string }>;
   parameters: Record<string, any>;
   tools?: ToolDefinition[];
@@ -257,7 +258,7 @@ export function createCortexSidecarGenerateRawAdapter(options: {
       parameters: sidecarParams,
       tools: opts.tools,
       signal: opts.signal,
-    });
+    }, { origin: { kind: "sidecar", name: "Memory Cortex", operation: opts.requestPurpose ?? "analysis" } });
 
     return {
       content: typeof result.content === "string" ? result.content : "",

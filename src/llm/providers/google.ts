@@ -74,7 +74,7 @@ export class GoogleProvider implements LlmProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "generate", res);
 
@@ -94,7 +94,7 @@ export class GoogleProvider implements LlmProvider {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "stream", res);
 

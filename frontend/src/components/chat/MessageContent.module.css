@@ -663,6 +663,19 @@
   overflow: visible;
 }
 
+/* Inline-style-only cards intentionally stay in the document tree so outside
+   CSS, controls, and observers can reach them. A light-DOM shell restores the
+   same transparent visual-bleed space that they received when they were
+   historically promoted to HTML islands. */
+.inlineHtmlCard {
+  --html-island-visual-bleed: 12px;
+  display: flow-root;
+  max-width: 100%;
+  margin: 8px 0;
+  padding-block: var(--html-island-visual-bleed);
+  overflow: visible;
+}
+
 .youtubeEmbedWrap {
   margin: 8px 0;
   border-radius: var(--lcs-radius-sm);

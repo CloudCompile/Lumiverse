@@ -13,8 +13,8 @@
       "tabHeaderTitle": "理性"
     },
     "loom": {
-      "shortName": "織機",
-      "tabName": "織機",
+      "shortName": "プリセット",
+      "tabName": "プリセット",
       "tabDescription": "物語の構造とストーリーのビートを設定する",
       "tabHeaderTitle": "織機"
     },
@@ -2620,6 +2620,13 @@
     "fontScale": "フォントスケール",
     "uiScale": "UIスケール",
     "glassEffects": "ガラス効果",
+    "renderingMode": {
+      "label": "描画",
+      "hint": "省電力ではぼかしを無効にします。高品質ではデスクトップウィンドウの再起動後、対応する macOS ディスプレイで高リフレッシュレート描画を有効にします。",
+      "efficiency": "省電力",
+      "balanced": "バランス",
+      "quality": "高品質"
+    },
     "desktopBackground": {
       "enable": "半透明のデスクトップ背景を使用",
       "hint": "Lumiverse デスクトップアプリでのみ利用できます。",

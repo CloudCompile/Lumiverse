@@ -23,7 +23,6 @@ export const SUITE_OWNED_PRODUCTIVITY_FLAGS: ReadonlySet<ProductivityFeatureFlag
   'showCortexSecondaryUi',
   'showEditAndSend',
   'enableToolbarIconReorder',
-  'showComposerCustomizeGear',
 ])
 
 export function isSuiteOwnedProductivityFlag(key: ProductivityFeatureFlag): boolean {

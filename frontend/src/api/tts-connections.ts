@@ -1,4 +1,4 @@
-import { get, post, put, del, upload } from './client'
+import { get, post, put, del, upload, type RequestOptions } from './client'
 import type {
   TtsConnectionProfile,
   CreateTtsConnectionInput,
@@ -55,8 +55,8 @@ export const ttsConnectionsApi = {
     return get<TtsConnectionVoicesResult>(`/tts-connections/${id}/voices`)
   },
 
-  previewVoices(input: TtsConnectionVoicesPreviewInput) {
-    return post<TtsConnectionVoicesResult>('/tts-connections/voices/preview', input)
+  previewVoices(input: TtsConnectionVoicesPreviewInput, options?: RequestOptions) {
+    return post<TtsConnectionVoicesResult>('/tts-connections/voices/preview', input, options)
   },
 
   setApiKey(id: string, apiKey: string) {

@@ -22,17 +22,13 @@ You need:
 1. A working Lumiverse instance reachable at a stable public URL, such as `https://app.example.com`.
 2. Owner access in Lumiverse.
 3. Admin access in your identity provider.
-4. Lumiverse configured with the same public URL used by browsers.
+4. The public HTTPS origin added under **Settings → Operator → Trusted
+   Hostnames**. Restart Lumiverse after adding it so auth discovery recognizes
+   the origin.
 
-Set this environment variable on the Lumiverse server:
-
-```bash
-AUTH_BASE_URL=https://app.example.com
-```
-
-Restart Lumiverse after changing it.
-
-If `AUTH_BASE_URL` is missing, Lumiverse may fall back to `http://localhost:7860`, which causes OIDC providers to reject the redirect URI.
+`AUTH_BASE_URL=https://app.example.com` may be used to pin auth to one public
+origin, but it is no longer required. The provider-specific **Public Lumiverse
+Origin** below remains the source of its registered callback URL.
 
 ---
 
@@ -276,12 +272,8 @@ The `redirect_uri` sent by Lumiverse does not exactly match the URI registered i
 
 Check:
 
-1. `AUTH_BASE_URL` is set on the Lumiverse server:
-
-   ```bash
-   AUTH_BASE_URL=https://app.example.com
-   ```
-
+1. The public origin is present under **Settings → Operator → Trusted
+   Hostnames**, and Lumiverse was restarted after adding it.
 2. **Settings > SSO > Public Lumiverse Origin** is the same origin:
 
    ```text

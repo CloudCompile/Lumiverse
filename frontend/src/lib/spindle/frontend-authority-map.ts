@@ -130,6 +130,11 @@ const HOST_SURFACE_ROWS: readonly AuthorityRow[] = [
 ]
 
 const DOMAIN_ROWS: readonly AuthorityRow[] = [
+  free({ surface: 'ctx_member', id: 'ctx.stt.listProviders', source: 'stt.providers', ctxLeaf: 'ctx.stt.listProviders', freeBecause: 'pure-host-action: reads speech capability metadata without audio, credentials, or microphone access' }),
+  ...(['prepare', 'start', 'transcribe'] as const).map((method) => gated('media', {
+    surface: 'ctx_member' as const, id: `ctx.stt.${method}`, source: `stt.${method}`, ctxLeaf: `ctx.stt.${method}`,
+    gatedBecause: 'Rule-B clause (c): invokes host-managed speech processing; capture additionally requires browser microphone consent',
+  })),
   free({ surface: 'ctx_member', id: 'ctx.connections.list', source: 'connections.list', ctxLeaf: 'ctx.connections.list', freeBecause: 'rest: GET /api/v1/connections returns credential-redacted profiles for the authenticated session' }),
   free({ surface: 'ctx_member', id: 'ctx.connections.getActive', source: 'connections.active', ctxLeaf: 'ctx.connections.getActive', freeBecause: 'rest: GET /api/v1/connections returns the authenticated active-profile projection' }),
   free({ surface: 'ctx_member', id: 'ctx.connections.subscribe', source: 'connections.active', ctxLeaf: 'ctx.connections.subscribe', freeBecause: 'limb-e: subscription observes the same active-profile projection as ctx.connections.getActive' }),
@@ -209,6 +214,7 @@ export const FRONTEND_AUTHORITY_MAP: readonly AuthorityRow[] = createAuthorityMa
   ...SELECTOR_ROWS,
   ...settingsAuthorityRows(),
   ...DOMAIN_ROWS,
+  gated('app_manipulation', { surface: 'ctx_member', id: 'ctx.display.registerResolver.skipInlineCardWrapping', source: 'display.skipInlineCardWrapping', gatedBecause: 'Rule-B clause (c): opts owned chat bodies out of automatic host spacing wrappers' }),
   ...GEOMETRY_ROWS,
   ...HOST_ACTION_ROWS,
   ...HOST_SURFACE_ROWS,

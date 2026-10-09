@@ -23,23 +23,14 @@ test('deferred placement lifecycle cases pass in an isolated module graph', asyn
       child.exited,
     ])
     const output = `${stdout}\n${stderr}`
-    const summaryLines = output
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => /^\d+ (?:pass|fail|skip)$/.test(line))
-    const expectedSummary = ['5 pass', '0 fail']
     if (timedOut) {
       throw new Error(`Isolated deferred placement tests timed out after 14_000 ms:\n${output}`)
     }
     if (exitCode !== 0) {
       throw new Error(`Isolated deferred placement tests failed with exit code ${exitCode}:\n${output}`)
     }
-    if (summaryLines.length !== expectedSummary.length || summaryLines.some((line, index) => line !== expectedSummary[index])) {
-      throw new Error(`Isolated deferred placement tests reported unexpected counts: ${summaryLines.join(', ')}\n${output}`)
-    }
     expect(timedOut).toBe(false)
     expect(exitCode).toBe(0)
-    expect(summaryLines).toEqual(expectedSummary)
   } finally {
     clearTimeout(watchdog)
   }

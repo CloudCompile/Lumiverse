@@ -1,5 +1,6 @@
 import { registerTtsProvider } from "./registry";
 import { OpenAITtsProvider } from "./providers/openai-tts";
+import { OpenVoxTtsProvider } from "./providers/openvox-tts";
 import { ElevenLabsTtsProvider } from "./providers/elevenlabs";
 import { KokoroTtsProvider } from "./providers/kokoro";
 import { OpenRouterTtsProvider } from "./providers/openrouter-tts";
@@ -10,6 +11,7 @@ import { GoogleVertexTtsProvider } from "./providers/google-vertex-tts";
 
 registerTtsProvider(new CartesiaTtsProvider());
 registerTtsProvider(new OpenAITtsProvider());
+registerTtsProvider(new OpenVoxTtsProvider());
 registerTtsProvider(new ElevenLabsTtsProvider());
 registerTtsProvider(new KokoroTtsProvider());
 registerTtsProvider(new OpenRouterTtsProvider());

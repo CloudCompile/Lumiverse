@@ -226,6 +226,13 @@ export interface CortexIngestionTelemetry {
 
 export type CortexSidecarVisibilityState = "ok" | "unavailable" | "timeout" | "aborted";
 
+export interface CortexIngestionErrorSnapshot {
+  message: string;
+  sidecarState: CortexSidecarVisibilityState | null;
+  occurredAt: number;
+  chunkId: string | null;
+}
+
 export interface CortexIngestionStatus {
   chatId: string;
   status: "idle" | "processing" | "complete" | "error";
@@ -236,6 +243,8 @@ export interface CortexIngestionStatus {
   pendingJobs: number;
   error?: string;
   sidecarState?: CortexSidecarVisibilityState | null;
+  /** Most recent failure retained for diagnostics after the active error state expires. */
+  lastError?: CortexIngestionErrorSnapshot | null;
   timings?: CortexIngestionTimings | null;
 }
 
@@ -640,6 +649,10 @@ export function primeLinkedCortexCache(
 // ─── Ingestion Status / Telemetry ──────────────────────────────
 
 const cortexIngestionStatus = new Map<string, CortexIngestionStatus>();
+/** Terminal failures are active UI status only briefly. The diagnostic snapshot
+ *  remains on CortexIngestionStatus.lastError until a later failure replaces it
+ *  or the chat is deleted. */
+export const CORTEX_INGESTION_ERROR_STATUS_TTL_MS = 60_000;
 const cortexIngestionSamples = new Map<string, {
   samples: number;
   fontMsTotal: number;
@@ -719,6 +732,7 @@ function beginIngestionTracking(userId: string, chatId: string, chunkId: string)
     startedAt: current.startedAt ?? Date.now(),
     pendingJobs,
     error: undefined,
+    sidecarState: null,
   });
   return pendingJobs;
 }
@@ -738,6 +752,7 @@ function completeIngestionTracking(
     startedAt: pendingJobs > 0 ? current.startedAt : null,
     pendingJobs,
     error: undefined,
+    sidecarState: null,
     timings,
   });
 
@@ -770,6 +785,7 @@ function failIngestionTracking(
 ): void {
   const current = getOrCreateIngestionStatus(chatId);
   const pendingJobs = Math.max(0, current.pendingJobs - 1);
+  const occurredAt = Date.now();
   updateIngestionStatus(userId, chatId, {
     status: "error",
     phase: "error",
@@ -777,11 +793,45 @@ function failIngestionTracking(
     pendingJobs,
     error,
     sidecarState: sidecarState ?? current.sidecarState ?? null,
+    lastError: {
+      message: error,
+      sidecarState: sidecarState ?? current.sidecarState ?? null,
+      occurredAt,
+      chunkId: current.chunkId,
+    },
   });
 }
 
+/** Convert an old terminal failure into idle status while preserving its
+ *  diagnostic snapshot. This keeps status consumers from treating historical
+ *  failures as work that is still active. */
+export function normalizeCortexIngestionStatusForRead(
+  status: CortexIngestionStatus,
+  now = Date.now(),
+): CortexIngestionStatus {
+  if (status.status !== "error" || now - status.updatedAt < CORTEX_INGESTION_ERROR_STATUS_TTL_MS) {
+    return status;
+  }
+
+  return {
+    ...status,
+    status: "idle",
+    phase: "complete",
+    chunkId: null,
+    startedAt: null,
+    updatedAt: now,
+    pendingJobs: 0,
+    error: undefined,
+    sidecarState: null,
+  };
+}
+
 export function getIngestionStatus(chatId: string): CortexIngestionStatus | null {
-  return cortexIngestionStatus.get(chatId) ?? null;
+  const status = cortexIngestionStatus.get(chatId);
+  if (!status) return null;
+  const normalized = normalizeCortexIngestionStatusForRead(status);
+  if (normalized !== status) cortexIngestionStatus.set(chatId, normalized);
+  return normalized;
 }
 
 export function getIngestionTelemetry(chatId: string): CortexIngestionTelemetry {
@@ -1047,7 +1097,7 @@ export async function queryCortex(
   }
 }
 
-// ─── Sidecar primary → retry → secondary → heuristic|skip ──────
+// ─── Sidecar primary → configured fallbacks → heuristic|skip ──────
 
 export const CORTEX_SIDECAR_CIRCUIT_FAILURE_THRESHOLD = 3;
 export const CORTEX_SIDECAR_CIRCUIT_COOLDOWN_MS = 30_000;
@@ -1156,22 +1206,6 @@ function throwIfCallerAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw callerAbortReason(signal);
 }
 
-async function delayWithCallerSignal(ms: number, signal?: AbortSignal): Promise<void> {
-  throwIfCallerAborted(signal);
-  if (ms <= 0) return;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(callerAbortReason(signal));
-    };
-    if (signal) signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 export function collectQueryGenerationTargets(
   config: MemoryCortexConfig,
   fallbackConnectionId?: string,
@@ -1218,8 +1252,6 @@ export async function runQueryGenerationSidecar<T>(options: {
 }): Promise<CortexSidecarIngestDecision<T>> {
   const { userId, config, sidecarConnectionId, signal, extract } = options;
   const fallback = config.sidecarReliability.fallback === "skip" ? "skip" : "heuristic";
-  const maxAttempts = 1 + (config.sidecarReliability.maxRetries ?? 0);
-  const baseDelayMs = config.sidecarReliability.retryDelayMs ?? 500;
   const sidecarTimeoutMs = config.sidecarTimeoutMs ?? 60000;
   const targets = collectQueryGenerationTargets(config, sidecarConnectionId);
 
@@ -1260,63 +1292,48 @@ export async function runQueryGenerationSidecar<T>(options: {
       continue;
     }
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const timeoutController = sidecarTimeoutMs > 0 ? new AbortController() : null;
+    const timer = timeoutController
+      ? setTimeout(() => {
+          console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
+          timeoutController.abort();
+        }, sidecarTimeoutMs)
+      : null;
+    const combinedSignal = signal && timeoutController
+      ? AbortSignal.any([signal, timeoutController.signal])
+      : signal ?? timeoutController?.signal;
+
+    attempts += 1;
+    invokedAny = true;
+    try {
+      const result = await extract({
+        ...target,
+        attempt: 1,
+        signal: combinedSignal,
+      });
       if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
-      if (attempt > 0) {
-        const delay = baseDelayMs * Math.pow(2, attempt - 1);
-        try {
-          await delayWithCallerSignal(delay, signal);
-        } catch {
-          return finish("aborted", { role: lastRole, attempts });
-        }
-        console.info(
-          `[memory-cortex] Sidecar ${target.role} retry attempt ${attempt + 1}/${maxAttempts} after ${delay}ms`,
+      if (result != null) {
+        recordCortexSidecarSuccess(userId, target.connectionProfileId);
+        return finish("ok", { result, role: target.role, attempts });
+      }
+      throw new Error("sidecar returned empty extraction");
+    } catch (err: unknown) {
+      if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
+      const timedOut = timeoutController?.signal.aborted === true;
+      if (timedOut) sawTimeout = true;
+      const transient = isTransientCortexSidecarError(err, false) || timedOut;
+      if (transient) {
+        recordCortexSidecarTransientFailure(userId, target.connectionProfileId);
+      }
+      const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
+      if (name !== "AbortError" && !timedOut) {
+        console.warn(
+          `[memory-cortex] Sidecar ${target.role} failed:`,
+          err instanceof Error ? err.message : err,
         );
       }
-
-      const timeoutController = sidecarTimeoutMs > 0 ? new AbortController() : null;
-      const timer = timeoutController
-        ? setTimeout(() => {
-            console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
-            timeoutController.abort();
-          }, sidecarTimeoutMs)
-        : null;
-      const combinedSignal = signal && timeoutController
-        ? AbortSignal.any([signal, timeoutController.signal])
-        : signal ?? timeoutController?.signal;
-
-      attempts += 1;
-      invokedAny = true;
-      try {
-        const result = await extract({
-          ...target,
-          attempt: attempt + 1,
-          signal: combinedSignal,
-        });
-        if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
-        if (result != null) {
-          recordCortexSidecarSuccess(userId, target.connectionProfileId);
-          return finish("ok", { result, role: target.role, attempts });
-        }
-        throw new Error("sidecar returned empty extraction");
-      } catch (err: unknown) {
-        if (signal?.aborted) return finish("aborted", { role: lastRole, attempts });
-        const timedOut = timeoutController?.signal.aborted === true;
-        if (timedOut) sawTimeout = true;
-        const transient = isTransientCortexSidecarError(err, false) || timedOut;
-        if (transient) {
-          recordCortexSidecarTransientFailure(userId, target.connectionProfileId);
-        }
-        const name = err && typeof err === "object" && "name" in err ? String((err as { name?: unknown }).name) : "";
-        if (name !== "AbortError" && !timedOut) {
-          console.warn(
-            `[memory-cortex] Sidecar ${target.role} attempt ${attempt + 1}/${maxAttempts} failed:`,
-            err instanceof Error ? err.message : err,
-          );
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -1346,6 +1363,7 @@ export function scheduleProcessChunk(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -1386,7 +1404,7 @@ export function scheduleProcessChunk(
       }
       return { action: "run" } as const;
     },
-    run: () => processChunk(
+    run: (laneSignal) => processChunk(
       data,
       characterNames,
       generateRawFn,
@@ -1394,7 +1412,7 @@ export function scheduleProcessChunk(
       descriptionAliases,
       undefined,
       false,
-      signal,
+      signal ? AbortSignal.any([signal, laneSignal]) : laneSignal,
     ),
   });
 }
@@ -1404,6 +1422,7 @@ export async function processChunk(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -2105,7 +2124,7 @@ export async function processChunk(
       await curateEntityFactsWithLLM(
         deferredFactAutopilot, sidecarFacts, chunkImp,
         config.factManagement.maxFactsPerEntity,
-        generateRawFn, sidecarConnectionId, config,
+        generateRawFn, sidecarConnectionId, config, signal,
       );
     }
 
@@ -2114,7 +2133,7 @@ export async function processChunk(
     // ask it whether to reactivate; otherwise auto-reactivate.
     if (sidecarActive && config.sidecarReliability.arbitratesHeuristics) {
       await evaluatePendingReactivations(
-        data.chatId, proseContent, generateRawFn!, sidecarConnectionId!, config,
+        data.chatId, proseContent, generateRawFn!, sidecarConnectionId!, config, signal,
       );
     } else {
       // Non-arbiter mode: auto-reactivate any pending relations
@@ -2230,6 +2249,7 @@ export async function rebuildCortex(
   characterNames: string[],
   generateRawFn?: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -2273,7 +2293,14 @@ export async function rebuildCortex(
   if (!resumable) {
     clearDerivedCortexData(chatId);
     chunks = db
-      .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
+      .query(
+        `SELECT * FROM chat_chunks
+         WHERE chat_id = ?
+         ORDER BY message_range_start IS NULL ASC,
+                  message_range_start ASC,
+                  message_range_end ASC,
+                  id ASC`,
+      )
       .all(chatId) as any[];
     totalChunks = chunks.length;
   } else {
@@ -2286,13 +2313,26 @@ export async function rebuildCortex(
       // keep existing salience visible until replacement scores are upserted.
       clearDerivedCortexData(chatId, { preserveSalience: true });
       chunks = db
-        .query("SELECT * FROM chat_chunks WHERE chat_id = ? ORDER BY created_at ASC")
+        .query(
+          `SELECT * FROM chat_chunks
+           WHERE chat_id = ?
+           ORDER BY message_range_start IS NULL ASC,
+                    message_range_start ASC,
+                    message_range_end ASC,
+                    id ASC`,
+        )
         .all(chatId) as any[];
     } else {
       completedBeforeStart = coverage.completedChunks;
       chunks = db
         .query(
-          "SELECT * FROM chat_chunks WHERE chat_id = ? AND (cortex_warmup_signature IS NULL OR cortex_warmup_signature != ?) ORDER BY created_at ASC",
+          `SELECT * FROM chat_chunks
+           WHERE chat_id = ?
+             AND (cortex_warmup_signature IS NULL OR cortex_warmup_signature != ?)
+           ORDER BY message_range_start IS NULL ASC,
+                    message_range_start ASC,
+                    message_range_end ASC,
+                    id ASC`,
         )
         .all(chatId, warmupSignature) as any[];
     }
@@ -2561,6 +2601,7 @@ export async function rebuildCortex(
         config.sidecarTimeoutMs,
         buildSidecarSamplingParameters(config.sidecar, { includeMaxTokens: false }),
         config.nonProseScaffoldTags,
+        { signal },
       );
       if (created > 0) {
         console.info(`[memory-cortex] Rebuild created ${created} scene consolidation(s) for chat ${chatId}`);
@@ -2889,6 +2930,7 @@ async function curateEntityFactsWithLLM(
   maxFacts: number,
   generateRawFn: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -2896,7 +2938,9 @@ async function curateEntityFactsWithLLM(
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   connectionId: string,
   config: MemoryCortexConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return;
   // Read raw facts WITH importance tags to preserve provenance
   const entity = entityGraph.getEntity(entityId);
   if (!entity || entity.facts.length <= maxFacts) return;
@@ -2932,6 +2976,7 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
 
   try {
     const result = await generateRawFn({
+      requestPurpose: "fact curation",
       connectionId,
       messages: [
         { role: "system", content: "You are a factual memory curator. Output valid JSON only — an array of {\"text\": string, \"salience\": number} objects." },
@@ -2942,7 +2987,10 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
         max_tokens: 2048,
         temperature: 0.1,
       },
+      signal,
     });
+
+    if (signal?.aborted) return;
 
     const text = result.content.trim();
     const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -2976,6 +3024,7 @@ ${scoredFacts.map((f, i) => `${i + 1}. [salience:${f.importance}] ${f.text}`).jo
       `UPDATE memory_entities SET facts = ?, fact_extraction_status = 'ok', updated_at = ? WHERE id = ?`,
     ).run(JSON.stringify(tagged), now, entityId);
   } catch (err) {
+    if (signal?.aborted) return;
     console.warn("[memory-cortex] Fact autopilot LLM call failed, keeping score-based result:", err);
   }
 }
@@ -3011,6 +3060,7 @@ async function evaluatePendingReactivations(
   passageContent: string,
   generateRawFn: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
     tools?: import("../../llm/types").ToolDefinition[];
@@ -3018,7 +3068,9 @@ async function evaluatePendingReactivations(
   }) => Promise<{ content: string; tool_calls?: Array<{ name: string; args: Record<string, unknown> }> }>,
   connectionId: string,
   config: MemoryCortexConfig,
+  signal?: AbortSignal,
 ): Promise<void> {
+  if (signal?.aborted) return;
   const db = getDb();
   const pendingRows = db.query(
     `SELECT r.id, r.source_entity_id, r.target_entity_id, r.relation_type,
@@ -3068,6 +3120,7 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
 
   try {
     const result = await generateRawFn({
+      requestPurpose: "relationship reactivation",
       connectionId,
       messages: [
         { role: "system", content: "You are a relationship status evaluator. Output valid JSON only." },
@@ -3078,7 +3131,10 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
         max_tokens: 1024,
         temperature: 0.1,
       },
+      signal,
     });
+
+    if (signal?.aborted) return;
 
     const text = result.content.trim();
     const jsonMatch = text.match(/\[[\s\S]*\]/);
@@ -3116,6 +3172,7 @@ Only include entries where you have a clear signal. Omit entries you're unsure a
       if (!decided.has(c.id)) entityGraph.dismissReactivation(c.id);
     }
   } catch (err) {
+    if (signal?.aborted) return;
     console.warn("[memory-cortex] Relationship reactivation arbiter failed, auto-reactivating:", err);
     for (const c of candidates) entityGraph.reactivateRelation(c.id);
   }

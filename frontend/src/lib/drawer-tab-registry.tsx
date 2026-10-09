@@ -32,11 +32,10 @@ import WorldBookPanel from '@/components/panels/world-book/WorldBookPanel'
 import SpindlePanel from '@/components/panels/SpindlePanel'
 import PackBrowser from '@/components/panels/pack-browser/PackBrowser'
 import ContentWorkshop from '@/components/panels/creator-workshop/ContentWorkshop'
-import CouncilManager from '@/components/panels/CouncilManager'
-import CouncilFeedback from '@/components/panels/CouncilFeedback'
-import WorldInfoFeedback from '@/components/panels/WorldInfoFeedback'
-import OOCPanel from '@/components/panels/OOCPanel'
 import PromptPanel from '@/components/panels/PromptPanel'
+import CouncilWorkspace from '@/components/panels/CouncilWorkspace'
+import { councilViewForTab, resolveCouncilTabId } from './council-navigation'
+import WorldInfoFeedback from '@/components/panels/WorldInfoFeedback'
 import ImageGenPanel from '@/components/panels/ImageGenPanel'
 import WallpaperPanel from '@/components/panels/WallpaperPanel'
 import BranchTreePanel from '@/components/panels/BranchTreePanel'
@@ -153,15 +152,16 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
   },
   {
     id: 'loom',
-    shortName: 'Loom',
-    tabName: 'Loom',
+    shortName: 'Preset',
+    tabName: 'Preset',
     tabDescription: 'Configure narrative structure and story beats',
     tabIcon: GitFork,
+    tabHeaderTitle: 'Loom',
     guide: {
   kind: 'builtin',
   path: 'presets/index.md',
 },
-    keywords: ['narrative', 'story', 'lore', 'structure', 'beats', 'loom', 'pacing', 'plot', 'sovereign hand', 'director'],
+    keywords: ['preset', 'presets', 'narrative', 'story', 'lore', 'structure', 'beats', 'loom', 'pacing', 'plot', 'sovereign hand', 'director'],
     mount: (root) => mountReactComponent(root, <LoomBuilder compact />),
   },
   {
@@ -315,19 +315,6 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     mount: (root) => mountReactComponent(root, <ContentWorkshop />),
   },
   {
-    id: 'ooc',
-    shortName: 'OOC',
-    tabName: 'OOC',
-    tabDescription: 'Out-of-character comment display settings',
-    tabIcon: MessageCircle,
-    guide: {
-  kind: 'builtin',
-  path: 'chatting/ooc.md',
-},
-    keywords: ['ooc', 'out of character', 'comments', 'irc', 'social', 'chat', 'meta', 'parentheses', 'brackets'],
-    mount: (root) => mountReactComponent(root, <OOCPanel />),
-  },
-  {
     id: 'prompt',
     shortName: 'Compose',
     tabName: 'Composition',
@@ -347,8 +334,8 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     kind: 'builtin',
     path: 'council/index.md',
   },
-  keywords: ['council', 'tools', 'agents', 'lumia', 'functions', 'tool use', 'sidecar', 'function calling'],
-  mount: (root) => mountReactComponent(root, <CouncilManager />),
+  keywords: ['council', 'tools', 'agents', 'lumia', 'functions', 'tool use', 'sidecar', 'function calling', 'ooc', 'feedback'],
+  mount: (root) => mountReactComponent(root, <CouncilWorkspace />),
 },
   {
     id: 'summary',
@@ -362,20 +349,6 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
 },
     keywords: ['summary', 'context', 'truncation', 'compress', 'summarize', 'shorten', 'overflow', 'window', 'limit'],
     mount: (root) => mountReactComponent(root, <SummaryEditor />),
-  },
-  {
-    id: 'feedback',
-    shortName: 'Feedback',
-    tabName: 'Council Feedback',
-    tabDescription: 'View the latest council execution results',
-    tabIcon: MessageSquareReply,
-    guide: {
-  kind: 'builtin',
-  path: 'council/council-tools.md',
-},
-    tabHeaderTitle: 'Feedback',
-    keywords: ['feedback', 'council', 'results', 'tools', 'output', 'debug', 'log', 'response', 'execution', 'trace'],
-    mount: (root) => mountReactComponent(root, <CouncilFeedback />),
   },
   {
     id: 'worldinfo',
@@ -501,6 +474,38 @@ export function adaptExtensionTabs(tabs: DrawerTabState[]): DrawerTabEntry[] {
   }))
 }
 
+/** Legacy navigation targets; excluded from drawer and configuration lists. */
+export const COUNCIL_DRAWER_ALIASES: DrawerTabEntry[] = [
+  {
+    id: 'ooc',
+    shortName: 'OOC',
+    tabName: 'OOC',
+    tabDescription: 'Out-of-character comment display settings',
+    tabIcon: MessageCircle,
+    guide: {
+  kind: 'builtin',
+  path: 'chatting/ooc.md',
+},
+    keywords: ['ooc', 'out of character', 'comments', 'irc', 'social', 'chat', 'meta', 'parentheses', 'brackets'],
+    mount: (root) => mountReactComponent(root, <CouncilWorkspace />),
+  },
+
+  {
+    id: 'feedback',
+    shortName: 'Feedback',
+    tabName: 'Council Feedback',
+    tabDescription: 'View the latest council execution results',
+    tabIcon: MessageSquareReply,
+    guide: {
+  kind: 'builtin',
+  path: 'council/council-tools.md',
+},
+    tabHeaderTitle: 'Feedback',
+    keywords: ['feedback', 'council', 'results', 'tools', 'output', 'debug', 'log', 'response', 'execution', 'trace'],
+    mount: (root) => mountReactComponent(root, <CouncilWorkspace />),
+  },
+]
+
 // ── Persistent tab roots (built-in tabs) ──
 //
 // Roots are mounted lazily on first request via `ensureRegistryRoot`.
@@ -519,6 +524,9 @@ const _registryCleanups = new Map<string, () => void>()
  * ContainerTabContent via replaceChildren.
  */
 export function ensureRegistryRoot(tabId: string): HTMLElement | undefined {
+  const view = councilViewForTab(tabId)
+  if (view) useStore.getState().setCouncilView(view)
+  tabId = resolveCouncilTabId(tabId)
   const existing = _registryRoots.get(tabId)
   if (existing) return existing
 
@@ -543,7 +551,10 @@ export function ensureRegistryRoot(tabId: string): HTMLElement | undefined {
 
 /** Generate Panel commands from the registry for the command palette. */
 export function registryToCommands(entries: DrawerTabEntry[]): Command[] {
-  return entries.map((entry) => ({
+  const commandEntries = entries.some((entry) => entry.id === 'council')
+    ? [...entries, ...COUNCIL_DRAWER_ALIASES]
+    : entries
+  return commandEntries.map((entry) => ({
     id: `panel-${entry.id}`,
     label: entry.tabName,
     description: entry.tabDescription,

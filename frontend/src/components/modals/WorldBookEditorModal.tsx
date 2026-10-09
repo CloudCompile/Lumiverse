@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo, type KeyboardEvent } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
-import { Plus, Trash2, BookOpen, Upload, User, FileUp, Search, Download, ArrowUp, ArrowDown, ArrowUpDown, CheckSquare, Square, X, Maximize2 } from 'lucide-react'
+import { Plus, Trash2, BookOpen, Upload, User, FileUp, Search, Download, ArrowUp, ArrowDown, ArrowUpDown, CheckSquare, Square, X, Maximize2, Minimize2, PanelLeft } from 'lucide-react'
 import { CloseButton } from '@/components/shared/CloseButton'
 import { ModalShell } from '@/components/shared/ModalShell'
 import { useStore } from '@/store'
@@ -12,19 +12,21 @@ import WorldBookDiagnosticsModal from '@/components/panels/world-book/WorldBookD
 import { formatWorldBookReindexStatus } from '@/lib/worldBookVectorization'
 import WorldBookEntriesSection from '@/components/shared/WorldBookEntriesSection'
 import FolderDropdown from '@/components/shared/FolderDropdown'
+import WorldBookColumnHandle from '@/components/shared/WorldBookColumnHandle'
 import { useFolders } from '@/hooks/useFolders'
 import { useWorldBookListLiveSync } from '@/hooks/useWorldBookListLiveSync'
 import Pagination from '@/components/shared/Pagination'
 import { triggerBlobDownload } from '@/lib/downloads'
 import { upsertById } from '@/lib/worldBookList'
 import { toast } from '@/lib/toast'
+import { scheduleMicrotask } from '@/lib/schedule-microtask'
 import type { WorldBook, WorldBookVectorSummary } from '@/types/api'
 import type { WorldBookExportFormat } from '@/api/world-books'
 
 import styles from './WorldBookEditorModal.module.css'
 import clsx from 'clsx'
 import { clearSearchOnEscape } from '@/lib/clearableSearch'
-import { canLaunchLorebookEditor, launchLorebookEditor } from '@/lib/lorebookLauncher'
+import useIsMobile from '@/hooks/useIsMobile'
 
 const BOOK_SORT_OPTIONS = [
   { value: 'updated', labelKey: 'sortRecent' },
@@ -55,6 +57,24 @@ export default function WorldBookEditorModal() {
   const modalProps = useStore((s) => s.modalProps)
   const activeChatId = useStore((s) => s.activeChatId)
   const [fullscreen, setFullscreen] = useState(false)
+  const isMobile = useIsMobile()
+  const workspace = fullscreen || isMobile
+  const [booksCollapsed, setBooksCollapsed] = useState(() => {
+    try { return localStorage.getItem('lumiverse.worldBook.booksCollapsed') === 'true' } catch { return false }
+  })
+  const [mobileBooksOpen, setMobileBooksOpen] = useState(false)
+  const [bookSettingsOpen, setBookSettingsOpen] = useState(false)
+  const [editingEntry, setEditingEntry] = useState(false)
+  const [booksWidth, setBooksWidth] = useState(200)
+  const booksToggleRef = useRef<HTMLButtonElement>(null)
+  const [entryCount, setEntryCount] = useState(0)
+  const toggleBooks = () => {
+    if (isMobile) setMobileBooksOpen(current => !current)
+    else setBooksCollapsed(current => {
+      try { localStorage.setItem('lumiverse.worldBook.booksCollapsed', String(!current)) } catch { /* Local preferences may be unavailable. */ }
+      return !current
+    })
+  }
 
   // Book list state
   const [books, setBooks] = useState<WorldBook[]>([])
@@ -63,15 +83,10 @@ export default function WorldBookEditorModal() {
     (modalProps.bookId as string) || null
   )
 
-  const launchEnhancedEditor = useCallback(() => {
-    if (!selectedBookId || !canLaunchLorebookEditor('full')) {
-      setFullscreen((current) => !current)
-      return
-    }
-    const launched = launchLorebookEditor({ bookId: selectedBookId, preferredTarget: 'full' })
-    if (launched) closeModal()
-    else setFullscreen((current) => !current)
-  }, [closeModal, selectedBookId])
+  const [visitedBooks, setVisitedBooks] = useState<string[]>([])
+  const activeBookRef = useRef(selectedBookId)
+  activeBookRef.current = selectedBookId
+  useEffect(() => { if (selectedBookId) setVisitedBooks(current => current.includes(selectedBookId) ? current : [...current, selectedBookId]); setMobileBooksOpen(false); setBookSettingsOpen(false) }, [selectedBookId])
   const [sortBy, setSortBy] = useState<BookSortBy>('updated')
   const [sortDir, setSortDir] = useState<BookSortDir>('desc')
   const [pageSize, setPageSize] = useState<BookPageSize>(50)
@@ -165,9 +180,9 @@ export default function WorldBookEditorModal() {
   const loadVectorSummary = useCallback(async (bookId: string) => {
     try {
       const summary = await worldBooksApi.getVectorSummary(bookId)
-      setVectorSummary(summary)
+      if (activeBookRef.current === bookId) setVectorSummary(summary)
     } catch {
-      setVectorSummary(null)
+      if (activeBookRef.current === bookId) setVectorSummary(null)
     }
   }, [])
 
@@ -309,6 +324,7 @@ export default function WorldBookEditorModal() {
       return
     }
     setSelectedBookId(bookId)
+    setMobileBooksOpen(false)
   }, [handleToggleBookSelection, selectMode])
 
   const handleBookRowKeyDown = useCallback((e: KeyboardEvent<HTMLDivElement>, bookId: string) => {
@@ -528,27 +544,28 @@ export default function WorldBookEditorModal() {
 
   return (
     <>
-    <ModalShell isOpen={true} onClose={closeModal} maxWidth="clamp(340px, 92vw, min(1160px, var(--lumiverse-content-max-width, 1160px)))" zIndex={10001} className={clsx(styles.modal, fullscreen && styles.fullscreen)}>
+    <ModalShell isOpen={true} onClose={closeModal} fullscreen={workspace} maxWidth="clamp(340px, 92vw, min(1160px, var(--lumiverse-content-max-width, 1160px)))" zIndex={10001} className={clsx(styles.modal, styles.nativeModal, workspace && styles.nativeFullscreen)}>
         <div className={styles.header}>
+          <button type="button" ref={booksToggleRef} className={styles.fullscreenBtn} onClick={toggleBooks} aria-label={isMobile ? 'Books' : booksCollapsed ? 'Show books' : 'Hide books'} aria-expanded={isMobile ? mobileBooksOpen : !booksCollapsed}><PanelLeft size={15} /></button>
           <h2 className={styles.title}>{t('modalTitle')}</h2>
           <div className={styles.headerActions}>
-            <button
+            {!isMobile && <button
               type="button"
               className={styles.fullscreenBtn}
-              onClick={launchEnhancedEditor}
-              title="Open enhanced full editor"
-              aria-label="Open enhanced full editor"
-              aria-pressed={false}
+              onClick={() => setFullscreen(current => !current)}
+              title={fullscreen ? "Restore window" : "Maximize editor"}
+              aria-label={fullscreen ? "Restore window" : "Maximize editor"}
+              aria-pressed={fullscreen}
             >
-              <Maximize2 size={15} />
-            </button>
+              {fullscreen ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+            </button>}
             <CloseButton onClick={closeModal} />
           </div>
         </div>
 
         <div className={styles.body}>
           {/* Left panel: Book list */}
-          <div className={styles.sidebar}>
+          <div className={clsx(styles.sidebar, isMobile && styles.mobileBooks, (isMobile ? selectedBookId && !mobileBooksOpen : booksCollapsed) && styles.sidebarHidden)} aria-label="Books" style={!isMobile ? { width: booksWidth, flexBasis: booksWidth } : undefined}>
             <div className={styles.sidebarHeader}>
               <div className={styles.sidebarSearchRow}>
                 <input
@@ -769,13 +786,18 @@ export default function WorldBookEditorModal() {
             />
           </div>
 
+          {!isMobile && !booksCollapsed && <WorldBookColumnHandle label="Resize books column" width={booksWidth} defaultWidth={200} min={140} max={320} collapseBelow={100} onResize={setBooksWidth} onCollapse={() => { toggleBooks(); scheduleMicrotask(() => booksToggleRef.current?.focus()) }} />}
           {/* Right panel: Book content */}
-          <div ref={contentRootRef} className={styles.content}>
-            <div ref={contentScrollRef} className={styles.contentScroll}>
+          <div ref={contentRootRef} className={clsx(styles.content, isMobile && (mobileBooksOpen || !selectedBookId) && styles.sidebarHidden)}>
+            <div ref={contentScrollRef} className={clsx(styles.contentScroll, styles.workspaceScroll)}>
               {selectedBookId ? (
                 <>
+                  <div className={styles.selectedBookHeader} hidden={isMobile && editingEntry}>
+                    <div><strong>{bookName}</strong><span>{entryCount} entries · {bookFolder || 'Unfiled'}{vectorSummary?.pending ? ` · ${vectorSummary.pending} vectors pending` : ''}{vectorSummary?.error ? ` · ${vectorSummary.error} vector errors` : ''}</span></div>
+                    <button type="button" className={styles.secondaryBtn} aria-expanded={bookSettingsOpen} onClick={() => setBookSettingsOpen(current => !current)}>Book settings</button>
+                  </div>
                   {/* Book name & description */}
-                  <div className={styles.bookFields}>
+                  <div className={styles.bookFields} hidden={!bookSettingsOpen || (isMobile && editingEntry)}>
                     <div className={styles.fieldRow}>
                       <label className={styles.fieldLabel}>{tp('name')}</label>
                       <input
@@ -805,6 +827,8 @@ export default function WorldBookEditorModal() {
                         onDeleteFolder={setDeleteFolderConfirm}
                       />
                     </div>
+                    <details className={styles.vectorTools} open={vectorSummary?.pending || vectorSummary?.error ? true : undefined}>
+                      <summary>Vector search: {vectorSummary?.enabled ? `${vectorSummary.enabled} enabled` : 'Off'}</summary>
                     {vectorSummary && (
                       <div className={styles.vectorSummary}>
                         <div className={styles.vectorSummaryTitle}>{tp('vectorStatusTitle')}</div>
@@ -820,7 +844,7 @@ export default function WorldBookEditorModal() {
                     <div className={styles.bookActionRow}>
                       <button
                         type="button"
-                        className={styles.primaryActionBtn}
+                        className={styles.secondaryBtn}
                         onClick={handleReindexVectors}
                         disabled={reindexing}
                       >
@@ -847,15 +871,12 @@ export default function WorldBookEditorModal() {
                         <span className={styles.vectorStatusText}>{vectorStatus}</span>
                       )}
                     </div>
+                    </details>
                   </div>
 
-                  <WorldBookEntriesSection
-                    books={books}
-                    selectedBookId={selectedBookId}
-                    onRefreshVectorSummary={loadVectorSummary}
-                    scrollContainerRef={contentScrollRef}
-                    paginationContainer={paginationContainer}
-                  />
+                  {visitedBooks.filter(id => books.some(book => book.id === id)).map(id => <div key={id} className={styles.bookWorkspace} hidden={id !== selectedBookId}>
+                    <WorldBookEntriesSection books={books} selectedBookId={id} active={id === selectedBookId} onDetailViewChange={id === selectedBookId ? setEditingEntry : undefined} presentation="workspace" onEntryCount={id === selectedBookId ? setEntryCount : undefined} onRefreshVectorSummary={loadVectorSummary} />
+                  </div>)}
                 </>
               ) : (
                 <div className={styles.emptyState}>

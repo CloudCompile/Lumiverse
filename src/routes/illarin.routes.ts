@@ -21,8 +21,9 @@ import { LINK_TIMEOUT_MS, runBrowserLink } from "../illarin/link-browser";
 import { createDeviceRequest } from "../illarin/api";
 import { DeviceLinkSession, runDeviceLinkUntilTerminal } from "../illarin/link-device";
 import { readBackendVersion } from "../illarin/warmup";
-import { handleTerminalUnauthorized } from "../illarin/tokens";
-import { startDeliveryWorker, stopDeliveryWorker } from "../illarin/delivery-worker";
+import { handleTerminalUnauthorized, refreshAccessToken } from "../illarin/tokens";
+import { getDeliveryWorkerStatus, startDeliveryWorker, stopDeliveryWorker } from "../illarin/delivery-worker";
+import { clearPermissionError, getPermissionError } from "../illarin/permission-state";
 import type { BrowserLinkOutcome } from "../illarin/link-browser";
 
 interface PendingBrowserLink {
@@ -139,7 +140,8 @@ illarinRoutes.post("/link/browser", async (c) => {
     declaration = buildDeclaration({
       instanceName,
       applicationVersion: await readBackendVersion(),
-      scopes: ["asset:receive"],
+      scopes: ["work:receive", "library:sync"],
+      installsExtensions: svc.canInstallExtensions(userId),
     });
   } catch (err) {
     return c.json({ error: err instanceof RangeError ? err.message : "invalid declaration" }, 400);
@@ -157,11 +159,11 @@ illarinRoutes.post("/link/browser", async (c) => {
   // page. This works on mobile localhost installs where desktop launchers
   // such as xdg-open are unavailable, and lets the frontend reserve a tab
   // synchronously before its user-activation window expires.
-  const authorizationReady = Promise.withResolvers<string>();
+  const authorizationReady = Promise.withResolvers<{ authorizationUrl: string; userCode: string }>();
   const linkTask = runBrowserLink({
     baseUrl,
     declaration,
-    openUrl: authorizationReady.resolve,
+    openAuthorization: authorizationReady.resolve,
   });
 
   void linkTask
@@ -172,7 +174,7 @@ illarinRoutes.post("/link/browser", async (c) => {
           illarinUrl: baseUrl,
           pair: outcome.tokens,
           instanceName,
-          applicationName: declaration.applicationName,
+          applicationName: declaration.appName,
           declarationJson: JSON.stringify(declaration),
         });
         startDeliveryWorker(userId);
@@ -188,9 +190,9 @@ illarinRoutes.post("/link/browser", async (c) => {
       session.reason = "link_failed";
     });
 
-  let authorizeUrl: string;
+  let authorization: { authorizationUrl: string; userCode: string };
   try {
-    authorizeUrl = await Promise.race([
+    authorization = await Promise.race([
       authorizationReady.promise,
       linkTask.then(() => {
         throw new Error("Browser link ended before authorization was ready");
@@ -204,7 +206,8 @@ illarinRoutes.post("/link/browser", async (c) => {
   c.header("Cache-Control", "no-store");
   return c.json({
     link_id: linkId,
-    authorize_url: authorizeUrl,
+    authorize_url: authorization.authorizationUrl,
+    user_code: authorization.userCode,
     expires_at: new Date(session.expiresAt).toISOString(),
   });
 });
@@ -213,6 +216,7 @@ illarinRoutes.post("/link/browser", async (c) => {
 illarinRoutes.get("/status", async (c) => {
   const userId = c.get("userId");
   const instance = await svc.getIllarinInstance(userId);
+  const missingReceivePermission = instance !== null && !instance.scopes.includes("work:receive");
 
   const active = activeLinkFor(userId);
   return c.json({
@@ -221,10 +225,20 @@ illarinRoutes.get("/status", async (c) => {
     instance_name: instance?.instanceName,
     instance_id: instance?.instanceId,
     scopes: instance?.scopes ?? [],
+    permission_error: getPermissionError(userId) ?? (missingReceivePermission ? "work:receive" : null),
+    pickup: instance === null ? null : getDeliveryWorkerStatus(userId) ?? {
+      state: missingReceivePermission ? "missing_permission" : "stopped",
+      lastCollectAt: null,
+      lastInstallAt: null,
+      lastError: missingReceivePermission ? "work:receive is not granted" : "Pickup worker has not started",
+      lastErrorAt: null,
+    },
     linked_at: instance?.linkedAt,
     last_refresh_at: instance?.lastRefreshAt,
-    declaration_version: typeof instance?.lastDeclaration?.applicationVersion === "string"
-      ? instance.lastDeclaration.applicationVersion
+    declaration_version: typeof instance?.lastDeclaration?.appVersion === "string"
+      ? instance.lastDeclaration.appVersion
+      : typeof instance?.lastDeclaration?.applicationVersion === "string"
+        ? instance.lastDeclaration.applicationVersion
       : null,
     pending_link: active
       ? { status: active.status, reason: active.reason ?? null }
@@ -240,11 +254,26 @@ illarinRoutes.post("/unlink", async (c) => {
   }
   cancelDeviceLink(userId);
   stopDeliveryWorker(userId);
+  clearPermissionError(userId);
   await handleTerminalUnauthorized(userId, "unlinked");
   return c.json({
     success: true,
     hint: "Also revoke this instance in your Illarin account settings to remove it there.",
   });
+});
+
+illarinRoutes.post("/permissions/refresh", async (c) => {
+  const userId = c.get("userId");
+  if (!await svc.getIllarinInstance(userId)) return c.json({ error: "Not connected" }, 404);
+  try {
+    if (!await refreshAccessToken(userId)) return c.json({ error: "Connection expired" }, 401);
+    const instance = await svc.getIllarinInstance(userId);
+    clearPermissionError(userId);
+    if (instance) startDeliveryWorker(userId);
+    return c.json({ scopes: instance?.scopes ?? [] });
+  } catch {
+    return c.json({ error: "Could not refresh permissions; try again later" }, 502);
+  }
 });
 
 
@@ -286,7 +315,8 @@ illarinRoutes.post("/link/device", async (c) => {
     declaration = buildDeclaration({
       instanceName,
       applicationVersion: await readBackendVersion(),
-      scopes: ["asset:receive"],
+      scopes: ["work:receive", "library:sync"],
+      installsExtensions: svc.canInstallExtensions(userId),
     });
   } catch (err) {
     return c.json({ error: err instanceof RangeError ? err.message : "invalid declaration" }, 400);
@@ -308,7 +338,7 @@ illarinRoutes.post("/link/device", async (c) => {
         illarinUrl: baseUrl,
         pair: tokens,
         instanceName,
-        applicationName: declaration.applicationName,
+        applicationName: declaration.appName,
         declarationJson,
       });
       startDeliveryWorker(userId);
@@ -320,7 +350,7 @@ illarinRoutes.post("/link/device", async (c) => {
     baseUrl,
     session,
     instanceName,
-    applicationName: declaration.applicationName,
+    applicationName: declaration.appName,
     declarationJson,
     expiresAt: Number.isFinite(expiresAt) ? expiresAt : Date.now() + 10 * 60_000,
     status: "pending",
@@ -336,7 +366,7 @@ illarinRoutes.post("/link/device", async (c) => {
       if (!result || pendingDeviceLinks.get(userId) !== pending) return;
       pending.status = result.status;
       pending.completedAt = Date.now();
-      if (result.status === "linked") pending.instanceId = result.tokens.instance.id;
+      if (result.status === "linked") pending.instanceId = result.tokens.connectedApp.id;
     })
     .catch((err) => {
       if (pendingDeviceLinks.get(userId) !== pending || pending.controller.signal.aborted) return;

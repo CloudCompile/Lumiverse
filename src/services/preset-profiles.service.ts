@@ -177,13 +177,14 @@ export function captureDefaults(
 }
 
 export function deleteDefaults(userId: string, presetId: string): boolean {
-  const deleted = settingsSvc.deleteSetting(userId, defaultsKey(presetId));
+  let deleted = settingsSvc.deleteSetting(userId, defaultsKey(presetId));
   settingsSvc.deleteSetting(userId, defaultsVariablesKey(presetId));
   const legacy = settingsSvc.getSetting(userId, LEGACY_DEFAULTS_KEY);
   if (legacy && (legacy.value as PresetProfileBinding)?.preset_id === presetId) {
     settingsSvc.deleteSetting(userId, LEGACY_DEFAULTS_KEY);
-    return true;
+    deleted = true;
   }
+  if (deleted) eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: defaultsKey(presetId), binding: null }, userId);
   return deleted;
 }
 
@@ -223,6 +224,7 @@ export function deleteCharacterBinding(
 ): boolean {
   const deleted = settingsSvc.deleteSetting(userId, characterKey(characterId));
   settingsSvc.deleteSetting(userId, variablesKey("character", characterId));
+  if (deleted) eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: characterKey(characterId), binding: null }, userId);
   return deleted;
 }
 
@@ -257,6 +259,7 @@ export function setPersonaBinding(
 export function deletePersonaBinding(userId: string, personaId: string): boolean {
   const deleted = settingsSvc.deleteSetting(userId, personaKey(personaId));
   settingsSvc.deleteSetting(userId, variablesKey("persona", personaId));
+  if (deleted) eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: personaKey(personaId), binding: null }, userId);
   return deleted;
 }
 
@@ -297,6 +300,7 @@ export function deleteChatBinding(
 ): boolean {
   const deleted = settingsSvc.deleteSetting(userId, chatKey(chatId));
   settingsSvc.deleteSetting(userId, variablesKey("chat", chatId));
+  if (deleted) eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: chatKey(chatId), binding: null }, userId);
   return deleted;
 }
 
@@ -384,6 +388,7 @@ export function deleteConnectionBinding(
 ): boolean {
   const deleted = settingsSvc.deleteSetting(userId, connectionKey(connectionId));
   settingsSvc.deleteSetting(userId, variablesKey("connection", connectionId));
+  if (deleted) eventBus.emit(EventType.PRESET_PROFILE_CHANGED, { key: connectionKey(connectionId), binding: null }, userId);
   return deleted;
 }
 

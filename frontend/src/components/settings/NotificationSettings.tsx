@@ -20,6 +20,7 @@ export default function NotificationSettings() {
     unsupportedReason,
     registrationStatus,
     registrationReason,
+    registrationKind,
     isSubscribed,
     permissionState,
     subscriptions,
@@ -161,7 +162,11 @@ export default function NotificationSettings() {
             </span>
           </div>
           <div className={styles.infoRow}>
-            <span className={styles.infoLabel}>{t('notifications.serviceWorker')}</span>
+            <span className={styles.infoLabel}>
+              {registrationKind === 'native'
+                ? t('notifications.nativeBridge', { defaultValue: 'Native Bridge' })
+                : t('notifications.serviceWorker')}
+            </span>
             <span className={styles.infoValue}>
               <span className={clsx(styles.statusDot, registrationStatus === 'ready' ? styles.statusActive : styles.statusInactive)} />
               {describeRegistrationStatus(registrationStatus, t)}
@@ -221,7 +226,11 @@ export default function NotificationSettings() {
           subscriptions.map((sub) => (
             <div key={sub.id} className={styles.deviceRow}>
               <Smartphone size={13} className={styles.deviceIcon} />
-              <span className={styles.deviceName}>{parseUserAgent(sub.user_agent, t)}</span>
+              <span className={styles.deviceName}>
+                {sub.type === 'tauri_desktop'
+                  ? `${sub.label || 'Lumiverse Desktop'}${sub.platform ? ` · ${sub.platform}` : ''}`
+                  : parseUserAgent(sub.user_agent, t)}
+              </span>
               <span className={styles.deviceDate}>
                 {new Date(sub.created_at * 1000).toLocaleDateString()}
               </span>

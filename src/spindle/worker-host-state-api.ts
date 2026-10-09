@@ -3,6 +3,8 @@ import * as chatsSvc from "../services/chats.service";
 import * as settingsSvc from "../services/settings.service";
 import * as presetsSvc from "../services/presets.service";
 import { PresetRevisionConflictError, type CreatePresetInput, type UpdatePresetInput } from "../types/preset";
+import { readRuntimeState, writeRuntimeState, type RuntimeStateCommand } from './runtime-state';
+import { withRuntimeMutation } from './runtime-state-revision';
 
 type PresetConflictWorkerError = {
   code: string;
@@ -16,7 +18,7 @@ export type WorkerHostStateApiContext = {
   getChatOwnerId: (chatId: string) => string | null;
   enforceScopedUser: (userId: string | null | undefined) => void;
   resolveEffectiveUserId: (requestUserId?: string) => string | null;
-  hasPermission: (permission: "presets") => boolean;
+  hasPermission: (permission: "presets" | "characters" | "chats" | "personas" | "world_books" | "chat_mutation") => boolean;
   postResponse: (message: { type: "response"; requestId: string; result?: unknown; error?: string }) => void;
 };
 
@@ -27,6 +29,8 @@ export class WorkerHostStateApi {
   dispatch(message: { type: string; [key: string]: unknown }): boolean {
     const msg = message as any;
     switch (msg.type) {
+      case 'runtime_state_read': void this.handleRuntimeState(msg.requestId, msg.chatId, msg.characterId, undefined, msg.userId); return true;
+      case 'runtime_state_write': void this.handleRuntimeState(msg.requestId, msg.chatId, undefined, msg.command, msg.userId, msg.mutationId); return true;
       case "vars_get_local": this.handleVarsGetLocal(msg.requestId, msg.chatId, msg.key); return true;
       case "vars_set_local": this.handleVarsSetLocal(msg.requestId, msg.chatId, msg.key, msg.value); return true;
       case "vars_delete_local": this.handleVarsDeleteLocal(msg.requestId, msg.chatId, msg.key); return true;
@@ -58,6 +62,28 @@ export class WorkerHostStateApi {
   }
 
   private getChatOwnerId(chatId: string): string | null { return this.context.getChatOwnerId(chatId); }
+
+  private async handleRuntimeState(requestId: string, chatId: string, characterId: string | undefined, command: RuntimeStateCommand | undefined, userId?: string, mutationId?: string): Promise<void> {
+    try {
+      const owner = this.context.resolveEffectiveUserId(userId);
+      if (!owner) throw new Error('Runtime state requires an explicit user');
+      this.context.enforceScopedUser(owner);
+      if (this.context.getChatOwnerId(chatId) !== owner) throw new Error('Runtime chat belongs to another user');
+      const permissions = command ? [command.kind.startsWith('character.') ? 'characters'
+        : command.kind.startsWith('persona.') ? 'personas' : command.kind.startsWith('lore.') ? 'world_books'
+          : command.kind.startsWith('message.') ? 'chat_mutation' : 'chats'] as const
+        : ['characters', 'chats', 'chat_mutation', 'personas', 'world_books'] as const;
+      for (const permission of permissions) if (!this.context.hasPermission(permission)) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} ${permission}`);
+      }
+      if (mutationId !== undefined && !/^[0-9a-f-]{36}$/.test(mutationId)) throw new Error('Invalid runtime mutation identifier');
+      const result = command ? await (mutationId ? withRuntimeMutation(owner, mutationId, () => writeRuntimeState(owner, chatId, command)) : writeRuntimeState(owner, chatId, command))
+        : readRuntimeState(owner, chatId, characterId ?? '');
+      this.context.postResponse({ type: 'response', requestId, result });
+    } catch (error) {
+      this.context.postResponse({ type: 'response', requestId, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
   private enforceScopedUser(userId: string | null | undefined): void { this.context.enforceScopedUser(userId); }
   private resolveEffectiveUserId(userId?: string): string | null { return this.context.resolveEffectiveUserId(userId); }
   private hasPermission(permission: "presets"): boolean { return this.context.hasPermission(permission); }

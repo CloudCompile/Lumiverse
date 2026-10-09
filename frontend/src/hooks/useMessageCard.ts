@@ -2,6 +2,7 @@ import { useState, useCallback, useMemo, useRef, useEffect, useLayoutEffect } fr
 import { useTranslation } from 'react-i18next'
 import { useNavigate } from 'react-router'
 import { useStore } from '@/store'
+import { readProductivityFeature } from '@/lib/spindle/productivity-feature-toggles'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { generateUUID } from '@/lib/uuid'
 import {
@@ -17,6 +18,7 @@ import {
   type AvatarTierUrls,
 } from '@/lib/avatarUrls'
 import { imagesApi } from '@/api/images'
+import { resolveMessageExpressionImageId } from '@/lib/expressionResolution'
 import type { Message } from '@/types/api'
 import type { GenerationMetrics } from '@/types/ws-events'
 import { resolveMultiplayerMessageAuthor } from '@/lib/multiplayerMessageAuthor'
@@ -265,19 +267,27 @@ export function useMessageCard(message: Message, chatId: string) {
   // messages when we're a peer (the host renders the real character avatar).
   const peerBotAvatar = !isUser && mpRoomId && !mpIsHost ? mpCharacterAvatar : null
 
+  const expressionAvatarImageId = useStore((state) =>
+    mpRoomId && !mpIsHost ? null : resolveMessageExpressionImageId(
+      state, effectiveCharacter, effectiveCharId, chatId, isUser,
+    )
+  )
+  const messageAvatarImageId = expressionAvatarImageId || effectiveChatAvatarId
+  const messageOriginalImageId = expressionAvatarImageId || activeAltAvatar?.original_image_id || effectiveChatAvatarId
+
   const avatarUrl = isUser
     ? personaAvatarFallbackUrl
     : peerBotAvatar
-      ?? (effectiveChatAvatarId
-        ? getImageUrl(effectiveChatAvatarId)
+      ?? (messageAvatarImageId
+        ? getImageUrl(messageAvatarImageId)
         : getCharAvatarUrl(effectiveCharId, characterAvatarCropImageId ?? effectiveCharacter?.image_id ?? null))
 
   // Full-size avatar URL for lightbox/floating viewer (no resize)
   const fullAvatarUrl = isUser
     ? getPersonaAvatarUrlById(personaAvatarId, null, personaAvatarContext)
     : peerBotAvatar
-      ?? (effectiveChatAvatarId
-        ? imagesApi.url(activeAltAvatar?.original_image_id || effectiveChatAvatarId)
+      ?? (messageAvatarImageId
+        ? imagesApi.url(messageOriginalImageId)
         : getCharacterAvatarUrlById(
             effectiveCharId,
             typeof effectiveCharacter?.extensions?.original_image_id === 'string'
@@ -291,18 +301,18 @@ export function useMessageCard(message: Message, chatId: string) {
   const characterOriginalImageId = typeof effectiveCharacter?.extensions?.original_image_id === 'string'
     ? effectiveCharacter.extensions.original_image_id
     : effectiveCharacter?.image_id ?? null
-  const usesChatAvatar = !!effectiveChatAvatarId
+  const usesChatAvatar = !!messageAvatarImageId
 
   const croppedAvatarTiers: AvatarTierUrls = isUser
     ? getPersonaAvatarTiers(personaAvatarId, null, personaAvatarContext, 'crop')
     : usesChatAvatar
-      ? getImageTiers(effectiveChatAvatarId)
+      ? getImageTiers(messageAvatarImageId)
       : getCharacterAvatarTiers(effectiveCharId, characterAvatarCropImageId ?? effectiveCharacter?.image_id ?? null)
 
   const originalAvatarTiers: AvatarTierUrls = isUser
     ? getPersonaAvatarTiers(personaAvatarId, null, personaAvatarContext, 'original')
     : usesChatAvatar
-      ? getImageTiers(activeAltAvatar?.original_image_id || effectiveChatAvatarId)
+      ? getImageTiers(messageOriginalImageId)
       : getCharacterAvatarTiers(effectiveCharId, characterOriginalImageId)
 
   const avatar = useMemo(
@@ -413,6 +423,7 @@ export function useMessageCard(message: Message, chatId: string) {
   }, [clearMessageEdit, editAndSendPending])
 
   const handleEditAndSend = useCallback(async () => {
+    if (!readProductivityFeature(useStore.getState(), 'showEditAndSend')) return
     if (!message.is_user || editAndSendPending || isStreaming) return
     const cleanContent = editContent.trim()
     if (!cleanContent) {

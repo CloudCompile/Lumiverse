@@ -135,17 +135,13 @@ function CortexFallbackList({
   const { t } = useTranslation("settings");
   const [drafts, setDrafts] = useState<Array<{ key: string; endpoint: CortexModelEndpoint }>>([]);
   const configured = extrasFromPair(pair);
-  const rows: Array<{ key: string; endpoint: CortexModelEndpoint; draft: boolean }> = [
+  const display: Array<{ key: string; endpoint: CortexModelEndpoint }> = [
     ...configured.map((endpoint) => ({
       key: endpoint.connectionProfileId || "secondary",
       endpoint,
-      draft: false,
     })),
-    ...drafts.map((draft) => ({ key: draft.key, endpoint: draft.endpoint, draft: true })),
+    ...drafts.map((draft) => ({ key: draft.key, endpoint: draft.endpoint })),
   ];
-  const display = rows.length > 0
-    ? rows
-    : [{ key: "empty", endpoint: emptyCortexEndpoint(), draft: false }];
 
   const commit = (next: CortexModelEndpoint[]) => {
     const persisted: CortexModelEndpoint[] = [];
@@ -184,9 +180,7 @@ function CortexFallbackList({
           }}
           testId={index === 0 ? firstTestId : `${extraTestIdPrefix}-${index}`}
           hint={hint}
-          onRemove={display.length > 1 || !!row.endpoint.connectionProfileId
-            ? () => commit(display.map((entry) => entry.endpoint).filter((_, i) => i !== index))
-            : undefined}
+          onRemove={() => commit(display.map((entry) => entry.endpoint).filter((_, i) => i !== index))}
           removeLabel={t("memoryCortex.removeFallback", { defaultValue: "Remove fallback" })}
           removeTestId={index === 0 ? `${extraTestIdPrefix}-remove` : `${extraTestIdPrefix}-remove-${index}`}
         />
@@ -197,13 +191,6 @@ function CortexFallbackList({
           className={styles.addBtn}
           data-testid={addTestId}
           onClick={() => {
-            if (configured.length === 0 && drafts.length === 0) {
-              setDrafts([
-                { key: "draft-0", endpoint: emptyCortexEndpoint() },
-                { key: "draft-1", endpoint: emptyCortexEndpoint() },
-              ]);
-              return;
-            }
             setDrafts((current) => [
               ...current,
               { key: `draft-${Date.now()}-${current.length}`, endpoint: emptyCortexEndpoint() },
@@ -718,7 +705,7 @@ export default function MemoryCortexSettings() {
             )}
             {sidecarVisibility === "timeout" && (
               <div className={styles.hintText} data-cortex-sidecar-state="timeout" role="status">
-                {t("memoryCortex.sidecarTimeoutState", { defaultValue: "Sidecar timed out. Primary will retry, then secondary, then the configured fallback." })}
+                {t("memoryCortex.sidecarTimeoutState", { defaultValue: "Sidecar timed out. Configured fallback connections are tried once each before applying the failure policy." })}
               </div>
             )}
             {config.sidecar.connectionProfileId && (
@@ -851,34 +838,6 @@ export default function MemoryCortexSettings() {
                     <option value="heuristic">{t("memoryCortex.fallbackHeuristic")}</option>
                     <option value="skip">{t("memoryCortex.fallbackSkip")}</option>
                   </select>
-                </div>
-                <div className={styles.infoRow}>
-                  <span className={styles.infoLabel}>{t("memoryCortex.retryAttempts")}</span>
-                  <NumericInput
-                    className={styles.numberInput}
-                    value={config.sidecarReliability?.maxRetries ?? 0}
-                    min={0}
-                    max={10}
-                    step={1}
-                    integer
-                    onChange={(value) => updateConfig({
-                      sidecarReliability: { ...config.sidecarReliability, maxRetries: value ?? 0 },
-                    })}
-                  />
-                </div>
-                <div className={styles.infoRow}>
-                  <span className={styles.infoLabel}>{t("memoryCortex.retryDelay")}</span>
-                  <NumericInput
-                    className={styles.numberInput}
-                    value={config.sidecarReliability?.retryDelayMs ?? 500}
-                    min={0}
-                    max={10000}
-                    step={100}
-                    integer
-                    onChange={(value) => updateConfig({
-                      sidecarReliability: { ...config.sidecarReliability, retryDelayMs: value ?? 500 },
-                    })}
-                  />
                 </div>
                 <div className={styles.toggleRow}>
                   <Toggle.Checkbox

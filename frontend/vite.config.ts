@@ -3,7 +3,7 @@ import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
 import { VitePWA } from 'vite-plugin-pwa'
 import path from 'path'
-import pkg from './package.json'
+import pkg from './package.json' with { type: 'json' }
 
 export default defineConfig({
   plugins: [
@@ -72,7 +72,7 @@ export default defineConfig({
   },
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   css: {
@@ -97,6 +97,10 @@ export default defineConfig({
     cssMinify: 'esbuild',
     chunkSizeWarningLimit: 6000,
     rollupOptions: {
+      input: {
+        main: path.resolve(import.meta.dirname, './index.html'),
+        widget: path.resolve(import.meta.dirname, './widget.html'),
+      },
       output: {
         manualChunks(id) {
           const normalized = id.replace(/\\/g, '/')

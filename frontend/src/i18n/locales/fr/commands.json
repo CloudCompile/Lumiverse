@@ -79,7 +79,7 @@
       "description": "Configurer le raisonnement, la chaîne de pensée et le comportement des invites"
     },
     "panel-loom": {
-      "label": "Métier à tisser",
+      "label": "Préréglage",
       "description": "Configurer la structure narrative et les rythmes de l'histoire"
     },
     "panel-dream-weaver": {

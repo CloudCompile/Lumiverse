@@ -382,7 +382,11 @@ function getRecentVectorizedChunkIds(db: any, chatId: string, limit: number): st
     .query(
       `SELECT id FROM chat_chunks
        WHERE chat_id = ? AND vectorized_at IS NOT NULL
-       ORDER BY created_at DESC LIMIT ?`,
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start DESC,
+                message_range_end DESC,
+                id DESC
+       LIMIT ?`,
     )
     .all(chatId, limit) as Array<{ id: string }>;
   return rows.map((r) => r.id);

@@ -17,6 +17,7 @@
     edit-env        - Edit the .env file ($env:VISUAL/$env:EDITOR, else Notepad)
     migrate-st      - Run SillyTavern migration helper
     kill-pkgs       - Nuke lockfiles + node_modules, reinstall backend deps
+    install-desktop - Build/install Tauri desktop app and create launcher shortcuts
 
 .PARAMETER Build
     Rebuild the frontend before starting the backend
@@ -26,6 +27,10 @@
 
 .PARAMETER EditEnv
     Open the .env file in an editor ($env:VISUAL/$env:EDITOR if set, else Notepad)
+
+.PARAMETER InstallDesktop
+    Build and install the Tauri desktop app for the current user. Automatically
+    installs the minimal stable Rust toolchain when cargo is not present.
 
 .PARAMETER FrontendPath
     Path to frontend directory (default: ./frontend)
@@ -43,11 +48,11 @@
     Upgrade Bun to the latest canary build before continuing
 
 .NOTES
-    Bun versions older than 1.4.0 are automatically upgraded to latest stable.
+    Bun versions older than 1.4.2 are automatically upgraded to latest stable.
 #>
 
 param(
-    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "reset-password", "edit-env", "migrate-st", "kill-pkgs")]
+    [ValidateSet("all", "build-only", "backend-only", "dev", "setup", "reset-password", "edit-env", "migrate-st", "kill-pkgs", "install-desktop")]
     [string]$Mode = "all",
 
     [Alias("b")]
@@ -67,13 +72,16 @@ param(
 
     [switch]$EditEnv,
 
+    [Alias("Desktop")]
+    [switch]$InstallDesktop,
+
     [switch]$UpgradeBun,
 
     [switch]$UpgradeBunCanary
 )
 
 $ErrorActionPreference = "Stop"
-$MinimumBunVersion = [version]"1.4.0"
+$MinimumBunVersion = [version]"1.4.2"
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -88,11 +96,90 @@ $BackendDir  = $PSScriptRoot
 
 if (-not $FrontendPath) { $FrontendPath = Join-Path $BackendDir "frontend" }
 
+# ─── Protect Windows system directories ────────────────────────────────────
+
+function Test-IsPathWithinDirectory {
+    param([string]$Path, [string]$Directory)
+
+    try {
+        $normalizedPath = [IO.Path]::GetFullPath($Path).TrimEnd([char[]]@('\', '/'))
+        $normalizedDirectory = [IO.Path]::GetFullPath($Directory).TrimEnd([char[]]@('\', '/'))
+    } catch {
+        return $false
+    }
+
+    if ([string]::Equals($normalizedPath, $normalizedDirectory, [StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+
+    return $normalizedPath.StartsWith(
+        $normalizedDirectory + [IO.Path]::DirectorySeparatorChar,
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+function Assert-SafeFirstRunLocation {
+    $dataDir = if ($env:DATA_DIR) { $env:DATA_DIR } else { Join-Path $BackendDir "data" }
+    $identityFile = Join-Path $dataDir "lumiverse.identity"
+    $credentialsFile = Join-Path $dataDir "owner.credentials"
+
+    # Existing installations remain runnable; this guard only prevents a new
+    # installation from writing dependencies and application data to System32.
+    if ((Test-Path $identityFile) -and (Test-Path $credentialsFile)) { return }
+
+    $windowsDirectory = if ($env:SystemRoot) { $env:SystemRoot } else { $env:WINDIR }
+    if (-not $windowsDirectory) { return }
+
+    $system32Directory = Join-Path $windowsDirectory "System32"
+    if (-not (Test-IsPathWithinDirectory $BackendDir $system32Directory)) { return }
+
+    $suggestedRoot = if ($env:USERPROFILE) {
+        Join-Path $env:USERPROFILE "Lumiverse"
+    } else {
+        "a user-owned folder outside $windowsDirectory"
+    }
+
+    Write-Host ""
+    Write-Err "First-time installation stopped: Lumiverse cannot be installed inside $system32Directory."
+    Write-Err "Move this repository to $suggestedRoot, then run .\start.ps1 again."
+    Write-Host ""
+    exit 1
+}
+
 # ─── Ensure Bun is installed ────────────────────────────────────────────────
 
+function Find-Bun {
+    if (Get-Command bun -ErrorAction SilentlyContinue) { return $true }
+
+    $bunInstall = if ($env:BUN_INSTALL) { $env:BUN_INSTALL } else { Join-Path $env:USERPROFILE ".bun" }
+    $defaultBunBin = Join-Path (Join-Path $env:USERPROFILE ".bun") "bin"
+    foreach ($tryPath in @(
+        (Join-Path (Join-Path $bunInstall "bin") "bun.exe"),
+        (Join-Path $defaultBunBin "bun.exe")
+    )) {
+        if (Test-Path $tryPath) {
+            $env:PATH = "$(Split-Path $tryPath);$env:PATH"
+            return $true
+        }
+    }
+    return $false
+}
+
+function Add-RegisteredPath {
+    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    $env:PATH = (@($env:PATH, $userPath, $machinePath) | Where-Object { $_ }) -join ";"
+}
+
 function Ensure-Bun {
-    $bunCmd = Get-Command bun -ErrorAction SilentlyContinue
-    if ($bunCmd) {
+    if (Find-Bun) {
+        $version = & bun --version
+        Write-Ok "Bun $version found"
+        return
+    }
+
+    Add-RegisteredPath
+    if (Find-Bun) {
         $version = & bun --version
         Write-Ok "Bun $version found"
         return
@@ -114,41 +201,11 @@ function Ensure-Bun {
     }
 
     # ── Make bun available in this session ────────────────────────────────
-    # The installer updates the user-level PATH but the current process
-    # still has the stale copy.  Refresh it, then fall back to known
-    # default install locations if Get-Command still can't find bun.
-
-    # Pull in the freshly-updated user PATH so this session sees bun
-    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
-    $userPath    = [Environment]::GetEnvironmentVariable("PATH", "User")
-    $env:PATH    = "$userPath;$machinePath"
-
-    # Also explicitly prepend the default install bin directory
-    $bunInstall = if ($env:BUN_INSTALL) { $env:BUN_INSTALL } else { Join-Path $env:USERPROFILE ".bun" }
-    $bunBin = Join-Path $bunInstall "bin"
-    if (Test-Path $bunBin) {
-        $env:PATH = "$bunBin;$env:PATH"
-    }
-
-    $bunCmd = Get-Command bun -ErrorAction SilentlyContinue
-    if ($bunCmd) {
+    Add-RegisteredPath
+    if (Find-Bun) {
         $version = & bun --version
         Write-Ok "Bun $version installed successfully"
         return
-    }
-
-    # Last resort: check default install locations directly
-    $tryPaths = @(
-        (Join-Path $bunInstall "bin" "bun.exe"),
-        (Join-Path $env:USERPROFILE ".bun" "bin" "bun.exe")
-    )
-    foreach ($tryPath in $tryPaths) {
-        if (Test-Path $tryPath) {
-            $version = & $tryPath --version
-            Write-Ok "Bun $version installed (using direct path: $tryPath)"
-            $env:PATH = "$(Split-Path $tryPath);$env:PATH"
-            return
-        }
     }
 
     Write-Err "Bun installation failed. Please install manually: https://bun.sh"
@@ -218,6 +275,28 @@ function Get-BunSemanticVersion {
     }
 }
 
+function Install-LumiverseBunRuntime {
+    $runtimeBase = if ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA "Lumiverse\runtimes"
+    } else {
+        Join-Path $BackendDir "data\.bun-runtime"
+    }
+    $runtimeRoot = Join-Path $runtimeBase "bun-$MinimumBunVersion"
+    $installer = Join-Path $BackendDir "scripts\install-bun-runtime.ps1"
+
+    & $installer -InstallRoot $runtimeRoot -MinimumVersion $MinimumBunVersion
+    $runtime = Join-Path (Join-Path $runtimeRoot "bin") "bun.exe"
+    if (-not (Test-Path $runtime -PathType Leaf)) {
+        throw "The fallback Bun runtime was not installed at $runtime"
+    }
+
+    # Force every later bare `bun` invocation in this launcher to use the
+    # validated side-by-side executable rather than an older PATH/npm shim.
+    $env:LUMIVERSE_BUN_EXECUTABLE = $runtime
+    $env:PATH = "$(Split-Path $runtime);$env:PATH"
+    Set-Alias -Name bun -Value $runtime -Scope Script -Force
+}
+
 function Ensure-MinimumBunVersion {
     $current = Get-BunSemanticVersion
     if ($current -and $current -ge $MinimumBunVersion) { return }
@@ -229,6 +308,23 @@ function Ensure-MinimumBunVersion {
         Invoke-BunUpgrade "stable"
     } catch {
         Write-Err "Automatic Bun upgrade failed: $_"
+    }
+
+    $current = Get-BunSemanticVersion
+    if ($current -and $current -ge $MinimumBunVersion) {
+        Write-Ok "Bun $current satisfies the minimum supported version"
+        return
+    }
+
+    # A running Bun process locks bun.exe on Windows, and npm-launched scripts
+    # may upgrade a temporary shim instead of the executable the next launch
+    # resolves. Install a versioned runtime beside it and select that exact path.
+    Write-Warn "The in-place Bun upgrade did not provide the required runtime."
+    Write-Info "Installing Lumiverse's side-by-side Bun $MinimumBunVersion runtime..."
+    try {
+        Install-LumiverseBunRuntime
+    } catch {
+        Write-Err "Fallback Bun installation failed: $_"
     }
 
     $current = Get-BunSemanticVersion
@@ -359,8 +455,19 @@ function Invoke-BunDependencyInstall {
     }
 }
 
-function Test-BackendDependencyLoad {
-    param([string]$Dir)
+function Test-DependencyLoad {
+    param([string]$Dir, [string]$Name)
+
+    if ($Name -eq "backend") {
+        $probeScript = "await import('better-auth'); await import('@better-auth/oauth-provider'); await import('./src/services/databank/web-page-parser.ts'); await import('./src/utils/remote-image-page.ts')"
+    } elseif ($Name -eq "frontend") {
+        # Exercise the browser-facing import that reaches Better Auth's
+        # transitive core files. A package.json-only check misses partial
+        # package extraction such as a missing dist/context/global.mjs.
+        $probeScript = "await import('@better-auth/oauth-provider/client')"
+    } else {
+        return [pscustomobject]@{ Success = $true; Output = "" }
+    }
 
     $previousErrorActionPreference = $ErrorActionPreference
     Push-Location $Dir
@@ -368,7 +475,7 @@ function Test-BackendDependencyLoad {
         # PowerShell 5 promotes redirected native stderr to error records. Keep
         # collecting it for the diagnostic, but judge success by the exit code.
         $ErrorActionPreference = "Continue"
-        $output = (& bun -e "await import('./src/services/databank/web-page-parser.ts'); await import('./src/utils/remote-image-page.ts')" 2>&1 | Out-String).Trim()
+        $output = (& bun -e $probeScript 2>&1 | Out-String).Trim()
         $exitCode = $LASTEXITCODE
     } finally {
         Pop-Location
@@ -387,24 +494,25 @@ function Install-Deps {
     Write-Info "Installing $Name dependencies..."
     Invoke-BunDependencyInstall $Dir
 
-    if ($Name -eq "backend") {
-        $probe = Test-BackendDependencyLoad $Dir
+    if ($Name -in @("backend", "frontend")) {
+        $probe = Test-DependencyLoad $Dir $Name
         if (-not $probe.Success) {
-            Write-Warn "Backend dependency validation failed; performing a clean copy-based reinstall..."
+            Write-Warn "$Name dependency validation failed; clearing the package cache and performing a clean copy-based reinstall..."
+            try { & bun pm cache rm 2>&1 | Out-Null } catch { }
             $nodeModules = Join-Path $Dir "node_modules"
             if (Test-Path $nodeModules) {
                 Remove-Item $nodeModules -Recurse -Force
             }
 
             Invoke-BunDependencyInstall $Dir
-            $probe = Test-BackendDependencyLoad $Dir
+            $probe = Test-DependencyLoad $Dir $Name
             if (-not $probe.Success) {
-                Write-Err "Backend dependencies are still unreadable after a clean copy-based reinstall."
+                Write-Err "$Name dependencies are still unreadable after a clean copy-based reinstall."
                 if ($probe.Output) { Write-Err $probe.Output }
                 Write-Err "Check Windows Defender/antivirus quarantine history and filesystem sync software for blocked package files."
                 exit 1
             }
-            Write-Ok "Backend dependency tree repaired"
+            Write-Ok "$Name dependency tree repaired"
         }
     }
 
@@ -501,6 +609,7 @@ Write-Host ""
 # data directory instead of silently creating a new empty ./data directory.
 Load-EnvFile
 
+Assert-SafeFirstRunLocation
 Ensure-Bun
 Update-BunChannel
 Ensure-MinimumBunVersion
@@ -509,6 +618,7 @@ Ensure-MinimumBunVersion
 if ($MigrateST) { $Mode = "migrate-st" }
 if ($KillPkgs)  { $Mode = "kill-pkgs" }
 if ($EditEnv)   { $Mode = "edit-env" }
+if ($InstallDesktop) { $Mode = "install-desktop" }
 
 switch ($Mode) {
     "all" {
@@ -543,5 +653,12 @@ switch ($Mode) {
     }
     "kill-pkgs" {
         Invoke-KillPkgs
+    }
+    "install-desktop" {
+        Push-Location $BackendDir
+        try {
+            & bun run desktop:install
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        } finally { Pop-Location }
     }
 }

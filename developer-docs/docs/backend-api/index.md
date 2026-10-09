@@ -30,6 +30,7 @@ declare const spindle: import('lumiverse-spindle-types').SpindleAPI
 | [Shared RPC Pool](shared-rpc-pool.md) | Free | Cross-extension latest-state and on-demand reads across the worker isolation boundary |
 | [Ephemeral Storage](ephemeral-storage.md) | `ephemeral_storage` | Temporary storage with TTL and quotas |
 | [Variables](variables.md) | Free | Local (chat-scoped) and global variable access |
+| [Runtime State](runtime-state.md) | Per operation | Read combined chat state and correlate mutation acknowledgements with events |
 | [Tokens](tokens.md) | Free | Count text, message arrays, or stored chats against an explicit model or the main/sidecar model |
 | [Uploads](uploads.md) | Free | Receive large files via a resumable tus endpoint, then read them in the worker by id |
 | [Characters](characters.md) | `characters` | CRUD on character cards |

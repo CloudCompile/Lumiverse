@@ -160,8 +160,21 @@ The `context` parameter is an object containing metadata about the current gener
 | `personaId` | `string` | The active persona ID |
 | `generationType` | `string` | One of `"normal"`, `"continue"`, `"regenerate"`, `"swipe"`, `"impersonate"`, `"quiet"` |
 | `activatedWorldInfo` | `array` | World info entries activated for this generation |
+| `presetId` | `string \| null` | The preset prompt assembly resolved for this generation; `null` without a preset or when the request skips assembly (explicit `messages`) |
+| `presetMetadata` | `unknown` | A copy of your extension's own namespace on that preset, `preset.metadata[<manifest identifier>]`; `undefined` when absent. Other extensions' and Loom's metadata are never included |
 
 The context is read-only for informational purposes. To influence the generation, return modified messages or parameters.
+
+### Running only for some presets
+
+Pass `match.presetField` in the registration options to run the interceptor only when your own preset metadata matches. `path` walks keys from your namespace (the same value as `presetMetadata`); `exists`, `oneOf`, and `notIn` test the value found there.
+
+```ts
+spindle.registerInterceptor(async (messages, context) => {
+  // Runs only for presets whose metadata has `<your identifier>.chatRanges`.
+  return messages
+}, 100, { match: { presetField: { path: ['chatRanges'], exists: true } } })
+```
 
 `"quiet"` can describe a host generation route, but calls made through
 `spindle.generate.quiet()` are direct provider calls and do **not** re-enter
@@ -169,7 +182,7 @@ this interceptor chain. The same is true for extension `raw` and `batch` calls.
 
 ## Timeout
 
-Interceptors run inside a wall-clock budget. When the budget is exceeded, the interceptor is skipped and the pre-interceptor messages are passed through unchanged — the generation still proceeds.
+Interceptors run inside a wall-clock budget. By default, an error or timeout skips the interceptor and passes through the previous messages. Required registrations stop generation instead.
 
 The budget is resolved **per run**, immediately before each invocation, in this order:
 
@@ -204,4 +217,19 @@ When your handler exceeds the budget, the host:
 2. Logs `[Spindle] Interceptor error from <your_id>:` with the rejection
 3. **Passes the last-known message list through** to the next interceptor (or to the LLM if you were last)
 
-This means a partial failure in your extension will never block the user's generation — it just means your modifications didn't land. Design your interceptor so that a timeout is a graceful no-op rather than a corrupted prompt.
+This is the default behavior for optional registrations. Use a required registration when sending the unmodified prompt would be incorrect.
+
+## Required interceptors and cancellation
+
+Hosts advertising `spindle.host.capabilities['required-interceptors-v1'] >= 1` accept `required: true` in the registration options:
+
+```ts
+spindle.registerInterceptor(async (messages, context) => {
+  context.signal.throwIfAborted()
+  return transformMessages(messages, context.signal)
+}, { priority: 100, required: true })
+```
+
+The numeric-priority form also accepts `required` in its third argument. A required interceptor's error or timeout stops the pipeline before subsequent interceptors and the provider request. Optional registrations keep their existing failure policy.
+
+The host aborts `context.signal` on timeout or generation cancellation. Pass it to cancellable work and check it before committing effects. Already accepted effects cannot be rolled back by cancellation; late replies do not resume the cancelled generation.

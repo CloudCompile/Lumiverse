@@ -556,6 +556,7 @@ export function getExtractionStructuredParams(_provider: string, _batch: boolean
 
 export type SidecarGenerateFn = (opts: {
   connectionId: string;
+  requestPurpose?: string;
   messages: Array<{ role: string; content: string }>;
   parameters: Record<string, any>;
   tools?: ToolDefinition[];
@@ -740,7 +741,7 @@ export async function extractWithSidecar(
     /** Logging label for "where this request came from" (e.g. "live",
      *  "rebuild:batch-12"). Appears in dispatch/response log lines. */
     logTag?: string;
-    /** Throw on failure instead of returning null. Required for retry callers
+    /** Throw on failure instead of returning null. Required for fallback callers
      *  that need to distinguish a real error (timeout, network, malformed
      *  response) from a successful "the passage had nothing to extract" result. */
     throwOnFailure?: boolean;
@@ -777,6 +778,8 @@ export async function extractWithSidecar(
     const sentAt = Date.now();
 
     const response = await generateRawFn({
+
+      requestPurpose: "extraction",
       connectionId: sidecarConnectionId,
       messages: [
         { role: "system", content: systemPrompt },
@@ -868,6 +871,7 @@ export async function scoreChunkWithSidecar(
   content: string,
   generateRawFn: (opts: {
     connectionId: string;
+    requestPurpose?: string;
     messages: Array<{ role: string; content: string }>;
     parameters: Record<string, any>;
   }) => Promise<{ content: string }>,
@@ -933,8 +937,8 @@ ${EXTRACTION_GLOBAL_RULES}
 ${EXTRACTION_RULES}`;
 
 // Extract all passages in one LLM request. Results align with input order.
-// Passages the batch drops are retried one by one. A whole batch failure
-// falls back to per chunk extraction.
+// Missing or failed results stay null so the caller can apply its fallback
+// policy without issuing more provider requests.
 /** Per-chunk arbiter input for the batched path. Position-parallel to chunks.
  *  existingGraphEntities is intentionally NOT here — it's the same list across
  *  every chunk in a batch, so it's passed once via batchExistingEntities to
@@ -995,16 +999,6 @@ export async function extractBatchWithSidecar(
     ];
   }
 
-  const perChunkFallback = (idxs: number[]) =>
-    Promise.all(
-      idxs.map((i) =>
-        extractWithSidecar(chunks[i].content, generateRawFn, sidecarConnectionId, {
-          ...options,
-          arbiter: singleChunkArbiterFor(i),
-        }).catch(() => null),
-      ),
-    );
-
   const arbiterActiveByIndex = (options?.perChunkArbiter ?? []).map(
     (a) => !!a && (a.heuristicEntities.length > 0 || a.heuristicRelationships.length > 0),
   );
@@ -1059,6 +1053,8 @@ export async function extractBatchWithSidecar(
     const sentAt = Date.now();
 
     const response = await generateRawFn({
+
+      requestPurpose: "batch extraction",
       connectionId: sidecarConnectionId,
       messages: [
         { role: "system", content: systemPrompt },
@@ -1071,7 +1067,7 @@ export async function extractBatchWithSidecar(
 
     // Be defensive here as this is the boundary for provider-normalized data.
     // A malformed/sparse entry should simply be treated as no batch tool call,
-    // allowing the existing text and per-chunk fallbacks to recover.
+    // allowing the existing text parser to recover without another request.
     const batchToolCall = response.tool_calls?.find(
       (call) => !!call && call.name === TOOL_ANALYZE_PASSAGE_BATCH.name,
     );
@@ -1101,19 +1097,14 @@ export async function extractBatchWithSidecar(
       missing: missing.length,
     });
 
-    // Retry passages the batch response dropped.
     if (missing.length > 0) {
-      console.warn(`[memory-cortex] ${tag}: ${missing.length}/${chunks.length} passage(s) missing from batch response; retrying as per-chunk extraction`);
-      const recovered = await perChunkFallback(missing);
-      missing.forEach((idx, k) => {
-        results[idx] = recovered[k];
-      });
+      console.warn(`[memory-cortex] ${tag}: ${missing.length}/${chunks.length} passage(s) missing from batch response`);
     }
 
     return results;
   } catch (err: any) {
-    console.warn(`[memory-cortex] ${options?.logTag ?? "batch"} failed (${err?.name ?? "Error"}: ${err?.message ?? err}); falling back to per-chunk extraction`);
-    return perChunkFallback(chunks.map((_, i) => i));
+    console.warn(`[memory-cortex] ${options?.logTag ?? "batch"} failed (${err?.name ?? "Error"}: ${err?.message ?? err})`);
+    return chunks.map(() => null);
   }
 }
 
@@ -1126,6 +1117,7 @@ function logSidecarDispatch(
     arbiter: boolean;
     userContent: string;
     connectionId: string;
+    requestPurpose?: string;
     tokenCounter?: (text: string) => number;
     batchExistingCount?: number;
   },

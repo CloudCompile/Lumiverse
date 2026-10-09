@@ -1,12 +1,20 @@
 import { betterAuth } from "better-auth";
 import { createOAuthAccountIssuer } from "better-auth/db";
-import { username, admin, bearer, genericOAuth } from "better-auth/plugins";
+import { username, admin, bearer, genericOAuth, jwt } from "better-auth/plugins";
+import { oauthProvider } from "@better-auth/oauth-provider";
 import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
 import { seedDefaultPreset } from "./default-preset";
-import { getAllowedOrigins } from "../services/trusted-hosts.service";
+import { getAllowedHosts, getAllowedOrigins } from "../services/trusted-hosts.service";
 import { listEnabledSsoAuthConfigs } from "../services/sso-providers.service";
+import {
+  DESKTOP_OAUTH_CLIENT_ID,
+  DESKTOP_OAUTH_CONFIGURED_ORIGIN,
+  DESKTOP_OAUTH_FALLBACK_ORIGIN,
+  DESKTOP_OAUTH_RESOURCE,
+  DESKTOP_STATUS_SCOPE,
+} from "./desktop-oauth";
 
 // ─── Signup gate ────────────────────────────────────────────────────────
 // All signups are blocked unless a valid nonce is presented.
@@ -64,7 +72,15 @@ try {
 
 export const auth = betterAuth({
   database: getDb(),
-  baseURL: process.env.AUTH_BASE_URL || `http://localhost:${env.port}`,
+  baseURL: DESKTOP_OAUTH_CONFIGURED_ORIGIN ?? {
+    // Better Auth resolves the request host only after it matches this startup
+    // snapshot. Operator changes still need a server restart before becoming
+    // OAuth issuers, which prevents an in-flight authorization from changing
+    // identity underneath the client.
+    allowedHosts: [...getAllowedHosts()],
+    fallback: DESKTOP_OAUTH_FALLBACK_ORIGIN,
+    protocol: "auto",
+  },
   basePath: "/api/auth",
   secret: env.authSecret,
   // Dynamic form so that hosts added via the Operator panel (Host-header
@@ -126,6 +142,39 @@ export const auth = betterAuth({
         })]
       : []),
     bearer(),
+    // Leaving jwt.issuer unset makes it follow Better Auth's validated,
+    // request-specific base URL (including /api/auth).
+    jwt({ disableSettingJwtHeader: true }),
+    oauthProvider({
+      loginPage: "/login",
+      consentPage: "/oauth/consent",
+      scopes: ["openid", "profile", "offline_access", DESKTOP_STATUS_SCOPE],
+      resources: [{
+        identifier: DESKTOP_OAUTH_RESOURCE,
+        name: "Lumiverse Desktop API",
+        allowedScopes: ["openid", "profile", "offline_access", DESKTOP_STATUS_SCOPE],
+        accessTokenTtl: 5 * 60,
+        refreshTokenTtl: 30 * 24 * 60 * 60,
+      }],
+      resourceSeedMode: "overwrite",
+      cachedResources: new Set([DESKTOP_OAUTH_RESOURCE]),
+      cachedTrustedClients: new Set([DESKTOP_OAUTH_CLIENT_ID]),
+      // The only client is installed by migration below. Keeping registration
+      // and management closed prevents ordinary accounts from minting their
+      // own clients with this server-owned scope.
+      allowDynamicClientRegistration: false,
+      // Dynamic registration remains disabled by the master switch above.
+      // This secondary flag also tells this Better Auth release to advertise
+      // token_endpoint_auth_method "none" for the pre-provisioned native
+      // public client.
+      allowUnauthenticatedClientRegistration: true,
+      clientPrivileges: () => false,
+      resourcePrivileges: () => false,
+      enforcePerClientResources: false,
+      grantTypes: ["authorization_code", "refresh_token"],
+      accessTokenExpiresIn: 5 * 60,
+      refreshTokenExpiresIn: 30 * 24 * 60 * 60,
+    }),
   ],
   account: {
     accountLinking: {

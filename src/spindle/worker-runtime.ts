@@ -82,6 +82,10 @@ import type {
   ConnectionDispatchDescriptorDTO,
   ImageGenStreamEventDTO,
   ImageGenStreamRequestDTO,
+  ImageGenNativeRequestDTO,
+  ImageGenNativeResultDTO,
+  ImageGenPromptPresetsResultDTO,
+  ImageGenNativeControlWorkerMessage,
   InterceptorContextDTO,
   InterceptorDisposer,
   InterceptorHandler,
@@ -101,6 +105,7 @@ import type {
   MediaTransformResultDTO,
 } from "../services/media.service";
 import { initializeSandbox } from "./worker-runtime-sandbox";
+import type { DesktopCaptureWorkerMessage, SpindleDesktopAPI, DesktopCaptureDevice, CapturedMediaRef } from "./desktop-capture-contract";
 import { deserializeWorkerResponseError } from "./worker-response-error";
 import { deriveCharacterOverlay } from "../utils/color-engine";
 import {
@@ -298,7 +303,15 @@ type ChatAppendMessageOptions =
 type SpindleUserRole = "operator" | "admin" | "user";
 
 type RuntimeWorkerToHost =
+  | DesktopCaptureWorkerMessage
+  | { type: 'context_handler_result'; requestId: string; context: unknown; error?: string }
+  | { type: 'frontend_message'; payload: unknown; userId?: string; frontendSessionId?: string }
+  | { type: 'runtime_state_read'; requestId: string; chatId: string; characterId: string; userId?: string }
+  | { type: 'runtime_state_write'; requestId: string; chatId: string; command: import('./runtime-state').RuntimeStateCommand; userId?: string; mutationId?: string }
+  | { type: 'register_interceptor'; registrationId: string; priority?: number; match?: InterceptorRegistrationMatchOptions['match']; required?: boolean }
+  | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string }
   | WorkerToHost
+  | ImageGenNativeControlWorkerMessage
   | { type: "register_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "unregister_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -308,7 +321,7 @@ type RuntimeWorkerToHost =
       input: Omit<AssembleRequest, "signal">;
       userId?: string;
     }
-  | { type: "register_context_handler"; priority?: number; timeoutMs?: number }
+  | { type: "register_context_handler"; priority?: number; timeoutMs?: number; required?: boolean }
   | {
       type: "chat_append_message";
       requestId: string;
@@ -333,7 +346,6 @@ type RuntimeWorkerToHost =
     }
   | { type: "toast_show"; toastType: "success" | "warning" | "error" | "info"; message: string; title?: string; duration?: number; userId?: string }
   | { type: "prompt_regex_set_owned"; chatIds: string[] }
-  | { type: "image_gen_generate_native"; requestId: string; input: any }
   | { type: "user_storage_read_binary"; requestId: string; path: string; userId?: string }
   | {
       type: "user_storage_write_binary";
@@ -474,7 +486,7 @@ type RuntimeWorkerToHost =
       requestId: string;
       result: unknown;
     }
-  | { type: "register_macro_interceptor"; priority?: number }
+  | { type: "register_macro_interceptor"; priority?: number; handlesOwnedSources?: boolean }
   | {
       type: "macro_interceptor_result";
       requestId: string;
@@ -603,6 +615,8 @@ type RuntimeWorkerToHost =
     };
 
 type RuntimeHostToWorker =
+  | { type: 'context_handler_abort'; requestId: string; reason: string }
+  | { type: 'frontend_message'; payload: unknown; userId: string; frontendSessionId?: string }
   | HostToWorker
   | {
       type: "rpc_pool_request";
@@ -702,7 +716,12 @@ type RuntimeWorldBooksAPI = Omit<SpindleAPI["world_books"], "entries"> & {
 // PromptBlock type also carries host-only sealed-block provenance. Keeping the
 // runtime CRUD surface on the native type avoids narrowing data returned by
 // newer hosts when the installed public type package lags a release.
-type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books"> & {
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop"> & {
+  desktop: SpindleDesktopAPI;
+  runtimeState: {
+    read(chatId: string, characterId: string, userId?: string): Promise<unknown>;
+    write(chatId: string, command: import('./runtime-state').RuntimeStateCommand, userId?: string, mutationId?: string): Promise<unknown>;
+  };
   frontendCapabilities: {
     declare(capability: "message_tag_interceptor"): () => void;
   };
@@ -726,16 +745,6 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books"
   ): Promise<SpindleBatchResult[]>;
   world_books: RuntimeWorldBooksAPI;
   entityExtensions: RuntimeEntityExtensionsAPI;
-  imageGen: SpindleAPI["imageGen"] & {
-    /** Native Lumiverse image pipeline; public types are released separately. */
-    generateNative(input: any): Promise<any>;
-    /**
-     * Generate through a provider that explicitly supports WebSocket preview
-     * images and status updates. The terminal `done` event contains the saved
-     * image result. Breaking out of the iterator aborts the upstream job.
-     */
-    generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void>;
-  };
   mcp: {
     servers: {
       list(options?: { limit?: number; offset?: number; userId?: string }): Promise<{ data: SpindleMcpServerDTO[]; total: number }>;
@@ -785,6 +794,7 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books"
       commit: boolean;
       phase: "prompt" | "display" | "response" | "other";
       sourceHint?: string;
+      sourceOwner?: { extensionIdentifier: string };
       userId?: string;
     }) => Promise<
       | string
@@ -795,7 +805,8 @@ type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "imageGen" | "world_books"
         }
       | void
     >,
-    priority?: number
+    priority?: number,
+    opts?: { handlesOwnedSources?: boolean }
   ): void;
   registerWorldInfoInterceptor(
     handler: (ctx: {
@@ -1073,7 +1084,8 @@ let interceptHandler:
   | InterceptorHandler
   | null = null;
 let interceptRegistrationId: string | null = null;
-let contextHandlerFn: ((context: unknown) => Promise<unknown>) | null = null;
+let contextHandlerFn: ((context: unknown, signal?: AbortSignal) => Promise<unknown>) | null = null;
+const contextAbortControllers = new Map<string, AbortController>();
 let messageContentProcessorFn:
   | ((ctx: unknown) => Promise<unknown>)
   | null = null;
@@ -1086,7 +1098,7 @@ let worldInfoInterceptorFn:
 let oauthCallbackHandler:
   | ((params: Record<string, string>) => Promise<{ html?: string } | void>)
   | null = null;
-const frontendMessageHandlers = new Set<(payload: unknown, userId: string) => void>();
+const frontendMessageHandlers = new Set<(payload: unknown, userId: string, frontendSessionId?: string) => void>();
 const frontendRuntimeCapabilityRefCounts = new Map<"message_tag_interceptor", number>();
 const commandInvokedHandlers = new Set<(commandId: string, context: any) => void | Promise<void>>();
 const permissionDeniedHandlers = new Set<(detail: PermissionDeniedDetail) => void>();
@@ -1497,6 +1509,28 @@ function requestImageGenStream(input: ImageGenStreamInput): AsyncGenerator<Image
 // ─── Spindle API (exposed to extensions as globalThis.spindle) ───────────
 
 const spindleApi: RuntimeSpindleAPI = {
+  desktop: {
+    capture: {
+      async listDevices(options) {
+        return await request({ type: "desktop_capture_devices", requestId: crypto.randomUUID(), userId: options?.userId }) as DesktopCaptureDevice[];
+      },
+      async request(input) {
+        assertMutationAllowed("spindle.desktop.capture.request()");
+        return await request({ type: "desktop_capture_request", requestId: crypto.randomUUID(), input }) as CapturedMediaRef;
+      },
+      async release(assetId, options) {
+        assertMutationAllowed("spindle.desktop.capture.release()");
+        await request({ type: "desktop_capture_release", requestId: crypto.randomUUID(), assetId, userId: options?.userId });
+      },
+    },
+  },
+  runtimeState: {
+    read(chatId, characterId, userId) { return request({ type: 'runtime_state_read', requestId: crypto.randomUUID(), chatId, characterId, userId }); },
+    write(chatId, command, userId, mutationId) {
+      assertMutationAllowed('spindle.runtimeState.write()');
+      return request({ type: 'runtime_state_write', requestId: crypto.randomUUID(), chatId, command, userId, mutationId });
+    },
+  },
   get host(): SpindleHostDescriptorV1 {
     if (!hostDescriptor) throw new Error("Spindle host descriptor is not initialized");
     return hostDescriptor;
@@ -1596,8 +1630,8 @@ const spindleApi: RuntimeSpindleAPI = {
 
   registerInterceptor(
     handler: InterceptorHandler,
-    priorityOrOptions?: number | InterceptorRegistrationOptions,
-    options?: InterceptorRegistrationMatchOptions,
+    priorityOrOptions?: number | (InterceptorRegistrationOptions & { required?: boolean }),
+    options?: InterceptorRegistrationMatchOptions & { required?: boolean },
   ): InterceptorDisposer {
     assertMutationAllowed("spindle.registerInterceptor()");
     const registrationId = crypto.randomUUID();
@@ -1607,9 +1641,10 @@ const spindleApi: RuntimeSpindleAPI = {
     const match = typeof priorityOrOptions === "number"
       ? options?.match
       : priorityOrOptions?.match;
+    const required = (typeof priorityOrOptions === 'number' ? options : priorityOrOptions)?.required === true;
     interceptHandler = handler;
     interceptRegistrationId = registrationId;
-    post({ type: "register_interceptor", registrationId, priority, ...(match ? { match } : {}) });
+    post({ type: "register_interceptor", registrationId, priority, required, ...(match ? { match } : {}) });
     return () => {
       if (interceptRegistrationId !== registrationId) return;
       interceptHandler = null;
@@ -2392,13 +2427,19 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   imageGen: {
+    async getPromptPresets(userId?: string): Promise<ImageGenPromptPresetsResultDTO> {
+      return await request({ type: "image_gen_prompt_presets", requestId: crypto.randomUUID(), userId }) as ImageGenPromptPresetsResultDTO;
+    },
+    async cancelNative(jobId: string, userId?: string) {
+      return await request({ type: "image_gen_cancel_native", requestId: crypto.randomUUID(), jobId, userId }) as boolean;
+    },
     async generate(input: any): Promise<any> {
       const requestId = crypto.randomUUID();
       return request({ type: "image_gen_generate", requestId, input });
     },
-    async generateNative(input: any): Promise<any> {
+    async generateNative(input: ImageGenNativeRequestDTO): Promise<ImageGenNativeResultDTO> {
       const requestId = crypto.randomUUID();
-      return request({ type: "image_gen_generate_native", requestId, input });
+      return await request({ type: "image_gen_generate_native", requestId, input }) as ImageGenNativeResultDTO;
     },
     generateStream(input: ImageGenStreamInput): AsyncGenerator<ImageGenStreamEvent, void, void> {
       return requestImageGenStream(input);
@@ -3986,16 +4027,17 @@ const spindleApi: RuntimeSpindleAPI = {
     preAssemblyGenerationContext: 1,
     worldInfoActivationCapture: 1,
     worldInfoRuntimePlacement: 1,
+    worldInfoOutputOrdering: 1,
   }),
 
   registerContextHandler(
-    handler: (context: unknown) => Promise<unknown>,
+    handler: (context: unknown, signal?: AbortSignal) => Promise<unknown>,
     priority?: number,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; required?: boolean },
   ): void {
     assertMutationAllowed("spindle.registerContextHandler()");
     contextHandlerFn = handler;
-    post({ type: "register_context_handler", priority, timeoutMs: opts?.timeoutMs });
+    post({ type: "register_context_handler", priority, timeoutMs: opts?.timeoutMs, required: opts?.required });
   },
 
   registerMessageContentProcessor(handler, priority?): void {
@@ -4004,10 +4046,10 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_message_content_processor", priority });
   },
 
-  registerMacroInterceptor(handler, priority?): void {
+  registerMacroInterceptor(handler, priority?, opts?: { handlesOwnedSources?: boolean }): void {
     assertMutationAllowed("spindle.registerMacroInterceptor()");
     macroInterceptorFn = handler as (ctx: unknown) => Promise<unknown>;
-    post({ type: "register_macro_interceptor", priority });
+    post({ type: "register_macro_interceptor", priority, handlesOwnedSources: opts?.handlesOwnedSources });
   },
 
   registerWorldInfoInterceptor(handler, priority?): void {
@@ -4016,11 +4058,11 @@ const spindleApi: RuntimeSpindleAPI = {
     post({ type: "register_world_info_interceptor", priority });
   },
 
-  sendToFrontend(payload: unknown, userId?: string): void {
-    post({ type: "frontend_message", payload, userId });
+  sendToFrontend(payload: unknown, userId?: string, options?: { frontendSessionId?: string }): void {
+    post({ type: "frontend_message", payload, userId, frontendSessionId: options?.frontendSessionId });
   },
 
-  onFrontendMessage(handler: (payload: unknown, userId: string) => void): () => void {
+  onFrontendMessage(handler: (payload: unknown, userId: string, frontendSessionId?: string) => void): () => void {
     frontendMessageHandlers.add(handler);
     return () => {
       frontendMessageHandlers.delete(handler);
@@ -4501,7 +4543,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
           post({
             type: "log",
             level: "error",
-            message: `Interceptor error: ${err.message}`,
+            message: `Interceptor error: ${err instanceof Error ? err.message : String(err)}`,
           });
           // Return original messages on error
           post({
@@ -4509,6 +4551,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
             requestId: msg.requestId,
             registrationId: msg.registrationId,
             messages: msg.messages,
+            error: err instanceof Error ? err.message : String(err),
           });
         } finally {
           interceptorAbortControllers.delete(msg.requestId);
@@ -4565,10 +4608,16 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       break;
     }
 
+    case 'context_handler_abort': {
+      contextAbortControllers.get(msg.requestId)?.abort(new Error(msg.reason));
+      break;
+    }
     case "context_handler_request": {
       if (contextHandlerFn) {
+        const controller = new AbortController();
+        contextAbortControllers.set(msg.requestId, controller);
         try {
-          const result = await contextHandlerFn(msg.context);
+          const result = await contextHandlerFn(msg.context, controller.signal);
           post({
             type: "context_handler_result",
             requestId: msg.requestId,
@@ -4578,14 +4627,15 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
           post({
             type: "log",
             level: "error",
-            message: `Context handler error: ${err.message}`,
+            message: `Context handler error: ${err instanceof Error ? err.message : String(err)}`,
           });
           post({
             type: "context_handler_result",
             requestId: msg.requestId,
             context: msg.context,
+            error: err instanceof Error ? err.message : String(err),
           });
-        }
+        } finally { contextAbortControllers.delete(msg.requestId); }
       } else {
         post({
           type: "context_handler_result",
@@ -4854,7 +4904,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
 
       for (const handler of frontendMessageHandlers) {
         try {
-          handler(msg.payload, msg.userId)
+          handler(msg.payload, msg.userId, 'frontendSessionId' in msg ? msg.frontendSessionId : undefined)
         } catch (err: any) {
           post({
             type: "log",

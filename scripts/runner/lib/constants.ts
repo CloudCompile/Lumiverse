@@ -35,8 +35,9 @@ export const TIMEOUT_BUN_INSTALL_TERMUX_MS = 30 * 60_000;
 // Windows Vite builds can legitimately take longer than five minutes on cold
 // disks or when an antivirus scanner inspects generated assets.
 export const TIMEOUT_BUN_BUILD_MS = 10 * 60_000;
-// A Tauri build compiles the whole native dependency tree — tauri, wry, and
-// the platform bindings — the first time it runs. That routinely outlasts the
-// frontend build budget on a laptop, and a timeout kill part-way through
-// leaves the user with nothing to show for the wait.
-export const TIMEOUT_DESKTOP_BUILD_MS = 30 * 60_000;
+// A first Windows build downloads the crates.io index and the entire native
+// dependency graph before compiling tauri, wry, and the platform bindings.
+// Slow disks, antivirus scanning, or a constrained connection can push that
+// well beyond 30 minutes while Cargo is still making steady progress. Keep a
+// firm ceiling for a true hang, but allow a cold build enough time to finish.
+export const TIMEOUT_DESKTOP_BUILD_MS = 2 * 60 * 60_000;

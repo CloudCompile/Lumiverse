@@ -5,18 +5,21 @@ import {
   applyRegexScripts,
   createRegexScript,
   deleteRegexScript,
+  deleteRegexScripts,
   exportRegexScripts,
   getCharacterBoundScripts,
   getRegexScript,
   getRegexScriptByScriptId,
   getRegexScriptsByPresetId,
   getPresetActivationScripts,
+  deleteRegexScriptsByPresetId,
   duplicateRegexScript,
   getSpindleExtensionRegexFolderVersion,
   importRegexScripts,
   importCharacterBoundRegexScripts,
   installLumiHubPresetRegexScripts,
   importPresetBoundRegexScripts,
+  MAX_REGEX_PATTERN_LENGTH,
   resolveLumiHubPresetRegexInstallFolder,
   retireLumiHubPresetRegexScriptsForUpdate,
   reportRegexScriptPerformance,
@@ -36,6 +39,24 @@ function mustGetScript(id: string) {
   const script = getRegexScript(USER_ID, id);
   expect(script).not.toBeNull();
   return script!;
+}
+
+function seedPreset(id: string, userId = USER_ID) {
+  getDb().query("INSERT INTO presets (id, user_id, prompt_order) VALUES (?, ?, ?)").run(id, userId, "[]");
+}
+
+function countScriptsWithPresetLink(presetId: string): number {
+  const row = getDb()
+    .query("SELECT COUNT(*) AS count FROM regex_scripts WHERE preset_id = ?")
+    .get(presetId) as { count: number };
+  return row.count;
+}
+
+function readPresetRestoreList(presetId: string): unknown {
+  const row = getDb()
+    .query("SELECT value FROM settings WHERE key = ? AND user_id = ?")
+    .get(`presetRegexEnabled:${presetId}`, USER_ID) as { value: string } | null;
+  return row ? JSON.parse(row.value) : null;
 }
 
 function runtimeScript(overrides: Partial<RegexScript>): RegexScript {
@@ -175,6 +196,23 @@ describe("preset prompt activation mappings", () => {
     expect(getPresetActivationScripts(USER_ID, "other", { chatId: "chat-1" })).toEqual([]);
     expect(mustGetScript(original.id).disabled).toBe(true);
   });
+
+  test("uses extension-owned disabled state instead of the preset restore snapshot", () => {
+    seedPreset();
+    create();
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension activation",
+      find_regex: "combat",
+      preset_id: "preset-a",
+      metadata: { prompt_activation: activation },
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+
+    expect(getPresetActivationScripts(USER_ID, "preset-a", { chatId: "chat" }).map((s) => s.id))
+      .toContain(extensionRow.id);
+    updateRegexScript(USER_ID, extensionRow.id, { disabled: true }, { extensionIdentifier: "extension.a" });
+    expect(getPresetActivationScripts(USER_ID, "preset-a", { chatId: "chat" }).map((s) => s.id))
+      .not.toContain(extensionRow.id);
+  });
   test("preset exports round-trip mappings into the new preset", () => {
     seedPreset();
     seedPreset("preset-b");
@@ -197,6 +235,10 @@ describe("preset prompt activation mappings", () => {
     expect(getPresetActivationScripts(USER_ID, "preset-b", { chatId: "chat" })[0].metadata.prompt_activation).toEqual(next);
   });
 });
+
+// Byte-exact ownership message: callers compare it verbatim, so this literal is
+// asserted in more than one place. Update it only with a deliberate migration.
+const OWNERSHIP_ERROR = "Regex script is not an unbound script owned by this extension";
 
 describe("extension regex ownership", () => {
   test("attributes an explicitly versioned Spindle folder without affecting unversioned scripts", () => {
@@ -271,11 +313,12 @@ describe("extension regex ownership", () => {
     );
   });
 
-  test("stamps extension-created scripts and strips host-owned bindings", () => {
+  test("stamps extension-created scripts and strips host-owned pack/character bindings", () => {
+    seedPreset("preset-owned");
     const created = createRegexScript(USER_ID, {
       name: "Owned",
       find_regex: "owned",
-      preset_id: "attempted-preset",
+      preset_id: "preset-owned",
       pack_id: "attempted-pack",
       character_id: "attempted-character",
     }, { extensionIdentifier: "extension.a" });
@@ -283,7 +326,7 @@ describe("extension regex ownership", () => {
     expect(typeof created).not.toBe("string");
     const script = created as RegexScript;
     expect(script.owner_extension_identifier).toBe("extension.a");
-    expect(script.preset_id).toBeNull();
+    expect(script.preset_id).toBe("preset-owned");
     expect(script.pack_id).toBeNull();
     expect(script.character_id).toBeNull();
 
@@ -292,19 +335,260 @@ describe("extension regex ownership", () => {
     });
     expect(typeof updated).not.toBe("string");
     expect((updated as RegexScript).name).toBe("Updated");
+    expect((updated as RegexScript).preset_id).toBe("preset-owned");
   });
 
-  test("treats unattributed, foreign, and preset-bound scripts as read-only without disabling them", async () => {
+  test("rejects an unknown or foreign preset link on extension creation", () => {
+    seedPreset("preset-own");
+    seedPreset("preset-foreign", "u2");
+
+    for (const presetId of ["preset-missing", "preset-foreign"]) {
+      expect(createRegexScript(USER_ID, {
+        name: `Orphan ${presetId}`,
+        find_regex: "orphan",
+        preset_id: presetId,
+      }, { extensionIdentifier: "extension.a" })).toBe("Linked preset not found");
+      expect(countScriptsWithPresetLink(presetId)).toBe(0);
+    }
+
+    // A malformed link is rejected instead of silently creating an unbound row.
+    expect(createRegexScript(USER_ID, {
+      name: "Malformed link",
+      find_regex: "malformed",
+      preset_id: 42 as unknown as string,
+    }, { extensionIdentifier: "extension.a" })).toBe("preset_id must be a string or null");
+    // An empty string means "no link", matching the rest of the host API.
+    const unlinked = createRegexScript(USER_ID, {
+      name: "Unlinked",
+      find_regex: "unlinked",
+      preset_id: "",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    expect(unlinked.preset_id).toBeNull();
+
+    // The same preset id is accepted for its own user, and no restore-list entry
+    // is written for a row the preset's activation does not manage.
+    const accepted = createRegexScript(USER_ID, {
+      name: "Linked",
+      find_regex: "linked",
+      preset_id: "preset-own",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    expect(accepted.preset_id).toBe("preset-own");
+    expect(readPresetRestoreList("preset-own")).toBeNull();
+  });
+
+  test("keeps an extension-owned preset-bound script editable and deletable by its owner", () => {
+    seedPreset("preset-1");
+    const created = createRegexScript(USER_ID, {
+      name: "Managed",
+      find_regex: "managed",
+      preset_id: "preset-1",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    expect(created.disabled).toBe(false);
+
+    const edited = updateRegexScript(USER_ID, created.id, { name: "Managed v2", disabled: true }, {
+      extensionIdentifier: "extension.a",
+    });
+    expect(typeof edited).not.toBe("string");
+    expect((edited as RegexScript).name).toBe("Managed v2");
+    expect((edited as RegexScript).disabled).toBe(true);
+    expect(readPresetRestoreList("preset-1")).toBeNull();
+
+    // A preset binding installed by a host flow does not close the row either.
+    const hostBound = createRegexScript(USER_ID, { name: "Host-bound", find_regex: "host_bound" }, {
+      extensionIdentifier: "extension.a",
+    }) as RegexScript;
+    updateRegexScript(USER_ID, hostBound.id, { preset_id: "preset-1" });
+    expect(mustGetScript(hostBound.id).preset_id).toBe("preset-1");
+    expect(mustGetScript(hostBound.id).disabled).toBe(false);
+    expect((updateRegexScript(USER_ID, hostBound.id, { name: "Host-bound v2" }, {
+      extensionIdentifier: "extension.a",
+    }) as RegexScript).name).toBe("Host-bound v2");
+    expect(deleteRegexScript(USER_ID, hostBound.id, { extensionIdentifier: "extension.a" })).toBe(true);
+    expect(getRegexScript(USER_ID, hostBound.id)).toBeNull();
+
+    expect(deleteRegexScript(USER_ID, created.id, { extensionIdentifier: "extension.b" }))
+      .toBe(OWNERSHIP_ERROR);
+    expect(getRegexScript(USER_ID, created.id)).not.toBeNull();
+
+    expect(deleteRegexScript(USER_ID, created.id, { extensionIdentifier: "extension.a" })).toBe(true);
+    expect(getRegexScript(USER_ID, created.id)).toBeNull();
+  });
+
+  test("cascades the preset-delete reap onto extension-owned rows", () => {
+    seedPreset("preset-1");
+    seedPreset("preset-2");
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    const hostRow = createRegexScript(USER_ID, {
+      name: "Host rule",
+      find_regex: "host_rule",
+      preset_id: "preset-1",
+    }) as RegexScript;
+    const otherPresetRow = createRegexScript(USER_ID, {
+      name: "Other preset rule",
+      find_regex: "other_rule",
+      preset_id: "preset-2",
+    }) as RegexScript;
+
+    expect(deleteRegexScriptsByPresetId(USER_ID, "preset-1")).toBe(2);
+    expect(getRegexScript(USER_ID, extensionRow.id)).toBeNull();
+    expect(getRegexScript(USER_ID, hostRow.id)).toBeNull();
+    expect(getRegexScript(USER_ID, otherPresetRow.id)).not.toBeNull();
+  });
+
+  test("leaves extension-owned preset-bound rows out of preset activation state", () => {
+    seedPreset("preset-1");
+    seedPreset("preset-2");
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    const hostRow = createRegexScript(USER_ID, {
+      name: "Host rule",
+      find_regex: "host_rule",
+      preset_id: "preset-1",
+    }, { activePresetId: "preset-1" }) as RegexScript;
+
+    // Preset activation owns the host row only.
+    expect(hostRow.disabled).toBe(false);
+    expect(extensionRow.disabled).toBe(false);
+
+    switchPresetBoundRegexScripts(USER_ID, { previousPresetId: "preset-1", presetId: "preset-2" });
+    expect(mustGetScript(hostRow.id).disabled).toBe(true);
+    expect(mustGetScript(extensionRow.id).disabled).toBe(false);
+
+    // The owner, not the preset, keeps control of its own row's enabled state.
+    updateRegexScript(USER_ID, extensionRow.id, { disabled: true }, { extensionIdentifier: "extension.a" });
+
+    switchPresetBoundRegexScripts(USER_ID, { previousPresetId: "preset-2", presetId: "preset-1" });
+    expect(mustGetScript(hostRow.id).disabled).toBe(false);
+    expect(mustGetScript(extensionRow.id).disabled).toBe(true);
+  });
+
+  test("keeps extension-owned rows out of preset restore state across host toggles", () => {
+    seedPreset("preset-1");
+    const hostRow = createRegexScript(USER_ID, {
+      name: "Host rule",
+      find_regex: "host_rule",
+      preset_id: "preset-1",
+    }, { activePresetId: "preset-1" }) as RegexScript;
+    getDb().query("DELETE FROM settings WHERE key = ? AND user_id = ?")
+      .run("presetRegexEnabled:preset-1", USER_ID);
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+      folder: "Extension rules",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+
+    expect(toggleRegexScript(USER_ID, extensionRow.id, true, { activePresetId: "other" })?.disabled).toBe(true);
+    expect(readPresetRestoreList("preset-1")).toBeNull();
+    expect(toggleRegexScriptsByIds(USER_ID, [extensionRow.id], false, { activePresetId: "other" }))
+      .toEqual({ changedIds: [extensionRow.id], skippedIds: [] });
+    expect(toggleRegexScriptsByFolder(USER_ID, "Extension rules", true, { activePresetId: "other" }))
+      .toEqual({ changedIds: [extensionRow.id], skippedIds: [] });
+    expect(readPresetRestoreList("preset-1")).toBeNull();
+
+    activatePresetBoundRegexScripts(USER_ID, "preset-1");
+    expect(mustGetScript(hostRow.id).disabled).toBe(false);
+    expect(mustGetScript(extensionRow.id).disabled).toBe(true);
+  });
+
+  test("keeps extension-owned rows out of preset restore state on bulk delete", () => {
+    seedPreset("preset-1");
+    const hostRow = createRegexScript(USER_ID, {
+      name: "Host rule",
+      find_regex: "host_rule",
+      preset_id: "preset-1",
+    }, { activePresetId: "preset-1" }) as RegexScript;
+    getDb().query("DELETE FROM settings WHERE key = ? AND user_id = ?")
+      .run("presetRegexEnabled:preset-1", USER_ID);
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+
+    expect(deleteRegexScripts(USER_ID, [extensionRow.id])).toEqual([extensionRow.id]);
+    expect(readPresetRestoreList("preset-1")).toBeNull();
+    activatePresetBoundRegexScripts(USER_ID, "preset-1");
+    expect(mustGetScript(hostRow.id).disabled).toBe(false);
+  });
+
+  test("does not retire extension-owned rows during a remote preset update", () => {
+    seedPreset("preset-1");
+    const extensionRow = createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+      folder: "Extension rules",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+
+    expect(retireLumiHubPresetRegexScriptsForUpdate(USER_ID, {
+      presetId: "preset-1",
+      hubPresetId: "remote-1",
+      previousHubPresetId: "remote-1",
+      previousVersion: "1.0.0",
+      incomingVersion: "2.0.0",
+      presetName: "Remote preset",
+    })).toEqual({ archivedIds: [], replacedIds: [] });
+    expect(mustGetScript(extensionRow.id)).toMatchObject({
+      disabled: false,
+      folder: "Extension rules",
+      owner_extension_identifier: "extension.a",
+    });
+  });
+
+  test("still force-disables host-owned rows bound to an inactive preset", () => {
+    seedPreset("preset-1");
+    seedPreset("preset-2");
+    const dormant = createRegexScript(USER_ID, {
+      name: "Dormant host rule",
+      find_regex: "dormant",
+      preset_id: "preset-1",
+    }, { activePresetId: "preset-2" }) as RegexScript;
+    expect(dormant.disabled).toBe(true);
+    expect(dormant.owner_extension_identifier).toBeNull();
+  });
+
+  test("treats unattributed, foreign, and host-owned preset-bound scripts as read-only without disabling them", async () => {
     const legacy = createRegexScript(USER_ID, { name: "Legacy", find_regex: "legacy" }) as RegexScript;
     const foreign = createRegexScript(USER_ID, { name: "Foreign", find_regex: "foreign" }, {
       extensionIdentifier: "extension.b",
     }) as RegexScript;
-    const bound = createRegexScript(USER_ID, { name: "Bound", find_regex: "bound" }, {
-      extensionIdentifier: "extension.a",
-    }) as RegexScript;
-    updateRegexScript(USER_ID, bound.id, { preset_id: "preset-1" });
+    const hostOwnedBound = createRegexScript(USER_ID, { name: "Bound", find_regex: "bound" }) as RegexScript;
+    updateRegexScript(USER_ID, hostOwnedBound.id, { preset_id: "preset-1" });
 
-    for (const script of [legacy, foreign, bound]) {
+    for (const script of [legacy, foreign, hostOwnedBound]) {
+      expect(updateRegexScript(USER_ID, script.id, { name: "Hijacked" }, {
+        extensionIdentifier: "extension.a",
+      })).toBe(OWNERSHIP_ERROR);
+      expect(deleteRegexScript(USER_ID, script.id, {
+        extensionIdentifier: "extension.a",
+      })).toBe(OWNERSHIP_ERROR);
+      expect(getRegexScript(USER_ID, script.id)).not.toBeNull();
+    }
+
+    expect(await applyRegexScripts(
+      "legacy",
+      [mustGetScript(legacy.id)],
+      "ai_output",
+    )).toBe("");
+  });
+
+  test("keeps the historical ownership error message byte-identical", () => {
+    // Compatibility contract: the refusal text is compared verbatim by callers, so
+    // it is asserted as a literal here in addition to OWNERSHIP_ERROR above.
+    const hostOwned = createRegexScript(USER_ID, { name: "Host rule", find_regex: "host_rule" }) as RegexScript;
+    const foreignOwned = createRegexScript(USER_ID, { name: "Foreign rule", find_regex: "foreign_rule" }, {
+      extensionIdentifier: "extension.b",
+    }) as RegexScript;
+
+    for (const script of [hostOwned, foreignOwned]) {
       expect(updateRegexScript(USER_ID, script.id, { name: "Hijacked" }, {
         extensionIdentifier: "extension.a",
       })).toBe("Regex script is not an unbound script owned by this extension");
@@ -314,11 +598,17 @@ describe("extension regex ownership", () => {
       expect(getRegexScript(USER_ID, script.id)).not.toBeNull();
     }
 
-    expect(await applyRegexScripts(
-      "legacy",
-      [mustGetScript(legacy.id)],
-      "ai_output",
-    )).toBe("");
+    // The same call on a preset-bound row the caller owns is no longer a refusal,
+    // so the historical text is not reachable for it.
+    seedPreset("preset-1");
+    const ownedBound = createRegexScript(USER_ID, {
+      name: "Owned bound rule",
+      find_regex: "owned_bound",
+      preset_id: "preset-1",
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
+    expect(updateRegexScript(USER_ID, ownedBound.id, { name: "Owned bound rule v2" }, {
+      extensionIdentifier: "extension.a",
+    })).toMatchObject({ name: "Owned bound rule v2", preset_id: "preset-1" });
   });
 
   test("allows explicitly-authorized editors to mutate protected scripts without taking ownership", () => {
@@ -333,6 +623,13 @@ describe("extension regex ownership", () => {
     }) as RegexScript;
     const bound = createRegexScript(USER_ID, { name: "Bound", find_regex: "bound" }) as RegexScript;
     updateRegexScript(USER_ID, bound.id, { preset_id: "preset-1" });
+    seedPreset("preset-owned");
+    const extensionBound = createRegexScript(USER_ID, {
+      name: "Extension bound",
+      find_regex: "extension_bound",
+      preset_id: "preset-owned",
+      disabled: true,
+    }, { extensionIdentifier: "extension.a" }) as RegexScript;
 
     const context = { extensionIdentifier: "editor.extension", allowUnownedMutation: true };
     const updatedLegacy = updateRegexScript(USER_ID, legacy.id, { name: "Edited legacy" }, context) as RegexScript;
@@ -349,6 +646,8 @@ describe("extension regex ownership", () => {
 
     expect((updateRegexScript(USER_ID, bound.id, { name: "Edited bound" }, context) as RegexScript).name)
       .toBe("Edited bound");
+    expect((updateRegexScript(USER_ID, extensionBound.id, { disabled: false }, context) as RegexScript).disabled)
+      .toBe(false);
     expect(deleteRegexScript(USER_ID, foreign.id, context)).toBe(true);
     expect(getRegexScript(USER_ID, foreign.id)).toBeNull();
   });
@@ -425,6 +724,25 @@ describe("regex export", () => {
     expect(out.scripts).toHaveLength(2);
     expect(out.scripts.find((s) => s.name === "Enabled In Preset")?.disabled).toBe(false);
     expect(out.scripts.find((s) => s.name === "Disabled In Preset")?.disabled).toBe(true);
+  });
+
+  test("preset export preserves extension-owned enablement outside the restore snapshot", () => {
+    seedPreset("preset-1");
+    createRegexScript(USER_ID, {
+      name: "Host rule",
+      find_regex: "host_rule",
+      preset_id: "preset-1",
+    }, { activePresetId: "preset-1" });
+    createRegexScript(USER_ID, {
+      name: "Extension rule",
+      find_regex: "extension_rule",
+      preset_id: "preset-1",
+      disabled: false,
+    }, { extensionIdentifier: "extension.a" });
+
+    const extensionExport = exportRegexScripts(USER_ID, { presetId: "preset-1" }).scripts
+      .find((script) => script.name === "Extension rule");
+    expect(extensionExport?.disabled).toBe(false);
   });
 
   test("can export only scripts in a folder", () => {
@@ -919,6 +1237,22 @@ describe("regex performance reporting", () => {
       flags: "gg",
     });
     expect(typeof result).toBe("string");
+  });
+
+  test("accepts bounded large patterns and rejects patterns over 50k", () => {
+    const accepted = createRegexScript(USER_ID, {
+      name: "Large imported pattern",
+      find_regex: "a".repeat(27_302),
+      flags: "g",
+    });
+    expect(typeof accepted).not.toBe("string");
+
+    const rejected = createRegexScript(USER_ID, {
+      name: "Oversized pattern",
+      find_regex: "a".repeat(MAX_REGEX_PATTERN_LENGTH + 1),
+      flags: "g",
+    });
+    expect(rejected).toBe("find_regex exceeds maximum length");
   });
 });
 

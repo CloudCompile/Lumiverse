@@ -46,6 +46,8 @@ describe("AnthropicProvider thinking config", () => {
 
   for (const model of [
     "claude-opus-5-20260813",
+    "claude-opus-5-5",
+    "claude-opus-5.5",
     "claude-sonnet-5-20260813",
     "claude-fable-5-20260813",
     "claude-future-family-5.1",

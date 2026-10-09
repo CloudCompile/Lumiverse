@@ -22,10 +22,10 @@
 /* The Tauri shell is frameless; the frontend supplies its complete title bar. */
 :global(html[data-tauri-desktop]) .titlebar {
   display: block;
-  height: 36px;
-  border-top-left-radius: var(--desktop-window-corner-radius);
-  border-top-right-radius: var(--desktop-window-corner-radius);
+  height: var(--app-desktop-titlebar-height, 36px);
+  border-radius: var(--desktop-window-corner-radius) var(--desktop-window-corner-radius) 0 0;
   overflow: hidden;
+  z-index: var(--app-window-chrome-z-index, 12000);
 }
 
 :global(html[data-tauri-desktop]) .dragRegion {
@@ -33,9 +33,10 @@
   /* Keep the native resize target unclaimed. The drag-region handler starts
      a window move on mouse-down, so covering even the top edge would steal
      its 1px resize hit area. */
-  /* The equal side insets reserve the caption controls on the right and an
-     invisible matching gutter on the left, keeping the title truly centered. */
-  inset: 4px 100px;
+  /* Let the drag surface fill the rest of the custom titlebar. The controls
+     are a higher-z-index sibling, so they remain clickable without creating
+     broad dead gutters around the centered title. */
+  inset: 1px 1px 0;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -76,6 +77,9 @@
   align-items: stretch;
   gap: 4px;
   pointer-events: auto;
+  /* This only orders the controls above the sibling drag region. The
+     titlebar itself owns the application-wide chrome layer. */
+  z-index: 1;
 }
 
 .windowControl {
@@ -109,6 +113,7 @@
 @media (display-mode: window-controls-overlay) {
   .titlebar {
     display: block;
+    height: var(--app-window-controls-overlay-top, 32px);
   }
 
   /* Browser PWAs keep their host-provided window-control buttons. */
@@ -122,7 +127,6 @@
      Keep the titlebar background uniform so the lights don't sit on a
      darker patch, and nudge the drag region past the light cluster. */
   :global(html[data-platform="macos"]) .titlebar {
-    height: max(env(titlebar-area-height, 40px), 40px);
     background: color-mix(in srgb, var(--lumiverse-bg-deep) 86%, transparent);
   }
 
@@ -130,7 +134,7 @@
     top: max(env(titlebar-area-y, 0px), 6px);
     left: max(env(titlebar-area-x, 78px), 78px);
     width: calc(100% - max(env(titlebar-area-x, 78px), 78px));
-    height: max(env(titlebar-area-height, 40px), 40px);
+    height: calc(var(--app-window-controls-overlay-top, 40px) - max(env(titlebar-area-y, 0px), 6px));
     padding-left: 12px;
     justify-content: center;
   }

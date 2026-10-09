@@ -14,6 +14,7 @@ Every extension needs a `spindle.json` at the repository root.
   "permissions": ["generation", "interceptor"],
   "entry_backend": "dist/backend.js",
   "entry_frontend": "dist/frontend.js",
+  "entry_frontend_widget": "dist/widget.js",
   "minimum_lumiverse_version": "0.1.0"
 }
 ```
@@ -33,6 +34,7 @@ Every extension needs a `spindle.json` at the repository root.
 | `requested_capabilities` | No | Array of declared backend capabilities that suppress specific install-time scanner blocks. See [Backend Capabilities](capabilities.md) |
 | `entry_backend` | No | Path to backend entry. Default: `"dist/backend.js"` |
 | `entry_frontend` | No | Path to frontend entry. Default: `"dist/frontend.js"` |
+| `entry_frontend_widget` | No | Path to an optional lightweight frontend entry used only by native Lumiverse Desktop floating-widget pop-outs. The module must export `setupWidget(ctx, target)`. If omitted, pop-outs use `entry_frontend` and its normal `setup(ctx)` export for backward compatibility. |
 | `minimum_lumiverse_version` | No | Minimum Lumiverse version required |
 | `storage_seed_files` | No | Files/directories to copy into extension storage on install (see below) |
 | `interceptorTimeoutMs` | No | Per-extension override (in milliseconds) for how long the host will wait for this extension's interceptor to return. See [Interceptor Timeout](#interceptor-timeout) below |

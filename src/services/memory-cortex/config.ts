@@ -63,7 +63,7 @@ export interface CortexModelFallbackPair {
 }
 
 export interface SidecarReliabilityConfig {
-  /** What to do when the sidecar fails after exhausting retries.
+  /** What to do when the sidecar fails on all configured connections.
    *  - "heuristic": persist heuristic output for this chunk (legacy behavior).
    *    Heuristic salience/entities/relations leak into the graph even though the
    *    user asked for sidecar-quality results.
@@ -71,10 +71,6 @@ export interface SidecarReliabilityConfig {
    *    warmup signature. The next cortex warmup re-processes it. Equivalent to
    *    the "AI Only" mode users have asked for. */
   fallback: "heuristic" | "skip";
-  /** Additional sidecar attempts after the first call (0 = no retry, legacy). */
-  maxRetries: number;
-  /** Base backoff in ms between sidecar attempts. Doubled per retry. */
-  retryDelayMs: number;
   /** When true and the sidecar succeeded, the sidecar judges heuristic entities
    *  and relationships extracted for this chunk: rejected heuristics are
    *  dropped, transformed ones are renamed to the sidecar's canonical form
@@ -297,8 +293,6 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   sidecarTimeoutMs: 60000,
   sidecarReliability: {
     fallback: "heuristic",
-    maxRetries: 0,
-    retryDelayMs: 500,
     arbitratesHeuristics: false,
     gradesExistingRecords: false,
   },
@@ -698,14 +692,6 @@ export function normalizeCortexConfig(
     sidecarTimeoutMs: input.sidecarTimeoutMs ?? defaults.sidecarTimeoutMs,
     sidecarReliability: {
       fallback: input.sidecarReliability?.fallback === "skip" ? "skip" : defaults.sidecarReliability.fallback,
-      maxRetries: normalizeNonNegativeInt(
-        input.sidecarReliability?.maxRetries,
-        defaults.sidecarReliability.maxRetries,
-      ),
-      retryDelayMs: normalizeNonNegativeInt(
-        input.sidecarReliability?.retryDelayMs,
-        defaults.sidecarReliability.retryDelayMs,
-      ),
       arbitratesHeuristics: input.sidecarReliability?.arbitratesHeuristics
         ?? defaults.sidecarReliability.arbitratesHeuristics,
       gradesExistingRecords: input.sidecarReliability?.gradesExistingRecords
@@ -764,11 +750,6 @@ export function normalizeCortexConfig(
 }
 
 function normalizeRequestsPerMinute(value: number | null | undefined, fallback: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-  return Math.max(0, Math.floor(value));
-}
-
-function normalizeNonNegativeInt(value: number | null | undefined, fallback: number): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
   return Math.max(0, Math.floor(value));
 }

@@ -8,14 +8,18 @@
     "urls": [
       "http://127.0.0.1:*",
       "http://localhost:*",
-      "http://*",
-      "https://*"
+      "http://*:*",
+      "https://*:*"
     ]
   },
   "permissions": [
     "allow-configure-frontend-appearance",
+    "desktop-frontend-presence",
+    "desktop-discord-presence-refresh",
     "desktop-startup-appearance",
     "desktop-widget-catalog",
+    "desktop-notification-registration",
+    "notification:allow-is-permission-granted",
     "core:event:allow-listen",
     "core:event:allow-unlisten",
     "core:window:allow-start-dragging",

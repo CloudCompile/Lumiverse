@@ -26,8 +26,6 @@ function configWith(overrides: Partial<MemoryCortexConfig> = {}): MemoryCortexCo
     sidecarReliability: {
       ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
       fallback: "heuristic",
-      maxRetries: 1,
-      retryDelayMs: 1,
     },
     ...overrides,
   });
@@ -69,8 +67,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "heuristic",
-          maxRetries: 0,
-          retryDelayMs: 0,
         },
       }),
       extract: async (target) => {
@@ -87,7 +83,7 @@ describe("runQueryGenerationSidecar", () => {
     expect(calls).toEqual(["primary-conn", "secondary-conn", "tertiary-conn"]);
   });
 
-  test("fails over to secondary after primary retries exhaust", async () => {
+  test("fails over to secondary after one primary failure", async () => {
     const calls: string[] = [];
     const decision = await runQueryGenerationSidecar({
       userId: "user-1",
@@ -103,7 +99,7 @@ describe("runQueryGenerationSidecar", () => {
     expect(decision.role).toBe("secondary");
     expect(decision.persist).toBe(true);
     expect(decision.useHeuristic).toBe(false);
-    expect(calls).toEqual(["primary:1", "primary:2", "secondary:1"]);
+    expect(calls).toEqual(["primary:1", "secondary:1"]);
   });
 
   test("falls back to heuristic after primary and secondary fail", async () => {
@@ -113,8 +109,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "heuristic",
-          maxRetries: 0,
-          retryDelayMs: 0,
         },
       }),
       extract: async () => {
@@ -134,8 +128,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "skip",
-          maxRetries: 0,
-          retryDelayMs: 0,
         },
       }),
       extract: async () => {
@@ -169,7 +161,7 @@ describe("runQueryGenerationSidecar", () => {
     expect(calls).toEqual(["primary"]);
   });
 
-  test("caller cancellation during retry stops the chain without a memory write", async () => {
+  test("caller cancellation after a provider failure stops the chain without a memory write", async () => {
     const controller = new AbortController();
     const calls: number[] = [];
     const decision = await runQueryGenerationSidecar({
@@ -178,8 +170,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "heuristic",
-          maxRetries: 1,
-          retryDelayMs: 30,
         },
       }),
       signal: controller.signal,
@@ -205,8 +195,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "heuristic",
-          maxRetries: 0,
-          retryDelayMs: 0,
         },
       }),
       signal: controller.signal,
@@ -256,8 +244,6 @@ describe("runQueryGenerationSidecar", () => {
         sidecarReliability: {
           ...DEFAULT_CORTEX_CONFIG.sidecarReliability,
           fallback: "skip",
-          maxRetries: 0,
-          retryDelayMs: 0,
         },
       }),
       extract: async (target) => {

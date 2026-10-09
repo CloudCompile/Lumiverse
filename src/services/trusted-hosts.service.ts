@@ -236,6 +236,24 @@ function baselineEntries(): TrustedHostEntry[] {
   return out;
 }
 
+/** Preserve the scheme of explicitly configured CORS origins. */
+function environmentOriginsByHost(): Map<string, Set<string>> {
+  const origins = new Map<string, Set<string>>();
+  for (const value of env.trustedOrigins) {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") continue;
+      const host = parsed.host.toLowerCase();
+      const values = origins.get(host) ?? new Set<string>();
+      values.add(parsed.origin.toLowerCase());
+      origins.set(host, values);
+    } catch {
+      // Malformed values are ignored here just as they are in baselineEntries.
+    }
+  }
+  return origins;
+}
+
 // ─── State ──────────────────────────────────────────────────────────────────
 
 let configuredHosts: string[] = [];
@@ -246,14 +264,20 @@ let loaded = false;
 
 function rebuildCaches(): void {
   const baseline = baselineEntries();
+  const environmentOrigins = environmentOriginsByHost();
   const hosts = new Set<string>();
   for (const e of baseline) hosts.add(e.host);
   for (const entry of configuredTrustedInputs) hosts.add(entry.host);
 
   const origins = new Set<string>();
   for (const entry of baseline) {
-    origins.add(`http://${entry.host}`);
-    origins.add(`https://${entry.host}`);
+    const explicitOrigins = environmentOrigins.get(entry.host);
+    if (explicitOrigins) {
+      for (const origin of explicitOrigins) origins.add(origin);
+    } else {
+      origins.add(`http://${entry.host}`);
+      origins.add(`https://${entry.host}`);
+    }
   }
   for (const entry of configuredTrustedInputs) {
     for (const origin of entry.origins) origins.add(origin);

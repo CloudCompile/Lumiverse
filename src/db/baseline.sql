@@ -249,6 +249,20 @@ CREATE TABLE databanks (
   updated_at  INTEGER NOT NULL
 );
 
+CREATE TABLE desktop_notification_destinations (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  device_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL,
+  token_prefix TEXT NOT NULL,
+  label TEXT NOT NULL DEFAULT 'Lumiverse Desktop',
+  platform TEXT NOT NULL DEFAULT '',
+  user_agent TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_seen_at INTEGER
+);
+
 CREATE TABLE dream_weaver_messages (
   id            TEXT PRIMARY KEY,
   session_id    TEXT NOT NULL,
@@ -394,7 +408,7 @@ CREATE TABLE illarin_delivery_receipt (
   content_generation INTEGER NOT NULL,
   installed_at TEXT NOT NULL DEFAULT (datetime('now')),
   acknowledged_at TEXT,
-  PRIMARY KEY (user_id, delivery_id)
+  PRIMARY KEY (user_id, instance_id, delivery_id)
 );
 
 CREATE TABLE image_gen_connections (
@@ -1199,6 +1213,15 @@ CREATE INDEX idx_databanks_scope ON databanks(user_id, scope, scope_id);
 
 CREATE INDEX idx_databanks_user ON databanks(user_id);
 
+CREATE UNIQUE INDEX idx_desktop_notification_token
+  ON desktop_notification_destinations(token_hash);
+
+CREATE INDEX idx_desktop_notification_user
+  ON desktop_notification_destinations(user_id, created_at DESC);
+
+CREATE UNIQUE INDEX idx_desktop_notification_user_device
+  ON desktop_notification_destinations(user_id, device_id);
+
 CREATE INDEX idx_dw_saved_prompts_user
   ON dream_weaver_saved_prompts(user_id, updated_at DESC);
 
@@ -1521,3 +1544,225 @@ CREATE TRIGGER world_book_entries_fts_update_after AFTER UPDATE ON world_book_en
   INSERT INTO world_book_entries_fts(rowid, comment, content, key, keysecondary)
     VALUES (new.rowid, new.comment, new.content, new.key, new.keysecondary);
 END;
+
+-- Better Auth OAuth 2.1 Provider + JWT signing schema. The desktop client is
+-- public (no secret), native, PKCE-only, and restricted to the read-only
+-- desktop status capability configured in src/auth/index.ts.
+
+CREATE TABLE IF NOT EXISTS "jwks" (
+  id TEXT PRIMARY KEY NOT NULL,
+  publicKey TEXT NOT NULL,
+  privateKey TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  expiresAt INTEGER,
+  alg TEXT,
+  crv TEXT
+);
+
+CREATE TABLE IF NOT EXISTS "oauthClient" (
+  id TEXT PRIMARY KEY NOT NULL,
+  clientId TEXT NOT NULL UNIQUE,
+  clientSecret TEXT,
+  clientDiscoveryId TEXT,
+  disabled INTEGER DEFAULT 0,
+  skipConsent INTEGER,
+  enableEndSession INTEGER,
+  subjectType TEXT,
+  scopes TEXT,
+  clientCredentialsScopes TEXT DEFAULT '[]',
+  userId TEXT REFERENCES "user"(id) ON DELETE CASCADE,
+  createdAt INTEGER,
+  updatedAt INTEGER,
+  name TEXT,
+  uri TEXT,
+  icon TEXT,
+  contacts TEXT,
+  tos TEXT,
+  policy TEXT,
+  softwareId TEXT,
+  softwareVersion TEXT,
+  softwareStatement TEXT,
+  redirectUris TEXT NOT NULL,
+  postLogoutRedirectUris TEXT,
+  backchannelLogoutUri TEXT,
+  backchannelLogoutSessionRequired INTEGER,
+  tokenEndpointAuthMethod TEXT,
+  applicationType TEXT,
+  jwks TEXT,
+  jwksUri TEXT,
+  grantTypes TEXT,
+  responseTypes TEXT,
+  requirePKCE INTEGER,
+  dpopBoundAccessTokens INTEGER DEFAULT 0,
+  referenceId TEXT,
+  metadata TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_client_user ON "oauthClient"(userId);
+
+CREATE TABLE IF NOT EXISTS "oauthResource" (
+  id TEXT PRIMARY KEY NOT NULL,
+  identifier TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  accessTokenTtl INTEGER,
+  refreshTokenTtl INTEGER,
+  signingAlgorithm TEXT,
+  signingKeyId TEXT,
+  allowedScopes TEXT,
+  customClaims TEXT,
+  dpopBoundAccessTokensRequired INTEGER DEFAULT 0,
+  disabled INTEGER DEFAULT 0,
+  createdAt INTEGER,
+  updatedAt INTEGER,
+  policyVersion INTEGER DEFAULT 1,
+  metadata TEXT
+);
+
+CREATE TABLE IF NOT EXISTS "oauthClientResource" (
+  id TEXT PRIMARY KEY NOT NULL,
+  clientId TEXT NOT NULL REFERENCES "oauthClient"(clientId) ON DELETE CASCADE,
+  resourceId TEXT NOT NULL REFERENCES "oauthResource"(identifier) ON DELETE CASCADE,
+  metadata TEXT,
+  createdAt INTEGER,
+  UNIQUE(clientId, resourceId)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_client_resource_client ON "oauthClientResource"(clientId);
+CREATE INDEX IF NOT EXISTS idx_oauth_client_resource_resource ON "oauthClientResource"(resourceId);
+
+CREATE TABLE IF NOT EXISTS "oauthRefreshToken" (
+  id TEXT PRIMARY KEY NOT NULL,
+  token TEXT NOT NULL UNIQUE,
+  clientId TEXT NOT NULL REFERENCES "oauthClient"(clientId) ON DELETE CASCADE,
+  sessionId TEXT REFERENCES "session"(id) ON DELETE SET NULL,
+  userId TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  referenceId TEXT,
+  authorizationCodeId TEXT,
+  resources TEXT,
+  requestedUserInfoClaims TEXT,
+  expiresAt INTEGER NOT NULL,
+  createdAt INTEGER NOT NULL,
+  revoked INTEGER,
+  rotatedAt INTEGER,
+  rotationReplayResponse TEXT,
+  rotationReplayExpiresAt INTEGER,
+  authTime INTEGER,
+  confirmation TEXT,
+  scopes TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_client ON "oauthRefreshToken"(clientId);
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_session ON "oauthRefreshToken"(sessionId);
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_user ON "oauthRefreshToken"(userId);
+CREATE INDEX IF NOT EXISTS idx_oauth_refresh_code ON "oauthRefreshToken"(authorizationCodeId);
+
+CREATE TABLE IF NOT EXISTS "oauthAccessToken" (
+  id TEXT PRIMARY KEY NOT NULL,
+  token TEXT UNIQUE,
+  clientId TEXT NOT NULL REFERENCES "oauthClient"(clientId) ON DELETE CASCADE,
+  sessionId TEXT REFERENCES "session"(id) ON DELETE SET NULL,
+  userId TEXT REFERENCES "user"(id) ON DELETE CASCADE,
+  referenceId TEXT,
+  authorizationCodeId TEXT,
+  resources TEXT,
+  requestedUserInfoClaims TEXT,
+  refreshId TEXT REFERENCES "oauthRefreshToken"(id) ON DELETE CASCADE,
+  expiresAt INTEGER NOT NULL,
+  createdAt INTEGER NOT NULL,
+  revoked INTEGER,
+  confirmation TEXT,
+  scopes TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_access_client ON "oauthAccessToken"(clientId);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_session ON "oauthAccessToken"(sessionId);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_user ON "oauthAccessToken"(userId);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_code ON "oauthAccessToken"(authorizationCodeId);
+CREATE INDEX IF NOT EXISTS idx_oauth_access_refresh ON "oauthAccessToken"(refreshId);
+
+CREATE TABLE IF NOT EXISTS "oauthConsent" (
+  id TEXT PRIMARY KEY NOT NULL,
+  clientId TEXT NOT NULL REFERENCES "oauthClient"(clientId) ON DELETE CASCADE,
+  userId TEXT REFERENCES "user"(id) ON DELETE CASCADE,
+  referenceId TEXT,
+  resources TEXT,
+  requestedUserInfoClaims TEXT,
+  scopes TEXT NOT NULL,
+  createdAt INTEGER NOT NULL,
+  updatedAt INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_consent_client ON "oauthConsent"(clientId);
+CREATE INDEX IF NOT EXISTS idx_oauth_consent_user ON "oauthConsent"(userId);
+
+CREATE TABLE IF NOT EXISTS "oauthClientAssertion" (
+  id TEXT PRIMARY KEY NOT NULL,
+  expiresAt INTEGER NOT NULL
+);
+
+INSERT INTO "oauthClient" (
+  id, clientId, disabled, skipConsent, enableEndSession, scopes,
+  clientCredentialsScopes, createdAt, updatedAt, name, redirectUris,
+  tokenEndpointAuthMethod, applicationType, grantTypes, responseTypes,
+  requirePKCE, dpopBoundAccessTokens
+) VALUES (
+  'lumiverse-desktop',
+  'lumiverse-desktop',
+  0,
+  1,
+  0,
+  '["openid","profile","offline_access","desktop:instance-status:read"]',
+  '[]',
+  unixepoch(),
+  unixepoch(),
+  'Lumiverse Desktop',
+  '["http://127.0.0.1/callback"]',
+  'none',
+  'native',
+  '["authorization_code","refresh_token"]',
+  '["code"]',
+  1,
+  0
+) ON CONFLICT(clientId) DO UPDATE SET
+  disabled = 0,
+  skipConsent = 1,
+  scopes = excluded.scopes,
+  redirectUris = excluded.redirectUris,
+  tokenEndpointAuthMethod = 'none',
+  applicationType = 'native',
+  grantTypes = excluded.grantTypes,
+  responseTypes = excluded.responseTypes,
+  requirePKCE = 1,
+  updatedAt = unixepoch();
+
+-- 122: UI-only entry organization.
+ALTER TABLE world_book_entries ADD COLUMN folder TEXT NOT NULL DEFAULT '';
+ALTER TABLE world_book_entries ADD COLUMN tags TEXT NOT NULL DEFAULT '[]';
+
+-- 123: CharacterLibrary migration jobs and item identities.
+-- Account-scoped, resumable bundle jobs. Archive paths are derived from job IDs.
+CREATE TABLE cl_migration_jobs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL,
+  archive_sha256 TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ready',
+  preview TEXT NOT NULL,
+  progress TEXT NOT NULL DEFAULT '{}',
+  report TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX idx_cl_migration_jobs_user ON cl_migration_jobs(user_id, created_at DESC);
+
+CREATE TABLE cl_migration_items (
+  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  source_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  source_key TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  destination_id TEXT NOT NULL,
+  completed_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, source_id, kind, source_key)
+);

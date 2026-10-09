@@ -79,7 +79,7 @@
       "description": "Configure reasoning, chain-of-thought, and prompt behavior"
     },
     "panel-loom": {
-      "label": "Loom",
+      "label": "Preset",
       "description": "Configure narrative structure and story beats"
     },
     "panel-dream-weaver": {

@@ -21,7 +21,7 @@ if (visible) {
 
 ### `spindle.users.isVisible(userId?)`
 
-Returns `true` if the user has the app visible in at least one browser tab or PWA window. Returns `false` if all sessions are hidden/backgrounded, or the user has no active WebSocket connections.
+Returns `true` if the user has the app active in at least one browser tab, PWA window, or desktop companion window. Returns `false` if all sessions are hidden/backgrounded, or the user has no active WebSocket connections.
 
 | Parameter | Type | Description |
 |---|---|---|
@@ -43,10 +43,10 @@ Lumiverse's internal owner account is reported as `operator`. Admin accounts are
 
 ## How It Works
 
-The Lumiverse frontend automatically reports page visibility to the backend over the WebSocket connection using the [Page Visibility API](https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API). The backend tracks visibility per-user, per-session:
+The Lumiverse frontend automatically reports presence to the backend over the WebSocket connection. Browser and PWA sessions combine the [Page Visibility API](https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API) with window focus. The Tauri desktop companion reports native window visibility, minimized state, and focus so a WebView that remains loaded in the tray is not mistaken for an active user. The backend tracks the resulting status per-user, per-session:
 
-- When a tab/window gains focus or becomes visible, the session is marked **visible**
-- When a tab/window is hidden or backgrounded, the session is marked **hidden**
+- When a tab/window is visible and frontmost, the session is marked **visible**
+- When a tab/window is hidden, minimized, closed to the tray, or behind another window, the session is marked **hidden**
 - When a WebSocket disconnects (tab closed, app quit), the session is removed
 
 `isVisible()` returns `true` if **any** of the user's sessions are currently visible. This correctly handles multiple tabs, multiple devices, and PWA windows.

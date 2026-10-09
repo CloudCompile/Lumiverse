@@ -13,6 +13,8 @@ import {
 } from "./google-search";
 import { splitLeadingSystemMessagePrefix } from "../system-message-prefix";
 import { normalizeGoogleMediaMimeType } from "./google-media";
+import { AnthropicProvider } from "./anthropic";
+import { OpenAICompatibleProvider } from "./openai-compatible";
 
 // ── Service account JWT → OAuth2 access token ──────────────────────────────
 
@@ -211,6 +213,180 @@ export async function listVertexLocations(apiKey: string): Promise<string[]> {
   return allLocations.sort();
 }
 
+// ── Model Garden protocol routing ──────────────────────────────────────────
+
+export type VertexModelRoute =
+  | { protocol: "gemini"; publisher: "google"; model: string }
+  | { protocol: "anthropic"; publisher: "anthropic"; model: string }
+  | { protocol: "openai"; publisher: string; model: string; publisherEndpoint: boolean };
+
+/** Publishers whose managed partner API uses OpenAI-shaped rawPredict rather
+ * than the shared OpenAI endpoint. Open MaaS publishers use `endpoints/openapi`.
+ */
+const OPENAI_RAW_PREDICT_PUBLISHERS = new Set(["ai21", "mistralai"]);
+
+/** Publisher catalogs that contain managed text-generation APIs supported by
+ * the routing above. Open-model catalogs are filtered to their `-maas` entries
+ * so self-deploy-only Model Garden cards are not presented as callable APIs.
+ */
+const VERTEX_MANAGED_PUBLISHERS = [
+  "google",
+  "anthropic",
+  "ai21",
+  "mistralai",
+  "xai",
+  "meta",
+  "deepseek-ai",
+  "qwen",
+  "moonshotai",
+  "minimaxai",
+  "zai-org",
+  "openai",
+] as const;
+
+const VERTEX_OPEN_MAAS_PUBLISHERS = new Set([
+  "meta",
+  "deepseek-ai",
+  "qwen",
+  "moonshotai",
+  "minimaxai",
+  "zai-org",
+  "openai",
+]);
+
+/** Model Garden documentation sometimes presents only a bare model name even
+ * though the shared Chat Completions API requires `publisher/model`.
+ */
+const MODEL_PUBLISHER_PREFIXES: Array<[RegExp, string]> = [
+  [/^claude(?:-|$)/i, "anthropic"],
+  [/^(?:mistral|codestral)(?:-|$)/i, "mistralai"],
+  [/^jamba(?:-|$)/i, "ai21"],
+  [/^grok(?:-|$)/i, "xai"],
+  [/^llama(?:-|$)/i, "meta"],
+  [/^deepseek(?:-|$)/i, "deepseek-ai"],
+  [/^qwen(?:-|$)/i, "qwen"],
+  [/^kimi(?:-|$)/i, "moonshotai"],
+  [/^minimax(?:-|$)/i, "minimaxai"],
+  [/^glm(?:-|$)/i, "zai-org"],
+  [/^gpt-oss(?:-|$)/i, "openai"],
+  [/^gemma.*-maas(?:$|[-.:@])/i, "google"],
+];
+
+/**
+ * Resolve the protocol required by a Vertex Model Garden identifier.
+ *
+ * Accepted forms include the bare IDs shown on model cards, `publisher/model`,
+ * `publishers/{publisher}/models/{model}`, and fully-qualified Vertex resource
+ * names. Unknown bare IDs retain the historical Gemini behavior.
+ */
+export function resolveVertexModelRoute(input: string): VertexModelRoute {
+  let value = (input || "").trim().replace(/^\/+|\/+$/g, "");
+  let publisher: string | undefined;
+  let model = value;
+
+  const resource = value.match(/(?:^|\/)publishers\/([^/]+)\/models\/(.+)$/i);
+  if (resource) {
+    publisher = resource[1].toLowerCase();
+    model = resource[2];
+  } else {
+    model = model.replace(/^models\//i, "");
+    const slash = model.indexOf("/");
+    if (slash > 0) {
+      publisher = model.slice(0, slash).toLowerCase();
+      model = model.slice(slash + 1);
+    }
+  }
+
+  if (!publisher) {
+    publisher = MODEL_PUBLISHER_PREFIXES.find(([pattern]) => pattern.test(model))?.[1];
+  }
+
+  if (publisher === "anthropic") {
+    return { protocol: "anthropic", publisher, model };
+  }
+
+  // Bare IDs have always meant a Google model on this connection. Keep that
+  // compatibility, while an inferred `google/*-maas` ID uses Chat Completions.
+  if (!publisher || (publisher === "google" && !/-maas(?:$|[-.:@])/i.test(model))) {
+    return { protocol: "gemini", publisher: "google", model };
+  }
+
+  return {
+    protocol: "openai",
+    publisher,
+    model: `${publisher}/${model}`,
+    publisherEndpoint: OPENAI_RAW_PREDICT_PUBLISHERS.has(publisher),
+  };
+}
+
+const VERTEX_OPENAI_CAPABILITIES: ProviderCapabilities = {
+  parameters: {
+    temperature: { ...COMMON_PARAMS.temperature, max: 2 },
+    max_tokens: COMMON_PARAMS.max_tokens,
+    top_p: COMMON_PARAMS.top_p,
+    top_k: COMMON_PARAMS.top_k,
+    frequency_penalty: COMMON_PARAMS.frequency_penalty,
+    presence_penalty: COMMON_PARAMS.presence_penalty,
+    stop: COMMON_PARAMS.stop,
+  },
+  requiresMaxTokens: false,
+  supportsSystemRole: true,
+  supportsStreaming: true,
+  apiKeyRequired: true,
+  modelListStyle: "none",
+};
+
+/** Reuse the existing OpenAI serializer/parser against a fully-resolved Vertex
+ * Chat Completions or partner rawPredict URL.
+ */
+class VertexOpenAIAdapter extends OpenAICompatibleProvider {
+  readonly name = "google_vertex";
+  readonly displayName = "Google Vertex AI";
+  readonly defaultUrl = "";
+  readonly capabilities = VERTEX_OPENAI_CAPABILITIES;
+
+  protected override chatCompletionsUrl(apiUrl: string): string {
+    return apiUrl;
+  }
+}
+
+/** Reuse Anthropic's native Messages wire format and response parser while
+ * adapting authentication, URL, and the Vertex-only body version field.
+ */
+class VertexAnthropicAdapter extends AnthropicProvider {
+  override readonly name = "google_vertex";
+  override readonly displayName = "Google Vertex AI";
+  override readonly defaultUrl = "";
+
+  protected override requestHeaders(
+    accessToken: string,
+    _request: GenerationRequest,
+  ): Record<string, string> {
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    };
+  }
+
+  protected override messagesUrl(
+    apiUrl: string,
+    _request: GenerationRequest,
+    stream: boolean,
+  ): string {
+    return `${apiUrl}:${stream ? "streamRawPredict" : "rawPredict"}`;
+  }
+
+  protected override buildBody(request: GenerationRequest, stream: boolean): any {
+    const body = super.buildBody(request, stream);
+    delete body.model;
+    body.anthropic_version = "vertex-2023-10-16";
+    return body;
+  }
+}
+
+const vertexOpenAIAdapter = new VertexOpenAIAdapter();
+const vertexAnthropicAdapter = new VertexAnthropicAdapter();
+
 // ── Provider implementation ────────────────────────────────────────────────
 
 export class GoogleVertexProvider implements LlmProvider {
@@ -244,12 +420,50 @@ export class GoogleVertexProvider implements LlmProvider {
     return `${host}/v1/projects/${projectId}/locations/${location}/publishers/google/models`;
   }
 
+  /** Build a managed publisher-model endpoint without its prediction method. */
+  private publisherModelEndpoint(
+    projectId: string,
+    location: string,
+    publisher: string,
+    model: string,
+  ): string {
+    const host = vertexHostForLocation(location);
+    return `${host}/v1/projects/${projectId}/locations/${location}/publishers/${publisher}/models/${model}`;
+  }
+
+  /** Build Vertex's shared OpenAI-compatible endpoint for open MaaS models. */
+  private openAIEndpoint(projectId: string, location: string): string {
+    const host = vertexHostForLocation(location);
+    return `${host}/v1/projects/${projectId}/locations/${location}/endpoints/openapi/chat/completions`;
+  }
+
   /** Strip resource-name prefixes so only the bare model ID hits the URL path. */
   private sanitizeModelId(model: string): string {
     return model
       .replace(/^publishers\/google\/models\//, "")
       .replace(/^projects\/[^/]+\/locations\/[^/]+\/publishers\/google\/models\//, "")
       .replace(/^models\//, "");
+  }
+
+  /** Google-only controls must not leak into Anthropic/OpenAI partner bodies. */
+  private buildPartnerRequest(
+    request: GenerationRequest,
+    model: string,
+  ): GenerationRequest {
+    const parameters = { ...(request.parameters || {}) };
+    for (const key of [
+      ...GOOGLE_SEARCH_HANDLED_PARAMS,
+      "thinkingConfig",
+      "responseMimeType",
+      "responseSchema",
+      "responseJsonSchema",
+      "safetySettings",
+      "_replay_thought_signatures",
+      "_streaming",
+    ]) {
+      delete parameters[key];
+    }
+    return { ...request, model, parameters };
   }
 
   /** Extract project_id and location from the resolved API URL. */
@@ -271,8 +485,31 @@ export class GoogleVertexProvider implements LlmProvider {
   async generate(apiKey: string, apiUrl: string, request: GenerationRequest): Promise<GenerationResponse> {
     const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
     const accessToken = await getAccessToken(sa);
+    const route = resolveVertexModelRoute(request.model);
+
+    if (route.protocol === "anthropic") {
+      const endpoint = this.publisherModelEndpoint(projectId, location, route.publisher, route.model);
+      return vertexAnthropicAdapter.generate(
+        accessToken,
+        endpoint,
+        this.buildPartnerRequest(request, route.model),
+      );
+    }
+
+    if (route.protocol === "openai") {
+      const bareModel = route.model.slice(route.publisher.length + 1);
+      const endpoint = route.publisherEndpoint
+        ? this.publisherModelEndpoint(projectId, location, route.publisher, bareModel) + ":rawPredict"
+        : this.openAIEndpoint(projectId, location);
+      return vertexOpenAIAdapter.generate(
+        accessToken,
+        endpoint,
+        this.buildPartnerRequest(request, route.publisherEndpoint ? bareModel : route.model),
+      );
+    }
+
     const base = this.endpointBase(projectId, location);
-    const model = this.sanitizeModelId(request.model);
+    const model = this.sanitizeModelId(route.model);
     const url = `${base}/${model}:generateContent`;
     const body = this.buildBody(request);
 
@@ -283,7 +520,7 @@ export class GoogleVertexProvider implements LlmProvider {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey, accessToken] });
 
     if (!res.ok) await throwProviderResponseError("Vertex AI", "generate", res);
 
@@ -298,8 +535,33 @@ export class GoogleVertexProvider implements LlmProvider {
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const { sa, projectId, location } = this.resolveProjectConfig(apiKey, apiUrl);
     const accessToken = await getAccessToken(sa);
+    const route = resolveVertexModelRoute(request.model);
+
+    if (route.protocol === "anthropic") {
+      const endpoint = this.publisherModelEndpoint(projectId, location, route.publisher, route.model);
+      yield* vertexAnthropicAdapter.generateStream(
+        accessToken,
+        endpoint,
+        this.buildPartnerRequest(request, route.model),
+      );
+      return;
+    }
+
+    if (route.protocol === "openai") {
+      const bareModel = route.model.slice(route.publisher.length + 1);
+      const endpoint = route.publisherEndpoint
+        ? this.publisherModelEndpoint(projectId, location, route.publisher, bareModel) + ":streamRawPredict"
+        : this.openAIEndpoint(projectId, location);
+      yield* vertexOpenAIAdapter.generateStream(
+        accessToken,
+        endpoint,
+        this.buildPartnerRequest(request, route.publisherEndpoint ? bareModel : route.model),
+      );
+      return;
+    }
+
     const base = this.endpointBase(projectId, location);
-    const model = this.sanitizeModelId(request.model);
+    const model = this.sanitizeModelId(route.model);
     const url = `${base}/${model}:streamGenerateContent?alt=sse`;
     const body = this.buildBody(request);
 
@@ -310,7 +572,7 @@ export class GoogleVertexProvider implements LlmProvider {
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey, accessToken] });
 
     if (!res.ok) await throwProviderResponseError("Vertex AI", "stream", res);
 
@@ -334,37 +596,57 @@ export class GoogleVertexProvider implements LlmProvider {
     const { sa, location } = this.resolveProjectConfig(apiKey, apiUrl);
     const accessToken = await getAccessToken(sa);
     const host = vertexHostForLocation(location);
-    const allModels: string[] = [];
-    let pageToken: string | undefined;
+    const listPublisher = async (publisher: string): Promise<string[]> => {
+      const models: string[] = [];
+      let pageToken: string | undefined;
 
-    do {
-      const params = new URLSearchParams();
-      if (pageToken) params.set("pageToken", pageToken);
-      // List base (publisher) models. Per Google's @google/genai SDK
-      // (`_api_client.ts` → `shouldPrependVertexProjectPath`):
-      //   "For base models Vertex does not accept a project/location
-      //    prefix (for tuned models the prefix is required)."
-      // So the URL is un-prefixed and sits at v1beta1 (the SDK's default
-      // version for Vertex; the v1 surface does not expose this list).
-      //   →  {host}/v1beta1/publishers/google/models
-      const url = `${host}/v1beta1/publishers/google/models${params.toString() ? `?${params}` : ""}`;
-      const data = await fetchProviderJson<any>(this.displayName, "model listing", url, {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
-      // Response may use `publisherModels`, `models`, or `tunedModels`
-      // depending on the surface — mirrors tExtractModels() in the SDK.
-      const models: any[] = data.publisherModels || data.models || data.tunedModels || [];
-      for (const m of models) {
-        // Names are "publishers/google/models/{id}".
-        const name: string = m.name || "";
-        const shortName = name.replace(/^publishers\/google\/models\//, "");
-        const id = shortName || name;
-        if (id) allModels.push(id);
+      do {
+        const params = new URLSearchParams();
+        if (pageToken) params.set("pageToken", pageToken);
+        // Publisher model catalogs are un-prefixed (no project/location in
+        // the path) and exposed by ModelGardenService at v1beta1.
+        const url = `${host}/v1beta1/publishers/${publisher}/models${params.toString() ? `?${params}` : ""}`;
+        const data = await fetchProviderJson<any>(this.displayName, "model listing", url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const entries: any[] = data.publisherModels || data.models || data.tunedModels || [];
+        for (const entry of entries) {
+          const name: string = entry.name || "";
+          const match = name.match(/(?:^|\/)publishers\/([^/]+)\/models\/(.+)$/i);
+          const id = match?.[2] || name;
+          if (!id) continue;
+          // Open publisher catalogs also contain models that must be deployed
+          // to a user-owned endpoint. Only their MaaS entries work through the
+          // shared `openapi` endpoint used by this connection.
+          if (VERTEX_OPEN_MAAS_PUBLISHERS.has(publisher) && !/-maas(?:$|[-.:@])/i.test(id)) {
+            continue;
+          }
+          if (publisher === "google" && !/-maas(?:$|[-.:@])/i.test(id)) {
+            models.push(id); // Preserve existing bare Gemini model IDs.
+          } else {
+            models.push(`${publisher}/${id}`);
+          }
+        }
+        pageToken = data.nextPageToken;
+      } while (pageToken);
+
+      return models;
+    };
+
+    const results = await Promise.allSettled(
+      VERTEX_MANAGED_PUBLISHERS.map((publisher) => listPublisher(publisher)),
+    );
+    const models = new Set<string>();
+    for (const result of results) {
+      if (result.status === "fulfilled") {
+        for (const model of result.value) models.add(model);
       }
-      pageToken = data.nextPageToken;
-    } while (pageToken);
-
-    return allModels.sort();
+    }
+    if (models.size === 0) {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failed) throw failed.reason;
+    }
+    return [...models].sort();
   }
 
   // ── Body building (mirrors GoogleProvider.buildBody) ──────────────────

@@ -3,21 +3,22 @@ import { describe, expect, test } from 'bun:test'
 const source = await Bun.file(new URL('./WorldBookEntriesSection.tsx', import.meta.url)).text()
 
 describe('regular lorebook panel smart-search contract', () => {
-  test('keeps ordinary navigation paginated and loads the complete corpus only on demand', () => {
-    expect(source).toContain('shouldLoadFullWorldBookEntryCorpus(')
-    expect(source).toContain('worldBooksApi.listEntries(bookId')
-    expect(source).toContain('worldBooksApi.listAllEntries(bookId, { signal: controller.signal })')
+  test('loads the complete organization/type scope for ranked search', () => {
+    expect(source).toContain('loadLorebookSearchEntries(pagination => worldBooksApi.listEntries(bookId')
+    expect(source).toContain('folder: entryFolder')
+    expect(source).toContain('tag: entryTags')
+    expect(source).not.toContain('search: entrySearchFilter')
+    expect(source).toContain("type: entryTypeFilter === 'all' ? undefined : entryTypeFilter")
     expect(source).toContain('entriesAbortRef.current?.abort()')
-    expect(source).toContain("value === 'all' || fullCorpusMode ? count : '—'")
-    expect(source).toContain('searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex)')
-    expect(source).toContain('entrySearchResults?.map((result) => result.entry) ?? orderedEntries')
-    expect(source).not.toContain('search: search || undefined')
+    expect(source).toContain('controller.signal.aborted || entriesAbortRef.current !== controller')
   })
 
-  test('counts query results before applying the selected type', () => {
-    expect(source).toContain('for (const entry of queryEntries) counts[getEntryType(entry)] += 1')
-    expect(source).toMatch(/entryTypeFilter === 'all'[\s\S]*\? queryEntries[\s\S]*queryEntries\.filter/)
-    expect(source).toContain('fullCorpusMode ? filteredEntries.length : sourceEntryTotal')
+  test('uses ranked results before slicing a visible search page', () => {
+    expect(source).toContain('searchEntriesByQuery(entries, entrySearchFilter, entrySearchIndex)')
+    expect(source).toContain('entrySearchResults?.map((result) => result.entry) ?? entries')
+    expect(source).toContain('queryEntries.slice((entryPage - 1) * pageSize, entryPage * pageSize)')
+    expect(source).toContain('searchCorpusMode ? queryEntries.length : sourceEntryTotal')
+    expect(source).toContain('loadedSearchScopeRef.current === searchScope')
   })
 
   test('keeps search clearable, scoped, and independent from the open entry', () => {

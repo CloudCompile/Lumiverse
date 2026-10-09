@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { zipSync } from "fflate";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
+import { env } from "../env";
+import { resetStBackupUploadState } from "../migration/st-backup-upload";
 
 initDatabase(":memory:");
 const { stMigrationRoutes } = await import("./st-migration.routes");
@@ -29,14 +35,25 @@ const objectBodyUrls = [
   executeUrl,
 ];
 const ownerHeaders = { "content-type": "application/json", "x-test-role": "owner", "x-test-user": "owner-a" };
+let workDir = "";
+let originalDataDir = "";
 
 beforeEach(() => {
+  originalDataDir = env.dataDir;
+  workDir = mkdtempSync(join(tmpdir(), "st-migration-route-"));
+  env.dataDir = workDir;
+  resetStBackupUploadState();
   closeDatabase();
   initDatabase(":memory:");
   getDb().run('CREATE TABLE "user" (id TEXT PRIMARY KEY, role TEXT NOT NULL)');
   getDb().run('INSERT INTO "user" (id, role) VALUES (?, ?), (?, ?)', ["owner-a", "owner", "user-a", "user"]);
 });
-afterEach(() => closeDatabase());
+afterEach(() => {
+  resetStBackupUploadState();
+  closeDatabase();
+  env.dataDir = originalDataDir;
+  if (workDir && existsSync(workDir)) rmSync(workDir, { recursive: true, force: true });
+});
 
 describe("SillyTavern migration route security", () => {
   test("requires an authenticated owner or admin", async () => {
@@ -92,5 +109,31 @@ describe("SillyTavern migration route security", () => {
     });
     expect(response.status).toBe(404);
     expect(await response.text()).not.toContain(secret);
+  });
+
+  test("uploads, scans, and discards a web user-folder ZIP", async () => {
+    const archive = zipSync({
+      "characters/Alice.png": new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      "cache/ignored.bin": new Uint8Array([1, 2, 3]),
+    });
+    const uploaded = await app.request(
+      "http://localhost/st-migration/backup?filename=default-user.zip",
+      {
+        method: "PUT",
+        headers: { ...ownerHeaders, "content-type": "application/zip" },
+        body: archive.buffer as ArrayBuffer,
+      },
+    );
+
+    expect(uploaded.status).toBe(201);
+    const result = await uploaded.json() as { uploadId: string; fileName: string; counts: { characters: number } };
+    expect(result.fileName).toBe("default-user.zip");
+    expect(result.counts.characters).toBe(1);
+
+    const discarded = await app.request(`http://localhost/st-migration/backup/${result.uploadId}`, {
+      method: "DELETE",
+      headers: ownerHeaders,
+    });
+    expect(discarded.status).toBe(204);
   });
 });

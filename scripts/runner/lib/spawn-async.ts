@@ -26,8 +26,11 @@ export interface SpawnAsyncOptions {
   /** Kill the subprocess after this many ms. Returns timedOut: true. */
   timeoutMs?: number;
   env?: Record<string, string | undefined>;
+  windowsVerbatimArguments?: boolean;
   /** Discard stdout instead of capturing. */
   ignoreStdout?: boolean;
+  /** Observe output as it arrives while retaining the bounded error snapshot. */
+  onOutput?: (source: "stdout" | "stderr", text: string) => void;
 }
 
 const MAX_CAPTURED_OUTPUT_CHARS = 64 * 1024;
@@ -47,6 +50,7 @@ function appendOutput(output: string, chunk: string): string {
 
 function startStreamDrain(
   stream: ReadableStream<Uint8Array> | null | undefined,
+  onChunk?: (text: string) => void,
 ): StreamDrain {
   if (!stream) {
     return {
@@ -64,9 +68,15 @@ function startStreamDrain(
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) output = appendOutput(output, decoder.decode(value, { stream: true }));
+        if (value) {
+          const text = decoder.decode(value, { stream: true });
+          output = appendOutput(output, text);
+          onChunk?.(text);
+        }
       }
-      output = appendOutput(output, decoder.decode());
+      const finalText = decoder.decode();
+      output = appendOutput(output, finalText);
+      if (finalText) onChunk?.(finalText);
       return output;
     } finally {
       reader.releaseLock();
@@ -90,17 +100,29 @@ export async function spawnAsync(
   cmd: string[],
   opts: SpawnAsyncOptions = {}
 ): Promise<SpawnAsyncResult> {
-  const hasTimeout = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0;
+  const timeoutMs = typeof opts.timeoutMs === "number" && opts.timeoutMs > 0
+    ? opts.timeoutMs
+    : null;
+  const startedAt = performance.now();
 
   const proc = Bun.spawn({
     cmd,
     cwd: opts.cwd,
     env: opts.env,
+    windowsVerbatimArguments: opts.windowsVerbatimArguments,
     stdin: "ignore",
     stdout: opts.ignoreStdout ? "ignore" : "pipe",
     stderr: "pipe",
-    ...(hasTimeout ? { timeout: opts.timeoutMs } : {}),
+    ...(timeoutMs !== null ? { timeout: timeoutMs } : {}),
   });
+
+  // Bun's `killed` property means that the process has exited, not that its
+  // native timeout killed it. Treating that flag as timeout evidence turns
+  // every ordinary non-zero exit into a reported timeout. Bun's timeout does
+  // terminate by signal, so pair that signal with the monotonic elapsed time.
+  const didTimeOut = () => timeoutMs !== null
+    && proc.signalCode !== null
+    && performance.now() - startedAt >= timeoutMs;
 
   let stdout: StreamDrain | undefined;
   let stderr: StreamDrain | undefined;
@@ -111,11 +133,17 @@ export async function spawnAsync(
     // after Bun has killed the direct child at its timeout.
     stdout = opts.ignoreStdout
       ? startStreamDrain(undefined)
-      : startStreamDrain(proc.stdout as ReadableStream<Uint8Array> | null);
-    stderr = startStreamDrain(proc.stderr as ReadableStream<Uint8Array> | null);
+      : startStreamDrain(
+          proc.stdout as ReadableStream<Uint8Array> | null,
+          (text) => opts.onOutput?.("stdout", text),
+        );
+    stderr = startStreamDrain(
+      proc.stderr as ReadableStream<Uint8Array> | null,
+      (text) => opts.onOutput?.("stderr", text),
+    );
     const exitCode = await proc.exited;
 
-    if (hasTimeout && proc.killed) {
+    if (didTimeOut()) {
       await Promise.all([stdout.cancel(), stderr.cancel()]);
       void Promise.allSettled([stdout.text, stderr.text]);
       return {
@@ -129,7 +157,7 @@ export async function spawnAsync(
     const [stdoutText, stderrText] = await Promise.all([stdout.text, stderr.text]);
     return { exitCode: exitCode ?? -1, stdout: stdoutText, stderr: stderrText, timedOut: false };
   } catch (err: any) {
-    const timedOut = hasTimeout && proc.killed;
+    const timedOut = didTimeOut();
     const stderrMessage =
       timedOut
         ? stderr?.snapshot() ?? ""

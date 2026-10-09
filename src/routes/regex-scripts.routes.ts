@@ -11,7 +11,8 @@ const app = new Hono();
 
 const APPLY_MAX_CONTENT_LENGTH = 500_000;
 const APPLY_MAX_SCRIPT_COUNT = 500;
-const APPLY_MAX_PATTERN_LENGTH = 10_000;
+const APPLY_MAX_PATTERN_LENGTH = svc.MAX_REGEX_PATTERN_LENGTH;
+const ACTIVATION_MAX_PATTERN_LENGTH = 10_000;
 const APPLY_MAX_RESOLVED_TEMPLATE_LENGTH = 100_000;
 const APPLY_VALID_PLACEMENTS = new Set<RegexPlacement>(["user_input", "ai_output", "world_info", "reasoning"]);
 const APPLY_VALID_FLAGS = new Set(["d", "g", "i", "m", "s", "u", "v", "y"]);
@@ -211,12 +212,38 @@ app.post("/apply", async (c) => {
   });
 });
 
+// Prepare persisted activation inputs without matching message content.
+app.post("/activation-patterns", async (c) => {
+  const body = await c.req.json().catch(() => null);
+  if (!body || typeof body.preset_id !== "string" || !body.preset_id || body.preset_id.length > 200
+    || !Array.isArray(body.patterns) || body.patterns.length === 0 || body.patterns.length > 100
+    || body.patterns.some((pattern: unknown) => typeof pattern !== "string" || pattern.length > 10_000)
+    || body.patterns.reduce((sum: number, pattern: string) => sum + pattern.length, 0) > 100_000) {
+    return c.json({ error: "A preset ID and between 1 and 100 bounded patterns are required" }, 400);
+  }
+  try {
+    const inputs = loadActivationInputSnapshot(c.get("userId"), body.preset_id, {
+      chat_id: body.chat_id, character_id: body.character_id,
+      persona_id: body.persona_id, connection_id: body.connection_id,
+    }, body.patterns);
+    return c.json({ patterns: body.patterns.map((pattern: string) => {
+      try {
+        return { source: pattern, resolved: resolveActivationFindPattern(pattern, inputs) };
+      } catch (error) {
+        return { source: pattern, error: error instanceof Error ? error.message : String(error) };
+      }
+    }) });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+  }
+});
+
 // POST /test — test regex
 app.post("/test-activation", async (c) => {
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body.content !== "string" || typeof body.find_regex !== "string"
     || typeof body.flags !== "string" || !validateFlags(body.flags) || !body.prompt_activation
-    || body.find_regex.length > APPLY_MAX_PATTERN_LENGTH) {
+    || body.find_regex.length > ACTIVATION_MAX_PATTERN_LENGTH) {
     return c.json({ error: "A pattern, flags, content and prompt activation configuration are required" }, 400);
   }
   if (body.content.length > MAX_ACTIVATION_CONTENT_LENGTH) return c.json({ error: "Content exceeds maximum length" }, 413);

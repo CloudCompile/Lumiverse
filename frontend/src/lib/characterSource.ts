@@ -10,8 +10,8 @@ const CHUB_HOSTS = new Set([
 const HUB_HOSTS = new Map<string, 'lumihub' | 'illarin'>([
   ['lumi.spot', 'lumihub'],
   ['www.lumi.spot', 'lumihub'],
-  ['illarin.xyz', 'illarin'],
-  ['www.illarin.xyz', 'illarin'],
+  ['illarin.com', 'illarin'],
+  ['www.illarin.com', 'illarin'],
 ])
 
 export type CharacterSource =

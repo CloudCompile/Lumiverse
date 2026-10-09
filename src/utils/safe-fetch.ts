@@ -7,6 +7,7 @@
  */
 
 import { lookup, resolve4, resolve6 } from "dns/promises";
+import { isIP } from "node:net";
 import { dns as bunDns } from "bun";
 import { getEffectiveDnsSettings } from "../services/dns-settings.service";
 
@@ -86,34 +87,45 @@ function isLoopbackIPv4(ip: string): boolean {
   return ((ipv4ToInt(ip) & 0xFF000000) >>> 0) === 0x7F000000;
 }
 
+function ipv6ToWords(ip: string): number[] | null {
+  const normalized = ip.toLowerCase().replace(/^\[|\]$/g, "");
+  if (isIP(normalized) !== 6) return null;
+  const dotted = normalized.match(/(\d+\.\d+\.\d+\.\d+)$/);
+  let expanded = normalized;
+  if (dotted) {
+    const v4 = ipv4ToInt(dotted[1]);
+    expanded = `${normalized.slice(0, -dotted[1].length)}${(v4 >>> 16).toString(16)}:${(v4 & 0xffff).toString(16)}`;
+  }
+  const halves = expanded.split("::");
+  const left = halves[0] ? halves[0].split(":") : [];
+  const right = halves.length > 1 && halves[1] ? halves[1].split(":") : [];
+  const zeros = halves.length > 1 ? 8 - left.length - right.length : 0;
+  if (zeros < 0 || (halves.length === 1 && left.length !== 8)) return null;
+  return [...left, ...Array(zeros).fill("0"), ...right].map((word) => Number.parseInt(word, 16));
+}
+
+function mappedIPv4(ip: string): string | null {
+  const words = ipv6ToWords(ip);
+  if (!words || words.slice(0, 5).some((word) => word !== 0) || words[5] !== 0xffff) return null;
+  return `${words[6] >>> 8}.${words[6] & 0xff}.${words[7] >>> 8}.${words[7] & 0xff}`;
+}
+
 function isPrivateIPv6(ip: string): boolean {
-  const normalized = ip.toLowerCase();
-
-  // Loopback
-  if (normalized === "::1") return true;
-
-  // IPv4-mapped: ::ffff:x.x.x.x
-  const v4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (v4Mapped) return isPrivateIPv4(v4Mapped[1]);
-
-  // Unique local (fc00::/7 → fc and fd prefixes)
-  if (/^f[cd]/.test(normalized)) return true;
-
-  // Link-local (fe80::/10)
-  if (/^fe[89ab]/.test(normalized)) return true;
-
-  // Unspecified
-  if (normalized === "::") return true;
-
-  return false;
+  const words = ipv6ToWords(ip);
+  if (!words) return false;
+  if (words.slice(0, 7).every((word) => word === 0) && (words[7] === 0 || words[7] === 1)) return true;
+  const mapped = mappedIPv4(ip);
+  if (mapped) return isPrivateIPv4(mapped);
+  if ((words[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
+  return (words[0] & 0xffc0) === 0xfe80; // fe80::/10 link-local
 }
 
 function isLoopbackIPv6(ip: string): boolean {
-  const normalized = ip.toLowerCase();
-  if (normalized === "::1") return true;
-
-  const v4Mapped = normalized.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  return v4Mapped ? isLoopbackIPv4(v4Mapped[1]) : false;
+  const words = ipv6ToWords(ip);
+  if (!words) return false;
+  if (words.slice(0, 7).every((word) => word === 0) && words[7] === 1) return true;
+  const mapped = mappedIPv4(ip);
+  return mapped ? isLoopbackIPv4(mapped) : false;
 }
 
 export function isPrivateIp(ip: string): boolean {
@@ -334,6 +346,7 @@ export async function validateHost(hostname: string, options?: ValidateHostOptio
 // ─── safeFetch ────────────────────────────────────────────────────────────
 
 export interface SafeFetchOptions {
+  signal?: AbortSignal;
   method?: string;
   body?: BodyInit | null;
   maxBytes?: number;
@@ -361,6 +374,7 @@ export async function safeFetch(
   let body = options?.body ?? null;
 
   for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+    options?.signal?.throwIfAborted();
     let parsed: URL;
     try {
       parsed = new URL(currentUrl);
@@ -391,7 +405,11 @@ export async function safeFetch(
     pinDnsCache(parsed.hostname, port);
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
 
     let response: Response;
     try {
@@ -403,7 +421,7 @@ export async function safeFetch(
         method,
         body,
         redirect: "manual",
-        signal: controller.signal,
+        signal: options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
         headers,
       });
     } catch (err: any) {
@@ -412,12 +430,11 @@ export async function safeFetch(
         throw new SSRFError(`Request timed out after ${timeoutMs}ms`);
       }
       throw err;
-    } finally {
-      clearTimeout(timer);
     }
 
     // Handle redirects manually so we can re-validate each hop
     if (response.status >= 300 && response.status < 400) {
+      clearTimeout(timer);
       const location = response.headers.get("location");
       if (!location) {
         throw new SSRFError(`Redirect with no Location header (status ${response.status})`);
@@ -440,13 +457,53 @@ export async function safeFetch(
       continue;
     }
 
-    // Enforce response size limit
+    // Check the declared size early, then cap the actual stream as servers can
+    // omit or understate Content-Length (including on chunked responses).
     const contentLength = response.headers.get("content-length");
-    if (contentLength && parseInt(contentLength, 10) > maxBytes) {
+    if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
+      clearTimeout(timer);
       throw new SSRFError(`Response too large: ${contentLength} bytes (max ${maxBytes})`);
     }
-
-    return response;
+    if (!response.body) {
+      clearTimeout(timer);
+      return response;
+    }
+    const reader = response.body.getReader();
+    let received = 0;
+    const clearBodyTimer = () => clearTimeout(timer);
+    const limitedBody = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            clearBodyTimer();
+            controller.close();
+            reader.releaseLock();
+            return;
+          }
+          received += value.byteLength;
+          if (received > maxBytes) {
+            clearBodyTimer();
+            await reader.cancel();
+            controller.error(new SSRFError(`Response too large: more than ${maxBytes} bytes`));
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          clearBodyTimer();
+          controller.error(timedOut ? new SSRFError(`Request timed out after ${timeoutMs}ms`) : error);
+        }
+      },
+      async cancel(reason) {
+        clearBodyTimer();
+        await reader.cancel(reason);
+      },
+    });
+    return new Response(limitedBody, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: response.headers,
+    });
   }
 
   throw new SSRFError(`Too many redirects (max ${MAX_REDIRECTS})`);

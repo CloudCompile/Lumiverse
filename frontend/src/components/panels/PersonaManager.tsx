@@ -5,6 +5,7 @@ import { useStore } from '@/store'
 import { Check, ChevronRight, History, Pencil, Trash2, X } from 'lucide-react'
 import { toast } from '@/lib/toast'
 import { triggerBlobDownload } from '@/lib/downloads'
+import { includeEmptyPersonaFolders } from '@/lib/personaBrowser'
 import { worldBooksApi } from '@/api/world-books'
 import { personasApi } from '@/api/personas'
 import {
@@ -28,7 +29,12 @@ export default function PersonaManager() {
   const { t } = useTranslation('panels')
   const browser = usePersonaBrowser()
   const openModal = useStore((s) => s.openModal)
-  const { createFolder, renameFolder: renameStoredFolder, deleteFolder: deleteStoredFolder } = useFolders('personaFolders', browser.allPersonas)
+  const {
+    folders,
+    createFolder,
+    renameFolder: renameStoredFolder,
+    deleteFolder: deleteStoredFolder,
+  } = useFolders('personaFolders', browser.allPersonas)
   const [creating, setCreating] = useState(false)
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
   const [renamingValue, setRenamingValue] = useState('')
@@ -38,14 +44,23 @@ export default function PersonaManager() {
   const [batchSelectedIds, setBatchSelectedIds] = useState<Set<string>>(() => new Set())
   const [bulkBusy, setBulkBusy] = useState(false)
   const [worldBooks, setWorldBooks] = useState<WorldBook[]>([])
+  const [selectedPlacement, setSelectedPlacement] = useState<'recent' | 'folders'>('folders')
   const renameInputRef = useRef<HTMLInputElement>(null)
   // Collapsed folders — start with all named folders collapsed, uncategorized open
   const [collapsedFolders, setCollapsedFolders] = useState<Set<string>>(() => new Set())
   const [initializedFolders, setInitializedFolders] = useState(false)
 
   // Auto-collapse named folders once we know them
-  const groupedPersonas = browser.groupedPersonas
-  useMemo(() => {
+  const showEmptyFolders = browser.filterType === 'all' && !browser.searchQuery.trim()
+  const groupedPersonas = useMemo(
+    () => includeEmptyPersonaFolders(
+      browser.groupedPersonas,
+      showEmptyFolders ? folders : [],
+      browser.allPersonas,
+    ),
+    [browser.allPersonas, browser.groupedPersonas, folders, showEmptyFolders],
+  )
+  useEffect(() => {
     if (initializedFolders || groupedPersonas.length === 0) return
     const named = groupedPersonas
       .filter((g) => g.folder)
@@ -164,6 +179,7 @@ export default function PersonaManager() {
         await browser.uploadAvatar(persona.id, avatarFile, originalFile)
       }
       setCreating(false)
+      setSelectedPlacement('folders')
       browser.setSelectedPersonaId(persona.id)
     },
     [browser]
@@ -347,14 +363,18 @@ export default function PersonaManager() {
     [browser]
   )
 
-  const renderPersonaCards = useCallback((personas: Persona[]) => {
+  const renderPersonaCards = useCallback((personas: Persona[], placement: 'recent' | 'folders' = 'folders') => {
+    const ownsSelection = selectedPlacement === placement
     const commonProps = {
       personas,
-      selectedId: browser.selectedPersonaId,
+      selectedId: ownsSelection ? browser.selectedPersonaId : null,
       activeId: browser.activePersonaId,
-      onSelect: browser.setSelectedPersonaId,
+      onSelect: (id: string | null) => {
+        setSelectedPlacement(placement)
+        browser.setSelectedPersonaId(id)
+      },
       onDoubleClick: handleDoubleClick,
-      renderEditor,
+      renderEditor: ownsSelection ? renderEditor : undefined,
       batchMode,
       batchSelectedIds,
       onToggleBatch: toggleBatchPersona,
@@ -362,7 +382,7 @@ export default function PersonaManager() {
     return browser.viewMode === 'grid'
       ? <PersonaCardGrid {...commonProps} />
       : <PersonaCardList {...commonProps} />
-  }, [batchMode, batchSelectedIds, browser, handleDoubleClick, renderEditor, toggleBatchPersona])
+  }, [batchMode, batchSelectedIds, browser, handleDoubleClick, renderEditor, selectedPlacement, toggleBatchPersona])
 
   if (browser.loading && browser.allPersonas.length === 0) {
     return <div className={styles.loading}>{t('personaManager.loading')}</div>
@@ -391,6 +411,7 @@ export default function PersonaManager() {
         onBatchModeChange={(enabled) => {
           setBatchMode(enabled)
           if (!enabled) setBatchSelectedIds(new Set())
+          setSelectedPlacement('folders')
           browser.setSelectedPersonaId(null)
         }}
       />
@@ -399,7 +420,7 @@ export default function PersonaManager() {
         <PersonaBulkBar
           selectedCount={batchSelectedIds.size}
           totalCount={browser.allPersonas.length}
-          folders={browser.allFolders}
+          folders={folders}
           worldBooks={worldBooks}
           busy={bulkBusy}
           onSelectAll={() => setBatchSelectedIds(new Set(browser.allPersonas.map((persona) => persona.id)))}
@@ -416,7 +437,7 @@ export default function PersonaManager() {
         />
       )}
 
-      {browser.totalFiltered === 0 ? (
+      {browser.totalFiltered === 0 && groupedPersonas.length === 0 ? (
         <div className={styles.loading}>{t('personaManager.noPersonasFound')}</div>
       ) : (
         <>
@@ -427,12 +448,12 @@ export default function PersonaManager() {
                 <span className={styles.folderName}>{t('personaManager.recentlyUsed')}</span>
                 <span className={styles.folderCount}>{browser.recentPersonas.length}</span>
               </div>
-              {renderPersonaCards(browser.recentPersonas)}
+              {renderPersonaCards(browser.recentPersonas, 'recent')}
             </div>
           )}
           {groupedPersonas.map((group) => {
           const folderKey = group.folder || '__uncategorized'
-          const hasFolders = browser.allFolders.length > 0 || group.folder
+          const hasFolders = folders.length > 0 || group.folder
           const isCollapsed = collapsedFolders.has(folderKey)
           const isRenaming = group.folder && renamingFolder === group.folder
 

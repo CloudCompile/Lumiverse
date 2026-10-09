@@ -13,6 +13,7 @@ import type { WorldInfoVectorQueryScope } from "./world-info-vector-ranking";
 
 function entry(overrides: Partial<WorldBookEntry> = {}): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: "entry-1",
     world_book_id: "book-1",
     uid: "uid-1",

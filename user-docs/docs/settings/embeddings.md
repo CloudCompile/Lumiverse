@@ -88,13 +88,11 @@ Enable vectorization for the content types you want:
 | **Chat Documents** | `vectorize_chat_documents` | Indexes [databank](../chatting/databank.md) and chat-attached documents for `#slug` mentions and document RAG |
 | **Chat Messages** | `vectorize_chat_messages` | Enables [long-term memory](../chatting/memory.md) — recalls relevant past messages during generation |
 
-When chat-message vectorization is enabled, the **Memory Retrieval Mode** (`chat_memory_mode`) controls how aggressively past messages are recalled:
+Configure chat recall under **Settings → Advanced → Long-Term Chat Memory**. Its **Memory Mode** presets (Conservative, Balanced, Aggressive, Manual) set chunk sizes, overlap, and the recent-message exclusion window. They do not change the similarity threshold or Top-K. Explicit settings there take precedence over the legacy embedding-level chat-memory mode.
 
-| Mode | Behavior |
-|------|----------|
-| **Conservative** | Fewer, high-quality memories — strict threshold |
-| **Balanced** | Standard retrieval (recommended) |
-| **Aggressive** | More memories, lower threshold — better for long epics |
+Basic Chat Memory works with **Memory Cortex disabled**. Cortex's Simple/Standard/Advanced modes are separate analysis settings under **Settings → Memory Cortex**. [Summary](../chatting/loom-summary.md) uses an LLM connection and does not require embeddings.
+
+Enable **Vectorise chat messages**, then use **Recompile Memories** in the chat input bar's quick menu to prepare existing history. Add `{{memories}}` to an enabled preset block: basic recall defaults to **Macro only**, not automatic injection. See [Long-Term Memory](../chatting/memory.md) for setup, stored versus vectorized chunks, and injection rules.
 
 ---
 
@@ -120,8 +118,8 @@ The preset row drives the **Retrieved Entries**, **Chunk Target / Max / Overlap 
 Maximum cosine distance for matches. Lower values = stricter matching.
 
 - **0** — No filtering (accept all matches)
-- **0.3-0.5** — Moderate filtering
-- **0.8+** — Very strict (only highly similar content)
+- **Smaller positive values** — Stricter filtering
+- **Larger positive values** — Permit more distant matches
 
 Cosine distance can exceed 1.0 in LanceDB's implementation, so this isn't capped at 1.
 

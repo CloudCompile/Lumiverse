@@ -393,6 +393,7 @@ function applyDisplayActions(
 }
 
 export interface ApplyDisplayRegexContext {
+  processingState?: string
   isUser: boolean
   depth: number
   chatId?: string
@@ -674,6 +675,7 @@ export async function applyDisplayRegexViaOwnedResolver(
   if (resolver) {
     try {
       const local = await resolver.applyScripts({
+        processingState: context.processingState,
         content,
         scripts,
         context: toSpindleDisplayContext(context),

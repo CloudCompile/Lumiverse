@@ -246,6 +246,21 @@ export function getConnectionIp(c: Context): string | null {
   }
 }
 
+/**
+ * Whether the socket peer is covered by the explicit TRUSTED_PROXIES list.
+ * High-impact forwarded headers (host/proto) deliberately do not use the
+ * legacy "any private peer" compatibility rule used for client-IP logging.
+ */
+export function isConnectionFromExplicitTrustedProxy(c: Context): boolean {
+  const remoteIp = getConnectionIp(c);
+  const rules = getTrustedProxyRules();
+  return Boolean(
+    remoteIp
+    && rules
+    && rules.some((rule) => ipMatchesRule(remoteIp, rule)),
+  );
+}
+
 export function getClientIp(c: Context): string {
   const remoteIp = getConnectionIp(c);
   if (!remoteIp) return "unknown";

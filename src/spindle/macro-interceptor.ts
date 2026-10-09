@@ -27,6 +27,7 @@ export interface MacroInterceptorCtx {
   readonly commit: boolean;
   readonly phase: MacroInterceptorPhase;
   readonly sourceHint?: string;
+  readonly sourceOwner?: { readonly extensionIdentifier: string };
   readonly userId?: string;
 }
 
@@ -47,6 +48,8 @@ export interface MacroInterceptorRunResult {
 
 export interface MacroInterceptor {
   extensionId: string;
+  extensionIdentifier?: string;
+  handlesOwnedSources?: boolean;
   userId?: string | null;
   priority: number;
   handler: (ctx: MacroInterceptorCtx) => Promise<MacroInterceptorResult>;
@@ -67,6 +70,27 @@ class MacroInterceptorChain {
 
   unregisterByExtension(extensionId: string): void {
     this.handlers = this.handlers.filter((h) => h.extensionId !== extensionId);
+  }
+
+  ownsMessageSource(extensions: Record<string, any>, userId: string | undefined): boolean {
+    return this.handlers.some((h) => h.handlesOwnedSources && h.extensionIdentifier
+      && (!h.userId || h.userId === userId)
+      && extensions[h.extensionIdentifier]?.display_owner === true);
+  }
+
+  async runOwned(ctx: MacroInterceptorCtx): Promise<MacroInterceptorRunResult | undefined> {
+    const handler = this.handlers.find((h) => h.handlesOwnedSources
+      && h.extensionIdentifier === ctx.sourceOwner?.extensionIdentifier
+      && (!h.userId || h.userId === ctx.userId));
+    if (!handler) return undefined;
+    const result = await handler.handler(ctx);
+    if (typeof result === "string") {
+      return { text: result, touchedVars: [], volatile: false, opaque: true };
+    }
+    if (!result || typeof result.text !== "string") {
+      throw new OwnedMacroResultError(handler.extensionIdentifier!);
+    }
+    return { text: result.text, touchedVars: result.touchedVars ?? [], volatile: result.volatile === true, opaque: false };
   }
 
   async run(ctx: MacroInterceptorCtx): Promise<MacroInterceptorRunResult> {
@@ -110,6 +134,13 @@ class MacroInterceptorChain {
 
   get count(): number {
     return this.handlers.length;
+  }
+}
+
+export class OwnedMacroResultError extends Error {
+  constructor(identifier: string) {
+    super(`Macro source owner ${identifier} returned no result`);
+    this.name = "OwnedMacroResultError";
   }
 }
 

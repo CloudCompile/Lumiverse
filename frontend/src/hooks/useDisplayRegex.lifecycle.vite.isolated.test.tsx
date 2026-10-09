@@ -41,7 +41,7 @@ Object.assign(globalThis, {
 })
 
 const pendingResults = new Map<string, (outcome: PipelineOutcome) => void>()
-const applyDisplayRegexTiered = mock((content: string) => new Promise<PipelineOutcome>((resolve) => {
+const applyDisplayRegexTiered = mock((content: string, ..._args: unknown[]) => new Promise<PipelineOutcome>((resolve) => {
   pendingResults.set(content, resolve)
 }))
 const trackInitialDisplayResolve = mock(<T,>(promise: Promise<T>) => promise)
@@ -91,7 +91,8 @@ mock.module('@/api/macros', () => ({
  * preprocess response landing.
  */
 const heldPreprocess = new Set<string>()
-const pendingPreprocess = new Map<string, (value: { content: string; cacheable: boolean }) => void>()
+const pendingPreprocess = new Map<string, (value: { content: string; cacheable: boolean; processingState?: string }) => void>()
+let finalizeWithoutScripts: boolean | undefined = true
 const isDisplayChatOwnedMock = mock(() => true)
 const heldRemotePreprocess = new Set<string>()
 const pendingRemotePreprocess = new Map<string, (response: Response) => void>()
@@ -122,6 +123,7 @@ globalThis.fetch = fetchMock as unknown as typeof fetch
 mock.module('@/lib/spindle/display-resolver-registry', () => ({
   isDisplayChatOwned: isDisplayChatOwnedMock,
   getDisplayResolverForChat: () => ({
+    finalizeWithoutScripts,
     resolveBody: ({ content }: { content: string }) => (
       heldPreprocess.has(content)
         ? new Promise<{ content: string; cacheable: boolean }>((resolvePreprocess) => {
@@ -137,6 +139,7 @@ mock.module('@/lib/toast', () => ({ toast: { warning: () => undefined } }))
 mock.module('@/i18n', () => ({ default: { t: (key: string) => key } }))
 
 const {
+  getDisplayContentCacheStatsForTests,
   invalidateDisplayRegexCache,
   resetDisplayRegexCachesForTests,
   useDisplayRegexState,
@@ -206,13 +209,13 @@ function holdPreprocess(content: string): void {
   heldPreprocess.add(content)
 }
 
-async function releasePreprocess(content: string, result = content): Promise<void> {
+async function releasePreprocess(content: string, result = content, processingState?: string): Promise<void> {
   heldPreprocess.delete(content)
   const resolvePreprocess = pendingPreprocess.get(content)
   if (!resolvePreprocess) throw new Error(`No held preprocess for ${content}`)
   pendingPreprocess.delete(content)
   await act(async () => {
-    resolvePreprocess({ content: result, cacheable: true })
+    resolvePreprocess({ content: result, cacheable: true, processingState })
     await Promise.resolve()
   })
 }
@@ -250,6 +253,163 @@ afterAll(() => {
 })
 
 describe('useDisplayRegex resolver lifecycle', () => {
+  test('large preset definitions are shared across cached answer frames', async () => {
+    isDisplayChatOwnedMock.mockImplementation(() => false)
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = Array.from({ length: 176 }, (_, index) => ({
+      ...originalScripts[0],
+      id: `large-preset-${index}`,
+      replace_string: `<style>.card-${index}{color:red}</style><div>${'x'.repeat(1500)}</div>`,
+    }))
+    const { host, root } = await createHarness()
+    try {
+      for (let frame = 0; frame < 6; frame++) {
+        const content = `chunk${' next'.repeat(frame)}`
+        await render(root, { content, isStreaming: true })
+        await settle(content, `card frame ${frame}`)
+        expect(readRendered(host)).toBe(`card frame ${frame}`)
+      }
+      const stats = getDisplayContentCacheStatsForTests()
+      expect(stats.size).toBe(6)
+      // Sola-sized replacements used to be serialized into every cache key.
+      expect(stats.keyCharacters).toBeLessThan(10_000)
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
+  test.each(['replacement', 'actions', 'reload', 'order'])('script %s changes invalidate cached output without relying on timestamps', async change => {
+    isDisplayChatOwnedMock.mockImplementation(() => false)
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = [
+      { ...originalScripts[0], id: 'first-script' },
+      { ...originalScripts[0], id: 'second-script' },
+    ]
+    const { host, root } = await createHarness()
+    try {
+      await render(root, { content: 'chunk', isStreaming: false })
+      await settle('chunk', 'previous cards')
+      const [first, second] = storeState.regexScripts
+      storeState.regexScripts = change === 'order' ? [second, first]
+        : change === 'reload' ? storeState.regexScripts.map(script => ({ ...script }))
+        : [{ ...first, ...(change === 'replacement'
+          ? { replace_string: '<div>Updated card</div>' }
+          : { metadata: { match_actions: ['repeat_back'] } }) }, second]
+      await render(root, { content: 'chunk', isStreaming: false })
+      await settle('chunk', 'updated cards')
+      expect(readRendered(host)).toBe('updated cards')
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(2)
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
+  test.each(['', 'second state', undefined])('pairs cached body content with processing state %p', async nextState => {
+    const { host, root } = await createHarness()
+    try {
+      const identity = { chatId: 'chat', messageId: 'message' }
+      const first = { content: 'first raw', isStreaming: false, identity }
+      holdPreprocess(first.content)
+      await renderWhilePreprocessPending(root, first)
+      await releasePreprocess(first.content, 'same body', 'first state')
+      await waitForPending('same body')
+      expect(applyDisplayRegexTiered.mock.calls.at(-1)?.[2]).toMatchObject({ processingState: 'first state' })
+      await settle('same body', 'first output')
+      const next = { content: 'next raw', isStreaming: false, identity }
+      holdPreprocess(next.content)
+      await renderWhilePreprocessPending(root, next)
+      await releasePreprocess(next.content, 'same body', nextState)
+      await waitForPending('same body')
+      expect((applyDisplayRegexTiered.mock.calls.at(-1)?.[2] as { processingState?: string }).processingState).toBe(nextState)
+      await settle('same body', 'next output')
+      expect(readRendered(host)).toBe('next output')
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(2)
+      await act(async () => { root.render(null) })
+      await act(async () => { root.render(createElement(Harness, next)) })
+      expect(readRendered(host)).toBe('next output')
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(2)
+    } finally { await destroyHarness(host, root) }
+  })
+
+  test('a late final pass cannot commit for another processing state with identical text', async () => {
+    const { host, root } = await createHarness()
+    const identity = { chatId: 'chat', messageId: 'message' }
+    try {
+      holdPreprocess('first raw')
+      await renderWhilePreprocessPending(root, { content: 'first raw', isStreaming: true, identity })
+      await releasePreprocess('first raw', 'same body', 'first state')
+      await waitForPending('same body')
+      const stale = pendingResults.get('same body')!
+      holdPreprocess('second raw')
+      await renderWhilePreprocessPending(root, { content: 'second raw', isStreaming: true, identity })
+      await releasePreprocess('second raw', 'same body', 'second state')
+      await waitForPending('same body')
+      await act(async () => { stale({ result: 'stale output', cacheable: true, touchedVars: new Set() }) })
+      expect(readRendered(host)).not.toBe('stale output')
+      await settle('same body', 'current output')
+      expect(readRendered(host)).toBe('current output')
+    } finally { await destroyHarness(host, root) }
+  })
+
+  test.each(['empty', 'disabled', 'depth-filtered'])('owned chats finish display processing with %s scripts', async variant => {
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = variant === 'empty' ? [] : originalScripts.map(script => ({
+      ...script, disabled: variant === 'disabled', max_depth: variant === 'depth-filtered' ? 0 : null,
+    }))
+    const { host, root } = await createHarness()
+    const props = { content: 'owned final stage', depth: 1, isStreaming: false }
+    try {
+      await render(root, props)
+      expect(applyDisplayRegexTiered.mock.calls[0]?.[1]).toEqual([])
+      expect(host.querySelector('output')?.dataset.pending).toBe('true')
+      await settle(props.content, '<img src="/asset">')
+      expect(readRendered(host)).toBe('<img src="/asset">')
+      expect(host.querySelector('output')?.dataset.pending).toBe('false')
+      await act(async () => { root.render(null) })
+      await act(async () => { root.render(createElement(Harness, props)) })
+      expect(readRendered(host)).toBe('<img src="/asset">')
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(1)
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
+  test.each([undefined, false])('legacy owning resolvers do not receive empty script calls (opt-in=%s)', async optIn => {
+    finalizeWithoutScripts = optIn
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = []
+    const { host, root } = await createHarness()
+    try {
+      await renderWhilePreprocessPending(root, { content: 'legacy text', isStreaming: false })
+      expect(readRendered(host)).toBe('legacy text')
+      expect(host.querySelector('output')?.dataset.pending).toBe('false')
+      expect(applyDisplayRegexTiered).not.toHaveBeenCalled()
+    } finally {
+      finalizeWithoutScripts = true
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
+  test('unowned chats with no scripts keep the preprocessing result', async () => {
+    const originalScripts = storeState.regexScripts
+    storeState.regexScripts = []
+    isDisplayChatOwnedMock.mockImplementation(() => false)
+    const { host, root } = await createHarness()
+    try {
+      await renderWhilePreprocessPending(root, { content: 'native text', isStreaming: false })
+      expect(readRendered(host)).toBe('native text')
+      expect(host.querySelector('output')?.dataset.pending).toBe('false')
+      expect(applyDisplayRegexTiered).not.toHaveBeenCalled()
+    } finally {
+      storeState.regexScripts = originalScripts
+      await destroyHarness(host, root)
+    }
+  })
+
   test('a cold virtual row stays provisional through preprocessing and HTML replacement', async () => {
     const { host, root } = await createHarness()
     const identity = { chatId: 'chat-virtual', messageId: 'message-virtual' }
@@ -406,9 +566,13 @@ describe('useDisplayRegex resolver lifecycle', () => {
       expect(host.querySelector('output')?.dataset.pending).toBe('false')
 
       await releasePreprocess(props.content)
+      await waitForPending(props.content)
+      expect(readRendered(host)).toBe('<div>Depth-limited island</div>')
+      expect(applyDisplayRegexTiered.mock.calls.at(-1)?.[1]).toEqual([])
+      await settle(props.content, props.content)
       expect(readRendered(host)).toBe(props.content)
       expect(host.querySelector('output')?.dataset.pending).toBe('false')
-      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(1)
+      expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(2)
     } finally {
       storeState.regexScripts = originalScripts
       await destroyHarness(host, root)

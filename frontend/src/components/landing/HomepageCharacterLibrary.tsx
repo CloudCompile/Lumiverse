@@ -20,6 +20,7 @@ import type { CharacterDisplaySettings } from '@/types/store'
 import type { CharacterSummary } from '@/types/api'
 import { Button } from '@/components/shared/FormComponents'
 import { useStore } from '@/store'
+import HomepageLibraryCardImage from './HomepageLibraryCardImage'
 import {
   clampHomepagePanelWidth,
   useHomepageCharacterLibrary,
@@ -154,10 +155,9 @@ const LibraryCard = memo(function LibraryCard({
       onDoubleClick={() => onOpen(character)}
     >
       <span className={styles.imageFrame}>
-        <img
+        <HomepageLibraryCardImage
           src={getCharacterAvatarLargeUrlById(character.id, character.image_id)}
           alt={character.name}
-          loading="lazy"
         />
       </span>
       <span className={styles.cardFooter}>

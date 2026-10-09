@@ -122,9 +122,3 @@
     border-bottom-width: 2.5px;
   }
 }
-
-@media (max-width: 400px) {
-  .container {
-    display: none !important;
-  }
-}

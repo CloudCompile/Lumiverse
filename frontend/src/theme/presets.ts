@@ -105,6 +105,7 @@ export function normalizeTheme(input: unknown): ThemeConfig | null {
     !!a && typeof a.h === 'number' && typeof a.s === 'number' && typeof a.l === 'number'
   const desktopBackground = t.desktopBackground
   const blurIntensity = desktopBackground?.blurIntensity
+  const renderingMode = t.renderingMode
 
   return {
     ...DEFAULT_THEME,
@@ -112,6 +113,10 @@ export function normalizeTheme(input: unknown): ThemeConfig | null {
     accent: accentValid ? (t.accent as ThemeConfig['accent']) : DEFAULT_THEME.accent,
     radiusScale: typeof t.radiusScale === 'number' ? t.radiusScale : DEFAULT_THEME.radiusScale,
     fontScale: typeof t.fontScale === 'number' ? t.fontScale : DEFAULT_THEME.fontScale,
+    renderingMode:
+      renderingMode === 'efficiency' || renderingMode === 'quality' || renderingMode === 'balanced'
+        ? renderingMode
+        : 'balanced',
     desktopBackground: desktopBackground && typeof desktopBackground.color === 'string'
       ? {
           color: desktopBackground.color,

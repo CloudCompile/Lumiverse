@@ -2,11 +2,16 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
+import { spawnAsync } from "./lib/spawn-async.js";
 import {
   FRONTEND_BUILD_STEPS,
+  backendDependencyProbeCmd,
   bunInstallCmd,
   bunInstallTimeoutMs,
+  bunRuntimeCmd,
+  desktopBuildEnv,
   dependencyInstallStampIsStale,
+  frontendDependencyProbeCmd,
   hardSyncRefusalMessage,
   inspectDependencyTree,
   packageInstallInputsChanged,
@@ -40,6 +45,18 @@ function installPackage(dir: string, packageName: string): void {
   const packageDir = join(dir, "node_modules", ...packageName.split("/"));
   mkdirSync(packageDir, { recursive: true });
   writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name: packageName, version: "1.0.0" }));
+}
+
+function installEsmPackage(dir: string, packageName: string, source: string): void {
+  const packageDir = join(dir, "node_modules", ...packageName.split("/"));
+  mkdirSync(packageDir, { recursive: true });
+  writeFileSync(join(packageDir, "package.json"), JSON.stringify({
+    name: packageName,
+    version: "1.0.0",
+    type: "module",
+    exports: "./index.js",
+  }));
+  writeFileSync(join(packageDir, "index.js"), source);
 }
 
 afterEach(() => {
@@ -84,6 +101,43 @@ test("uses copyfile installs on Windows", () => {
   expect(bunInstallCmd("linux")).toEqual(["bun", "install"]);
 });
 
+test("uses the runtime selected by the Windows version bootstrap", () => {
+  const env = { LUMIVERSE_BUN_EXECUTABLE: "C:\\Lumiverse\\bun-1.4.2\\bin\\bun.exe" };
+  expect(bunInstallCmd("win32", env)).toEqual([
+    env.LUMIVERSE_BUN_EXECUTABLE,
+    "install",
+    "--backend=copyfile",
+  ]);
+  expect(bunRuntimeCmd(["--version"], env)).toEqual([
+    env.LUMIVERSE_BUN_EXECUTABLE,
+    "--version",
+  ]);
+});
+
+test("desktop builds retain Windows Path and the Bun that started the runner", () => {
+  const env = desktopBuildEnv(
+    { Path: "C:\\Windows\\System32;C:\\TOOLS\\BUN", PATH: "C:\\Other\\bin", SYSTEMROOT: "C:\\Windows" },
+    "C:\\Tools\\Bun\\bun.exe",
+    "C:\\Users\\Alice\\.cargo\\bin",
+    "win32",
+  );
+
+  expect(env).toEqual({
+    SYSTEMROOT: "C:\\Windows",
+    PATH: "C:\\Tools\\Bun;C:\\Users\\Alice\\.cargo\\bin;C:\\Windows\\System32;C:\\Other\\bin",
+  });
+});
+
+test("desktop builds find Bun even if it is absent from the inherited PATH", async () => {
+  if (process.platform === "win32") return;
+
+  const env = desktopBuildEnv({ PATH: "/no/bun/on/path" }, process.execPath, "/no/cargo", process.platform);
+  const result = await spawnAsync(["bun", "--version"], { env });
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.trim()).toBe(Bun.version);
+});
+
 test("wraps native Termux installs in proot using the detected Bun launcher", () => {
   expect(bunInstallCmd("linux", {
     LUMIVERSE_IS_TERMUX: "true",
@@ -112,6 +166,103 @@ test("wraps native Termux installs in proot using the detected Bun launcher", ()
   ]);
 });
 
+test("validates backend and frontend dependencies with the same Termux runtime wrapper", () => {
+  const env = {
+    LUMIVERSE_IS_TERMUX: "true",
+    LUMIVERSE_BUN_METHOD: "grun",
+    LUMIVERSE_BUN_PATH: "/data/data/com.termux/files/home/.bun/bin/bun",
+  };
+
+  expect(bunRuntimeCmd(["--version"], env)).toEqual([
+    "grun",
+    env.LUMIVERSE_BUN_PATH,
+    "--version",
+  ]);
+
+  const probe = backendDependencyProbeCmd(env);
+  expect(probe.slice(0, 2)).toEqual(["grun", env.LUMIVERSE_BUN_PATH]);
+  expect(probe.at(-1)).toContain("import('better-auth')");
+  expect(probe.at(-1)).toContain("import('@better-auth/oauth-provider')");
+  expect(probe.at(-1)).not.toMatch(/\s/);
+
+  const frontendProbe = frontendDependencyProbeCmd(env);
+  expect(frontendProbe.slice(0, 2)).toEqual(["grun", env.LUMIVERSE_BUN_PATH]);
+  expect(frontendProbe.at(-1)).toContain("import('@better-auth/oauth-provider/client')");
+  expect(frontendProbe.at(-1)).not.toMatch(/\s/);
+});
+
+test("Better Auth validation detects a missing exported core subpath", () => {
+  const dir = makeTempDir();
+  const coreDir = join(dir, "node_modules", "@better-auth", "core");
+  mkdirSync(coreDir, { recursive: true });
+  writeFileSync(join(coreDir, "package.json"), JSON.stringify({
+    name: "@better-auth/core",
+    version: "1.0.0",
+    type: "module",
+    exports: { "./context": "./context.js" },
+  }));
+  const contextPath = join(coreDir, "context.js");
+  writeFileSync(contextPath, "export const context = {};\n");
+  installEsmPackage(dir, "better-auth", "import '@better-auth/core/context';\n");
+  installEsmPackage(dir, "@better-auth/oauth-provider", "import '@better-auth/core/context';\n");
+
+  const runProbe = () => Bun.spawnSync({
+    cmd: backendDependencyProbeCmd({}),
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(runProbe().exitCode).toBe(0);
+  rmSync(contextPath);
+  expect(runProbe().exitCode).not.toBe(0);
+});
+
+test("frontend dependency validation detects a missing transitive Better Auth module", () => {
+  const dir = makeTempDir();
+  const coreDir = join(dir, "node_modules", "@better-auth", "core");
+  const coreUtilsDir = join(coreDir, "utils");
+  const coreContextDir = join(coreDir, "context");
+  mkdirSync(coreUtilsDir, { recursive: true });
+  mkdirSync(coreContextDir, { recursive: true });
+  writeFileSync(join(coreDir, "package.json"), JSON.stringify({
+    name: "@better-auth/core",
+    version: "1.0.0",
+    type: "module",
+    exports: { "./utils/json": "./utils/json.js" },
+  }));
+  writeFileSync(
+    join(coreUtilsDir, "json.js"),
+    "import '../context/global.js'; export const safeJSONParse = JSON.parse;\n",
+  );
+  const globalPath = join(coreContextDir, "global.js");
+  writeFileSync(globalPath, "export const context = {};\n");
+
+  const oauthDir = join(dir, "node_modules", "@better-auth", "oauth-provider");
+  mkdirSync(oauthDir, { recursive: true });
+  writeFileSync(join(oauthDir, "package.json"), JSON.stringify({
+    name: "@better-auth/oauth-provider",
+    version: "1.0.0",
+    type: "module",
+    exports: { "./client": "./client.js" },
+  }));
+  writeFileSync(
+    join(oauthDir, "client.js"),
+    "import { safeJSONParse } from '@better-auth/core/utils/json'; export { safeJSONParse };\n",
+  );
+
+  const runProbe = () => Bun.spawnSync({
+    cmd: frontendDependencyProbeCmd({}),
+    cwd: dir,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  expect(runProbe().exitCode).toBe(0);
+  rmSync(globalPath);
+  expect(runProbe().exitCode).not.toBe(0);
+});
+
 test("uses a longer install timeout only on Termux-like runtimes", () => {
   expect(bunInstallTimeoutMs({})).toBe(10 * 60_000);
   expect(bunInstallTimeoutMs({ LUMIVERSE_IS_TERMUX: "true" })).toBe(30 * 60_000);
@@ -135,16 +286,32 @@ test("reports frontend build phases separately while preserving their order", ()
   expect(FRONTEND_BUILD_STEPS.map(({ label, command }) => ({ label, command }))).toEqual([
     {
       label: "frontend component metadata extraction",
-      command: ["bun", "run", "extract-props"],
+      command: ["bun", "run", "scripts/extract-props.ts"],
     },
     {
       label: "frontend CSS variable extraction",
-      command: ["bun", "run", "extract-css-vars"],
+      command: ["bun", "run", "scripts/extract-css-vars.ts"],
     },
     {
       label: "frontend Vite bundling",
       command: ["bun", "run", "scripts/build-frontend.ts"],
     },
+  ]);
+});
+
+test("runs frontend build entrypoints directly through the selected Termux Bun wrapper", () => {
+  const env = {
+    LUMIVERSE_IS_TERMUX: "true",
+    LUMIVERSE_BUN_METHOD: "grun",
+    LUMIVERSE_BUN_PATH: "/data/data/com.termux/files/home/.bun/bin/bun",
+  };
+
+  expect(FRONTEND_BUILD_STEPS.map((step) =>
+    bunRuntimeCmd([...step.command].slice(1), env),
+  )).toEqual([
+    ["grun", env.LUMIVERSE_BUN_PATH, "run", "scripts/extract-props.ts"],
+    ["grun", env.LUMIVERSE_BUN_PATH, "run", "scripts/extract-css-vars.ts"],
+    ["grun", env.LUMIVERSE_BUN_PATH, "run", "scripts/build-frontend.ts"],
   ]);
 });
 

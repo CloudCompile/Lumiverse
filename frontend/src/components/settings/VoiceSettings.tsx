@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Volume2, Mic, Play, ExternalLink } from 'lucide-react'
 import { useStore } from '@/store'
@@ -17,7 +17,10 @@ import VoicePicker from '@/components/shared/VoicePicker'
 import { speak, speakSegments, stop, setTTSVolume, setTTSSpeed, isSpeaking } from '@/lib/ttsAudio'
 import { formatTtsConnectionVoiceLabel } from '@/lib/qwenTts'
 import { synthesizeTtsSegments } from '@/lib/ttsSynthesis'
+import { resolveTtsConnectionId } from '@/lib/voiceResolution'
 import { isWebSpeechAvailable } from '@/lib/sttEngine'
+import { getWhistleUnavailableReason, isWhistleAvailable, whistleLanguage } from '@/lib/whistle/config'
+import { whistleClient } from '@/lib/whistle/client'
 import styles from './VoiceSettings.module.css'
 import clsx from 'clsx'
 
@@ -34,6 +37,13 @@ export default function VoiceSettings() {
 
   const [testing, setTesting] = useState(false)
   const [registryVoiceProviders, setRegistryVoiceProviders] = useState(() => listVoiceProviders())
+  const whistleState = useSyncExternalStore(whistleClient.subscribe, whistleClient.getState)
+  const whistleUnavailable = getWhistleUnavailableReason()
+  useEffect(() => {
+    if (voiceSettings.sttProvider === 'whistle' && isWhistleAvailable()) {
+      void whistleClient.prepare().catch(() => {}) // The status below exposes failures and retry.
+    }
+  }, [voiceSettings.sttProvider])
 
   // Connection lists come from the store; only the provider registries need a
   // refresh here. Registry engines update live without a page reload.
@@ -108,9 +118,10 @@ export default function VoiceSettings() {
     [sttProfiles, voiceSettings.sttConnectionId],
   )
 
+  const connectionId = resolveTtsConnectionId(voiceSettings, ttsProfiles)
   const activeConnection = useMemo(
-    () => ttsProfiles.find((p) => p.id === voiceSettings.ttsConnectionId) || null,
-    [ttsProfiles, voiceSettings.ttsConnectionId]
+    () => ttsProfiles.find((p) => p.id === connectionId) || null,
+    [ttsProfiles, connectionId]
   )
   const activeVoiceLabel = useMemo(
     () => (activeConnection ? formatTtsConnectionVoiceLabel(activeConnection) : ''),
@@ -118,7 +129,7 @@ export default function VoiceSettings() {
   )
 
   const handleTestTTS = async () => {
-    if (!voiceSettings.ttsConnectionId) {
+    if (!connectionId) {
       addToast({ type: 'warning', message: t('voice.selectTtsFirst') })
       return
     }
@@ -131,7 +142,7 @@ export default function VoiceSettings() {
       setTTSVolume(voiceSettings.ttsVolume)
       setTTSSpeed(voiceSettings.ttsSpeed)
       const segments = await synthesizeTtsSegments(
-        voiceSettings.ttsConnectionId,
+        connectionId,
         t('voice.ttsTestPhrase'),
         { profile: activeConnection },
       )
@@ -167,7 +178,7 @@ export default function VoiceSettings() {
             <button
               className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
               onClick={handleTestTTS}
-              disabled={testing || !voiceSettings.ttsConnectionId}
+              disabled={testing || !connectionId}
             >
               <Play size={12} />
               {testing ? t('voice.speaking') : isSpeaking() ? t('voice.stop') : t('voice.test')}
@@ -296,7 +307,7 @@ export default function VoiceSettings() {
             onChange={(v) =>
               setVoiceSettings({
                 narrationVoice: v
-                  ? { connectionId: voiceSettings.ttsConnectionId ?? '', voice: '' }
+                  ? { connectionId: connectionId ?? '', voice: '' }
                   : null,
               })
             }
@@ -451,22 +462,63 @@ export default function VoiceSettings() {
           <select
             className={styles.select}
             value={voiceSettings.sttProvider}
-            onChange={(e) => setVoiceSettings({ sttProvider: e.target.value as 'webspeech' | 'connection' })}
+            onChange={(e) => setVoiceSettings({ sttProvider: e.target.value as typeof voiceSettings.sttProvider })}
           >
             <option value="webspeech" disabled={!isWebSpeechAvailable()}>
               {t('voice.sttWebSpeech')} {!isWebSpeechAvailable() ? t('voice.sttUnavailable') : ''}
             </option>
             <option value="connection">{t('voice.sttConnection')}</option>
+            <option value="whistle" disabled={!!whistleUnavailable}>
+              {t('voice.sttWhistle')} {whistleUnavailable ? t('voice.sttUnavailable') : ''}
+            </option>
           </select>
         </div>
+
+        {whistleUnavailable && voiceSettings.sttProvider !== 'whistle' && (
+          <div className={styles.infoBox} role="status" data-whistle-unavailable={whistleUnavailable}>
+            {t(`voice.sttWhistleReasons.${whistleUnavailable}`)}
+          </div>
+        )}
+
+        {voiceSettings.sttProvider === 'whistle' && (
+          <div className={styles.infoBox} aria-live="polite" data-whistle-unavailable={whistleUnavailable}>
+            <div>{t('voice.sttWhistleHint')}</div>
+            <div className={styles.hint}>
+              {whistleUnavailable ? t(`voice.sttWhistleReasons.${whistleUnavailable}`)
+                : whistleState.phase === 'ready' ? t('voice.sttWhistleReady')
+                : whistleState.phase === 'error' ? whistleState.error
+                : whistleState.phase === 'loading'
+                  ? t('voice.sttWhistleLoading', { percent: Math.round(whistleState.progress * 100) })
+                  : t('voice.sttWhistleAutomatic')}
+            </div>
+            {whistleState.phase === 'loading' && (
+              <progress className={styles.whistleProgress} value={whistleState.progress} max={1} aria-label={t('voice.sttWhistleLoadingLabel')} />
+            )}
+            {whistleState.phase === 'error' && (
+              <button type="button" className={styles.actionBtn} onClick={() => { void whistleClient.prepare().catch(() => {}) }}>
+                {t('voice.sttWhistleRetry')}
+              </button>
+            )}
+          </div>
+        )}
 
         <div className={styles.row}>
           <span className={styles.label}>{t('voice.sttLanguage')}</span>
           <select
             className={styles.select}
-            value={voiceSettings.sttLanguage}
+            value={voiceSettings.sttProvider === 'whistle' ? whistleLanguage(voiceSettings.sttLanguage) || 'auto' : voiceSettings.sttLanguage}
             onChange={(e) => setVoiceSettings({ sttLanguage: e.target.value })}
           >
+            {voiceSettings.sttProvider === 'whistle' ? <>
+              <option value="auto">{t('voice.sttLanguageAuto')}</option>
+              <option value="en">English</option>
+              <option value="de">Deutsch</option>
+              <option value="fr">Français</option>
+              <option value="es">Español</option>
+              <option value="it">Italiano</option>
+              <option value="nl">Nederlands</option>
+              <option value="pl">Polski</option>
+            </> : <>
             <option value="en-US">English (US)</option>
             <option value="en-GB">English (UK)</option>
             <option value="ja-JP">Japanese</option>
@@ -478,6 +530,9 @@ export default function VoiceSettings() {
             <option value="pt-BR">Portuguese (Brazil)</option>
             <option value="ko-KR">Korean</option>
             <option value="ru-RU">Russian</option>
+            <option value="nl-NL">Dutch</option>
+            <option value="pl-PL">Polish</option>
+            </>}
           </select>
         </div>
 
@@ -492,10 +547,11 @@ export default function VoiceSettings() {
 
         <div className={styles.toggleRow}>
           <Toggle.Checkbox
-            checked={voiceSettings.sttInterimResults}
+            checked={voiceSettings.sttProvider === 'whistle' ? false : voiceSettings.sttInterimResults}
             onChange={(v) => setVoiceSettings({ sttInterimResults: v })}
             label={t('voice.sttInterim')}
-            hint={t('voice.sttInterimHint')}
+            disabled={voiceSettings.sttProvider === 'whistle'}
+            hint={t(voiceSettings.sttProvider === 'whistle' ? 'voice.sttWhistleFinalHint' : 'voice.sttInterimHint')}
           />
         </div>
 

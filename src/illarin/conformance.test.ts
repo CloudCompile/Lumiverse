@@ -27,7 +27,7 @@ function pair(access: string, refresh: string): TokenPair {
     accessToken: access,
     accessTokenExpiresAt: futureExpiry(),
     refreshToken: refresh,
-    instance: { id: `inst-${refresh}`, scopes: ["asset:receive"] },
+    connectedApp: { id: `inst-${refresh}`, permissions: ["work:receive"] },
   };
 }
 
@@ -72,24 +72,24 @@ describe("illarin protocol conformance checklist", () => {
   test("declarations carry required arrays and stay inside every bound", () => {
     const declaration = buildDeclaration({ instanceName: "check", applicationVersion: "1.0.0", scopes: [] });
     expect(Array.isArray(declaration.capabilities)).toBe(true);
-    expect(Array.isArray(declaration.acceptedTargets)).toBe(true);
+    expect(Array.isArray(declaration.acceptedFormats)).toBe(true);
     expect(declaration.capabilities.length).toBeLessThanOrEqual(DECLARATION_LIMITS.maxArrayEntries);
-    expect(declaration.acceptedTargets.length).toBeLessThanOrEqual(DECLARATION_LIMITS.maxArrayEntries);
+    expect(declaration.acceptedFormats.length).toBeLessThanOrEqual(DECLARATION_LIMITS.maxArrayEntries);
     expect(new TextEncoder().encode(JSON.stringify(declaration)).length).toBeLessThanOrEqual(
       DECLARATION_LIMITS.maxBodyBytes,
     );
   });
 
   test("only documented scopes are ever requested", () => {
-    const decision = ["asset:receive"] as const;
+    const decision = ["work:receive"] as const;
     for (const scope of decision) expect(ILLARIN_SCOPES).toContain(scope);
     const declaration = buildDeclaration({ instanceName: "check", scopes: [...decision] });
-    expect(declaration.scopes).toEqual([...decision]);
+    expect(declaration.permissions).toEqual([...decision]);
   });
 
   test("declaration updates omit names and scopes", () => {
     const update = buildDeclarationUpdate(
-      buildDeclaration({ instanceName: "check", applicationVersion: "2.0.0", scopes: ["asset:receive"] }),
+      buildDeclaration({ instanceName: "check", applicationVersion: "2.0.0", scopes: ["work:receive"] }),
     );
     const keys = Object.keys(update);
     expect(keys).not.toContain("applicationName");
@@ -101,11 +101,11 @@ describe("illarin protocol conformance checklist", () => {
     const { fetch, urls } = recordingFetch(() => Response.json(pair("ia1.next", "ir1.next")));
     const options: IllarinRequestOptions = { fetchImpl: fetch };
 
-    await refreshTokens("https://illarin.xyz", "ir1.secret-refresh", options);
-    await updateInstanceDeclaration("https://illarin.xyz", "ia1.secret-access", {
+    await refreshTokens("https://illarin.com", "ir1.secret-refresh", options);
+    await updateInstanceDeclaration("https://illarin.com", "ia1.secret-access", {
       protocolVersion: 1,
       capabilities: [],
-      acceptedTargets: [],
+      acceptedFormats: [],
     }, options);
 
     for (const url of urls()) {
@@ -125,8 +125,12 @@ describe("illarin protocol conformance checklist", () => {
     expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-a")).toEqual(["delivery-1"]);
     expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-b")).toEqual([]);
 
+    svc.recordDeliveryInstalled(USER_A, "instance-b", "delivery-1", "asset-2", 6);
+    expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-b")).toEqual(["delivery-1"]);
+
     svc.markDeliveriesAcknowledged(USER_A, "instance-a", ["delivery-1"]);
     expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-a")).toEqual([]);
+    expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-b")).toEqual(["delivery-1"]);
 
     svc.queueDeliveryAcknowledgement(USER_A, "instance-a", "delivery-1");
     expect(svc.pendingDeliveryAcknowledgements(USER_A, "instance-a")).toEqual(["delivery-1"]);
@@ -153,5 +157,16 @@ describe("illarin protocol conformance checklist", () => {
       .query("SELECT user_id FROM illarin_instance ORDER BY user_id")
       .all() as Array<{ user_id: string }>;
     expect(rows).toEqual([{ user_id: USER_A }, { user_id: USER_B }]);
+  });
+
+  test("one unreadable saved connection does not prevent other users from starting", async () => {
+    await seed(USER_A, "https://hub-a.example", pair("ia1.a", "ir1.a"));
+    await seed(USER_B, "https://hub-b.example", pair("ia1.b", "ir1.b"));
+    getDb().query("UPDATE illarin_instance SET access_token_tag = ? WHERE user_id = ?")
+      .run(Buffer.alloc(16, 255).toString("base64"), USER_A);
+
+    const instances = await svc.listIllarinInstances();
+
+    expect(instances.map((instance) => instance.userId)).toEqual([USER_B]);
   });
 });

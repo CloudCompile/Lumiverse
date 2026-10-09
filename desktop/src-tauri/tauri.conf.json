@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Lumiverse Desktop",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "identifier": "chat.lumiverse.tray",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -24,6 +24,7 @@
         "transparent": true,
         "shadow": false,
         "focus": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-background-timer-throttling",
         "skipTaskbar": true,
         "alwaysOnBottom": true
       }
@@ -36,6 +37,19 @@
     "active": true,
     "targets": "all",
     "category": "Utility",
+    "license": "LicenseRef-LCL-2.1",
+    "licenseFile": "../../LICENSE.md",
+    "resources": {
+      "../../LICENSE.md": "LICENSE.md"
+    },
+    "macOS": {
+      "entitlements": "Entitlements.plist"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
     "shortDescription": "Experimental Lumiverse integrated browser and tray",
     "icon": [
       "icons/32x32.png",

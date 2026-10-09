@@ -31,7 +31,52 @@ Start Lumiverse normally once before setting up the tray. This lets the normal
 launcher install Bun, install backend dependencies, and run the first-time
 setup wizard.
 
-You also need the following build tools:
+The tray app uses the same Bun version as Lumiverse: Bun 1.4.2 or later.
+Pre-built installers contain the desktop companion, **not** the Lumiverse
+server or Bun. You still need your local Lumiverse checkout.
+
+## Download Lumiverse Desktop
+
+Pre-built installers are available from the
+[Build Desktop workflow](https://github.com/prolix-oc/Lumiverse/actions/workflows/desktop-build.yml).
+You do not need Rust or the platform build tools to install a pre-built app.
+
+1. Sign in to GitHub and open a successful workflow run for the branch you use
+   (for example, `staging`).
+2. Scroll to **Artifacts** and download the `desktop-...` artifact matching
+   your operating system, processor, and preferred installer format.
+3. Extract the downloaded ZIP, then install the file inside:
+
+| Platform | Processor | Installer |
+|----------|-----------|-----------|
+| macOS | Apple Silicon (`aarch64`) or Intel (`x64`) | `.dmg` — open it and copy the app to Applications |
+| Windows | Intel/AMD (`x64`) | NSIS `.exe` or `.msi` — run the installer |
+| Windows | ARM64 | NSIS `.exe` — run the installer |
+| Linux | Intel/AMD (`amd64`) or ARM64 (`arm64` / `aarch64`) | `.deb` — install with your package manager; or `.AppImage` — mark executable and launch |
+
+Workflow artifacts expire according to GitHub's retention policy. If a
+download has expired, choose a newer successful run. These are branch builds,
+not necessarily a published release. Published desktop installers are attached
+to **Lumiverse Desktop** releases tagged `desktop-v...` on the
+[Releases page](https://github.com/prolix-oc/Lumiverse/releases) when available.
+
+!!! warning "Unsigned installers"
+    Windows installers are unsigned, and macOS builds use ad-hoc signing
+    without Apple notarization. SmartScreen or Gatekeeper may warn or block
+    installation or launch. Only install downloads from the official repository
+    that you trust; do not disable system-wide security protections.
+
+Windows needs WebView2 (included with most Windows 11 installations). Linux
+still needs the matching WebKitGTK 4.1 and AppIndicator runtime libraries;
+an AppImage does not remove every system dependency. GNOME Shell also needs
+an AppIndicator/KStatusNotifier extension for the tray icon to appear.
+
+After installation, skip to [Connect Lumiverse Desktop to Lumiverse](#connect-lumiverse-desktop-to-lumiverse).
+
+## Build from source (optional)
+
+Build locally if you prefer, or if no suitable pre-built installer is available.
+Only this path requires the following build tools:
 
 | Platform | Required tools |
 |----------|----------------|
@@ -39,9 +84,7 @@ You also need the following build tools:
 | Windows | [Rust](https://rustup.rs/) stable, the Microsoft C++ Build Tools, and WebView2 (included with most Windows 11 installations) |
 | Linux | [Rust](https://rustup.rs/) stable plus the GTK/WebKitGTK and AppIndicator packages listed below |
 
-The tray app uses the same Bun version as Lumiverse: Bun 1.4.0 or later.
-
-### Linux dependencies
+### Linux build dependencies
 
 The Linux tray icon uses the StatusNotifierItem/AppIndicator D-Bus protocol.
 Install the required native packages before building the app:
@@ -80,14 +123,14 @@ KStatusNotifierItem Support**, before the icon will appear.
 
 ---
 
-## Build Lumiverse Desktop
+### Build Lumiverse Desktop
 
 From the root of your Lumiverse checkout, run:
 
 ```bash
 cd desktop
 bun install
-bun run tauri build
+bun run tauri:finalized build
 ```
 
 The finished app and installer files are placed under
@@ -128,9 +171,37 @@ The finished app and installer files are placed under
 5. Choose **Start Server**. Lumiverse opens in the experimental integrated
    browser when the local server is ready.
 
-The **Start Server at Launch** option is enabled by default. Disable it if you
+The **Start Local Server at Launch** option is enabled by default. Disable it if you
 want the tray icon to open without starting Lumiverse. You can also enable
 **Launch at Login** from the tray menu.
+
+### Connect to a remote instance
+
+1. Choose **Instance Connection…** from the tray menu.
+2. Enter the remote Lumiverse URL and save it. Remote connections require HTTPS;
+   plain HTTP is accepted only for local loopback development.
+3. Choose **Browser → Sign In to Remote Instance…** and finish signing in
+   in your system browser.
+
+Add the server's public HTTPS origin (for example, `https://app.example.com`)
+under **Settings → Operator → Trusted Hostnames**, then restart Lumiverse.
+Desktop verifies the request-specific OAuth issuer against the instance you
+selected. `AUTH_BASE_URL` is an optional single-origin override, not a
+requirement.
+
+When Lumiverse terminates TLS directly with `LUMIVERSE_TLS_CERT_FILE` or
+`LUMIVERSE_TLS_CONFIG_FILE`, forwarded headers are not needed. When TLS
+terminates at a reverse proxy, preserve `Host`. If the proxy replaces
+it, send `X-Forwarded-Host` and `X-Forwarded-Proto` and list the proxy IP or
+CIDR in `TRUSTED_PROXIES`. Lumiverse does not trust those headers from arbitrary
+peers.
+
+Desktop uses authorization-code PKCE. Its refresh credential is kept in the
+operating system credential store, while access tokens remain only in native
+memory and are not passed into the remote WebView. Every account can see the
+instance identity and its own role; serving status is shown only to administrators
+and owners. Local process and checkout controls are disabled until you switch the
+instance connection back to **Use Local Server**.
 
 ---
 
@@ -139,14 +210,26 @@ want the tray icon to open without starting Lumiverse. You can also enable
 The menu provides:
 
 - **Start Server / Stop Server** — controls the Lumiverse process owned by the tray app.
-- **Open Lumiverse** — opens or closes the integrated browser. Its submenu
-  can reload that browser or open the same address in your default browser.
+- **Browser** — opens or closes the integrated browser. Its submenu can reload
+  that browser or open the same address in your default browser. Closing the
+  integrated browser also closes its active floating widgets.
 - **Serving Stats** — shows the port, process ID, uptime, branch, and version.
 - **Check for Updates / Apply Update** — uses Lumiverse's normal Git-based update flow.
 
 Closing the tray app stops the runner and the server it started. If Lumiverse
 was started separately from a terminal, the tray can show that it is running,
 but it does not take ownership of or stop that process.
+
+### Native notifications
+
+Enable notifications from **Settings > Notifications** inside the integrated
+browser to register Lumiverse Desktop as a native notification destination.
+The tray keeps a notification-only connection while the server is available,
+including when the integrated browser is closed or its login session has
+expired. Its device identity and revocable credential live in the standard
+per-app configuration directory, so rebuilding the desktop app does not
+silently unregister it. The credential is pinned to that server's origin and
+identity. Removing the destination in Settings revokes it.
 
 ---
 
@@ -220,7 +303,8 @@ also stops any server the tray started).
 
 #### 3. Remove the tray app's data
 
-The tray stores its settings and logs in the standard per-app locations:
+The tray stores its settings, logs, notification device identity, and revocable
+notification credential in the standard per-app locations:
 
 === "macOS"
 

@@ -558,7 +558,7 @@ test('every eligible chat renders exactly one working oldest-message owner', asy
           // Preserved contracts, asserted on every cell.
           expect(evidence.nativeGroups).toBe(1)
           expect(evidence.dockRequest).toBe('strip')
-          expect(evidence.nativeActionSide).toBe('right')
+          expect(evidence.nativeActionSide).toBe(suiteEnabled ? 'right' : null)
 
           // Duplicates are always a failure.
           if (owners > 1) failures.push(`DUPLICATE(${owners}) ${describeCell(cell)}`)
@@ -687,9 +687,9 @@ test('native ownership survives a disabled, hidden, or overridden QuickToolbar',
 }, 180_000)
 
 // ─────────────────────────────────────────────────────────────────────────
-// Preserved: Suite-disabled right side, single native group, dock contracts
+// Preserved: Suite-disabled native alignment, single native group, dock contracts
 // ─────────────────────────────────────────────────────────────────────────
-test('Suite-disabled placement stays right and the docked toolbar keeps its dock contract', async () => {
+test('Suite-disabled placement drops the Suite side contract and keeps its dock contract', async () => {
   const suiteDisabledLeft = await renderCell({
     suiteEnabled: false,
     toolbarEnabled: true,
@@ -701,7 +701,7 @@ test('Suite-disabled placement stays right and the docked toolbar keeps its dock
     nativeDockActionSide: 'left',
   })
   expect(suiteDisabledLeft.nativeGroups).toBe(1)
-  expect(suiteDisabledLeft.nativeActionSide).toBe('right')
+  expect(suiteDisabledLeft.nativeActionSide).toBeNull()
   expect(suiteDisabledLeft.dockRequest).toBe('strip')
   expect(suiteDisabledLeft.quickToolbarMounted).toBe(false)
 

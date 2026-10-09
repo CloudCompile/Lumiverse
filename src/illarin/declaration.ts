@@ -1,8 +1,8 @@
 /**
- * Declaration building for the Illarin linked-instance protocol (v1).
+ * Declaration building for the Illarin connected-app protocol (v1).
  *
  * The declaration is the machine-readable description of this installation:
- * who we are, what we can accept, and which scopes we ask for. Illarin
+ * who we are, what we can accept, and which permissions we ask for. Illarin
  * enforces every limit on the wire (names ≤64 printable chars after trim,
  * arrays ≤32 unique entries ≤64 chars each, body ≤4 KiB, unknown fields
  * rejected), so this module validates before anything leaves the process.
@@ -33,10 +33,13 @@ export const ILLARIN_CAPABILITIES = Object.freeze([
   "theme-install",
 ].map((name) => `${ILLARIN_CAPABILITY_NAMESPACE}:${name}`));
 
+export const EXTENSION_INSTALL_CAPABILITY = `${ILLARIN_CAPABILITY_NAMESPACE}:extension-install`;
+
 /**
  * Export targets Lumiverse can read, ordered most → least preferred.
  * Illarin delivers using the first supported entry and falls back to `raw`.
  * SillyTavern themes are deliberately absent — Lumiverse does not accept them.
+ * Presets must use the Lumiverse writer, which also converts SillyTavern uploads.
  */
 export const ILLARIN_ACCEPTED_TARGETS = Object.freeze([
   "charx",
@@ -45,9 +48,9 @@ export const ILLARIN_ACCEPTED_TARGETS = Object.freeze([
   "lorebook",
   "lorebook_sillytavern",
   "preset_lumiverse",
-  "preset_sillytavern",
   "theme_lumiverse",
   "pack_lumiverse",
+  "extension_spindle",
 ]);
 
 export interface DeclarationInput {
@@ -55,34 +58,37 @@ export interface DeclarationInput {
   instanceName: string;
   applicationVersion?: string;
   scopes: readonly IllarinScope[];
+  installsExtensions?: boolean;
 }
 
 /** Build and wire-validate the link-time declaration. */
 export function buildDeclaration(input: DeclarationInput): IllarinDeclaration {
   const declaration: IllarinDeclaration = {
-    applicationName: (input.applicationName ?? DEFAULT_APPLICATION_NAME).trim(),
-    instanceName: input.instanceName.trim(),
-    ...(input.applicationVersion === undefined ? {} : { applicationVersion: input.applicationVersion.trim() }),
+    appName: (input.applicationName ?? DEFAULT_APPLICATION_NAME).trim(),
+    name: input.instanceName.trim(),
+    ...(input.applicationVersion === undefined ? {} : { appVersion: input.applicationVersion.trim() }),
     protocolVersion: ILLARIN_PROTOCOL_VERSION,
-    capabilities: [...ILLARIN_CAPABILITIES],
-    acceptedTargets: [...ILLARIN_ACCEPTED_TARGETS],
-    scopes: [...input.scopes],
+    capabilities: input.installsExtensions
+      ? [...ILLARIN_CAPABILITIES, EXTENSION_INSTALL_CAPABILITY]
+      : [...ILLARIN_CAPABILITIES],
+    acceptedFormats: [...ILLARIN_ACCEPTED_TARGETS],
+    permissions: [...input.scopes],
   };
   assertDeclarationWireLimits(declaration);
   return declaration;
 }
 
 /**
- * Derive the updatable declaration for `PUT /api/v1/instances/me`. Names and
- * granted scopes are deliberately omitted — the endpoint cannot change them
+ * Derive the updatable declaration for `PUT /api/v1/connected-apps/me`. Names and
+ * permissions are deliberately omitted — the endpoint cannot change them
  * and would reject them as unknown fields. Never widen access silently.
  */
 export function buildDeclarationUpdate(declaration: IllarinDeclaration): DeclarationUpdate {
   return {
-    ...(declaration.applicationVersion === undefined ? {} : { applicationVersion: declaration.applicationVersion }),
+    ...(declaration.appVersion === undefined ? {} : { appVersion: declaration.appVersion }),
     protocolVersion: declaration.protocolVersion,
     capabilities: [...declaration.capabilities],
-    acceptedTargets: [...declaration.acceptedTargets],
+    acceptedFormats: [...declaration.acceptedFormats],
   };
 }
 
@@ -96,14 +102,14 @@ export function assertDeclarationWireLimits(declaration: IllarinDeclaration): vo
   if (declaration.protocolVersion !== ILLARIN_PROTOCOL_VERSION) {
     throw new RangeError(`protocolVersion must be exactly ${ILLARIN_PROTOCOL_VERSION}`);
   }
-  assertPrintableName("applicationName", declaration.applicationName);
-  assertPrintableName("instanceName", declaration.instanceName);
+  assertPrintableName("appName", declaration.appName);
+  assertPrintableName("name", declaration.name);
 
-  if (declaration.applicationVersion !== undefined) {
-    const version = declaration.applicationVersion.trim();
+  if (declaration.appVersion !== undefined) {
+    const version = declaration.appVersion.trim();
     if (!version || version.length > DECLARATION_LIMITS.versionMaxChars || CONTROL_CHAR_PATTERN.test(version)) {
       throw new RangeError(
-        `applicationVersion must be 1-${DECLARATION_LIMITS.versionMaxChars} printable characters`,
+        `appVersion must be 1-${DECLARATION_LIMITS.versionMaxChars} printable characters`,
       );
     }
   }
@@ -116,16 +122,17 @@ export function assertDeclarationWireLimits(declaration: IllarinDeclaration): vo
     }
   }
 
-  assertEntryArray("acceptedTargets", declaration.acceptedTargets);
-  for (const target of declaration.acceptedTargets) {
+  assertEntryArray("acceptedFormats", declaration.acceptedFormats);
+  for (const target of declaration.acceptedFormats) {
     if (!/^[a-z0-9_]+$/.test(target)) {
       throw new RangeError(`accepted target "${target}" must be a lowercase module ID`);
     }
   }
 
-  for (const scope of declaration.scopes) {
+  assertEntryArray("permissions", declaration.permissions);
+  for (const scope of declaration.permissions) {
     if (!ILLARIN_SCOPES.includes(scope)) {
-      throw new RangeError(`scope "${scope}" is not an Illarin scope`);
+      throw new RangeError(`permission "${scope}" is not an Illarin permission`);
     }
   }
 

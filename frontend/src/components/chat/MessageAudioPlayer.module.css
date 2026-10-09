@@ -129,6 +129,7 @@
 .playerRegenerating .slider,
 .playerRegenerating .time,
 .playerRegenerating .volumeBtn,
+.playerRegenerating .downloadBtn,
 .playerRegenerating .deleteBtn {
   opacity: 0.35;
   transition: opacity var(--lcs-transition-fast, 120ms ease);
@@ -219,11 +220,8 @@
   color: var(--lumiverse-text, rgba(230, 230, 240, 0.92));
 }
 
-/* Tiny delete button at the trailing edge. Defaults to a subtle dim
-   colour so it doesn't compete with the playback controls visually,
-   then shifts to the theme's danger colour on hover/focus to signal
-   the destructive action. Sized down vs the play button (22 vs 24) so
-   it reads as secondary. */
+/* Secondary download/delete actions at the trailing edge. */
+.downloadBtn,
 .deleteBtn {
   display: inline-flex;
   align-items: center;
@@ -243,16 +241,24 @@
     transform var(--lcs-transition-fast, 120ms ease);
 }
 
+.downloadBtn:hover:not(:disabled),
+.downloadBtn:focus-visible:not(:disabled) {
+  background: var(--lumiverse-fill-strong, rgba(255, 255, 255, 0.08));
+  color: var(--lumiverse-primary, #9370db);
+}
+
 .deleteBtn:hover:not(:disabled),
 .deleteBtn:focus-visible:not(:disabled) {
   background: color-mix(in srgb, var(--lumiverse-danger, #ef4444) 18%, transparent);
   color: var(--lumiverse-danger, #ef4444);
 }
 
+.downloadBtn:active:not(:disabled),
 .deleteBtn:active:not(:disabled) {
   transform: scale(0.94);
 }
 
+.downloadBtn:disabled,
 .deleteBtn:disabled {
   cursor: default;
   opacity: 0.35;

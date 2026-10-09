@@ -27,6 +27,7 @@ export default function AuthGuard({ children }: AuthGuardProps) {
 
     let validationInFlight = false
     const revalidate = () => {
+      if (document.visibilityState !== 'visible') return
       if (validationInFlight) return
       validationInFlight = true
       void checkSession().finally(() => {

@@ -227,7 +227,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "responses generate", res);
 
@@ -316,7 +316,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       method: "POST",
       headers: this.headers(apiKey),
       body: JSON.stringify(body),
-    }, request.signal);
+    }, request.signal, { observer: request.onProviderRequest, provider: this.name, model: request.model, credentials: [apiKey] });
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "responses stream", res);
 
@@ -384,6 +384,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
           terminal = {
             token: "", ...outcome,
             finish_reason: toolCalls && !failed ? "tool_calls" : outcome.finish_reason,
+            stopReceivedAt: Date.now(),
             tool_calls: toolCalls,
             usage: resp.usage ? {
               prompt_tokens: resp.usage.input_tokens || 0,

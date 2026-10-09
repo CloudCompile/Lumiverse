@@ -11,6 +11,7 @@ export const createGenerationSlice: StateCreator<AppStore, [], [], GenerationSli
     promptMode: 'scene',
     customPrompt: '',
     customNegativePrompt: '',
+    captionPrompt: '',
     activePromptPresetId: null,
     promptPresets: [],
     promptParserConnectionId: null,

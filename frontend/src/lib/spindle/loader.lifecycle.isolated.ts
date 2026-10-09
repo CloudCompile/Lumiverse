@@ -1,3 +1,4 @@
+import { createFrontendSTTAPI } from './stt-api'
 import { afterAll, afterEach, beforeAll, describe, expect, mock, test } from 'bun:test'
 import { JSDOM } from 'jsdom'
 import type { SpindleManifest } from 'lumiverse-spindle-types'
@@ -312,6 +313,7 @@ mock.module('./display-resolver-registry', () => ({
   isDisplayChatOwned: () => false,
   registerDisplayResolver: () => () => {},
   unregisterDisplayResolver() {},
+  revokeInlineCardWrappingOptOut() {},
 }))
 mock.module('@/hooks/useDisplayRegex', () => ({
   invalidateDisplayRegexCache() {},
@@ -408,6 +410,17 @@ mock.module('./browser-scheduler', () => ({ scheduleSpindleDomTask: () => () => 
 // lifecycle test exercises the loader boundary, so keep that compile-time-only
 // module graph behind its adapter rather than weakening the production macros.
 mock.module('./theme-authoring-native', () => ({ createNativeThemeAuthoringAPI: () => ({}) }))
+mock.module('./stt-native', () => ({ createNativeSTTAPI: (deps: Parameters<typeof createFrontendSTTAPI>[0]) => createFrontendSTTAPI({
+  ...deps,
+  getConfig: () => ({ provider: 'whistle', language: 'en', continuous: false, interimResults: true }),
+  listProviders: () => [{ id: 'whistle', name: 'Whistle', onDevice: true, available: true, supportsAudioTranscription: true }],
+  prepare: async () => {},
+  transcribe: async () => ({ text: 'hello', provider: 'whistle' }),
+  createEngine: () => ({
+    start() {}, stop() {}, destroy() {}, isListening: () => true,
+    onResult() {}, onError() {}, onStop() {}, onAudioFrame() {},
+  }),
+}) }))
 
 const lifecycleModuleSource = `
   export function teardown() {
@@ -437,7 +450,7 @@ globalThis.fetch = (async () => new Response(lifecycleModuleSource)) as unknown 
 
 
 
-const { getLoadedExtensions, loadFrontendExtension, unloadFrontendExtension, routeBackendMessage, routeFrontendProcessEvent } = await import('./loader')
+const { getLoadedExtensions, loadFrontendExtension, unloadFrontendExtension, unloadAllFrontendExtensions, routeBackendMessage, routeFrontendProcessEvent } = await import('./loader')
 mock.restore()
 trackWindowHandlers = true
 
@@ -1093,6 +1106,22 @@ describe('loader lifecycle orchestration', () => {
     expect(frontendProcessEvents).toHaveLength(eventCount)
   })
 
+  test('unload-all invalidates a frontend still waiting for its source', async () => {
+    const previousFetch = globalThis.fetch
+    let resolveFetch!: (value: Response) => void
+    globalThis.fetch = (() => new Promise<Response>(resolve => { resolveFetch = resolve })) as unknown as typeof fetch
+    try {
+      const pending = loadFrontendExtension('pending_shutdown', { ...manifest, identifier: 'pending_shutdown' })
+      await Promise.resolve()
+      await Promise.resolve()
+      await unloadAllFrontendExtensions()
+      resolveFetch(new Response(lifecycleModuleSource))
+      await pending
+      expect(getLoadedExtensions().has('pending_shutdown')).toBe(false)
+      expect(lifecycleGlobals.__lifecycleContext).toBeUndefined()
+    } finally { globalThis.fetch = previousFetch }
+  })
+
   test('asynchronous setup rejection unloads a resolved generation and every owned resource', async () => {
     const extensionId = 'async_setup_failure'
     const processId = 'async-failure-process'
@@ -1137,4 +1166,23 @@ describe('loader lifecycle orchestration', () => {
     await flushLifecycleTasks()
     expect(frontendProcessEvents).toHaveLength(eventCount)
   })
+})
+
+test('tab takeover disposes the runtime and rejects retained or newly loaded frontend work', async () => {
+  const { activeTab } = await import('../active-tab')
+  const release = activeTab.claim('takeover-account')
+  try {
+    await loadFrontendExtension('tab_takeover', { ...manifest, identifier: 'tab_takeover' })
+    const context = lifecycleGlobals.__lifecycleContext as { sendToBackend(value: unknown): void }
+    expect(getLoadedExtensions().has('tab_takeover')).toBe(true)
+    window.localStorage.setItem('lumiverse:active-tab:takeover-account', 'replacement')
+    window.dispatchEvent(new dom.window.StorageEvent('storage', {
+      key: 'lumiverse:active-tab:takeover-account', storageArea: window.localStorage,
+    }))
+    await flushLifecycleTasks()
+    expect(getLoadedExtensions().has('tab_takeover')).toBe(false)
+    expect(lifecycleGlobals.__lifecycleTeardownCalls).toBe(1)
+    expect(() => context.sendToBackend({ type: 'late-write' })).toThrow('Another tab is active')
+    await expect(loadFrontendExtension('late_load', manifest)).rejects.toThrow('Another tab is active')
+  } finally { release() }
 })

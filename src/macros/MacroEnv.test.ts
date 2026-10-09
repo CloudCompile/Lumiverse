@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildEnv } from "./MacroEnv";
+import { macroInterceptorChain } from "../spindle/macro-interceptor";
 import type { Character } from "../types/character";
 import type { Chat } from "../types/chat";
 import type { Message } from "../types/message";
@@ -464,4 +465,15 @@ describe("buildEnv groupCardMode", () => {
       expect(env.names.groupCardMode).toBe("swap");
     }
   });
+});
+
+
+test("preserves message source only for an opted-in display owner in the same account", () => {
+  const remove = macroInterceptorChain.register({ extensionId: 'owner-install', extensionIdentifier: 'owner', handlesOwnedSources: true, priority: 100, userId: 'owner-user', handler: async () => undefined });
+  try {
+    for (const [owner, userId, expected] of [[true, 'owner-user', true], [false, 'owner-user', false], [true, 'other-user', false]] as const) {
+      const env = buildEnv({ character: { ...baseCharacter, extensions: { owner: { display_owner: owner } } }, persona: null, chat: baseChat, messages: [], generationType: 'normal', userId });
+      expect(env.extra.preserveMessageSource).toBe(expected);
+    }
+  } finally { remove(); }
 });

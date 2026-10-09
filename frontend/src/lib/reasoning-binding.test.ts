@@ -66,3 +66,17 @@ describe('captureReasoningBindings', () => {
     ])
   })
 })
+
+describe('getEffortOptions', () => {
+  test('exposes XHigh for Opus 4.7 and version-matched Opus 4.8+ models', () => {
+    for (const model of ['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5']) {
+      expect(getEffortOptions('anthropic', model).map(({ value }) => value)).toContain('xhigh')
+    }
+  })
+
+  test('does not expose XHigh for older Opus or other Claude families', () => {
+    for (const model of ['claude-opus-4-6', 'claude-sonnet-5-5']) {
+      expect(getEffortOptions('anthropic', model).map(({ value }) => value)).not.toContain('xhigh')
+    }
+  })
+})

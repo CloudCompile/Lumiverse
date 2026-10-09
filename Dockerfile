@@ -6,12 +6,14 @@
 # floating `canary-slim` tag here: its lockfile behavior changed between
 # scheduled builds and made `--frozen-lockfile` fail nondeterministically.
 # Supports: linux/amd64, linux/arm64
+# Keep COPY sources explicit: desktop/ is a native Tauri app and must not enter
+# any image stage. Docker workflows also exclude it from their checkout.
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Stage 1: Build frontend (Vite + TypeScript)
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6 AS frontend-build
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS frontend-build
 WORKDIR /app/frontend
 
 # Install dependencies first (cache layer)
@@ -38,7 +40,7 @@ RUN echo "frontend-refresh: ${FRONTEND_REFRESH}" && bun run build
 # ---------------------------------------------------------------------------
 # Stage 2: Install backend production dependencies
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6 AS backend-deps
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61 AS backend-deps
 
 WORKDIR /app
 
@@ -50,7 +52,7 @@ RUN bun install --production --frozen-lockfile
 # ---------------------------------------------------------------------------
 # Stage 3: Runtime
 # ---------------------------------------------------------------------------
-FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61
 
 # CA_REFRESH: cache-busting marker for the apt layer below. Bump (or pass via
 # --build-arg) to force apt-get to re-fetch the `ca-certificates` package so the
@@ -113,7 +115,7 @@ VOLUME /app/data
 
 # Health check — hit the root (serves frontend) to verify the server is alive
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD bun -e "fetch('http://localhost:' + (Bun.env.PORT || '7860')).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+  CMD bun run src/healthcheck.ts
 
 # Run as non-root
 USER bun

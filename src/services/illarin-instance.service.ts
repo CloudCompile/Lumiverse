@@ -6,6 +6,7 @@
  * from export/import (EXCLUDED_TABLES) so credentials never leave the box.
  */
 
+import type { Database } from "bun:sqlite";
 import { getDb } from "../db/connection";
 import { getEncryptionKeyBytes } from "../crypto/init";
 import type { TokenPair } from "../illarin/types";
@@ -53,7 +54,7 @@ export interface SaveInstanceInput {
   pair: TokenPair;
   instanceName: string;
   applicationName: string;
-  /** Full requested declaration as sent to /api/v1/link/* — the version marker. */
+  /** Full requested declaration as sent to /api/v1/connect/* — the version marker. */
   declarationJson: string;
 }
 
@@ -95,10 +96,32 @@ async function decrypt(encrypted: string, ivB64: string, tagB64: string): Promis
   return new TextDecoder().decode(plaintext);
 }
 
+/**
+ * A rotated refresh token must survive a hard reboot once Illarin has issued
+ * it. Temporarily raise this connection from WAL/NORMAL to FULL so the token
+ * transaction is flushed at commit, then immediately restore normal tuning.
+ * Keep the callback synchronous so no unrelated write can interleave.
+ */
+function withDurableTokenWrite<T>(write: (db: Database) => T): T {
+  const db = getDb();
+  const row = db.query("PRAGMA synchronous").get() as { synchronous?: unknown } | null;
+  const rawLevel = Number(row?.synchronous);
+  const previousLevel = Number.isInteger(rawLevel) && rawLevel >= 0 && rawLevel <= 3 ? rawLevel : 1;
+  const needsFullSync = previousLevel < 2;
+
+  if (needsFullSync) db.run("PRAGMA synchronous = FULL");
+  try {
+    return write(db);
+  } finally {
+    if (needsFullSync) db.run(`PRAGMA synchronous = ${previousLevel}`);
+  }
+}
+
 function parseScopes(json: string): string[] {
   try {
     const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string") : [];
+    return Array.isArray(parsed) ? parsed.filter((s): s is string => typeof s === "string")
+      .map((scope) => scope === "asset:receive" ? "work:receive" : scope) : [];
   } catch {
     return [];
   }
@@ -141,41 +164,70 @@ export async function getIllarinInstance(userId: string): Promise<IllarinInstanc
 /** Get every configured instance for startup warmup. */
 export async function listIllarinInstances(): Promise<IllarinInstance[]> {
   const rows = getDb().query("SELECT * FROM illarin_instance WHERE user_id IS NOT NULL").all() as InstanceRow[];
-  return Promise.all(rows.map(rowToInstance));
+  const settled = await Promise.allSettled(rows.map(rowToInstance));
+  const instances: IllarinInstance[] = [];
+  let failed = 0;
+  for (const result of settled) {
+    if (result.status === "fulfilled") instances.push(result.value);
+    else failed++;
+  }
+  if (failed > 0) {
+    console.warn(
+      `[Illarin] Skipped ${failed} saved connection${failed === 1 ? "" : "s"} because its credentials could not be read.`,
+    );
+  }
+  return instances;
 }
 
 /** Persist a completed link, replacing only that user's row. */
 export async function saveInstance(input: SaveInstanceInput): Promise<void> {
-  const db = getDb();
-  db.query("DELETE FROM illarin_instance WHERE user_id = ?").run(input.userId);
-
+  // Finish encryption before touching an existing row. A failed relink can
+  // therefore never erase the last usable credential pair.
   const [accessEnc, refreshEnc] = await Promise.all([
     encrypt(input.pair.accessToken),
     encrypt(input.pair.refreshToken),
   ]);
-  db.query(
-    `INSERT INTO illarin_instance (
-       user_id, illarin_url, instance_id, instance_name, application_name,
-       scopes_json, access_token_encrypted, access_token_iv, access_token_tag,
-       access_token_expires_at, refresh_token_encrypted, refresh_token_iv,
-       refresh_token_tag, last_declaration_json
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(
-    input.userId,
-    input.illarinUrl,
-    input.pair.instance.id,
-    input.instanceName,
-    input.applicationName,
-    JSON.stringify(input.pair.instance.scopes ?? []),
-    accessEnc.encrypted,
-    accessEnc.iv,
-    accessEnc.tag,
-    input.pair.accessTokenExpiresAt,
-    refreshEnc.encrypted,
-    refreshEnc.iv,
-    refreshEnc.tag,
-    input.declarationJson,
-  );
+  withDurableTokenWrite((db) => {
+    db.query(
+      `INSERT INTO illarin_instance (
+         user_id, illarin_url, instance_id, instance_name, application_name,
+         scopes_json, access_token_encrypted, access_token_iv, access_token_tag,
+         access_token_expires_at, refresh_token_encrypted, refresh_token_iv,
+         refresh_token_tag, last_declaration_json
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(user_id) DO UPDATE SET
+         illarin_url = excluded.illarin_url,
+         instance_id = excluded.instance_id,
+         instance_name = excluded.instance_name,
+         application_name = excluded.application_name,
+         scopes_json = excluded.scopes_json,
+         access_token_encrypted = excluded.access_token_encrypted,
+         access_token_iv = excluded.access_token_iv,
+         access_token_tag = excluded.access_token_tag,
+         access_token_expires_at = excluded.access_token_expires_at,
+         refresh_token_encrypted = excluded.refresh_token_encrypted,
+         refresh_token_iv = excluded.refresh_token_iv,
+         refresh_token_tag = excluded.refresh_token_tag,
+         last_declaration_json = excluded.last_declaration_json,
+         linked_at = datetime('now'),
+         last_refresh_at = NULL`,
+    ).run(
+      input.userId,
+      input.illarinUrl,
+      input.pair.connectedApp.id,
+      input.instanceName,
+      input.applicationName,
+      JSON.stringify(input.pair.connectedApp.permissions),
+      accessEnc.encrypted,
+      accessEnc.iv,
+      accessEnc.tag,
+      input.pair.accessTokenExpiresAt,
+      refreshEnc.encrypted,
+      refreshEnc.iv,
+      refreshEnc.tag,
+      input.declarationJson,
+    );
+  });
 }
 
 /**
@@ -188,12 +240,13 @@ export async function replaceTokens(userId: string, pair: TokenPair): Promise<vo
     encrypt(pair.accessToken),
     encrypt(pair.refreshToken),
   ]);
-  getDb()
-    .query(
+  withDurableTokenWrite((db) => {
+    db.query(
       `UPDATE illarin_instance SET
          access_token_encrypted = ?, access_token_iv = ?, access_token_tag = ?,
          access_token_expires_at = ?,
          refresh_token_encrypted = ?, refresh_token_iv = ?, refresh_token_tag = ?,
+         scopes_json = ?,
          last_refresh_at = datetime('now')
        WHERE user_id = ?`,
     )
@@ -205,13 +258,20 @@ export async function replaceTokens(userId: string, pair: TokenPair): Promise<vo
       refreshEnc.encrypted,
       refreshEnc.iv,
       refreshEnc.tag,
+      JSON.stringify(pair.connectedApp.permissions),
       userId,
     );
+  });
 }
 
 /** Record the declaration last accepted by Illarin (version-drift marker). */
 export function updateLastDeclaration(userId: string, declarationJson: string): void {
   getDb().query("UPDATE illarin_instance SET last_declaration_json = ? WHERE user_id = ?").run(declarationJson, userId);
+}
+
+export function canInstallExtensions(userId: string): boolean {
+  const row = getDb().query('SELECT role FROM "user" WHERE id = ?').get(userId) as { role: string | null } | null;
+  return row?.role === "owner" || row?.role === "admin";
 }
 
 /** Remove one user's Illarin credentials entirely. */
@@ -241,14 +301,14 @@ export function recordDeliveryInstalled(
   userId: string,
   instanceId: string,
   deliveryId: string,
-  assetId: string,
-  contentGeneration: number,
+  workId: string,
+  versionNumber: number,
 ): void {
   getDb().query(
     `INSERT OR IGNORE INTO illarin_delivery_receipt
        (user_id, instance_id, delivery_id, asset_id, content_generation)
      VALUES (?, ?, ?, ?, ?)`,
-  ).run(userId, instanceId, deliveryId, assetId, contentGeneration);
+  ).run(userId, instanceId, deliveryId, workId, versionNumber);
 }
 
 /** A repeated delivery is acknowledged again without being reinstalled. */

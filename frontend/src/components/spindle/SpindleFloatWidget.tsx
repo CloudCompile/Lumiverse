@@ -7,6 +7,7 @@ import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/compo
 import { useLongPress } from '@/hooks/useLongPress'
 import { getLiveRootRecordExact } from '@/lib/spindle/live-root-registry'
 import { scheduleSpindleDomTask } from '@/lib/spindle/browser-scheduler'
+import { getUiScale, layoutViewportSize, toLayoutDelta } from '@/lib/uiScale'
 import {
   FLOAT_WIDGET_VIEWPORT_PADDING,
   resolveFloatWidgetSize,
@@ -24,15 +25,12 @@ export default function SpindleFloatWidget({ widget }: Props) {
   const setPlacementHidden = useStore((s) => s.setPlacementHidden)
   const isMobile = useIsMobile()
 
-  const dragging = useRef(false)
-  const offset = useRef({ x: 0, y: 0 })
+  const dragCleanup = useRef<(() => void) | null>(null)
+  const suppressDragClick = useRef(false)
   const contentHostRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
-  const [viewport, setViewport] = useState(() => ({
-    width: window.innerWidth,
-    height: window.innerHeight,
-  }))
+  const [viewport, setViewport] = useState(() => layoutViewportSize())
 
   const size = useMemo(() => resolveFloatWidgetSize(
     isMobile,
@@ -42,10 +40,16 @@ export default function SpindleFloatWidget({ widget }: Props) {
 
   useEffect(() => {
     const updateViewport = () => {
-      setViewport({ width: window.innerWidth, height: window.innerHeight })
+      const next = layoutViewportSize()
+      setViewport((prev) => prev.width === next.width && prev.height === next.height ? prev : next)
     }
+    const observer = new MutationObserver(updateViewport)
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['style'] })
     window.addEventListener('resize', updateViewport)
-    return () => window.removeEventListener('resize', updateViewport)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateViewport)
+    }
   }, [])
 
   useEffect(() => {
@@ -99,39 +103,84 @@ export default function SpindleFloatWidget({ widget }: Props) {
 
   const isFullscreen = widget.fullscreen ?? false
 
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (isFullscreen || e.button !== 0) return
-    dragging.current = true
-    offset.current = { x: e.clientX - pos.x, y: e.clientY - pos.y }
-    ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
-    e.preventDefault()
-  }, [pos, isFullscreen])
+  useEffect(() => () => { dragCleanup.current?.() }, [widget.visible, isFullscreen, widget.root])
 
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragging.current || isFullscreen) return
-    const raw = { x: e.clientX - offset.current.x, y: e.clientY - offset.current.y }
-    setPos(clampPos(raw.x, raw.y))
-  }, [clampPos, isFullscreen])
+  const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (isFullscreen || e.defaultPrevented || e.button !== 0 || (e.pointerType === 'touch' && !e.isPrimary)) return
+    dragCleanup.current?.()
+    suppressDragClick.current = false
+    // Editing/navigation gestures belong to the extension. Buttons and custom
+    // click targets can still be dragged, but an ordinary press stays untouched.
+    const surface = e.currentTarget
+    for (const target of e.nativeEvent.composedPath()) {
+      if (target === surface) break
+      if (target instanceof Element && target.matches(
+        'input, textarea, select, option, a[href], [contenteditable]:not([contenteditable="false"]), [role="slider"], [role="textbox"], [data-spindle-float-resize-handle]',
+      )) return
+    }
+    const pointerId = e.pointerId
+    const startX = e.clientX, startY = e.clientY
+    const scale = getUiScale()
+    let moved = false
+    let position = pos
 
-  const handlePointerUp = useCallback(() => {
-    if (!dragging.current || isFullscreen) return
-    dragging.current = false
-    let snapped = { x: 0, y: 0 }
-    setPos((prev) => {
-      snapped = snapToEdge(prev.x, prev.y)
-      return snapped
-    })
-    // Defer store update out of React's state-computation phase to avoid
-    // triggering a SpindleUIManager re-render while this component is mid-render.
-    requestAnimationFrame(() => {
+    const cleanup = () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', finish)
+      window.removeEventListener('pointercancel', finish)
+      window.removeEventListener('blur', onBlur)
+      surface.removeEventListener('lostpointercapture', onLostCapture)
+      dragCleanup.current = null
+      if (surface.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId)
+    }
+    const onMove = (event: PointerEvent) => {
+      if (event.pointerId !== pointerId) return
+      const dx = event.clientX - startX, dy = event.clientY - startY
+      // Slop is measured in rendered pixels, independently of UI zoom.
+      if (!moved) {
+        if (Math.hypot(dx, dy) < 4) return
+        moved = true
+        suppressDragClick.current = true
+        surface.setPointerCapture(pointerId)
+      }
+      const delta = toLayoutDelta(dx, dy, scale)
+      position = clampPos(pos.x + delta.x, pos.y + delta.y)
+      setPos(position)
+    }
+    const finish = (event?: PointerEvent) => {
+      if (event && event.pointerId !== pointerId) return
+      cleanup()
+      if (!moved) return
+      if (event?.type === 'pointerup') {
+        const delta = toLayoutDelta(event.clientX - startX, event.clientY - startY, scale)
+        position = clampPos(pos.x + delta.x, pos.y + delta.y)
+      }
+      const snapped = snapToEdge(position.x, position.y)
+      setPos(snapped)
       updateFloatWidget(widget.id, snapped)
-      window.dispatchEvent(
-        new CustomEvent('spindle:float-drag-end', {
-          detail: { widgetId: widget.id, ...snapped },
-        })
-      )
-    })
-  }, [snapToEdge, updateFloatWidget, widget.id, isFullscreen])
+      window.dispatchEvent(new CustomEvent('spindle:float-drag-end', {
+        detail: { widgetId: widget.id, ...snapped },
+      }))
+    }
+    const onBlur = () => finish()
+    const onLostCapture = (event: PointerEvent) => {
+      // Touch may transfer implicit capture from a child to the drag surface.
+      if (event.target === surface) finish(event)
+    }
+    dragCleanup.current = cleanup
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', finish)
+    window.addEventListener('pointercancel', finish)
+    window.addEventListener('blur', onBlur)
+    surface.addEventListener('lostpointercapture', onLostCapture)
+  }, [pos, isFullscreen, clampPos, snapToEdge, updateFloatWidget, widget.id])
+
+  const handleClickCapture = useCallback((e: React.MouseEvent) => {
+    if (!suppressDragClick.current || e.detail === 0) return
+    suppressDragClick.current = false
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
 
   const longPress = useLongPress({
     onLongPress: (pos) => setContextMenu(pos),
@@ -161,9 +210,10 @@ export default function SpindleFloatWidget({ widget }: Props) {
         const pad = FLOAT_WIDGET_VIEWPORT_PADDING
         const resetWidth = widget.defaultWidth
         const resetHeight = widget.defaultHeight
+        const bounds = layoutViewportSize()
         const reset = {
-          x: Math.max(pad, Math.min(widget.defaultX, window.innerWidth - resetWidth - pad)),
-          y: Math.max(pad, Math.min(widget.defaultY, window.innerHeight - resetHeight - pad)),
+          x: Math.max(pad, Math.min(widget.defaultX, bounds.width - resetWidth - pad)),
+          y: Math.max(pad, Math.min(widget.defaultY, bounds.height - resetHeight - pad)),
           width: resetWidth,
           height: resetHeight,
         }
@@ -194,8 +244,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
         style={widgetStyle}
         title={widget.tooltip}
         onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
+        onClickCapture={handleClickCapture}
         {...longPress}
         onTouchStart={(e) => { if (!widget.root.contains(e.target as Node)) longPress.onTouchStart(e) }}
         onContextMenu={handleContextMenu}

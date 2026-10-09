@@ -64,6 +64,12 @@ export interface InjectionRecord {
    *  the target element. Empty string means "the message root itself". */
   relativePath: string
   position: InsertPosition
+  /** True when `relativePath` is measured from an *outer* element carrying
+   *  the same `data-message-id` (the virtualized list row) rather than the
+   *  bubble root that `replay()` receives. Replay then resolves the path
+   *  from that outer element, so an injection into the row is not moved
+   *  inside the bubble on remount. */
+  outer?: boolean
   /** The wrapper Element created at first inject. Preserved across
    *  remounts so form-control state, event listeners, and refs survive
    *  virtualization. Null only when the record was created without an
@@ -261,7 +267,42 @@ export function scheduleReplay(messageId: string, root: Element): () => void {
   }
 }
 
-function replayRecord(messageId: string, root: Element, record: InjectionRecord): void {
+/**
+ * The outermost ancestor of `root` (or `root` itself) carrying the same
+ * message id — the list row wrapping the bubble. Null when the bubble has
+ * no such ancestor (it isn't mounted inside a row).
+ */
+export function outerMessageRoot(messageId: string, root: Element): Element | null {
+  const selector = `[data-message-id="${cssEscape(messageId)}"]`
+  let outer: Element | null = null
+  for (let cur = root.parentElement?.closest(selector) ?? null; cur; cur = cur.parentElement?.closest(selector) ?? null) {
+    outer = cur
+  }
+  return outer
+}
+
+/** True when `messageRoot` wraps another element with the same message id,
+ *  i.e. it's the list row around the bubble, not the bubble itself. */
+export function isOuterMessageRoot(messageId: string, messageRoot: Element): boolean {
+  return messageRoot.querySelector(`[data-message-id="${cssEscape(messageId)}"]`) !== null
+}
+
+// Same fallback as dom-helper's findMessageElement: ids are UUIDs in practice.
+function cssEscape(value: string): string {
+  return typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+    ? CSS.escape(value)
+    : value
+}
+
+function replayRecord(messageId: string, bubbleRoot: Element, record: InjectionRecord): void {
+  // Resolve from the same element the path was measured from. The bubble
+  // component hands us its own root, but an injection that targeted the
+  // list row around it was measured from the row; resolving that path
+  // against the bubble would move the wrapper inside the bubble (and into
+  // its flex layout) on every remount.
+  const root = record.outer ? outerMessageRoot(messageId, bubbleRoot) : bubbleRoot
+  if (!root) return
+
   // Already in place (bubble never truly unmounted, or replay fired
   // redundantly). insertAdjacentElement would just move it back to the
   // same slot, but skipping is cheaper and avoids spurious mutations.

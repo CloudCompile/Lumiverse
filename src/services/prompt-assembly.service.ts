@@ -9,10 +9,14 @@ import {
   type MemoryStats,
   type DatabankStats,
   type ContextClipStats,
+  EditAndSendContextError,
 } from "../llm/types";
 import {
   resolveCounter,
   APPROXIMATE_TOKENIZER_NAME,
+  warmTokenizerForModel,
+  tokenizerRuntime,
+  type TokenCounterMetrics,
 } from "./tokenizer.service";
 import type {
   PromptBlock,
@@ -46,14 +50,25 @@ import {
   registry,
   initMacros,
   withPromptBlockContext,
+  restoreLiteralBraces,
 } from "../macros";
-import type { MacroEnv } from "../macros";
+import type { AstNode, MacroEnv } from "../macros/types";
+import { parse } from "../macros/MacroParser";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { coercePromptVariable } from "../utils/prompt-variable-values";
+import { readMessageRevision } from "../utils/message-revision";
+import {
+  isClaudeOpusAtLeast,
+  supportsClaudeOpusXhigh,
+} from "../utils/claude-model";
 import { createActivationInputSnapshot } from "../utils/regex-activation-inputs";
+import { maskWorldInfoScanExclusions } from "../utils/world-info-scan-exclusion";
 import {
   activateWorldInfo,
   applyWorldInfoGroupLogic,
   createWorldInfoActivationScanCache,
+  estimateWorldInfoEntryTokens,
   finalizeActivatedWorldInfoEntries,
   materializeWorldInfoCache,
   primeWorldInfoActivationScanCache,
@@ -62,6 +77,7 @@ import {
   type FinalizedWorldInfoEntries,
   normalizeWorldInfoSettings,
 } from "./world-info-activation.service";
+import { orderWorldInfoForOutput } from "./world-info-output-order";
 import {
   worldInfoInterceptorChain,
   type WorldInfoInterceptorPlacementDTO,
@@ -352,17 +368,28 @@ export function resolveChatHistoryInsertionIndex(
 
 export function insertBlocksIntoTaggedHistory(
   messages: LlmMessage[],
-  blocks: Array<Pick<LlmMessage, "role" | "content"> & { depth: number }>,
+  blocks: Array<
+    Pick<LlmMessage, "role" | "content"> & {
+      depth: number;
+      worldInfo?: boolean;
+    }
+  >,
 ): void {
-  // Insert in reverse so blocks that resolve to the same chat-history boundary
-  // keep their original prompt_order sequence after repeated splices.
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    const block = blocks[i];
-    const insertAt = resolveChatHistoryInsertionIndex(messages, block.depth);
+  // Resolve every boundary before splicing, then insert from the last boundary
+  // back so earlier indices stay valid. Within one boundary the later block goes
+  // in first, so blocks sharing a boundary keep their prompt_order sequence.
+  const placements = blocks.map((block, order) => ({
+    block,
+    order,
+    insertAt: resolveChatHistoryInsertionIndex(messages, block.depth),
+  }));
+  placements.sort((a, b) => b.insertAt - a.insertAt || b.order - a.order);
+  for (const { block, insertAt } of placements) {
     messages.splice(insertAt, 0, {
       role: block.role,
       content: block.content,
     });
+    if (block.worldInfo) markAsWorldInfoEntry(messages[insertAt]);
   }
 }
 
@@ -843,16 +870,82 @@ async function applyPromptRegexScriptsBeforeClipping(
   }
 }
 
+/**
+ * Restore the braces a {{#escape}} body was shielded with. The sentinels only
+ * exist to keep that body inert while macro passes run, so this must be the
+ * last text transformation applied to prompt content — every caller of
+ * `resolvePromptMacrosAfterRegexPass` gets the model-facing form.
+ */
+function restoreEscapeLiteralBraces(result: LlmMessage[]): void {
+  for (let i = 0; i < result.length; i++) {
+    const msg = result[i];
+    let content = msg.content;
+    let changed = false;
+
+    if (typeof msg.content === "string") {
+      const restored = restoreLiteralBraces(msg.content);
+      if (restored !== msg.content) {
+        content = restored;
+        changed = true;
+      }
+    } else if (Array.isArray(msg.content)) {
+      const parts = msg.content.map((part: any) => {
+        if (part?.type !== "text" || typeof part.text !== "string") return part;
+        const text = restoreLiteralBraces(part.text);
+        if (text === part.text) return part;
+        changed = true;
+        return { ...part, text };
+      });
+      if (changed) content = parts;
+    }
+
+    const reasoningContent = typeof msg.reasoning_content === "string"
+      ? restoreLiteralBraces(msg.reasoning_content)
+      : msg.reasoning_content;
+    if (reasoningContent !== msg.reasoning_content) changed = true;
+    if (!changed) continue;
+
+    const replacement: LlmMessage = {
+      ...msg,
+      content,
+      ...(reasoningContent !== undefined
+        ? { reasoning_content: reasoningContent }
+        : {}),
+    };
+    if (isChatHistoryMessage(msg)) markAsChatHistory(replacement);
+    result[i] = replacement;
+  }
+}
+
+/**
+ * Same restoration for the prompt breakdown, which snapshots block content
+ * between the two macro passes and feeds prompt display and token counts.
+ */
+function restoreEscapeLiteralBracesInBreakdown(
+  breakdown: AssemblyBreakdownEntry[],
+): void {
+  for (const entry of breakdown) {
+    if (typeof entry.content === "string") {
+      entry.content = restoreLiteralBraces(entry.content);
+    }
+    if (typeof entry.tokenCountContent === "string") {
+      entry.tokenCountContent = restoreLiteralBraces(entry.tokenCountContent);
+    }
+  }
+}
+
 export async function resolvePromptMacrosAfterRegexPass(
   result: LlmMessage[],
   macroEnv: MacroEnv,
 ): Promise<void> {
+  // Valid <json> blocks stay verbatim in every message: whatever the first
+  // pass or a regex script left in a block must not be expanded or healed here.
   for (let i = 0; i < result.length; i++) {
     const msg = result[i];
     if (typeof msg.content === "string") {
       if (!msg.content.includes("{{") && !msg.content.includes("<")) continue;
-      const resolved = healFormattingArtifacts(
-        (await evaluate(msg.content, macroEnv, registry)).text,
+      const resolved = await withJsonBlocksProtected(msg.content, macroEnv, async (protectedContent) =>
+        healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
       );
       if (resolved !== msg.content) {
         result[i] = { ...msg, content: resolved };
@@ -867,8 +960,8 @@ export async function resolvePromptMacrosAfterRegexPass(
       msg.content.map(async (part: any) => {
         if (part.type !== "text") return part;
         if (!part.text.includes("{{") && !part.text.includes("<")) return part;
-        const text = healFormattingArtifacts(
-          (await evaluate(part.text, macroEnv, registry)).text,
+        const text = await withJsonBlocksProtected(part.text, macroEnv, async (protectedContent) =>
+          healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
         );
         if (text !== part.text) changed = true;
         return text !== part.text ? { ...part, text } : part;
@@ -879,6 +972,10 @@ export async function resolvePromptMacrosAfterRegexPass(
       if (isChatHistoryMessage(msg)) markAsChatHistory(result[i]);
     }
   }
+
+  // Last macro pass: the braces that {{#escape}} shielded come back now, so no
+  // pass above this point can re-expand them.
+  restoreEscapeLiteralBraces(result);
 }
 
 function isDecorativeNewChatSeparator(text: string): boolean {
@@ -1326,11 +1423,22 @@ async function evaluateHostPromptSource(
   macroEnv: MacroEnv,
   sourceHint = "prompt_source:preset_setting",
 ): Promise<string> {
-  return (await evaluate(content, macroEnv, registry, {
+  return (await evaluateForPromptAssembly(content, macroEnv, {
     phase: "prompt",
     sourceHint,
     sourceOwner: "host",
   })).text;
+}
+
+function evaluateForPromptAssembly(
+  content: string,
+  macroEnv: MacroEnv,
+  options: NonNullable<Parameters<typeof evaluate>[3]> = {},
+) {
+  return evaluate(content, macroEnv, registry, {
+    ...options,
+    deferLiteralBraceRestore: true,
+  });
 }
 
 export const DEFAULT_REGEN_FEEDBACK_FORMAT = "[OOC: {{$regenInput}}]";
@@ -1352,7 +1460,7 @@ export async function resolveRegenFeedbackPrompt(
 
   const guardedTemplate = template.split(REGEN_INPUT_PLACEHOLDER).join(guard);
   const resolved = (
-    await evaluate(guardedTemplate, macroEnv, registry, {
+    await evaluateForPromptAssembly(guardedTemplate, macroEnv, {
       phase: "prompt",
       sourceHint: "prompt_source:regen_feedback",
     })
@@ -1500,6 +1608,45 @@ const PROMPT_BLOCK_POSITIONS = new Set<PromptBlock["position"]>([
   "post_history",
   "in_history",
 ]);
+const MEMORY_CONTENT_MACROS = new Set([
+  "memories",
+  "memoriesraw",
+  "entities",
+  "entityfacts",
+  "relationships",
+  "arc",
+  "memorysalience",
+  "charactercolors",
+]);
+const DATABANK_CONTENT_MACROS = new Set(["databank", "databankraw"]);
+
+function detectPromptContextMacros(
+  blocks: PromptBlock[],
+  generationType: GenerationType,
+  characterTags: string[],
+): { memory: boolean; databank: boolean } {
+  const usage = { memory: false, databank: false };
+  for (const block of blocks) {
+    if (!block.enabled || !block.content) continue;
+    if (block.injectionTrigger?.length && !block.injectionTrigger.includes(generationType)) continue;
+    if (!promptBlockMatchesCharacterTags(block.characterTagTrigger, characterTags)) continue;
+    if (block.marker && STRUCTURAL_MARKERS.has(block.marker)) continue;
+
+    const pendingNodes: AstNode[] = [...parse(block.content)];
+    while (pendingNodes.length > 0) {
+      const node = pendingNodes.pop()!;
+      if (node.type === "text" || node.flags.close) continue;
+      const name = (registry.getMacro(node.name)?.name ?? node.name).toLowerCase();
+      if (name === "escape" || name === "comment" || name === "//") continue;
+      if (MEMORY_CONTENT_MACROS.has(name)) usage.memory = true;
+      if (DATABANK_CONTENT_MACROS.has(name)) usage.databank = true;
+      for (const argument of node.args) pendingNodes.push(...argument);
+      if (node.type === "scoped_macro") pendingNodes.push(...node.body);
+    }
+    if (usage.memory && usage.databank) break;
+  }
+  return usage;
+}
 
 function isPromptBlockPlacement(value: unknown): value is Pick<PromptBlock, "role" | "position" | "depth"> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -1679,11 +1826,53 @@ export async function assemblePrompt(
 
   const allMessages =
     pf?.messages ?? chatsSvc.getMessages(ctx.userId, ctx.chatId);
+
+  // Validate the snapshot and live row, then cap history at the committed turn
+  // before WI, macros, and MessageLimit. Context errors survive the worker boundary.
+  let editedContextMessages = allMessages;
+  const editAndSendContext = ctx.editAndSendContext;
+  if (editAndSendContext) {
+    const selectedIndex = allMessages.findIndex(
+      (m) => m.id === editAndSendContext.editedUserMessageId,
+    );
+    if (selectedIndex < 0) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const selected = allMessages[selectedIndex];
+    if (selected.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is not a user message",
+      );
+    }
+    const snapshotRevision = readMessageRevision(selected);
+    if (snapshotRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    // Prefetch may predate a concurrent edit, so also check the live row.
+    const live = chatsSvc.getMessage(ctx.userId, editAndSendContext.editedUserMessageId);
+    if (!live || live.chat_id !== ctx.chatId || live.is_user !== true) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send target message is no longer part of this chat",
+      );
+    }
+    const liveRevision = readMessageRevision(live);
+    if (liveRevision !== editAndSendContext.committedRevision) {
+      throw new EditAndSendContextError(
+        "Edit-and-Send message revision has changed since it was committed",
+      );
+    }
+    editedContextMessages = allMessages.slice(0, selectedIndex + 1);
+  }
+
   // Filter out the excluded message (e.g. regenerate/swipe target with a blank swipe)
   // so it doesn't appear in macros, WI scanning, or any assembly path.
   const messages = ctx.excludeMessageId
-    ? allMessages.filter((m) => m.id !== ctx.excludeMessageId)
-    : allMessages;
+    ? editedContextMessages.filter((m) => m.id !== ctx.excludeMessageId)
+    : editedContextMessages;
   const contextAnchorMessageId =
     typeof chat.metadata?.context_history_anchor_message_id === "string"
       ? chat.metadata.context_history_anchor_message_id
@@ -1727,6 +1916,10 @@ export async function assemblePrompt(
     pf?.connection !== undefined
       ? pf.connection
       : connectionsSvc.resolveConnection(ctx.userId, ctx.connectionId);
+
+  // Start cold file loading while the rest of assembly resolves its inputs.
+  // Clipping joins this pending load in the same runtime if it is not ready.
+  if (connection?.model) void warmTokenizerForModel(connection.model);
 
   // Resolve preset: request presetId takes priority, then connection's
   // preset_id, then any more-specific preset-profile binding can override that
@@ -1812,7 +2005,7 @@ export async function assemblePrompt(
 
   // If no blocks, fall back to legacy mapping
   if (!blocks.length) {
-    return await legacyAssembly(
+    const legacyResult = await legacyAssembly(
       messages,
       ctx.generationType,
       character,
@@ -1823,6 +2016,12 @@ export async function assemblePrompt(
       ctx.userInput,
       ctx.signal,
     );
+    return {
+      ...legacyResult,
+      ...(preset
+        ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
+        : {}),
+    };
   }
 
   // ---- Pre-flight: prepare deferred cortex warm-cache task ----
@@ -2314,13 +2513,18 @@ export async function assemblePrompt(
   const runtimePlacementIds = new Set(
     runtimeWorldInfoPlacements.map((entry) => entry.id),
   );
+  const outputWorldInfo = orderWorldInfoForOutput(
+    mergedWorldInfo.activatedEntries,
+    interception.insertionOrderByEntryId,
+    runtimePlacementIds,
+  );
   const wiCache =
-    runtimePlacementIds.size === 0
+    runtimePlacementIds.size === 0 && outputWorldInfo === mergedWorldInfo.activatedEntries
       ? mergedWorldInfo.cache
       : materializeWorldInfoCache(
-          mergedWorldInfo.activatedEntries.filter(
-            (entry) => !runtimePlacementIds.has(entry.id),
-          ),
+          runtimePlacementIds.size === 0
+            ? outputWorldInfo
+            : outputWorldInfo.filter((entry) => !runtimePlacementIds.has(entry.id)),
         );
   wiResult.activatedEntries = mergedWorldInfo.activatedEntries;
   const activatedWorldInfo = mergedWorldInfo.activatedWorldInfo;
@@ -2589,6 +2793,10 @@ export async function assemblePrompt(
     );
   }
 
+  // `preset` intentionally continues through the normal full-assembly path.
+  // Its only difference from `prompts` is that the caller force-selects the
+  // chat's dedicated impersonation preset.
+
   // ---- Pre-loop: retrieve chat vector memories ----
   phaseStartedAt = performance.now();
   // Reuse settings resolved during cortex pre-flight (avoids duplicate DB reads).
@@ -2710,7 +2918,11 @@ export async function assemblePrompt(
     chatMemSettings?.injectionStrategy ??
     embeddingsSvc.DEFAULT_CHAT_MEMORY_SETTINGS.injectionStrategy;
   const effectiveMemoryEnabled =
-    memoryResult.enabled && memoryInjectionStrategy !== "disabled";
+    (memoryResult.enabled || !!linkedMemoryText) && memoryInjectionStrategy !== "disabled";
+  const memoryFallbackAllowed =
+    memoryInjectionStrategy === "fallback" ||
+    !!macroEnv.extra.cortex?.formatted ||
+    !!linkedMemoryText;
 
   macroEnv.extra.memory = {
     chunks: memoryResult.chunks,
@@ -2767,14 +2979,10 @@ export async function assemblePrompt(
   };
   profiler.addPhase("databank-retrieval", performance.now() - phaseStartedAt);
 
-  // Detect if any enabled block uses the {{memories}} macro
-  const macroHandlesMemory = effectiveBlocks.some(
-    (b) => b.enabled && b.content && /\{\{memories(\b|::|\}\})/.test(b.content),
-  );
-
-  // Detect if any enabled block uses the {{databank}} macro
-  const macroHandlesDatabank = effectiveBlocks.some(
-    (b) => b.enabled && b.content && /\{\{databank(\b|::|\}\})/.test(b.content),
+  const { memory: macroHandlesMemory, databank: macroHandlesDatabank } = detectPromptContextMacros(
+    effectiveBlocks,
+    ctx.generationType,
+    focusedCharacter.tags,
   );
 
   // ---- Resolve #mentions in user messages ----
@@ -2783,8 +2991,8 @@ export async function assemblePrompt(
   //   1. Extract slugs from every user message (pure regex, no I/O).
   //   2. Single sync batch lookup: which slugs map to valid docs in active scope.
   //   3. Strip resolved #tags from every user message.
-  //   4. Expensive content fetch + vector search runs ONCE, only for the LAST
-  //      user message's slugs (the only ones that contribute to the appendix).
+  //   4. Full document content is fetched ONCE, only for the LAST user
+  //      message's slugs (the only ones that contribute to the appendix).
   let databankMentionAppendix = "";
   {
     const charIds = databankCharIds;
@@ -2837,16 +3045,11 @@ export async function assemblePrompt(
             const lastValid = new Set<string>();
             for (const s of lastSlugs) if (validSlugs.has(s)) lastValid.add(s);
             if (lastValid.size > 0) {
-              const queryContext = messages
-                .slice(-6)
-                .map((m) => m.content)
-                .join(" ");
               const resolved = await databankSvc.resolveSlugContent(
                 ctx.userId,
                 ctx.chatId,
                 lastValid,
                 docs,
-                queryContext,
                 ctx.signal,
               );
               if (resolved.length > 0) {
@@ -2867,7 +3070,7 @@ export async function assemblePrompt(
 
   phaseStartedAt = performance.now();
   await resolveWorldInfoOutlets(
-    mergedWorldInfo.activatedEntries,
+    outputWorldInfo,
     macroEnv,
     ctx.signal,
   );
@@ -2899,7 +3102,7 @@ export async function assemblePrompt(
           throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
         }
         entry.content = (
-          await evaluate(entry.content, macroEnv, registry)
+          await evaluateForPromptAssembly(entry.content, macroEnv)
         ).text;
       }
     }
@@ -2940,6 +3143,7 @@ export async function assemblePrompt(
     blockName: string;
     blockId: string;
     marker?: string;
+    worldInfo?: boolean;
   }[] = [];
   let chatHistoryInserted = false;
   let chatHistoryCount = 0;
@@ -3027,10 +3231,11 @@ export async function assemblePrompt(
       // the global injection strategy allows fallback injection.
       if (
         !macroHandlesMemory &&
-        memoryResult.count > 0 &&
-        memoryInjectionStrategy === "fallback"
+        effectiveMemoryEnabled &&
+        combinedFormatted &&
+        memoryFallbackAllowed
       ) {
-        const memoryContent = memoryResult.formatted;
+        const memoryContent = combinedFormatted;
         result.push({ role: "system", content: memoryContent });
         breakdown.push({
           type: "long_term_memory",
@@ -3176,15 +3381,17 @@ export async function assemblePrompt(
         // alloc) when no markers are present. This mirrors the evaluator's own
         // fast-path but avoids the function-call overhead and 4 string scans
         // that evaluate() performs before reaching its early return.
-        const rawContent = msg.content;
+        const rawContent = shieldMessageLiterals(msg.content, msg);
         const needsEval =
           rawContent.includes("{{") ||
           rawContent.includes("<USER>") ||
           rawContent.includes("<BOT>") ||
           rawContent.includes("<CHAR>");
         const visibleResolvedContent = needsEval
-          ? healFormattingArtifacts(
-              (await evaluate(rawContent, macroEnv, registry)).text,
+          ? await withJsonBlocksProtected(rawContent, macroEnv, async (protectedContent) =>
+              healFormattingArtifacts(
+                (await evaluateForPromptAssembly(protectedContent, macroEnv)).text,
+              ),
             )
           : rawContent;
         const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
@@ -3370,6 +3577,22 @@ export async function assemblePrompt(
       if (wiCache.before.length > 0) {
         for (const entry of wiCache.before) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info Before",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3390,6 +3613,22 @@ export async function assemblePrompt(
       if (wiCache.after.length > 0) {
         for (const entry of wiCache.after) {
           const role = (block.role as LlmMessage["role"]) || entry.role;
+          // In-history markers splice their entries into chat history at the
+          // block depth, like other in-history blocks.
+          if (block.position === "in_history") {
+            pendingDepthBlocks.push({
+              role,
+              depth: Math.max(0, block.depth || 0),
+              content: entry.content,
+              blockName: formatWorldInfoBreakdownName(
+                "World Info After",
+                entry.entryLabel,
+              ),
+              blockId: block.id,
+              worldInfo: true,
+            });
+            continue;
+          }
           result.push(markAsWorldInfoEntry({ role, content: entry.content }));
           breakdown.push({
             type: "world_info",
@@ -3555,12 +3794,12 @@ export async function assemblePrompt(
   // When memories are injected via {{memories}} macro, their content is embedded
   // inside a block. Add a separate breakdown entry so the prompt breakdown UI
   // shows memories as their own group.
-  if (macroHandlesMemory && memoryResult.count > 0 && memoryResult.formatted) {
+  if (macroHandlesMemory && effectiveMemoryEnabled && combinedFormatted) {
     breakdown.push({
       type: "long_term_memory",
       name: "Long-Term Memory",
       role: "system",
-      content: memoryResult.formatted,
+      content: combinedFormatted,
       excludeFromTotal: true, // tokens already counted in the block containing {{memories}}
     });
   }
@@ -3703,8 +3942,9 @@ export async function assemblePrompt(
   // ---- Author's Note injection ----
   const authorsNote: AuthorsNote | null = chat.metadata?.authors_note ?? null;
   if (authorsNote && authorsNote.content) {
-    const resolvedAN = (await evaluate(authorsNote.content, macroEnv, registry))
-      .text;
+    const resolvedAN = (
+      await evaluateForPromptAssembly(authorsNote.content, macroEnv)
+    ).text;
     if (resolvedAN) {
       // Count backward from the latest chat message, ignoring other prompt
       // content. Depth 0 belongs immediately after the latest chat message.
@@ -3733,6 +3973,15 @@ export async function assemblePrompt(
   insertBlocksIntoTaggedHistory(result, pendingDepthBlocks);
 
   for (const depthBlock of pendingDepthBlocks) {
+    if (depthBlock.worldInfo) {
+      breakdown.push({
+        type: "world_info",
+        name: depthBlock.blockName,
+        role: depthBlock.role,
+        content: depthBlock.content,
+      });
+      continue;
+    }
     breakdown.push({
       type: "block",
       name: depthBlock.blockName,
@@ -3865,11 +4114,18 @@ export async function assemblePrompt(
       resolved = resolved ? `${resolved}\n\n${userInput}` : userInput;
     }
     if (resolved) {
-      result.push({ role: "system", content: resolved });
+      // Without a native assistant prefill, finish on a conventional user
+      // turn so providers that reject or mishandle prefills still receive an
+      // explicit request to answer. Prefill mode retains the system
+      // instruction followed by the partial assistant message below.
+      const role = completionSettings.continuePrefill === true
+        ? "system"
+        : "user";
+      result.push({ role, content: resolved });
       breakdown.push({
         type: "utility",
         name: "Impersonation Prompt",
-        role: "system",
+        role,
         content: resolved,
       });
     }
@@ -3959,6 +4215,9 @@ export async function assemblePrompt(
   // the response still gets appended to the original chat message.
   const prefillParts: string[] = [];
   let assistantReasoningPrefill: string | undefined;
+  const impersonationPrefillEnabled =
+    ctx.generationType !== "impersonate" ||
+    completionSettings.continuePrefill === true;
 
   // A connection profile can bind its own Start Reply With value alongside its
   // reasoning settings (metadata.reasoningBindings.promptBias). When present,
@@ -3969,6 +4228,7 @@ export async function assemblePrompt(
     ? boundPromptBias
     : settingsMap.get("promptBias");
   if (
+    impersonationPrefillEnabled &&
     ctx.generationType !== "continue" &&
     promptBiasVal &&
     typeof promptBiasVal === "string" &&
@@ -3983,7 +4243,7 @@ export async function assemblePrompt(
   }
 
   const csPrefill =
-    ctx.generationType === "continue"
+    ctx.generationType === "continue" || !impersonationPrefillEnabled
       ? ""
       : ctx.generationType === "impersonate" && completionSettings.assistantImpersonation
         ? completionSettings.assistantImpersonation
@@ -3998,6 +4258,7 @@ export async function assemblePrompt(
   // `reasoning_content`. Keep it separate from the visible assistant prefix;
   // the generation service displays it in the reasoning pane.
   if (
+    impersonationPrefillEnabled &&
     ctx.generationType !== "continue" &&
     (connection?.provider === "moonshot" || connection?.provider === "deepseek") &&
     completionSettings.reasoningPrefill
@@ -4119,6 +4380,12 @@ export async function assemblePrompt(
   await profiler.measure("post-regex-macros", () =>
     resolvePromptMacrosAfterRegexPass(result, macroEnv)
   );
+  if (assistantPrefill !== undefined) {
+    assistantPrefill = restoreLiteralBraces(assistantPrefill);
+  }
+  if (assistantReasoningPrefill !== undefined) {
+    assistantReasoningPrefill = restoreLiteralBraces(assistantReasoningPrefill);
+  }
   stripEmptyTextParts(result);
 
   // {{webSearchContext}} resolves to a private token while prompt blocks are
@@ -4129,6 +4396,10 @@ export async function assemblePrompt(
   for (const message of result) {
     captureInlineWebSearchContextSlot(message);
   }
+  // The breakdown snapshots block content as it looked between the two macro
+  // passes, so it carries {{#escape}} sentinels too. Restore them here: the
+  // breakdown feeds prompt display and block token counts.
+  restoreEscapeLiteralBracesInBreakdown(breakdown);
   for (let index = breakdown.length - 1; index >= 0; index--) {
     const entry = breakdown[index];
     if (typeof entry.content !== "string") continue;
@@ -4198,7 +4469,7 @@ export async function assemblePrompt(
       ? "disabled"
       : macroHandlesMemory
         ? "macro"
-        : memoryInjectionStrategy === "fallback"
+        : memoryFallbackAllowed
           ? "fallback"
           : "disabled",
     retrievedChunks: memoryResult.chunks.map((c) => ({
@@ -4272,6 +4543,9 @@ export async function assemblePrompt(
     messages: result,
     breakdown,
     parameters,
+    ...(preset
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
+      : {}),
     trimIncompleteWords: prompts.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,
     assistantReasoningPrefill,
@@ -4309,7 +4583,7 @@ async function applyGuidedGenerations(
 
   for (const guide of guides) {
     const resolved = (
-      await evaluate(guide.content, macroEnv, registry)
+      await evaluateForPromptAssembly(guide.content, macroEnv)
     ).text.trim();
     if (!resolved) continue;
     if (guide.position === "system") systemInjections.push(resolved);
@@ -4593,7 +4867,7 @@ export async function resolveWorldInfoOutlets(
         }
       }
 
-      const next = (await evaluate(template, macroEnv, registry)).text;
+      const next = (await evaluateForPromptAssembly(template, macroEnv)).text;
       if (resolved.get(name) !== next) {
         resolved.set(name, next);
         changed = true;
@@ -4844,6 +5118,9 @@ export function mergeActivatedWorldInfoEntries(
         bookId: entry.world_book_id,
         bookSource: bookSourceMap?.get(entry.world_book_id),
         bookName: bookNameMap?.get(entry.world_book_id),
+        estimatedTokens: estimateWorldInfoEntryTokens(
+          selectionContentByEntryId?.get(entry.id) ?? entry.content,
+        ),
       };
     });
 
@@ -4894,9 +5171,16 @@ function selectWorldInfoVectorQueryMessages(
   messages: Message[],
   globalScanDepth: number | null,
 ): { visibleMessages: Message[]; queryMessages: Message[] } {
-  const visibleMessages = messages.filter(
-    (m) => !m.extra?.hidden && m.content.trim().length > 0,
-  );
+  // The vector query is a World Info scan input, so it honours scan-exclusion markup.
+  const visibleMessages: Message[] = [];
+  for (const message of messages) {
+    if (message.extra?.hidden) continue;
+    const content = maskWorldInfoScanExclusions(message.content);
+    if (content.trim().length === 0) continue;
+    // Formatting must read the original text with its saved literal provenance.
+    // Mask only after that protection is restored, immediately before evaluation.
+    visibleMessages.push(message);
+  }
   return {
     visibleMessages,
     queryMessages: globalScanDepth === null
@@ -4911,11 +5195,14 @@ async function formatWorldInfoVectorQueryMessage(
   reasoningStrip?: SanitizeOptions,
 ): Promise<string> {
   const sanitized = await resolveAndSanitizeForVectorization(
-    stripReasoningTags(message.content),
+    stripReasoningTags(shieldMessageLiterals(message.content, message)),
     env,
     reasoningStrip,
+    maskWorldInfoScanExclusions,
   );
-  return `[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitized}`;
+  return sanitized.trim()
+    ? `[${message.is_user ? "USER" : "CHARACTER"} | ${message.name}]: ${sanitized}`
+    : "";
 }
 
 async function buildWorldInfoVectorQueryTextReference(
@@ -4929,7 +5216,7 @@ async function buildWorldInfoVectorQueryTextReference(
     ),
   );
   return truncateToContextSizeWithStatus(
-    parts.join("\n").trim(),
+    parts.filter(Boolean).join("\n").trim(),
     WORLD_INFO_VECTOR_QUERY_MAX_TOKENS,
   );
 }
@@ -4938,10 +5225,11 @@ const DEFAULT_REASONING_OPEN_TAG_RE = /<(?:think|thinking|reasoning)>/i;
 const HTML_LIKE_VECTOR_HINT_RE = /<\s*\/?\s*[a-zA-Z]/;
 
 function worldInfoVectorMessageHasMacroHints(message: Message): boolean {
-  if (contentHasMacroHints(message.content)) return true;
+  const content = maskWorldInfoScanExclusions(message.content);
+  if (contentHasMacroHints(content)) return true;
   return (
-    DEFAULT_REASONING_OPEN_TAG_RE.test(message.content) &&
-    contentHasMacroHints(stripReasoningTags(message.content))
+    DEFAULT_REASONING_OPEN_TAG_RE.test(content) &&
+    contentHasMacroHints(stripReasoningTags(content))
   );
 }
 
@@ -5007,18 +5295,19 @@ function normalizePlainVectorQuerySuffix(
 
 function buildPlainVectorQueryMessageSuffix(
   message: Message,
+  content: string,
   maxChars: number,
   reasoningStrip?: SanitizeOptions,
 ): { part: string; truncated: boolean } | null {
   if (
-    message.content.length <= maxChars ||
-    !hasPlainVectorSuffix(message.content, reasoningStrip)
+    content.length <= maxChars ||
+    !hasPlainVectorSuffix(content, reasoningStrip)
   ) {
     return null;
   }
 
   const normalized = normalizePlainVectorQuerySuffix(
-    message.content,
+    content,
     maxChars,
   );
   if (normalized.fillsLimit) {
@@ -5065,6 +5354,7 @@ async function buildWorldInfoVectorQueryTextBounded(
     }
     const messageSuffix = buildPlainVectorQueryMessageSuffix(
       queryMessages[index],
+      maskWorldInfoScanExclusions(queryMessages[index].content),
       remainingChars,
       reasoningStrip,
     );
@@ -5081,8 +5371,9 @@ async function buildWorldInfoVectorQueryTextBounded(
         env,
         reasoningStrip,
       );
-    reverseParts.push(part);
     firstIncludedIndex = index;
+    if (!part) continue;
+    reverseParts.push(part);
     suffix = suffix ? `${part}\n${suffix}` : part;
     if (suffix.trim().length >= maxChars) break;
   }
@@ -5122,6 +5413,7 @@ export async function buildWorldInfoVectorQuery(
 
 export const __worldInfoVectorQueryTest = {
   buildReference: buildWorldInfoVectorQueryTextReference,
+  selectMessages: selectWorldInfoVectorQueryMessages,
 };
 
 function resolveWorldInfoVectorSettings(
@@ -5890,7 +6182,7 @@ async function buildQueryText(
     case "last_user_message": {
       const lastUser = [...visibleMessages].reverse().find((m) => m.is_user);
       if (!lastUser) return "";
-      const sanitized = await resolveAndSanitizeForVectorization(lastUser.content, env, reasoningStrip);
+      const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(lastUser.content, lastUser), env, reasoningStrip);
       return truncateToContextSize(
         `[USER | ${lastUser.name}]: ${sanitized}`,
         settings.queryMaxTokens,
@@ -5899,7 +6191,7 @@ async function buildQueryText(
     case "weighted_recent": {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async (m) => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       if (parts.length > 0) parts.push(parts[parts.length - 1]);
@@ -5912,7 +6204,7 @@ async function buildQueryText(
     default: {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async (m) => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       return truncateToContextSize(
@@ -6035,6 +6327,11 @@ function formatCortexForAssembly(
         ? memResult.formatted + "\n\n" + contextText
         : contextText;
     }
+    if (colorMapText) {
+      memResult.formatted = memResult.formatted
+        ? memResult.formatted + "\n\n" + colorMapText
+        : colorMapText;
+    }
 
     return memResult;
   }
@@ -6049,7 +6346,7 @@ function formatCortexForAssembly(
         messageRange: m.messageRange,
       },
     })),
-    formatted: shadowResult.text,
+    formatted: macroEnv.extra.cortex.formatted,
     count: cortexResult.memories.length,
     enabled: true,
     queryPreview: "",
@@ -6895,6 +7192,11 @@ export async function clipToContextBudget(
   maxResponseTokens: number | null | undefined,
   signal?: AbortSignal,
 ): Promise<ContextClipStats> {
+  const meta: Record<string, string | number | boolean | undefined> = { model: modelId ?? undefined, runtime: tokenizerRuntime() };
+  const clipProfiler = createPromptAssemblyProfiler("context-clip", meta);
+  let metrics: TokenCounterMetrics | undefined;
+  let countingStarted: number | undefined;
+  try {
   const resolvedContext =
     typeof maxContext === "number" && maxContext > 0 ? maxContext : 0;
   const resolvedResponse =
@@ -6960,7 +7262,10 @@ export async function clipToContextBudget(
   );
   const inputBudget = resolvedContext - resolvedResponse - safetyMargin;
 
-  const counter = await resolveCounter(modelId || "");
+  const counter = await clipProfiler.measure("tokenizer-wait", () => resolveCounter(modelId || ""));
+  metrics = counter.metrics;
+  meta.tokenizer = counter.name;
+  countingStarted = performance.now();
 
   // Tokenizing every message is the dominant cost on long chats. The clip only
   // ever keeps the newest run of history that fits the budget, so we tokenize
@@ -7188,6 +7493,16 @@ export async function clipToContextBudget(
     protectedHistoryTokens,
     remainingBeforeAnchor,
   });
+  } finally {
+    if (countingStarted !== undefined) clipProfiler.addPhase("count-and-clip", performance.now() - countingStarted);
+    if (metrics) {
+      meta.instance = metrics.instance;
+      meta.cacheHits = metrics.hits;
+      meta.cacheMisses = metrics.misses;
+      clipProfiler.addPhase("encode", metrics.encodeMs);
+    }
+    clipProfiler.finish();
+  }
 }
 
 /**
@@ -7388,7 +7703,7 @@ export function buildParameters(
  *
  * Provider mapping:
  * - Anthropic:   thinking + output_config (adaptive 4.6+) or thinking.budget_tokens (legacy).
- *                Opus 4.7 and 4.8 additionally support an "xhigh" tier between high and max.
+ *                Opus 4.7 and Opus 4.8+ additionally support an "xhigh" tier between high and max.
  *                Anthropic-only: `thinkingDisplay` ('summarized' | 'omitted') maps to the
  *                `thinking.display` field. On Opus 4.7+ the API defaults to 'omitted' when
  *                unset, so users must opt in to 'summarized' to receive summary text.
@@ -7426,16 +7741,17 @@ export function injectReasoningParams(
 ): void {
   if (providerName === "anthropic") {
     if (!params.thinking) {
-      // Claude 4.6+ and Claude 5 models support adaptive thinking (recommended over manual budget)
+      // Opus 4.6+ and Claude 5 models support adaptive thinking (recommended over manual budget)
       const isAdaptiveModel =
         model &&
-        (/claude-(opus|sonnet)-4[-.](6|7|8)/i.test(model) ||
+        (isClaudeOpusAtLeast(model, 4, 6) ||
+          /claude-sonnet-4[-.](6|7|8)/i.test(model) ||
           /claude-[a-z0-9][a-z0-9-]*-5(?:$|[-.:@])/i.test(model));
       if (isAdaptiveModel) {
         // Adaptive thinking: Claude decides when/how much to think
         params.thinking = { type: "adaptive" };
-        // Opus 4.7 and 4.8 add an "xhigh" tier between high and max; other adaptive models don't support it.
-        const supportsXhigh = /claude-opus-4[-.](7|8)/i.test(model!);
+        // Opus 4.7 remains eligible; all Opus 4.8+ releases are matched by version.
+        const supportsXhigh = supportsClaudeOpusXhigh(model);
         const validEfforts = supportsXhigh
           ? new Set(["low", "medium", "high", "xhigh", "max"])
           : new Set(["low", "medium", "high", "max"]);
@@ -7701,7 +8017,8 @@ export function applyProviderReasoningOffSwitch(
 /**
  * One-liner impersonation: skip all preset blocks, include only chat history
  * and the impersonation prompt from preset behaviors. Optionally includes the
- * assistantImpersonation prefill as a trailing assistant message.
+ * assistantImpersonation prefill as a trailing assistant message when the
+ * preset's prefill checkbox is enabled.
  */
 async function onelinerImpersonation(
   messages: Message[],
@@ -7745,8 +8062,8 @@ async function onelinerImpersonation(
       throw ctx.signal.reason ?? new DOMException("Aborted", "AbortError");
     }
     const role: "user" | "assistant" = msg.is_user ? "user" : "assistant";
-    const visibleResolvedContent = healFormattingArtifacts(
-      (await evaluate(msg.content, macroEnv, registry)).text,
+    const visibleResolvedContent = await withJsonBlocksProtected(shieldMessageLiterals(msg.content, msg), macroEnv, async (protectedContent) =>
+      healFormattingArtifacts((await evaluate(protectedContent, macroEnv, registry)).text),
     );
     const resolvedContent = appendAssociativeRegexContext(visibleResolvedContent, msg);
     result.push(
@@ -7780,22 +8097,27 @@ async function onelinerImpersonation(
     resolved = resolved ? `${resolved}\n\n${userInput}` : userInput;
   }
   if (resolved) {
-    result.push({ role: "system", content: resolved });
+    const role = completionSettings.continuePrefill === true
+      ? "system"
+      : "user";
+    result.push({ role, content: resolved });
     breakdown.push({
       type: "utility",
       name: "Impersonation Prompt",
-      role: "system",
+      role,
       content: resolved,
     });
   }
 
-  // assistantImpersonation prefill — sent as actual assistant message
+  // assistantImpersonation prefill — sent as an actual assistant message only
+  // when the preset explicitly opts into native prefilling.
   let assistantPrefill: string | undefined;
   let assistantReasoningPrefill: string | undefined;
+  const prefillEnabled = completionSettings.continuePrefill === true;
   const csPrefill =
     completionSettings.assistantImpersonation ||
     completionSettings.assistantPrefill;
-  if (csPrefill) {
+  if (prefillEnabled && csPrefill) {
     const resolvedPrefill = await evaluateHostPromptSource(csPrefill, macroEnv);
     if (resolvedPrefill) {
       assistantPrefill = resolvedPrefill;
@@ -7810,6 +8132,7 @@ async function onelinerImpersonation(
   }
 
   if (
+    prefillEnabled &&
     (connection?.provider === "moonshot" || connection?.provider === "deepseek") &&
     completionSettings.reasoningPrefill
   ) {
@@ -7839,6 +8162,15 @@ async function onelinerImpersonation(
         content: assistantReasoningPrefill,
       });
     }
+  }
+
+  restoreEscapeLiteralBraces(result);
+  restoreEscapeLiteralBracesInBreakdown(breakdown);
+  if (assistantPrefill !== undefined) {
+    assistantPrefill = restoreLiteralBraces(assistantPrefill);
+  }
+  if (assistantReasoningPrefill !== undefined) {
+    assistantReasoningPrefill = restoreLiteralBraces(assistantReasoningPrefill);
   }
 
   // Build parameters from sampler overrides + reasoning settings
@@ -7882,6 +8214,9 @@ async function onelinerImpersonation(
     messages: result,
     breakdown,
     parameters,
+    ...(preset
+      ? { resolvedPreset: { id: preset.id, name: preset.name, metadata: preset.metadata } }
+      : {}),
     trimIncompleteWords: preset?.prompts?.advancedSettings?.trimIncompleteWords === true,
     assistantPrefill,
     assistantReasoningPrefill,
@@ -8103,7 +8438,12 @@ async function legacyAssembly(
     } else if (signal?.aborted) {
       throw signal.reason ?? new DOMException("Aborted", "AbortError");
     }
-    const visibleResolved = healFormattingArtifacts(await resolveMacros(m.content));
+    // Without an env no macro runs, and healing skips valid blocks itself.
+    const visibleResolved = macroEnv
+      ? await withJsonBlocksProtected(shieldMessageLiterals(m.content, m), macroEnv, async (protectedContent) =>
+          healFormattingArtifacts(await resolveMacros(protectedContent)),
+        )
+      : healFormattingArtifacts(m.content);
     const resolved = appendAssociativeRegexContext(visibleResolved, m);
     const attachments = attachmentsForContext(m, legacyGeneratedImageContextPolicy);
     if (m.extra?.image_gen && resolved.trim().length === 0 && attachments.length === 0) {
@@ -8207,6 +8547,11 @@ async function legacyAssembly(
       );
     }
   }
+
+  // This path has no post-regex macro pass, so the {{#escape}} restoration that
+  // pass performs for the preset path happens here instead.
+  restoreEscapeLiteralBraces(llmMessages);
+  restoreEscapeLiteralBracesInBreakdown(breakdown);
 
   // Drop empty text parts or empty messages to avoid proxy/provider errors
   stripEmptyTextParts(llmMessages);

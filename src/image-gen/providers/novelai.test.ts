@@ -16,6 +16,64 @@ describe("NovelAIImageProvider", () => {
     globalThis.fetch = originalFetch;
   });
 
+
+  for (const nonStreaming of [false, true]) {
+    for (const raw of [false, true]) {
+      for (const seed of [undefined, null, -1, -42, NaN, Infinity, 1.5, "42", 0, 42, Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER + 1]) {
+        test(`final seed ${String(seed)}, raw=${raw}, nonStreaming=${nonStreaming}`, async () => {
+          const bodies: any[] = [];
+          globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+            bodies.push(JSON.parse(String(init?.body)));
+            return new Response(TINY_PNG);
+          }) as typeof fetch;
+          await provider.generate("offline-token", "https://example.test", {
+            prompt: "synthetic fox", model: "nai-diffusion-5-full",
+            parameters: raw
+              ? { seed: 77, rawRequestOverride: JSON.stringify({ input: "override", parameters: { seed, steps: 12 } }) }
+              : seed === undefined ? {} : { seed },
+            connectionOptions: { novelai: { nonStreaming } },
+          });
+          expect(bodies).toHaveLength(1);
+          const actual = bodies[0].parameters.seed;
+          if (raw && seed === undefined) expect(actual).toBe(77);
+          else if (typeof seed === "number" && Number.isSafeInteger(seed) && seed >= 0) expect(actual).toBe(seed);
+          else {
+            expect(Number.isSafeInteger(actual)).toBe(true);
+            expect(actual).toBeGreaterThanOrEqual(0);
+            expect(actual).toBeLessThan(2147483647);
+          }
+          if (raw) {
+            expect(bodies[0].input).toBe("override");
+            expect(bodies[0].parameters.steps).toBe(12);
+          }
+        });
+      }
+    }
+  }
+
+  test("replaces a merged connection-default seed of -1 without touching other defaults", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(TINY_PNG);
+    }) as typeof fetch;
+
+    // Mirrors the Spindle image path, where saved connection defaults are merged into
+    // the request before the provider runs, so a stored seed of -1 reaches this boundary.
+    await provider.generate("offline-token", "https://example.test", {
+      prompt: "synthetic fox",
+      model: "nai-diffusion-4-5-full",
+      parameters: { seed: -1, steps: 19, sampler: "k_euler" },
+    });
+
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0].parameters.seed).not.toBe(-1);
+    expect(Number.isSafeInteger(bodies[0].parameters.seed)).toBe(true);
+    expect(bodies[0].parameters.seed).toBeGreaterThanOrEqual(0);
+    expect(bodies[0].parameters.steps).toBe(19);
+    expect(bodies[0].parameters.sampler).toBe("k_euler");
+  });
+
   test("lists the V5 Full and Curated models", async () => {
     const models = await provider.listModels("", "");
 
@@ -23,6 +81,106 @@ describe("NovelAIImageProvider", () => {
       { id: "nai-diffusion-5-full", label: "NAI Diffusion V5 (Full)" },
       { id: "nai-diffusion-5-curated", label: "NAI Diffusion V5 (Curated)" },
     ]);
+  });
+
+  test("exposes Anime and Furry modes only for V5 models", () => {
+    expect(provider.capabilities.parameters.v5Mode).toMatchObject({
+      type: "select",
+      default: "anime",
+      modelPrefixes: ["nai-diffusion-5"],
+      options: [
+        { id: "anime", label: "Anime" },
+        { id: "furry", label: "Furry" },
+      ],
+    });
+  });
+
+  test("applies V5 Furry mode as a dataset tag and omits unsupported references", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(TINY_PNG);
+    }) as typeof fetch;
+
+    await provider.generate("token", "", {
+      prompt: "1girl, fox ears",
+      model: "nai-diffusion-5-full",
+      parameters: {
+        v5Mode: "furry",
+        resolvedReferenceImages: [{
+          data: "raw-reference-image",
+          strength: 0.7,
+          infoExtracted: 0.8,
+          refType: "character&style",
+        }],
+      },
+    });
+
+    expect(bodies).toHaveLength(1);
+    const body = bodies[0];
+    expect(body.input).toBe("fur dataset, 1girl, fox ears");
+    expect(body.parameters.params_version).toBe(4);
+    expect(body.parameters.prompt).toBe("fur dataset, 1girl, fox ears");
+    expect(body.parameters.v4_prompt.caption.base_caption).toBe("fur dataset, 1girl, fox ears");
+    expect(body.parameters.v5Mode).toBeUndefined();
+    expect(body.parameters.director_reference_images).toBeUndefined();
+    expect(body.parameters.reference_image_multiple).toBeUndefined();
+  });
+
+  test("does not duplicate an explicit V5 dataset tag or apply V5 mode to V4.5", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(TINY_PNG);
+    }) as typeof fetch;
+
+    for (const [model, prompt] of [
+      ["nai-diffusion-5-curated", "fur dataset, wolf"],
+      ["nai-diffusion-5-full", "background dataset, forest"],
+      ["nai-diffusion-4-5-full", "1girl, fox ears"],
+    ]) {
+      await provider.generate("token", "", {
+        prompt,
+        model,
+        parameters: { v5Mode: "furry" },
+      });
+    }
+
+    expect(bodies.map((body) => body.input)).toEqual([
+      "fur dataset, wolf",
+      "background dataset, forest",
+      "1girl, fox ears",
+    ]);
+    expect(bodies.map((body) => body.parameters.params_version)).toEqual([4, 4, 3]);
+  });
+
+  test("keeps the existing Precise Reference payload for V4.5", async () => {
+    const bodies: any[] = [];
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return new Response(TINY_PNG);
+    }) as typeof fetch;
+
+    await provider.generate("token", "", {
+      prompt: "1girl",
+      model: "nai-diffusion-4-5-full",
+      parameters: {
+        referenceFidelity: 0.75,
+        resolvedReferenceImages: [{
+          data: Buffer.from(TINY_PNG).toString("base64"),
+          strength: 0.7,
+          infoExtracted: 0.8,
+          refType: "character",
+        }],
+      },
+    });
+
+    const parameters = bodies[0].parameters;
+    expect(parameters.director_reference_images).toHaveLength(1);
+    expect(parameters.director_reference_strength_values).toEqual([0.7]);
+    expect(parameters.director_reference_secondary_strength_values).toEqual([0.25]);
+    expect(parameters.director_reference_information_extracted).toEqual([1]);
+    expect(parameters.director_reference_descriptions[0].caption.base_caption).toBe("character");
   });
 
   test("validates persistent tokens without making a generation request", async () => {

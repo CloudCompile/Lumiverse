@@ -20,6 +20,28 @@ const FULL_THEME_MIN_KEYS = 40;
 const USER_PREFERENCE_KEYS = new Set(["--lcs-glass-blur", "--lcs-glass-soft-blur", "--lcs-glass-strong-blur", "--lcs-radius", "--lcs-radius-sm", "--lcs-radius-xs", "--lcs-transition", "--lcs-transition-fast", "--lumiverse-radius", "--lumiverse-radius-sm", "--lumiverse-radius-md", "--lumiverse-radius-lg", "--lumiverse-radius-xl", "--lumiverse-font-family", "--lumiverse-font-mono", "--lumiverse-font-scale", "--lumiverse-ui-scale", "--lumiverse-transition", "--lumiverse-transition-fast"]);
 type SpindleUserRole = "operator" | "admin" | "user";
 
+function normalizePushMediaPath(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim();
+  if (
+    !normalized
+    || normalized.length > 2_048
+    || !normalized.startsWith("/")
+    || normalized.startsWith("//")
+    || normalized.includes("\\")
+    || normalized.includes("#")
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = new URL(normalized, "https://push-media.invalid");
+    if (parsed.origin !== "https://push-media.invalid") return undefined;
+  } catch {
+    return undefined;
+  }
+  return normalized;
+}
+
 type PresentationPermission = "push_notification" | "web_search" | "app_manipulation";
 export type WorkerHostPresentationApiContext = {
   extensionId: string; manifest: SpindleManifest; installScope: "operator" | "user"; installedByUserId: string | null;
@@ -185,17 +207,10 @@ export class WorkerHostPresentationApi {
         ? (title || "").slice(0, 200)
         : `${this.manifest.name}: ${(title || "").slice(0, 200)}`;
 
-      // Validate icon URL — must be a relative path (no external URLs)
-      let sanitizedIcon: string | undefined;
-      if (icon && typeof icon === "string" && icon.startsWith("/")) {
-        sanitizedIcon = icon;
-      }
-
-      // Validate image URL — must be a relative path (no external URLs)
-      let sanitizedImage: string | undefined;
-      if (image && typeof image === "string" && image.startsWith("/")) {
-        sanitizedImage = image;
-      }
+      // Notification media is resolved by the browser or desktop companion,
+      // so keep it strictly on the current Lumiverse origin.
+      const sanitizedIcon = normalizePushMediaPath(icon);
+      const sanitizedImage = normalizePushMediaPath(image);
 
       const payload = {
         title: sanitizedTitle,
@@ -266,7 +281,7 @@ export class WorkerHostPresentationApi {
       this.enforceScopedUser(resolvedUserId);
 
       const pushSvc = await import("../services/push.service");
-      const subs = pushSvc.listSubscriptions(resolvedUserId);
+      const subs = pushSvc.listNotificationDestinations(resolvedUserId);
       this.postToWorker({
         type: "response",
         requestId,

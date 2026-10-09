@@ -13,8 +13,8 @@
       "tabHeaderTitle": "Ragionamento"
     },
     "loom": {
-      "shortName": "Telaio",
-      "tabName": "Telaio",
+      "shortName": "Preset",
+      "tabName": "Preset",
       "tabDescription": "Configura la struttura narrativa e i momenti della storia",
       "tabHeaderTitle": "Telaio"
     },
@@ -2628,6 +2628,13 @@
     "fontScale": "Scala font",
     "uiScale": "Scala UI",
     "glassEffects": "Effetti vetro",
+    "renderingMode": {
+      "label": "Rendering",
+      "hint": "Risparmio disattiva la sfocatura; Qualità abilita l'alta frequenza di aggiornamento sui display macOS supportati dopo il riavvio della finestra.",
+      "efficiency": "Risparmio",
+      "balanced": "Bilanciata",
+      "quality": "Qualità"
+    },
     "desktopBackground": {
       "enable": "Usa sfondo desktop traslucido",
       "hint": "Disponibile solo nell’app desktop Lumiverse.",

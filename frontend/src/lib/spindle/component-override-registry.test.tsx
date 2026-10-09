@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
-import { act, createElement, type ComponentType } from 'react'
+import { act, createElement, useState, type ComponentType } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { JSDOM } from 'jsdom'
 
@@ -58,6 +58,13 @@ function NativeHost({ label, onAction, onSave }: HostProps) {
   )
 }
 
+let statefulNativeMounts = 0
+
+function StatefulNativeHost({ label }: HostProps) {
+  const [mountId] = useState(() => ++statefulNativeMounts)
+  return createElement('div', { 'data-stateful-native': label, 'data-mount-id': mountId }, label)
+}
+
 function WrapOverride({
   Original,
   label,
@@ -75,6 +82,10 @@ function BoomOverride(): never {
 
 function HostStandIn({ host, ...props }: HostProps & { host: SpindleOverrideHost }) {
   return useSpindleComponentOverride(host, NativeHost, props)
+}
+
+function StatefulHostStandIn({ host, ...props }: HostProps & { host: SpindleOverrideHost }) {
+  return useSpindleComponentOverride(host, StatefulNativeHost, props)
 }
 
 function mountHost(host: SpindleOverrideHost, props: HostProps): { container: HTMLDivElement; root: Root } {
@@ -210,5 +221,38 @@ describe('Spindle component override registry', () => {
       mode: 'replace',
       component: ReplaceOverride,
     })).toThrow('COMPONENT_OVERRIDE_DUPLICATE:extension.once:4')
+  })
+
+  test('wrap override preserves native state when host props change', () => {
+    registerComponentOverride({
+      host: 'BubbleMessage',
+      owner: 'extension.stateful-wrap',
+      generation: 1,
+      mode: 'wrap',
+      component: WrapOverride,
+    })
+
+    statefulNativeMounts = 0
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    try {
+      act(() => {
+        root.render(createElement(StatefulHostStandIn, { host: 'BubbleMessage', label: 'before' }))
+      })
+      const before = container.querySelector<HTMLElement>('[data-stateful-native]')
+      expect(before?.dataset.mountId).toBe('1')
+
+      act(() => {
+        root.render(createElement(StatefulHostStandIn, { host: 'BubbleMessage', label: 'after-metrics' }))
+      })
+      const after = container.querySelector<HTMLElement>('[data-stateful-native]')
+      expect(after).toBe(before)
+      expect(after?.dataset.mountId).toBe('1')
+      expect(after?.textContent).toBe('after-metrics')
+      expect(statefulNativeMounts).toBe(1)
+    } finally {
+      unmount(root, container)
+    }
   })
 })

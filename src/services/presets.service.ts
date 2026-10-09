@@ -9,6 +9,7 @@ import type { PaginationParams, PaginatedResult } from "../types/pagination";
 import { paginatedQuery } from "./pagination";
 import { deleteRegexScriptsByPresetId } from "./regex-scripts.service";
 import { sanitizePromptBlockCharacterTagTrigger } from "../utils/prompt-block-character-tags";
+import { getIllarinPresetWorkId } from "../illarin/preset-metadata";
 import * as settingsSvc from "./settings.service";
 import {
   reconcileStashedPromptBlocks,
@@ -467,6 +468,7 @@ export function updatePreset(userId: string, id: string, input: UpdatePresetInpu
 
 export function deletePreset(userId: string, id: string): boolean {
   const db = getDb();
+  const illarinWorkId = getIllarinPresetWorkId(getPreset(userId, id)?.metadata);
 
   // Capture connection profiles that reference this preset. The FK on
   // connection_profiles.preset_id (ON DELETE SET NULL) will clear the
@@ -521,7 +523,7 @@ export function deletePreset(userId: string, id: string): boolean {
     eventBus.emit(EventType.CONNECTION_PROFILE_LOADED, { id: connId, profile }, userId);
   }
 
-  eventBus.emit(EventType.PRESET_DELETED, { id }, userId);
+  eventBus.emit(EventType.PRESET_DELETED, { id, ...(illarinWorkId ? { illarinWorkId } : {}) }, userId);
   return true;
 }
 

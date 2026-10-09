@@ -119,6 +119,7 @@ mock.module('@dnd-kit/sortable', () => ({
   verticalListSortingStrategy: {},
 }))
 mock.module('@/lib/dndUiScale', () => ({
+  DndContext: ({ children }: { children?: unknown }) => children,
   useScaledSortableStyle: ({ setNodeRef }: { setNodeRef: (node: HTMLElement | null) => void }) => ({
     setNodeRef,
     style: {},

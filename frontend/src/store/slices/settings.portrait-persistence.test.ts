@@ -269,8 +269,12 @@ describe('portrait dock persistence', () => {
   })
 })
 
-describe('per-device enter-to-send preference', () => {
-  test('migrates the committed backend value once, then keeps changes local to the device', async () => {
+describe('per-device enter-to-send preferences', () => {
+  test('defaults desktop to enabled and mobile to disabled', () => {
+    expect(store().inputBarEnterToSend).toEqual({ desktop: true, mobile: false })
+  })
+
+  test('migrates the committed backend scalar once, then keeps both preferences local', async () => {
     setSettingsPersistenceScope('device-preference-test-user')
     const rows = new Map<string, unknown>([['chatSheldEnterToSend', false]])
     database(rows)
@@ -284,17 +288,49 @@ describe('per-device enter-to-send preference', () => {
     const firstDeviceSession = store()
     await firstDeviceSession.loadSettings()
 
-    expect(firstDeviceSession.inputBarEnterToSend).toBe(false)
-    expect(localStorage.getItem(`${DEVICE_ENTER_TO_SEND_STORAGE_KEY}:device-preference-test-user`)).toBe('false')
+    expect(firstDeviceSession.inputBarEnterToSend).toEqual({ desktop: false, mobile: false })
+    expect(localStorage.getItem(`${DEVICE_ENTER_TO_SEND_STORAGE_KEY}:device-preference-test-user`))
+      .toBe('{"desktop":false,"mobile":false}')
 
-    firstDeviceSession.setInputBarEnterToSend(true)
+    firstDeviceSession.setInputBarEnterToSend({ desktop: true, mobile: false })
     await flushSettingsNow()
     expect(puts).toBe(0)
     expect(rows.get('chatSheldEnterToSend')).toBe(false)
 
     const laterDeviceSession = store()
     await laterDeviceSession.loadSettings()
-    expect(laterDeviceSession.inputBarEnterToSend).toBe(true)
+    expect(laterDeviceSession.inputBarEnterToSend).toEqual({ desktop: true, mobile: false })
+  })
+
+  test('migrates the old device scalar into the active platform without enabling mobile by default', async () => {
+    setSettingsPersistenceScope('device-preference-test-user')
+    localStorage.setItem(`${DEVICE_ENTER_TO_SEND_STORAGE_KEY}:device-preference-test-user`, 'false')
+    database(new Map([['chatSheldEnterToSend', true]]))
+
+    const restored = store()
+    await restored.loadSettings()
+
+    expect(restored.inputBarEnterToSend).toEqual({ desktop: false, mobile: false })
+    expect(localStorage.getItem(`${DEVICE_ENTER_TO_SEND_STORAGE_KEY}:device-preference-test-user`))
+      .toBe('{"desktop":false,"mobile":false}')
+  })
+
+  test('preserves an explicitly enabled legacy mobile preference in the mobile slot', async () => {
+    const previousWidth = Object.getOwnPropertyDescriptor(window, 'innerWidth')
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+    try {
+      setSettingsPersistenceScope('device-preference-test-user')
+      localStorage.setItem(`${DEVICE_ENTER_TO_SEND_STORAGE_KEY}:device-preference-test-user`, 'true')
+      database(new Map([['chatSheldEnterToSend', false]]))
+
+      const restored = store()
+      await restored.loadSettings()
+
+      expect(restored.inputBarEnterToSend).toEqual({ desktop: false, mobile: true })
+    } finally {
+      if (previousWidth) Object.defineProperty(window, 'innerWidth', previousWidth)
+      else delete (window as Window & { innerWidth?: number }).innerWidth
+    }
   })
 })
 

@@ -8,6 +8,13 @@ import { startSsoPopup } from '@/lib/ssoPopup'
 import styles from './LoginPage.module.css'
 import clsx from 'clsx'
 
+const LOGIN_FOCUS_RESIZED_VIEWPORT_SETTLE_DELAY = 160
+
+function usesBrowserResizedKeyboardViewport(): boolean {
+  const root = document.documentElement
+  return root.hasAttribute('data-pwa') && root.hasAttribute('data-resizes-content')
+}
+
 export default function LoginPage() {
   const { t } = useTranslation('auth')
   const { t: tc } = useTranslation('common')
@@ -29,6 +36,10 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const formRef = useRef<HTMLFormElement>(null)
   const visibleError = error ?? authError
+  const oauthAuthorization = (() => {
+    const query = new URLSearchParams(window.location.search)
+    return query.has('client_id') && query.has('sig')
+  })()
 
   useEffect(() => {
     let cancelled = false
@@ -45,7 +56,10 @@ export default function LoginPage() {
 
     try {
       await login(username, password)
-      navigate('/')
+      // oauthProviderClient forwards the signed query and Better Auth resumes
+      // the native authorization automatically when the session is created.
+      // A local navigation here can race and overwrite its loopback redirect.
+      if (!oauthAuthorization) navigate('/')
     } catch (err: any) {
       setError(err.message || t('loginFailed'))
     } finally {
@@ -57,6 +71,14 @@ export default function LoginPage() {
     setError(null)
     setSsoLoading(provider.provider_id)
     try {
+      if (oauthAuthorization) {
+        // Keep the OAuth login in this system-browser window. Better Auth
+        // retains the signed outer authorization context and returns directly
+        // to the desktop loopback callback after the IdP signs the user in.
+        const { url } = await ssoProvidersApi.getLoginUrl(provider.provider_id, '/')
+        window.location.assign(url)
+        return
+      }
       const result = await startSsoPopup({ providerId: provider.provider_id, flow: 'login', returnTo: '/' })
       if (!result.ok) throw new Error(result.error || 'SSO authorization failed')
       await checkSession()
@@ -74,10 +96,10 @@ export default function LoginPage() {
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && !oauthAuthorization) {
       navigate('/', { replace: true })
     }
-  }, [isAuthenticated, navigate])
+  }, [isAuthenticated, navigate, oauthAuthorization])
 
   useEffect(() => {
     if (!focused) return
@@ -87,6 +109,28 @@ export default function LoginPage() {
         block: 'nearest',
       })
     }
+
+    // Chromium/Android PWAs already resize the layout viewport above the
+    // software keyboard. Debounce that resize to one settled fallback instead
+    // of scrolling during the animation and again at every legacy timer.
+    if (usesBrowserResizedKeyboardViewport()) {
+      let resizedViewportTimer = 0
+      const scheduleSettledReveal = () => {
+        clearTimeout(resizedViewportTimer)
+        resizedViewportTimer = window.setTimeout(
+          scrollFocusedInput,
+          LOGIN_FOCUS_RESIZED_VIEWPORT_SETTLE_DELAY,
+        )
+      }
+
+      scheduleSettledReveal()
+      window.visualViewport?.addEventListener('resize', scheduleSettledReveal)
+      return () => {
+        clearTimeout(resizedViewportTimer)
+        window.visualViewport?.removeEventListener('resize', scheduleSettledReveal)
+      }
+    }
+
     const timers = [100, 350, 650].map((delay) => setTimeout(scrollFocusedInput, delay))
     window.visualViewport?.addEventListener('resize', scrollFocusedInput)
 

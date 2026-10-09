@@ -119,6 +119,29 @@ describe("injectReasoningParams (Anthropic)", () => {
       expect(params.output_config).toEqual({ effort: "max" });
     });
   }
+
+  test("passes XHigh through for Opus 4.7 and every Opus 4.8+ model", () => {
+    for (const model of [
+      "claude-opus-4-7",
+      "claude-opus-4-8",
+      "claude-opus-5",
+      "claude-opus-5-5",
+      "claude-opus-5.5",
+    ]) {
+      const params: Record<string, any> = {};
+      injectReasoningParams(params, "anthropic", "xhigh", model);
+      expect(params.thinking).toEqual({ type: "adaptive" });
+      expect(params.output_config).toEqual({ effort: "xhigh" });
+    }
+  });
+
+  test("does not pass XHigh through for older Opus or other Claude families", () => {
+    for (const model of ["claude-opus-4-6", "claude-sonnet-5-5"]) {
+      const params: Record<string, any> = {};
+      injectReasoningParams(params, "anthropic", "xhigh", model);
+      expect(params.output_config).toEqual({ effort: "high" });
+    }
+  });
 });
 
 describe("injectReasoningParams (OpenAI-compatible)", () => {

@@ -12,7 +12,7 @@ if (!rootMatch) {
 }
 
 const rootContent = rootMatch[1];
-const varRegex = /(--lumiverse-[a-zA-Z0-9-]+)\s*:\s*([^;]+);/g;
+const varRegex = /(--(?:lumiverse|lcs)-[a-zA-Z0-9-]+)\s*:\s*([^;]+);/g;
 let match;
 const result: Record<string, string> = {};
 

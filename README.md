@@ -15,7 +15,10 @@ Please also review the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Get the Repository
 
-Clone the repo from GitHub. Do **not** use the GitHub **Releases** tab or download a release archive there; those builds are outdated.
+Clone the repo from GitHub. Do **not** use a general-release source archive as
+the server checkout; those archives are not the supported update path. The
+separately tagged `desktop-v*` releases contain prebuilt desktop installers,
+but the desktop companion still needs this checkout to run the local server.
 
 ```bash
 git clone https://github.com/prolix-oc/Lumiverse.git
@@ -59,7 +62,7 @@ All commands below assume you have already cloned the repo and are working from 
 
 The launcher will:
 1. Install Bun if not found
-2. Upgrade unsupported Bun versions to the latest stable release (minimum 1.4.0)
+2. Upgrade unsupported Bun versions to the latest stable release (minimum 1.4.2)
 3. Run the **first-time setup wizard** (admin account, port, extension storage, optional SMART disk monitoring)
 4. Install backend dependencies and serve the existing frontend build if one is available
 5. Start the backend with the runner and IPC bridge when launched interactively
@@ -117,7 +120,7 @@ In your Space's **Settings → Persistent storage**, attach a storage bucket and
 In the **Files** tab of your Space, create a file named `Dockerfile` with the following contents:
 
 ```dockerfile
-FROM oven/bun:1.4.0-slim@sha256:e0ee68d16ccb9927bf02aa7dd8fd4bf3369ee6d46da04faa72b05ce8bfd135f6
+FROM oven/bun:1.4.2-slim@sha256:cb3bbbb08e13a4a2ff400f24c7a2a1d5efa83f6ef8544d52d95a519631e2fc61
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -219,6 +222,7 @@ On Linux, disk access and installation normally require local administrator perm
 | `./start.sh --backend-only` | `.\start.ps1 -Mode backend-only` | Start the backend only, skip frontend serving |
 | `./start.sh --dev` | `.\start.ps1 -Mode dev` | Start the backend in watch mode |
 | `./start.sh --setup` | `.\start.ps1 -Mode setup` | Run the setup wizard only |
+| `./start.sh --install-desktop` | `.\start.ps1 -InstallDesktop` | Build and install the Tauri desktop app, including launcher shortcuts |
 | `./start.sh --no-runner` | `.\start.ps1 -NoRunner` | Start directly without runner IPC or Operator Panel control hooks |
 
 ### Runner & Operator Panel
@@ -248,9 +252,16 @@ with Lumiverse's integrated browser as its primary interface and a macOS menu
 bar / Windows system tray / Linux StatusNotifier icon for controls. It starts
 and stops a local server, shows serving stats, opens the same address in your
 default browser on request, and applies updates through the runner. See
-[desktop/README.md](desktop/README.md) for build instructions. There is no
-prebuilt download — run `bun run desktop:doctor` to check whether this machine
-can build it.
+[desktop/README.md](desktop/README.md) for prebuilt Linux AppImage help and
+development instructions. Prebuilt installers are attached to `desktop-v*`
+releases. To build the companion from this checkout instead, use
+`./start.sh --install-desktop` on macOS/Linux or `.\start.ps1 -InstallDesktop`
+on Windows; this checks prerequisites, builds it, and sets up its application
+launcher plus a desktop shortcut when that folder is available. On Windows the
+install also bootstraps the minimal stable Rust toolchain automatically when
+`cargo` is missing. The shorter `--desktop`/`-Desktop` aliases are also
+accepted. Run `bun run desktop:doctor` to check the source-build toolchain
+without installing anything.
 
 ## Configuration
 
@@ -261,11 +272,27 @@ Configuration is managed through `.env` (see `.env.example` for all options). Se
 | `PORT` | No | `7860` | Server port |
 | `OWNER_USERNAME` | No | `admin` | Admin account display name |
 | `AUTH_SECRET` | No | *derived* | Session signing secret (auto-derived from identity file) |
+| `AUTH_BASE_URL` | No | *request origin* | Optional single-origin override for auth/OAuth. Normally the request must match **Settings → Operator → Trusted Hostnames**. |
+| `LUMIVERSE_TLS_CERT_FILE` | No | — | PEM certificate/full-chain file for direct HTTPS. Set with `LUMIVERSE_TLS_KEY_FILE`; the certificate may cover multiple SANs. |
+| `LUMIVERSE_TLS_KEY_FILE` | No | — | PEM private-key file paired with `LUMIVERSE_TLS_CERT_FILE`. |
+| `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | No | — | Optional file containing the encrypted private key's passphrase. |
+| `LUMIVERSE_TLS_CONFIG_FILE` | No | — | JSON certificate manifest for multi-certificate SNI. Cannot be combined with the direct certificate/key variables. |
 | `FRONTEND_DIR` | No | — | Path to built frontend dist for static serving |
 | `TRUSTED_ORIGINS` | No | `localhost` | Comma-separated CORS origins |
-| `TRUSTED_PROXIES` | No | *private ranges* | Reverse proxies allowed to supply client IPs via `X-Forwarded-For`/`Forwarded`/`X-Real-IP`, as IPs or CIDRs (e.g. `203.0.113.10,10.0.0.0/8`). When set, ONLY listed peers are trusted — required for proxies with public addresses; also closes LAN XFF spoofing. |
+| `TRUSTED_PROXIES` | No | — | Proxy IPs/CIDRs allowed to supply external host/protocol headers for dynamic auth origins and client-IP headers. Host/protocol forwarding requires this explicit list. |
 
 Owner password is stored hashed in `data/owner.credentials` (created by the setup wizard). To reset: `bun run reset-password`.
+
+## CharacterLibrary migration
+
+Import a CharacterLibrary **Full bundle (.zip)** into a running Lumiverse instance:
+
+```sh
+bun run migrate:cl --bundle ~/Downloads/cl-bundle.zip --dry-run
+bun run migrate:cl --bundle ~/Downloads/cl-bundle.zip --report ./cl-report.json
+```
+
+The CLI prompts for your account and password, reviews the inventory, and uploads to the authenticated `/api/v1/cl-migration` API. Add `--url` for a remote server; `--resume JOB_ID` continues an existing job. Original archives and per-item reports are retained. Current v1 exports omit expressions and external script files; imported regex is disabled unless you opt in. See [the migration guide](user-docs/docs/data-portability/character-library.md) for authentication, retry semantics, limits, and cleanup.
 
 ## Architecture
 

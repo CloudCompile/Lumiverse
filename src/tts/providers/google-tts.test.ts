@@ -2,10 +2,67 @@ import { describe, expect, test } from "bun:test";
 import { GoogleTtsProvider } from "./google-tts";
 import { GoogleVertexTtsProvider } from "./google-vertex-tts";
 import { resolveEffectiveTtsApiUrl } from "../../services/tts-connections.service";
-import { GOOGLE_TTS_MODELS, GOOGLE_TTS_VOICES, buildGeminiTtsBody, wrapPcmInWav } from "./google-tts-shared";
+import {
+  GOOGLE_TTS_MODELS, GOOGLE_TTS_VOICES, buildGeminiTtsBody,
+  extractGeminiTtsAudio, extractGeminiTtsAudioChunks, wrapPcmInWav,
+} from "./google-tts-shared";
 
 const pcmB64 = (s: string) => Buffer.from(s, "utf8").toString("base64");
 const wavText = (buf: ArrayBuffer) => Buffer.from(buf.slice(44)).toString("utf8");
+const wavWithMetadata = () => {
+  const pcm = new Uint8Array([0, 0, 128, 0, 255, 127, 0, 128]);
+  const metadata = new Uint8Array([0x4a, 0x55, 0x4e, 0x4b, 4, 0, 0, 0, 0xde, 0xad, 0xbe, 0xef]);
+  const wav = new Uint8Array(44 + pcm.length + metadata.length);
+  wav.set(new Uint8Array(wrapPcmInWav(pcm, 16000)));
+  wav.set(metadata, 44 + pcm.length);
+  new DataView(wav.buffer).setUint32(4, wav.length - 8, true);
+  return wav;
+};
+
+describe("Gemini TTS audio extraction", () => {
+  test.each([
+    "audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave",
+    "Audio/WAV; codec=pcm", undefined, "audio/L16;codec=pcm;rate=24000",
+  ])("preserves native WAV bytes and trailing metadata (%s)", (mimeType) => {
+    const wav = wavWithMetadata();
+    const response = { candidates: [{ content: { parts: [
+      { inlineData: { mimeType, data: Buffer.from(wav).toString("base64") } },
+    ] } }] };
+
+    const audio = extractGeminiTtsAudio(response);
+    expect(audio.contentType).toBe("audio/wav");
+    expect(new Uint8Array(audio.audioData)).toEqual(wav);
+    expect(new DataView(audio.audioData).getUint32(40, true)).toBe(8);
+
+    const chunks = Array.from(extractGeminiTtsAudioChunks(response));
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0].data).toEqual(wav);
+    expect(chunks[0].kind).toBe("audio_file");
+    expect(chunks[0].mimeType).toBe("audio/wav");
+  });
+
+  test("wraps raw PCM using its declared sample rate and snake-case fields", () => {
+    const pcm = new Uint8Array([0, 0, 128, 0, 255, 127, 0, 128]);
+    const response = { candidates: [{ content: { parts: [
+      { inline_data: { mime_type: "audio/L16;codec=pcm;rate=16000", data: Buffer.from(pcm).toString("base64") } },
+    ] } }] };
+    const expected = new Uint8Array(wrapPcmInWav(pcm, 16000));
+
+    expect(new Uint8Array(extractGeminiTtsAudio(response).audioData)).toEqual(expected);
+    expect(Array.from(extractGeminiTtsAudioChunks(response))[0].data).toEqual(expected);
+  });
+
+  test("does not mistake a non-WAVE RIFF prefix for a WAV container", () => {
+    const pcm = new Uint8Array(Buffer.from("RIFF....AVI "));
+    const response = { candidates: [{ content: { parts: [
+      { inlineData: { mimeType: "audio/L16;rate=24000", data: Buffer.from(pcm).toString("base64") } },
+    ] } }] };
+    const expected = new Uint8Array(wrapPcmInWav(pcm, 24000));
+
+    expect(new Uint8Array(extractGeminiTtsAudio(response).audioData)).toEqual(expected);
+    expect(Array.from(extractGeminiTtsAudioChunks(response))[0].data).toEqual(expected);
+  });
+});
 
 describe("Google TTS providers", () => {
   const studio = new GoogleTtsProvider();
@@ -32,17 +89,20 @@ describe("Google TTS providers", () => {
     expect(ids).toEqual(["gemini-2.5-flash-preview-tts", "gemini-3.1-flash-tts-preview"]);
   });
 
-  test("voice mapping is non-empty, unique, and gendered", async () => {
+  test("voice mapping is unique, gendered, and includes tone descriptions", async () => {
     for (const p of [studio, vertex]) {
       const voices = await p.listVoices("", "");
       expect(voices.length).toBeGreaterThanOrEqual(30);
       expect(new Set(voices.map((v) => v.id)).size).toBe(voices.length);
       for (const v of voices) {
         expect(v.name).toBeTruthy();
-        expect(["masculine", "feminine"]).toContain((v as any).gender);
+        expect(["masculine", "feminine"]).toContain(v.gender ?? "");
+        expect(v.description?.trim()).toBeTruthy();
       }
       expect(voices.map((v) => v.id)).toContain("Kore");
       expect(voices.map((v) => v.id)).toContain("Charon");
+      expect(voices.find((v) => v.id === "Algieba")?.gender).toBe("masculine");
+      expect(voices.find((v) => v.id === "Kore")?.gender).toBe("feminine");
     }
     expect(GOOGLE_TTS_VOICES.length).toBe((await studio.listVoices("", "")).length);
   });
@@ -80,6 +140,20 @@ describe("Google TTS providers", () => {
       text: "hi", model: "gemini-2.5-flash-preview-tts", voice: "Puck", parameters: {},
     });
     expect(calls[0].startsWith("https://generativelanguage.googleapis.com/v1beta/models/")).toBe(true);
+  });
+
+  test("AI Studio preserves native WAV output from non-streaming generation", async () => {
+    const wav = wavWithMetadata();
+    (globalThis as any).fetch = async () => new Response(JSON.stringify({ candidates: [{ content: { parts: [
+      { inlineData: { mimeType: "audio/wav", data: Buffer.from(wav).toString("base64") } },
+    ] } }] }));
+
+    const result = await studio.synthesize("k", "", {
+      text: "hello", model: "gemini-3.8-flash-tts", voice: "Kore", parameters: {},
+    });
+
+    expect(result.contentType).toBe("audio/wav");
+    expect(new Uint8Array(result.audioData)).toEqual(wav);
   });
 
   test("Vertex uses service account token and regional host", async () => {

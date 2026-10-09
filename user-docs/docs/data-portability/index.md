@@ -45,6 +45,7 @@ These never leave your instance:
 - **System / auth tables** — your account row, sessions, OAuth tokens
 - **Operator-installed extensions** — only user-installed ones travel
 - **Runtime caches** — query vector cache, embedding cache (regenerated on demand)
+- **CharacterLibrary migration sources and receipts** — download the original ZIP separately; imported native data is included
 
 ---
 
@@ -53,6 +54,7 @@ These never leave your instance:
 | Use Case | Read |
 |----------|------|
 | Moving to a new server / fresh install | [Exporting Your Data](exporting.md) → [Importing an Archive](importing.md) |
+| Importing a SillyTavern CharacterLibrary bundle | [Migrating from CharacterLibrary](character-library.md) |
 | Periodic backup | [Exporting Your Data](exporting.md) (run on a schedule) |
 | Migrating between two of your own accounts | Export from source → Import into target |
 | Including API keys for a true 1:1 restore | [API Keys & Tickets](api-keys-and-tickets.md) |

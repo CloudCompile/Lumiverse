@@ -28,7 +28,7 @@ const FLAG_COPY: Record<ProductivityFeatureFlag, { title: string; description: s
   },
   showComposerCustomizeGear: {
     title: 'Customize composer gear',
-    description: 'Show the gear button on the chat composer bar to customize and reorder composer icons (requires LumiVerse Suite).',
+    description: 'Show the native gear button on the chat composer bar to customize and reorder composer icons.',
   },
 }
 

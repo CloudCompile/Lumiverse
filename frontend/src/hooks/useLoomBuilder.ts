@@ -10,7 +10,7 @@ import { enqueuePresetRegexOperation } from '@/lib/presetRegexQueue'
 import { bindImportedRegexesToPreset } from '@/lib/loom/preset-regex-import'
 import { flushPresetForGeneration, presetSaveCoordinator, StalePresetHydrationError } from '@/lib/loom/preset-save-coordinator'
 import { beginActiveLoomPresetSelection, transitionActiveLoomPreset } from '@/lib/loom/preset-selection-coordinator'
-import { assertRenderableLoomPreset, InvalidLoomPresetError, unmarshalPresetForEditor as unmarshalPreset } from '@/lib/loom/preset-validation'
+import { assertRenderableLoomPreset, InvalidLoomPresetError, marshalImportedPresetForEditor, unmarshalPresetForEditor as unmarshalPreset } from '@/lib/loom/preset-validation'
 import { findLoomPresetFallback } from '@/lib/loom/preset-recovery'
 import { getMacroCatalog } from '@/api/macros'
 import type { LoomPreset, PromptBlock, LoomConnectionProfile, MacroGroup, PromptVariableDef, PromptVariableValues } from '@/lib/loom/types'
@@ -27,12 +27,11 @@ import {
   detectSupportedParamsFromProviders,
   getAvailableMacros,
   exportToSTPreset,
-  sanitizeLumiHubSealedBlocksForExport,
+  sanitizeRemoteSealedBlocksForExport,
   createPortableLoomPresetExport,
   normalizeCategoryBlockState,
   toggleBlockWithCategoryRules,
   toggleCategoryWithChildren,
-  coerceImportedLoomPreset,
   detectImportedPresetKind,
   reconcilePromptVariableValues,
   pruneOrphanPromptVariables,
@@ -405,7 +404,13 @@ export function useLoomBuilder() {
     const updated = presetSaveCoordinator.mutate(
       current.id,
       current,
-      updater,
+      (draft) => {
+        const next = updater(draft)
+        // Validate before the coordinator publishes or schedules a save. A
+        // subscriber rejecting a bad draft is too late for this caller's state update.
+        assertRenderableLoomPreset(next)
+        return next
+      },
       { immediate },
     )
     activePresetRef.current = updated
@@ -836,12 +841,11 @@ export function useLoomBuilder() {
   const persistImportedPreset = useCallback(async (payload: any, fileName?: string) => {
     const selection = beginActiveLoomPresetSelection()
     setIsLoading(true)
+    setError(null)
     try {
       const fallbackName = fileName?.replace(/\.json$/i, '') || 'Imported Preset'
-      const loom = coerceImportedLoomPreset(payload, fallbackName)
-      // marshalPreset deliberately omits loom.id. The create endpoint assigns
-      // a fresh local identity even when an older export still contains one.
-      const created = await presetsApi.create(marshalPreset(loom))
+      const input = marshalImportedPresetForEditor(payload, fallbackName)
+      const created = await presetsApi.create(input)
       const newLoom = presetSaveCoordinator.hydrate(unmarshalPreset(created))
       await refreshRegistry()
       if (await selection.transition(created.id)) {
@@ -861,7 +865,7 @@ export function useLoomBuilder() {
             // ownership here; otherwise the backend treats them as inactive
             // source-preset scripts and their toggles become no-ops.
             scripts: bindImportedRegexesToPreset(embeddedRegex, created.id),
-            folder: loom.name,
+            folder: input.name,
             preset_id: created.id,
             active_preset_id: created.id,
           }))
@@ -880,6 +884,9 @@ export function useLoomBuilder() {
     } catch (err: any) {
       selection.cancel()
       setError(err.message)
+      if (err instanceof InvalidLoomPresetError) {
+        toast.warning(i18n.t('loomBuilder.toast.invalidPresetImport', { ns: 'panels' }))
+      }
       throw err
     } finally {
       setIsLoading(false)
@@ -925,7 +932,7 @@ export function useLoomBuilder() {
   // Export as legacy (SillyTavern) JSON
   const exportLegacy = useCallback(() => {
     if (!activePreset) return null
-    return exportToSTPreset(sanitizeLumiHubSealedBlocksForExport(activePreset))
+    return exportToSTPreset(sanitizeRemoteSealedBlocksForExport(activePreset))
   }, [activePreset])
 
   // Available macros for the inserter — fetched from API, with local fallback

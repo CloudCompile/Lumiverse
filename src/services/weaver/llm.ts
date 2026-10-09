@@ -70,7 +70,7 @@ export async function weaverGenerateJsonWithUsage(
     ],
     parameters: { temperature: resolveTemperature(input, 0.4) },
     signal: input.signal,
-  });
+  }, { origin: { kind: "sidecar", name: "Weaver", operation: input.kind ?? "generate" } });
 
   const content = stripCodeFence((response.content ?? "").trim());
   let parsed: unknown;
@@ -109,7 +109,7 @@ export async function weaverGenerateTextWithUsage(
     ],
     parameters: { temperature: resolveTemperature(input, 0.7) },
     signal: input.signal,
-  });
+  }, { origin: { kind: "sidecar", name: "Weaver", operation: input.kind ?? "generate" } });
 
   const text = stripCodeFence((response.content ?? "").trim()).trim();
   return { text, usage: normalizeUsage(response.usage) };

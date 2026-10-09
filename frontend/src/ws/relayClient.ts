@@ -16,6 +16,7 @@
  */
 
 import { wsClient } from './client'
+import { activeTab } from '@/lib/active-tab'
 import { useStore } from '@/store'
 import { multiplayerApi } from '@/api/multiplayer'
 import { toast } from '@/lib/toast'
@@ -268,6 +269,7 @@ export const relayClient = {
   },
 
   connect(grant: JoinGrant, profile: { displayName?: string; persona?: PersonaSnapshot | null } = {}) {
+    activeTab.assertActive()
     this.disconnect() // clean slate (sets intentionalClose)
     intentionalClose = false
     joinProfile = profile
@@ -278,6 +280,7 @@ export const relayClient = {
 
   /** Send a room action wrapped as a relay frame. */
   send(action: Record<string, any>) {
+    if (activeTab.signal.aborted) return
     sendAction(action)
   },
 
@@ -305,6 +308,9 @@ export const relayClient = {
  * connected, otherwise the host's own socket (local/LAN peer + host).
  */
 export function sendRoomAction(action: Record<string, any>): void {
+  if (activeTab.signal.aborted) return
   if (relayClient.isActive()) relayClient.send(action)
   else wsClient.send(action)
 }
+
+activeTab.signal.addEventListener('abort', () => relayClient.disconnect(), { once: true })

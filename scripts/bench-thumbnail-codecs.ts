@@ -43,6 +43,11 @@ interface AssetPair {
   pixels: number;
 }
 
+type PlaywrightModule = typeof import("./e2e-diagnostics/node_modules/playwright");
+type PlaywrightBrowser = Awaited<ReturnType<PlaywrightModule["chromium"]["launch"]>>;
+
+const PLAYWRIGHT_MODULE_PATH = "./e2e-diagnostics/node_modules/playwright/index.mjs";
+
 function arg(name: string, fallback?: string): string | undefined {
   const prefix = `--${name}=`;
   return process.argv.find((value) => value.startsWith(prefix))?.slice(prefix.length) ?? fallback;
@@ -452,9 +457,9 @@ async function runBrowserDecode(): Promise<{ browserVersion: string; measurement
     },
   });
 
-  let browser: Awaited<ReturnType<(typeof import("./e2e-diagnostics/node_modules/playwright/index.mjs"))["chromium"]["launch"]>> | undefined;
+  let browser: PlaywrightBrowser | undefined;
   try {
-    const { chromium } = await import("./e2e-diagnostics/node_modules/playwright/index.mjs");
+    const { chromium } = await import(PLAYWRIGHT_MODULE_PATH) as PlaywrightModule;
     browser = await chromium.launch({ headless: true });
     const browserVersion = await browser.version();
     const page = await browser.newPage();

@@ -30,6 +30,7 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
   // Until HTTP/WS identifies this request, the pool may still describe the
   // previous generation. It cannot confirm or finish an optimistic new swipe.
   if (state.isStreaming && !state.activeGenerationId) return
+  const generationEpoch = state.getGenerationEpoch()
 
   // Multiplayer peers don't own the host's generation pool — they reconcile
   // purely from the re-broadcast WS event stream. Polling the pool would either
@@ -63,6 +64,7 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
   if (
     latest.activeChatId !== chatId ||
     latest.streamingNavigationPaused ||
+    latest.getGenerationEpoch() !== generationEpoch ||
     latest.isStreaming !== state.isStreaming ||
     latest.activeGenerationId !== state.activeGenerationId
   ) return
@@ -147,6 +149,7 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
 
     const pageSize = latest.messagesPerPage || 50
     const beforeRefresh = useStore.getState()
+    const refreshEpoch = beforeRefresh.getGenerationEpoch()
     try {
       const fresh = await messagesApi.list(chatId, { limit: pageSize, tail: true })
       const after = useStore.getState()
@@ -154,6 +157,7 @@ export async function recoverPooledGeneration(chatId: string): Promise<void> {
         after.activeChatId === chatId &&
         !after.streamingNavigationPaused &&
         !after.isStreaming &&
+        after.getGenerationEpoch() === refreshEpoch &&
         after.activeGenerationId === beforeRefresh.activeGenerationId
       ) {
         after.setMessages(fresh.data, fresh.total)

@@ -1,6 +1,7 @@
-import type { Preset } from '@/types/api'
+import type { CreatePresetInput, Preset } from '@/types/api'
+import { assertPresetEditorBlocksProjectable } from '@/lib/spindle/preset-editor-adapter'
 import type { LoomPreset } from './types'
-import { unmarshalPreset } from './service'
+import { coerceImportedLoomPreset, marshalPreset, unmarshalPreset } from './service'
 import {
   DEFAULT_ADVANCED_SETTINGS,
   DEFAULT_COMPLETION_SETTINGS,
@@ -26,6 +27,12 @@ function record(value: unknown): value is Record<string, any> {
 
 function strings(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function placement(value: { role: unknown; position: unknown; depth: unknown }, path: string): void {
+  check(['system', 'user', 'assistant', 'user_append', 'assistant_append'].includes(value.role as string), `${path}.role`)
+  check(['pre_history', 'post_history', 'in_history'].includes(value.position as string), `${path}.position`)
+  check(typeof value.depth === 'number' && Number.isFinite(value.depth) && value.depth >= 0, `${path}.depth`)
 }
 
 function settings(value: unknown, defaults: object, path: string): void {
@@ -58,6 +65,8 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
     for (const key of ['id', 'name', 'content', 'role', 'position'] as const) {
       check(typeof block[key] === 'string', `block.${key}`)
     }
+    placement(block, 'block')
+    check(typeof block.enabled === 'boolean' && typeof block.isLocked === 'boolean', 'block.enabled/isLocked')
     for (const key of ['marker', 'color', 'group'] as const) {
       check(block[key] == null || typeof block[key] === 'string', `block.${key}`)
     }
@@ -95,8 +104,9 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
     }
     if (block.placementBinding !== undefined) {
       check(record(block.placementBinding) && typeof block.placementBinding.variableId === 'string' && record(block.placementBinding.options), 'block.placementBinding')
-      for (const placement of Object.values(block.placementBinding.options)) {
-        check(record(placement) && typeof placement.role === 'string' && typeof placement.position === 'string' && typeof placement.depth === 'number', 'block.placementBinding.option')
+      for (const option of Object.values(block.placementBinding.options)) {
+        check(record(option), 'block.placementBinding.option')
+        placement(option, 'block.placementBinding.option')
       }
     }
   }
@@ -112,6 +122,32 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
     for (const value of Object.values(bucket)) {
       check(typeof value === 'string' || typeof value === 'number' || strings(value), 'promptVariables.value')
     }
+  }
+  // Loading must satisfy the same projection used by Loom's React effects.
+  // Shape checks alone miss unknown fields and malformed optional variable options.
+  try {
+    assertPresetEditorBlocksProjectable(preset.blocks)
+  } catch (error) {
+    throw new InvalidLoomPresetError(error instanceof Error ? error.message : 'unreadable editor blocks')
+  }
+}
+
+/** Validate the normalized payload before creating a row, including portable exports without an id. */
+export function marshalImportedPresetForEditor(payload: unknown, fallbackName: string): CreatePresetInput {
+  try {
+    const loom = coerceImportedLoomPreset(payload, fallbackName)
+    const input = marshalPreset(loom)
+    unmarshalPresetForEditor({
+      ...input,
+      // Only the create endpoint assigns the persisted identity; this is a validation preview.
+      id: 'import-preview',
+      created_at: loom.createdAt ?? 0,
+      updated_at: loom.updatedAt ?? 0,
+    } as Preset)
+    return input
+  } catch (error) {
+    if (error instanceof InvalidLoomPresetError) throw error
+    throw new InvalidLoomPresetError(error instanceof Error ? error.message : 'unreadable import')
   }
 }
 

@@ -33,12 +33,15 @@ function makeDecompressionCapFilter(): NonNullable<Parameters<typeof unzipSync>[
 
 export interface ExpressionConfig {
   enabled: boolean;
+  /** Local chat presentation preference; absent on legacy characters. */
+  useAsAvatar?: boolean;
   defaultExpression: string;
   mappings: Record<string, string>; // label → image_id
 }
 
 const EMPTY_CONFIG: ExpressionConfig = {
   enabled: false,
+  useAsAvatar: false,
   defaultExpression: "",
   mappings: {},
 };
@@ -54,6 +57,7 @@ export function getExpressionConfig(userId: string, characterId: string): Expres
   if (!raw) return { ...EMPTY_CONFIG };
   return {
     enabled: !!raw.enabled,
+    useAsAvatar: raw.useAsAvatar === true,
     defaultExpression: raw.defaultExpression ?? "",
     mappings: raw.mappings ?? {},
   };
@@ -75,6 +79,9 @@ function saveConfig(
 export function putExpressionConfig(userId: string, characterId: string, config: ExpressionConfig): ExpressionConfig {
   return saveConfig(userId, characterId, {
     enabled: !!config.enabled,
+    useAsAvatar: config.useAsAvatar === undefined
+      ? (getExpressionConfig(userId, characterId)?.useAsAvatar ?? false)
+      : config.useAsAvatar === true,
     defaultExpression: config.defaultExpression ?? "",
     mappings: config.mappings ?? {},
   });
@@ -133,6 +140,7 @@ export async function importFromZip(
   }
 
   const config: ExpressionConfig = {
+    useAsAvatar: existing.useAsAvatar ?? false,
     enabled: existing.enabled || Object.keys(newMappings).length > 0,
     defaultExpression: existing.defaultExpression || Object.keys(newMappings)[0] || "",
     mappings: newMappings,
@@ -150,6 +158,7 @@ export function mapFromGallery(
   const merged: Record<string, string> = { ...existing.mappings, ...mappings };
 
   const config: ExpressionConfig = {
+    useAsAvatar: existing.useAsAvatar ?? false,
     enabled: existing.enabled || Object.keys(merged).length > 0,
     defaultExpression: existing.defaultExpression || Object.keys(merged)[0] || "",
     mappings: merged,
@@ -163,6 +172,7 @@ export function removeExpression(userId: string, characterId: string, label: str
   const { [label]: _, ...rest } = existing.mappings;
 
   const config: ExpressionConfig = {
+    useAsAvatar: existing.useAsAvatar ?? false,
     enabled: existing.enabled,
     defaultExpression: existing.defaultExpression === label
       ? (Object.keys(rest)[0] || "")
@@ -187,6 +197,7 @@ export async function importFromAssets(
   }
 
   const config: ExpressionConfig = {
+    useAsAvatar: existing.useAsAvatar ?? false,
     enabled: Object.keys(newMappings).length > 0,
     defaultExpression: existing.defaultExpression
       || ("default" in newMappings ? "default" : Object.keys(newMappings)[0] || ""),
@@ -262,6 +273,7 @@ export async function importFromImageData(
   }
 
   const config: ExpressionConfig = {
+    useAsAvatar: existing.useAsAvatar ?? false,
     enabled: existing.enabled || Object.keys(newMappings).length > 0,
     defaultExpression: existing.defaultExpression
       || ("default" in newMappings ? "default" : Object.keys(newMappings)[0] || ""),
@@ -422,7 +434,7 @@ export function convertToGroups(
   // Clear flat expressions and set groups
   const extensions = {
     ...getExtensions(character),
-    expressions: { enabled: false, defaultExpression: "", mappings: {} },
+    expressions: { enabled: false, useAsAvatar: config?.useAsAvatar ?? false, defaultExpression: "", mappings: {} },
     expression_groups: groups,
   };
   updateCharacter(userId, characterId, { extensions });
@@ -442,6 +454,7 @@ export function convertToFlat(
   const character = getCharacter(userId, characterId);
   if (!character) throw new Error("Character not found");
   const config: ExpressionConfig = {
+    useAsAvatar: getExpressionConfig(userId, characterId)?.useAsAvatar ?? false,
     enabled: Object.keys(mappings).length > 0,
     defaultExpression: Object.keys(mappings)[0] || "",
     mappings,

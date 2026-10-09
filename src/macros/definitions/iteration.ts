@@ -70,16 +70,22 @@ interface IterArgs {
 /**
  * Parse the shared `::list::var::delimiter` signature. Returns null (with a
  * warning) when used without a body. Caps the item count like {{repeat}}.
+ * The `#` flag keeps each item's whitespace and blank items, so data whose
+ * items carry meaningful spacing loops over exactly what was split.
  */
 async function parseIterArgs(ctx: MacroExecContext): Promise<IterArgs | null> {
   if (!ctx.isScoped) {
     ctx.warn(`{{${ctx.name}}} needs a body: {{${ctx.name}::list}}...{{/${ctx.name}}}`);
     return null;
   }
-  const listStr = ctx.rawArgs[0] ? (await ctx.resolveNodes(ctx.rawArgs[0])).trim() : "";
+  const preserve = ctx.flags.preserveWhitespace;
+  const resolvedList = ctx.rawArgs[0] ? await ctx.resolveNodes(ctx.rawArgs[0]) : "";
+  const listStr = preserve ? resolvedList : resolvedList.trim();
   const varName = (ctx.rawArgs[1] ? (await ctx.resolveNodes(ctx.rawArgs[1])).trim() : "") || "item";
   const delimiter = ctx.rawArgs[2] ? await ctx.resolveNodes(ctx.rawArgs[2]) : ",";
-  let items = parseDelimitedList(listStr, delimiter);
+  let items = preserve
+    ? (listStr === "" ? [] : delimiter === "" ? [listStr] : listStr.split(delimiter))
+    : parseDelimitedList(listStr, delimiter);
   if (items.length > MAX_LIST_ITEMS) {
     ctx.warn(`{{${ctx.name}}} capped at ${MAX_LIST_ITEMS} items (got ${items.length})`);
     items = items.slice(0, MAX_LIST_ITEMS);
@@ -305,10 +311,10 @@ export function registerIterationMacros(): void {
       // variable name; the second arg is the variable name when a count is given.
       const a0 = ctx.rawArgs[0] ? (await ctx.resolveNodes(ctx.rawArgs[0])).trim() : "";
       const a1 = ctx.rawArgs[1] ? (await ctx.resolveNodes(ctx.rawArgs[1])).trim() : "";
-      let count = 0; // 0 = all
+      let count: number | undefined; // undefined = all
       let varName = "msg";
       if (a0 !== "") {
-        if (/^\d+$/.test(a0)) {
+        if (/^-?\d+$/.test(a0)) {
           count = parseInt(a0, 10);
           if (a1) varName = a1;
         } else {
@@ -317,7 +323,7 @@ export function registerIterationMacros(): void {
       }
 
       const all = getMessages(ctx);
-      let messages = count > 0 ? all.slice(-count) : all;
+      let messages = count === undefined ? all : count > 0 ? all.slice(-count) : count < 0 ? all.slice(-Math.abs(count)) : [];
       if (messages.length > MAX_LIST_ITEMS) {
         ctx.warn(`{{foreachMessage}} capped at ${MAX_LIST_ITEMS} messages`);
         messages = messages.slice(-MAX_LIST_ITEMS);

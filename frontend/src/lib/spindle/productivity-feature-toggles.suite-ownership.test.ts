@@ -37,6 +37,13 @@ describe('readProductivityFeature — Suite ownership gate', () => {
     }
   })
 
+  test('the native composer customizer remains available without Suite', () => {
+    const flag = 'showComposerCustomizeGear'
+    expect(isSuiteOwnedProductivityFlag(flag)).toBe(false)
+    expect(readProductivityFeature({ [flag]: true, extensions: SUITE_ABSENT }, flag)).toBe(true)
+    expect(readProductivityFeature({ [flag]: false, extensions: SUITE_ENABLED }, flag)).toBe(false)
+  })
+
   test('a persisted true does not survive an unavailable Suite', () => {
     for (const flag of PRODUCTIVITY_FEATURE_FLAGS) {
       if (!isSuiteOwnedProductivityFlag(flag)) continue

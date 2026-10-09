@@ -185,12 +185,15 @@ function SummaryTextEditor() {
       )}
 
       {/* Textarea */}
-      <textarea
+      <ExpandableTextarea
         className={styles.textarea}
         value={summaryText}
-        onChange={(e) => setSummaryText(e.target.value)}
+        onChange={setSummaryText}
+        title={t('summaryEditor.summaryText')}
+        aria-label={t('summaryEditor.summaryText')}
         placeholder={PLACEHOLDER_TEXT}
         disabled={!hasChat}
+        markdownOnly
       />
 
       {/* Actions */}
@@ -334,7 +337,7 @@ function SummarizationConfig() {
       {/* Auto Settings */}
       {mode === 'auto' && (
         <Section icon={<Clock size={16} />} title={t('summaryEditor.autoSettings')} defaultOpen>
-          <div className={styles.fieldRow}>
+          <div className={styles.fieldRow3}>
             <NumberField
               id="sum-interval" label={t('summaryEditor.interval')} hint={t('summaryEditor.everyNMessages')}
               value={summarization.autoInterval}
@@ -347,7 +350,14 @@ function SummarizationConfig() {
               onChange={(v) => setSummarization({ autoMessageContext: v })}
               min={1} max={100}
             />
+            <NumberField
+              id="sum-auto-lag" label={t('summaryEditor.messageLag')} hint={t('summaryEditor.messageLagHint')}
+              value={summarization.autoMessageLag}
+              onChange={(v) => setSummarization({ autoMessageLag: Math.max(0, v) })}
+              min={0} max={100}
+            />
           </div>
+          <p className={styles.desc}>{t('summaryEditor.messageLagDescription')}</p>
         </Section>
       )}
 

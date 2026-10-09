@@ -12,6 +12,7 @@ import {
   setPersistedChatPersonaId,
 } from '@/lib/chatPersonaSelection'
 import { toast } from '@/lib/toast'
+import { derivePersonaBrowserPage, groupPersonasByFolder } from '@/lib/personaBrowser'
 import type { Persona, CreatePersonaInput, UpdatePersonaInput } from '@/types/api'
 
 const SEARCH_DEBOUNCE_MS = 150
@@ -142,49 +143,24 @@ export function usePersonaBrowser() {
     return result
   }, [personas, filterType, debouncedQuery, fuse, sortField, sortDirection])
 
-  const recentPersonas = useMemo(() => {
-    const filteredById = new Map(filteredPersonas.map((persona) => [persona.id, persona]))
-    return recentPersonaIds
-      .map((id) => filteredById.get(id))
-      .filter((persona): persona is Persona => !!persona)
-  }, [filteredPersonas, recentPersonaIds])
-
-  const recentPersonaIdSet = useMemo(
-    () => new Set(recentPersonas.map((persona) => persona.id)),
-    [recentPersonas],
-  )
-  const regularPersonas = useMemo(
-    () => filteredPersonas.filter((persona) => !recentPersonaIdSet.has(persona.id)),
-    [filteredPersonas, recentPersonaIdSet],
-  )
-
   // Reset to page 1 when filters change
   useEffect(() => {
     setCurrentPage(1)
   }, [filterType, debouncedQuery, sortField, sortDirection])
 
-  // Paginate filtered results
-  const totalPages = Math.max(1, Math.ceil(regularPersonas.length / personasPerPage))
-  const safePage = Math.min(currentPage, totalPages)
-  const paginatedPersonas = useMemo(() => {
-    const start = (safePage - 1) * personasPerPage
-    return regularPersonas.slice(start, start + personasPerPage)
-  }, [regularPersonas, safePage, personasPerPage])
+  // Recently used is a supplemental shortcut. Keep those personas in their
+  // canonical folder page too, so moving one never makes it disappear from
+  // the folder browser and pagination continues to match the total count.
+  const { recentPersonas, paginatedPersonas, safePage, totalPages } = useMemo(
+    () => derivePersonaBrowserPage(filteredPersonas, recentPersonaIds, currentPage, personasPerPage),
+    [filteredPersonas, recentPersonaIds, currentPage, personasPerPage],
+  )
 
   // Group paginated personas by folder
-  const groupedPersonas = useMemo(() => {
-    const groups: Array<{ folder: string; personas: Persona[] }> = []
-    const folderMap = new Map<string, Persona[]>()
-    for (const p of paginatedPersonas) {
-      const key = p.folder || ''
-      if (!folderMap.has(key)) {
-        folderMap.set(key, [])
-        groups.push({ folder: key, personas: folderMap.get(key)! })
-      }
-      folderMap.get(key)!.push(p)
-    }
-    return groups
-  }, [paginatedPersonas])
+  const groupedPersonas = useMemo(
+    () => groupPersonasByFolder(paginatedPersonas),
+    [paginatedPersonas],
+  )
 
   // All unique folders for the filter
   const allFolders = useMemo(() => {

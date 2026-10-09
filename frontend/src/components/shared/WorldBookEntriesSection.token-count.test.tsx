@@ -14,6 +14,7 @@ const deleteCalls: Array<{ bookId: string; entryId: string; revision?: number }>
 const bulkDeleteCalls: Array<{ bookId: string; input: Record<string, unknown> }> = []
 const listEntryCalls: Array<{ bookId: string; limit: number; offset: number }> = []
 const getEntryCalls: Array<{ bookId: string; entryId: string }> = []
+const organizationQueries: Array<Record<string, any>> = []
 const wsHandlers = new Map<string, (payload: unknown) => void>()
 let listEntriesResult: { data: WorldBookEntry[]; total: number } = { data: [], total: 0 }
 let updateDeferred: Deferred<WorldBookEntry> | null = null
@@ -74,12 +75,25 @@ mock.module('@/hooks/useTokenCounts', () => ({
 }))
 mock.module('@/api/world-books', () => ({
   worldBooksApi: {
-    listEntries: async (bookId: string, input: { limit: number; offset: number }) => {
-      listEntryCalls.push({ bookId, limit: input.limit, offset: input.offset })
-      return {
-        ...listEntriesResult,
-        data: listEntriesResult.data.slice(input.offset, input.offset + input.limit),
+    getEntryOrganization: async () => {
+      const folders = new Map<string, number>(), tags = new Map<string, number>()
+      for (const row of listEntriesResult.data) {
+        folders.set(row.folder, (folders.get(row.folder) ?? 0) + 1)
+        for (const tag of row.tags) tags.set(tag, (tags.get(tag) ?? 0) + 1)
       }
+      return { total: listEntriesResult.total, unfiled: folders.get('') ?? 0, folders: [...folders].filter(([name]) => name).map(([name, count]) => ({ name, count })), tags: [...tags].map(([name, count]) => ({ name, count })) }
+    },
+    listEntries: async (bookId: string, input: { limit: number; offset: number; folder?: string; tag?: string[]; search?: string; type?: string }) => {
+      listEntryCalls.push({ bookId, limit: input.limit, offset: input.offset })
+      organizationQueries.push({ ...input })
+      const filtered = listEntriesResult.data.filter(row =>
+        (input.folder === undefined || row.folder === input.folder)
+        && (input.tag ?? []).every(tag => row.tags.includes(tag))
+        && (!input.search || row.comment.includes(input.search) || row.content.includes(input.search))
+        && (!input.type || (input.type === 'constant' ? row.constant : input.type === 'vector' ? !row.constant && row.vectorized : !row.constant && !row.vectorized)),
+      )
+      return { data: filtered.slice(input.offset, input.offset + input.limit), total: filtered.length }
+
     },
     getEntry: async (bookId: string, entryId: string) => {
       getEntryCalls.push({ bookId, entryId })
@@ -130,14 +144,18 @@ mock.module('@/lib/i18n/worldBookEntryLabels', () => ({
   }),
 }))
 mock.module('@/lib/i18n/loomOptionLabels', () => ({ useLoomOptionLabels: () => ({ markerLabel: () => 'marker' }) }))
-mock.module('@/lib/dndUiScale', () => ({ useScaledSortableStyle: (input: unknown) => input }))
+mock.module('@/lib/dndUiScale', () => ({
+  DndContext: ({ children }: { children?: unknown }) => children,
+  useScaledSortableStyle: (input: unknown) => input,
+}))
 mock.module('@/hooks/useScrollGate', () => ({ useScrollGate: noop }))
-mock.module('@/hooks/useIsMobile', () => ({ default: () => false }))
+let mobileFixture = false
+mock.module('@/hooks/useIsMobile', () => ({ default: () => mobileFixture }))
 mock.module('@/components/shared/WorldBookEntryEditor', () => ({
   default: ({ entry, onUpdate }: { entry: WorldBookEntry; onUpdate(entryId: string, updates: Record<string, unknown>): void }) => (
-    <button type="button" data-testid={`edit-${entry.id}`} onClick={() => onUpdate(entry.id, { content: 'optimistic content' })}>
+    <><input aria-label="Fixture editor draft" defaultValue={entry.content} /><button type="button" data-testid={`edit-${entry.id}`} onClick={() => onUpdate(entry.id, { content: 'optimistic content' })}>
       edit
-    </button>
+    </button></>
   ),
 }))
 mock.module('@/components/panels/world-book/WorldBookTokenReportModal', () => ({ default: noop }))
@@ -152,7 +170,7 @@ mock.module('@/components/shared/ContextMenu', () => ({
 mock.module('@/components/shared/ModalPresentation', () => ({ ModalPresentation: ({ children }: { children?: ReactNode }) => <>{children}</> }))
 mock.module('@/components/shared/SearchableSelect', () => ({ default: noop }))
 mock.module('@/components/shared/FormComponents', () => ({ FormField: noop, Select: noop, TextInput: noop, Button: noop }))
-mock.module('@/components/shared/Pagination', () => ({ default: noop }))
+mock.module('@/components/shared/Pagination', () => ({ default: ({ currentPage, totalPages, onPageChange }: { currentPage: number; totalPages: number; onPageChange: (page: number) => void }) => currentPage < totalPages ? createElement('button', { 'aria-label': 'Next entry page', onClick: () => onPageChange(currentPage + 1) }, 'Next entry page') : null }))
 mock.module('@/store', () => ({ useStore: useStoreMock }))
 mock.module('@/lib/clearableSearch', () => ({ clearSearchOnEscape: noop }))
 mock.module('@dnd-kit/core', () => ({
@@ -170,6 +188,7 @@ mock.module('@dnd-kit/sortable', () => ({
 mock.module('lucide-react', () => ({
   ArrowDown: noop, ArrowUp: noop, ArrowUpDown: noop, CheckSquare: noop,
   ChevronDown: noop, ChevronRight: noop, Copy: noop, FileText: noop, GripVertical: noop,
+  Files: noop, Folder: noop, FolderOpen: noop,
   Hash: noop, MoreVertical: noop, MoveRight: noop, Plus: noop, Plug: noop,
   Search: noop, Square: noop, Tag: noop, Trash2: noop, X: noop,
   ArrowBigUp: noop, ArrowBigDown: noop, BetweenHorizontalStart: noop,
@@ -203,6 +222,7 @@ const book: WorldBook = { id: 'book-1', name: 'Book', description: '', folder: '
 
 function entry(id: string, content = 'original content'): WorldBookEntry {
   return {
+    folder: '', tags: [],
     id, world_book_id: book.id, uid: id, outlet_name: null, wi_marker: null, wi_marker_side: null,
     key: [], keysecondary: [], content, comment: id, position: 0, depth: 4, role: null, order_value: 0,
     selective: false, constant: false, disabled: false, group_name: '', group_override: false, group_weight: 100,
@@ -226,17 +246,19 @@ async function wait(ms: number): Promise<void> {
   })
 }
 
-async function render(entries: WorldBookEntry[]): Promise<{ root: Root; host: HTMLDivElement }> {
+async function render(entries: WorldBookEntry[], presentation?: 'workspace' | 'navigation', onOpenEntry?: (id: string) => void): Promise<{ root: Root; host: HTMLDivElement }> {
   listEntriesResult = { data: entries, total: entries.length }
   const host = document.createElement('div')
   document.body.appendChild(host)
   const { createRoot } = await import('react-dom/client')
   const root = createRoot(host)
   await act(async () => {
-    root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id }))
+    root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id, presentation, onOpenEntry }))
     await flush()
   })
   await wait(225)
+  const all = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('All entries'))
+  if (all) await act(async () => { all.click(); await flush() })
   return { root, host }
 }
 
@@ -271,6 +293,7 @@ afterEach(() => {
   updateDeferred = null
   listEntriesResult = { data: [], total: 0 }
   storeState.pendingWorldBookEditEntryId = null
+  mobileFixture = false
   document.body.replaceChildren()
 })
 
@@ -279,6 +302,70 @@ afterAll(() => {
     if (value === undefined) delete globalObject[key]
     else globalObject[key] = value
   }
+})
+
+describe('WorldBookEntriesSection ranked search', () => {
+  async function search(host: HTMLElement, value: string) {
+    const input = host.querySelector<HTMLInputElement>('input[type="search"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')!.set!.call(input, value)
+      input.dispatchEvent(new window.Event('input', { bubbles: true }))
+      await flush()
+    })
+    await wait(10)
+  }
+
+  for (const presentation of [undefined, 'workspace'] as const) for (const mobile of [false, true]) {
+    test(`ranks off-page title/key matches and reuses the complete source: ${presentation ?? 'sidebar'}/${mobile ? 'mobile' : 'desktop'}`, async () => {
+      mobileFixture = mobile
+      const data = Array.from({ length: 1107 }, (_, i) => entry(`entry-${i}`, 'A dragon appears in the background.'))
+      data[1105] = { ...data[1105], key: ['dragon'] }
+      data[1106] = { ...data[1106], comment: 'Dragon' }
+      const { root, host } = await render(data, presentation)
+      try {
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(host.querySelector('[data-entry-id="entry-1106"]')).toBeNull()
+        await search(host, 'dragon')
+        expect([...host.querySelectorAll('[data-entry-id]')].slice(0, 2).map(row => row.getAttribute('data-entry-id'))).toEqual(['entry-1106', 'entry-1105'])
+        expect(organizationQueries.slice(-2).map(query => query.offset)).toEqual([0, 1000])
+        expect(organizationQueries.slice(-2).every(query => query.search === undefined)).toBe(true)
+        const calls = listEntryCalls.length
+        click(host, '[aria-label="Next entry page"]'); await wait(10)
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(host.querySelector('[data-entry-id="entry-1106"]')).toBeNull()
+        expect(listEntryCalls.length).toBe(calls)
+        await search(host, 'dragn')
+        expect([...host.querySelectorAll('[data-entry-id]')].map(row => row.getAttribute('data-entry-id'))).toEqual(['entry-1106', 'entry-1105'])
+        expect(listEntryCalls.length).toBe(calls)
+        await search(host, 'no-such-match')
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(0)
+        await search(host, '')
+        expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+        expect(organizationQueries.at(-1)).toMatchObject({ limit: 50, offset: 0 })
+      } finally { unmount(root) }
+    })
+  }
+
+  test('search keeps folder, all-of tags and activation type scope through ranking', async () => {
+    const data = Array.from({ length: 107 }, (_, i) => ({ ...entry(`entry-${i}`, 'dragon'), folder: 'Characters', tags: ['a,b', 'Villain'], constant: true }))
+    data.push({ ...entry('wrong-folder'), comment: 'Dragon', folder: 'Locations', tags: ['a,b', 'Villain'], constant: true })
+    data.push({ ...entry('wrong-tag'), comment: 'Dragon', folder: 'Characters', tags: ['a,b'], constant: true })
+    data.push({ ...entry('wrong-type'), comment: 'Dragon', folder: 'Characters', tags: ['a,b', 'Villain'] })
+    data[106] = { ...data[106], comment: 'Dragon' }
+    const { root, host } = await render(data)
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Filter entry tags"]')!
+      await act(async () => { select.value = 'a,b'; select.dispatchEvent(new window.Event('change', { bubbles: true })) })
+      await act(async () => { select.value = 'Villain'; select.dispatchEvent(new window.Event('change', { bubbles: true })) })
+      clickByText(host, 'Constant'); await wait(10)
+      await search(host, 'dragon')
+      expect(host.querySelector('[data-entry-id]')?.getAttribute('data-entry-id')).toBe('entry-106')
+      expect(host.querySelector('[data-entry-id="wrong-folder"], [data-entry-id="wrong-tag"], [data-entry-id="wrong-type"]')).toBeNull()
+      expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', tag: ['a,b', 'Villain'], type: 'constant', limit: 1000, offset: 0 })
+      expect(host.textContent).toContain('107')
+    } finally { unmount(root) }
+  })
 })
 
 describe('WorldBookEntriesSection token-count invalidation', () => {
@@ -422,5 +509,176 @@ describe('WorldBookEntriesSection token-count invalidation', () => {
     } finally {
       unmount(root)
     }
+  })
+})
+
+
+describe('native organization server pagination', () => {
+  test('folder counts span the book and folder contents are loaded one server page at a time', async () => {
+    const data = Array.from({ length: 2107 }, (_, i) => ({ ...entry(`entry-${i}`), folder: i < 107 ? 'Characters' : 'Locations', tags: i % 2 ? ['a,b'] : ['Villain'] }))
+    const { root, host } = await render(data)
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      expect(host.querySelectorAll('[data-entry-id]').length).toBe(50)
+      expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', limit: 50, offset: 0 })
+      click(host, '[aria-label="Next entry page"]'); await wait(10)
+      expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', limit: 50, offset: 50 })
+      expect(host.querySelector('[data-entry-id="entry-50"]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-0"]')).toBeNull()
+      clickByText(host, '‹ Folders'); expect(host.textContent).toContain('Locations2000')
+    } finally { unmount(root) }
+  })
+  test('tag selection resets a later page and composes with the folder before LIMIT/OFFSET', async () => {
+    const data = Array.from({ length: 150 }, (_, i) => ({ ...entry(`entry-${i}`), folder: 'Characters', tags: i % 2 ? ['a,b'] : [] }))
+    const { root, host } = await render(data)
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      click(host, '[aria-label="Next entry page"]'); await wait(10)
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Filter entry tags"]')!
+      await act(async () => { select.value = 'a,b'; select.dispatchEvent(new window.Event('change', { bubbles: true })) })
+      await wait(10)
+      expect(organizationQueries.at(-1)).toMatchObject({ folder: 'Characters', tag: ['a,b'], limit: 50, offset: 0 })
+      expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-0"]')).toBeNull()
+    } finally { unmount(root) }
+  })
+})
+
+
+describe('native workspace presentation', () => {
+  for (const presentation of [undefined, 'workspace'] as const) {
+    test('folderless books open directly; first/last folder changes restore contextual navigation: ' + (presentation ?? 'sidebar'), async () => {
+      const first = entry('entry-1'), second = entry('entry-2')
+      const { root, host } = await render([first, second], presentation)
+      try {
+        expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
+        expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+        expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
+        expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+        listEntriesResult = { data: [{ ...first, folder: 'Characters' }, second], total: 2 }
+        act(() => wsHandlers.get('world-book-changed')?.({ id: book.id }))
+        await wait(300)
+        expect(host.querySelector('[aria-label="Entry folders"]')).not.toBeNull()
+        clickByText(host, 'Characters'); await wait(10)
+        expect(host.querySelector('[data-entry-id="entry-2"]')).toBeNull()
+        listEntriesResult = { data: [first, second], total: 2 }
+        act(() => wsHandlers.get('world-book-changed')?.({ id: book.id }))
+        await wait(300)
+        expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
+        expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+        expect(host.querySelector('[data-entry-id="entry-1"]')).not.toBeNull()
+        expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+        expect(organizationQueries.at(-1)?.folder).toBeUndefined()
+      } finally { unmount(root) }
+    })
+  }
+  test('tabs preserve drafts across folders; split and closing tabs never delete entries', async () => {
+    const first = { ...entry('entry-1'), folder: 'Characters' }
+    const second = { ...entry('entry-2'), folder: 'Plot' }
+    const { root, host } = await render([first, second], 'workspace')
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector<HTMLInputElement>('#entry-panel-entry-1 input')!
+      draft.value = 'retained unsaved draft'
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      expect(host.querySelector('[data-entry-id="entry-1"]')).toBeNull()
+      expect(host.querySelector('#entry-panel-entry-1 input') === draft).toBe(true)
+      click(host, '[data-entry-id="entry-2"] button[aria-label="Open entry editor"]')
+      click(host, '#entry-tab-entry-1')
+      expect(host.querySelector('strong')?.textContent).toBe('Plot')
+      expect(draft.value).toBe('retained unsaved draft')
+      updateDeferred = createDeferred<WorldBookEntry>()
+      click(host, '[data-testid="edit-entry-1"]'); await wait(450)
+      expect(updateCalls.at(-1)).toMatchObject({ entryId: 'entry-1', input: { content: 'optimistic content', expected_revision: 7 } })
+      await act(async () => { updateDeferred!.resolve({ ...first, content: 'optimistic content', revision: 8 }); await flush() })
+      clickByText(host, 'Split')
+      expect(host.querySelectorAll('[role="tabpanel"]:not([hidden])').length).toBe(2)
+      clickByText(host, 'Swap panes')
+      expect(host.querySelector('#entry-tab-entry-2')?.getAttribute('aria-selected')).toBe('true')
+      clickByText(host, 'Close split')
+      expect(host.querySelectorAll('[role="tabpanel"]:not([hidden])').length).toBe(1)
+      click(host, '[aria-label="Close tab entry-1"]')
+      expect(deleteCalls).toEqual([])
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-2"]')).not.toBeNull()
+    } finally { unmount(root) }
+  })
+
+  test('list/detail keeps a draft node mounted across responsive changes and returns to the same context', async () => {
+    const { root, host } = await render([entry('entry-1')], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector<HTMLInputElement>('[aria-label="Fixture editor draft"]')!
+      draft.value = 'unsaved controlled draft'
+      mobileFixture = true
+      await act(async () => { root.render(createElement(WorldBookEntriesSection, { books: [book], selectedBookId: book.id, presentation: 'workspace' })); await flush() })
+      expect(host.querySelector('[aria-label="Fixture editor draft"]') === draft).toBe(true)
+      expect(draft.value).toBe('unsaved controlled draft')
+      expect(host.querySelector('[aria-label="Entry detail"]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-1"]')?.closest('[hidden]')).not.toBeNull()
+      const previousRaf = window.requestAnimationFrame
+      window.requestAnimationFrame = callback => { callback(0); return 1 }
+      try { clickByText(host, '‹ Entries') } finally { window.requestAnimationFrame = previousRaf }
+      expect(host.querySelector('[aria-label="Entry detail"]')?.closest('[hidden]')).not.toBeNull()
+      expect(host.querySelector('[data-entry-id="entry-1"]')?.closest('[hidden]')).toBeNull()
+      expect([...host.querySelectorAll('button')].some(button => button.textContent === '‹ Folders')).toBe(false)
+      expect(host.querySelector('[aria-label="Entry folders"]')).toBeNull()
+    } finally { unmount(root) }
+  })
+  test('closing an off-page tab does not cancel its queued revision-guarded save', async () => {
+    const first = { ...entry('entry-1'), folder: 'Characters' }
+    const second = { ...entry('entry-2'), folder: 'Plot' }
+    const { root, host } = await render([first, second], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      updateDeferred = createDeferred<WorldBookEntry>()
+      click(host, '[data-testid="edit-entry-1"]')
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      click(host, '[aria-label="Close tab entry-1"]')
+      await wait(450)
+      expect(updateCalls.at(-1)).toMatchObject({ entryId: 'entry-1', input: { content: 'optimistic content', expected_revision: 7 } })
+      await act(async () => { updateDeferred!.resolve({ ...first, content: 'optimistic content', revision: 8 }); await flush() })
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('strong')?.textContent).toBe('Plot')
+      expect(deleteCalls).toEqual([])
+    } finally { unmount(root) }
+  })
+  test('off-page websocket deletion removes its tab without unmounting the other draft', async () => {
+    const { root, host } = await render([{ ...entry('entry-1'), folder: 'Characters' }, { ...entry('entry-2'), folder: 'Plot' }], 'workspace')
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="Open entry editor"]')
+      click(host, '[data-entry-id="entry-2"] button[aria-label="Open entry editor"]')
+      const draft = host.querySelector('#entry-panel-entry-2 input')!
+      clickByText(host, '‹ Folders'); clickByText(host, 'Plot'); await wait(10)
+      expect(host.querySelector('[data-entry-id="entry-1"]')).toBeNull()
+      await act(async () => { wsHandlers.get('world-book-entry-deleted')?.({ id: 'entry-1', worldBookId: book.id }); await flush() })
+      expect(host.querySelector('#entry-tab-entry-1')).toBeNull()
+      expect(host.querySelector('#entry-panel-entry-2 input') === draft).toBe(true)
+      expect(host.querySelector('#entry-tab-entry-2')?.getAttribute('aria-selected')).toBe('true')
+    } finally { unmount(root) }
+  })
+  test('sidebar folder entries expand inline and collapse without losing folder context', async () => {
+    const { root, host } = await render([{ ...entry('entry-1'), folder: 'Characters' }])
+    try {
+      clickByText(host, '‹ Folders'); clickByText(host, 'Characters'); await wait(10)
+      click(host, '[data-entry-id="entry-1"] button[aria-label="expandEditor"]')
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeTruthy()
+      expect(host.querySelector('strong')?.textContent).toBe('Characters')
+      expect(host.querySelector('[role="tablist"]')).toBeNull()
+      click(host, '[data-entry-id="entry-1"] button[aria-label="collapseEditor"]')
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeNull()
+      expect(host.querySelector('strong')?.textContent).toBe('Characters')
+      expect(deleteCalls).toEqual([])
+    } finally { unmount(root) }
+  })
+  test('light navigation opens the native authoring surface without expanding a second form', async () => {
+    const opened: string[] = []
+    const { root, host } = await render([entry('entry-1')], 'navigation', id => opened.push(id))
+    try {
+      click(host, '[data-entry-id="entry-1"] button[aria-label="expandEditor"]')
+      expect(opened).toEqual(['entry-1'])
+      expect(host.querySelector('[aria-label="Fixture editor draft"]')).toBeNull()
+    } finally { unmount(root) }
   })
 })

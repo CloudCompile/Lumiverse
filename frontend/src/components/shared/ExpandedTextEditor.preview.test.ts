@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 const componentSource = await Bun.file(new URL('./ExpandedTextEditor.tsx', import.meta.url)).text()
 const cssSource = await Bun.file(new URL('./ExpandedTextEditor.module.css', import.meta.url)).text()
+const viewportSource = await Bun.file(new URL('../../main.tsx', import.meta.url)).text()
 
 describe('ExpandedTextEditor Markdown preview', () => {
   test('toggles between the editor and the chat Markdown renderer', () => {
@@ -20,6 +21,19 @@ describe('ExpandedTextEditor Markdown preview', () => {
 })
 
 describe('ExpandedTextEditor mobile editing stability', () => {
+  test('aligns the overlay with the visible viewport while the page is zoomed', () => {
+    expect(viewportSource).toContain("root.style.setProperty('--app-visual-viewport-offset-top'")
+    expect(viewportSource).toContain("root.style.setProperty('--app-visual-viewport-offset-left'")
+    expect(viewportSource).toContain("root.style.setProperty('--app-visual-viewport-width'")
+    expect(viewportSource).toContain("root.style.setProperty('--app-visual-viewport-height'")
+
+    const overlayBlock = cssSource.match(/\.overlay\s*\{([\s\S]*?)\n\}/)?.[1] ?? ''
+    expect(overlayBlock).toContain('top: calc(var(--app-visual-viewport-offset-top)')
+    expect(overlayBlock).toContain('left: calc(var(--app-visual-viewport-offset-left)')
+    expect(overlayBlock).toContain('height: calc(var(--app-visual-viewport-height)')
+    expect(overlayBlock).toContain('width: calc(var(--app-visual-viewport-width)')
+  })
+
   test('focuses programmatically without allowing keyboard presentation to scroll the page', () => {
     expect(componentSource).toContain('textarea.focus({ preventScroll: true })')
     // reset.css already clips the document. Do not turn it back into a

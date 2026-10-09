@@ -1,37 +1,13 @@
-import { getDb } from "../db/connection";
+import { getDb, getDbGeneration, onDbReset } from "../db/connection";
 import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry, TokenizerType } from "../types/tokenizer";
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
-import { validateHost, SSRFError } from "../utils/safe-fetch";
-import { hfAuthHeaders } from "./huggingface.service";
+import { readTokenizerResource, discardTokenizerResource, tokenizerFingerprint, type TokenizerResource } from "./tokenizer-resource-cache";
+import { TiktokenCounter } from "./tiktoken-counter";
+import { createPromptAssemblyProfiler, type PromptAssemblyProfiler } from "./prompt-assembly-profiler";
 
 export interface TokenCountMessageLike {
   role: "system" | "user" | "assistant";
   content: string;
-}
-
-/**
- * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
- * should not reach private/internal hosts.
- */
-/**
- * Deadline for fetching remote tokenizer / vocab files (one-time, then cached).
- * Without it, a reachable-but-hung host stalls token counting on the live
- * generation path indefinitely (a hang never throws, so the char/4 fallback
- * would never engage). On timeout the fetch throws and the fallback kicks in.
- */
-const TOKENIZER_FETCH_TIMEOUT_MS = 30_000;
-
-async function validateTokenizerUrl(url: string, label: string): Promise<void> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    throw new SSRFError(`${label} is not a valid URL: ${url}`);
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new SSRFError(`${label} must use http or https, got: ${parsed.protocol}`);
-  }
-  await validateHost(parsed.hostname);
 }
 
 /** Display name reported when no real tokenizer could be resolved for a model. */
@@ -45,14 +21,41 @@ export const COUNT_BATCH_YIELD_EVERY = 8;
 /** A loaded tokenizer instance with a count(text) method. */
 interface TokenizerInstance {
   count: (text: string) => number;
+  revision?: string;
+  expiresAt?: number;
 }
+
+export interface TokenCounterMetrics {
+  instance: "hit" | "miss" | "pending" | "cooldown" | "approximate";
+  hits: number;
+  misses: number;
+  encodeMs: number;
+}
+
+export interface ResolvedTokenCounter {
+  count: (text: string) => number;
+  name: string;
+  metrics: TokenCounterMetrics;
+}
+
+export function tokenizerRuntime(): string {
+  return (globalThis as any).__LUMIVERSE_ASSEMBLY_WORKER ? "assembly-worker" : "main";
+}
+
+type LoadedTokenizer = { instance: TokenizerInstance; key: string; configKey: string; expiresAt: number };
 
 // ---- Caches ----
 const MAX_CACHED_TOKENIZER_INSTANCES = 5;
 const MAX_PREWARM_TOKENIZERS = MAX_CACHED_TOKENIZER_INSTANCES;
 
-const instanceCache = new Map<string, TokenizerInstance>();
-const pendingInstanceLoads = new Map<string, Promise<TokenizerInstance>>();
+const instanceCache = new Map<string, LoadedTokenizer>();
+const pendingInstanceLoads = new Map<string, Promise<LoadedTokenizer>>();
+const memoContexts = new Map<string, Omit<LoadedTokenizer, "instance">>();
+const failedLoads = new Map<string, { retryAt: number; error: unknown }>();
+const FAILURE_COOLDOWN_MS = 15_000;
+const invalidationVersions = new Map<string, number>();
+const invalidationListeners = new Set<(tokenizerId: string | null) => void>();
+let cacheEpoch = 0;
 let patternCache: { patterns: { regex: RegExp; tokenizerId: string }[] } | null = null;
 
 // ---- Token-count memoization ----
@@ -88,14 +91,22 @@ function hashText(str: string): number {
 
 /** Memoized `instance.count(text)`, keyed by (tokenizerId, length, content hash). */
 function countCached(
-  tokenizerId: string,
+  tokenizerKey: string,
   instance: TokenizerInstance,
   text: string,
+  metrics?: TokenCounterMetrics,
 ): number {
-  const key = `${tokenizerId}\u0000${text.length}\u0000${hashText(text)}`;
+  const key = countKey(tokenizerKey, text);
   const hit = tokenCountCache.get(key);
-  if (hit !== undefined) return hit;
-  const value = instance.count(text);
+  if (hit !== undefined) {
+    if (metrics) metrics.hits++;
+    return hit;
+  }
+  if (metrics) metrics.misses++;
+  const started = performance.now();
+  let value: number;
+  try { value = instance.count(text); }
+  finally { if (metrics) metrics.encodeMs += performance.now() - started; }
   // Bounded FIFO eviction — entries are tiny (~short key + number), and the
   // oldest are the least likely to belong to an actively-regenerating chat.
   if (tokenCountCache.size >= TOKEN_COUNT_CACHE_MAX) {
@@ -104,6 +115,39 @@ function countCached(
   }
   tokenCountCache.set(key, value);
   return value;
+}
+
+function countKey(tokenizerKey: string, text: string): string {
+  return `${tokenizerKey}\u0000${text.length}\u0000${hashText(text)}`;
+}
+
+function configKey(config: TokenizerConfig): string {
+  return `${config.id}\u0000${tokenizerFingerprint([config.type, config.config])}`;
+}
+
+type LoadedResource = TokenizerResource & { discard: () => Promise<void> };
+
+async function resource(url: string, config: TokenizerConfig, label: string, profiler: PromptAssemblyProfiler): Promise<LoadedResource> {
+  const started = performance.now();
+  const fingerprint = tokenizerFingerprint([config.type, config.config]);
+  const format = config.type === "tiktoken" && label === "model" ? "text" : "json";
+  const result = await readTokenizerResource(url, fingerprint, format);
+  profiler.addPhase(`${label}-${result.source}`, performance.now() - started);
+  return { ...result, discard: () => discardTokenizerResource(url, fingerprint, result.text, format) };
+}
+
+async function constructFromResources<T>(resources: LoadedResource[], profiler: PromptAssemblyProfiler, construct: () => T): Promise<T> {
+  try { return profiler.measureSync("construct", construct); }
+  catch (error) {
+    // HTTP 200 and valid JSON do not guarantee a usable tokenizer. Allow the
+    // normal retry cooldown to recover from transient bad resource responses.
+    await Promise.all(resources.map(resource => resource.discard().catch(() => {})));
+    throw error;
+  }
+}
+
+function resourceIdentity(resources: TokenizerResource[]): Pick<TokenizerInstance, "revision" | "expiresAt"> {
+  return { revision: tokenizerFingerprint(resources.map(r => r.text)), expiresAt: Math.min(...resources.map(r => r.expiresAt)) };
 }
 
 // ---- Helpers ----
@@ -187,18 +231,23 @@ function getTokenizerIdForModel(modelId: string): string | null {
 // ---- Loaders ----
 
 async function loadTokenizer(config: TokenizerConfig): Promise<TokenizerInstance> {
-  switch (config.type) {
-    case "openai":
-      return loadOpenAI(config);
-    case "huggingface":
-      return loadHuggingFace(config);
-    case "tiktoken":
-      return loadTiktoken(config);
-    case "approximate":
-      return loadApproximate(config);
-    default:
-      throw new Error(`Unknown tokenizer type: ${config.type}`);
-  }
+  const meta = { tokenizer: config.id, type: config.type, runtime: tokenizerRuntime(), failed: false };
+  const profiler = createPromptAssemblyProfiler("tokenizer-load", meta);
+  try {
+    switch (config.type) {
+      case "openai":
+        return await profiler.measure("module-import", () => loadOpenAI(config));
+      case "huggingface":
+        return await loadHuggingFace(config, profiler);
+      case "tiktoken":
+        return await loadTiktoken(config, profiler);
+      case "approximate":
+        return loadApproximate(config);
+      default:
+        throw new Error(`Unknown tokenizer type: ${config.type}`);
+    }
+  } catch (error) { meta.failed = true; throw error; }
+  finally { profiler.finish(); }
 }
 
 async function loadOpenAI(config: TokenizerConfig): Promise<TokenizerInstance> {
@@ -213,23 +262,23 @@ async function loadOpenAI(config: TokenizerConfig): Promise<TokenizerInstance> {
       mod = await import("gpt-tokenizer/encoding/o200k_base");
       break;
   }
-  const encode = mod.encode || mod.default?.encode;
-  if (!encode) throw new Error(`Could not find encode function for ${encoding}`);
-  return { count: (text: string) => encode(text).length };
+  const countTokens = mod.countTokens || mod.default?.countTokens;
+  if (!countTokens) throw new Error(`Could not find countTokens function for ${encoding}`);
+  return { count: (text: string) => countTokens(text) };
 }
 
-async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstance> {
+async function loadHuggingFace(config: TokenizerConfig, profiler: PromptAssemblyProfiler): Promise<TokenizerInstance> {
   const cfg = config.config;
 
   // Try package import first (e.g. @lenml/tokenizer-claude)
   if (cfg.package) {
     try {
-      const mod = await import(cfg.package);
+      const mod = await profiler.measure("module-import", () => import(cfg.package));
 
       // @lenml/tokenizer-* v3.x packages export fromPreTrained(params?) which builds
       // a tokenizer from embedded model data (tokenizerJSON + tokenizerConfig baked in)
       if (typeof mod.fromPreTrained === "function") {
-        const tokenizer = withoutBenignTokenizerWarning(() => mod.fromPreTrained());
+        const tokenizer = profiler.measureSync("construct", () => withoutBenignTokenizerWarning(() => mod.fromPreTrained()));
         if (tokenizer?.encode) {
           return { count: (text: string) => tokenizer.encode(text).length };
         }
@@ -247,7 +296,7 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
 
   // URL-based loading via @lenml/tokenizers
   if (cfg.url) {
-    const { TokenizerLoader } = await import("@lenml/tokenizers");
+    const { TokenizerLoader } = await profiler.measure("module-import", () => import("@lenml/tokenizers"));
 
     // v3.x requires both tokenizerJSON and tokenizerConfig URLs.
     // Auto-derive config URL from the tokenizer URL if not explicitly provided.
@@ -256,106 +305,49 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
     // If the user's URL doesn't end with tokenizer.json (e.g. a direct download link),
     // try fetching the JSON data manually and use fromPreTrained() instead of fromPreTrainedUrls()
     if (configUrl === cfg.url) {
-      await validateTokenizerUrl(cfg.url, "tokenizer url");
-      const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
-      if (!resp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${resp.status}`);
-      const tokenizerJSON = await resp.json();
-      const tokenizer = withoutBenignTokenizerWarning(() => TokenizerLoader.fromPreTrained({
+      const model = await resource(cfg.url, config, "model", profiler);
+      const tokenizerJSON = profiler.measureSync("parse", () => JSON.parse(model.text));
+      const tokenizer = await constructFromResources([model], profiler, () => withoutBenignTokenizerWarning(() => TokenizerLoader.fromPreTrained({
         tokenizerJSON,
         tokenizerConfig: { tokenizer_class: "PreTrainedTokenizer" },
-      }));
-      return { count: (text: string) => tokenizer.encode(text).length };
+      })));
+      return { count: (text: string) => tokenizer.encode(text).length, ...resourceIdentity([model]) };
     }
 
     // Fetch both files ourselves so warning suppression is scoped only to construction,
     // not the whole network request inside fromPreTrainedUrls().
-    await validateTokenizerUrl(cfg.url, "tokenizer url");
-    await validateTokenizerUrl(configUrl, "tokenizer config url");
-    const tokenizerResp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
-    if (!tokenizerResp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${tokenizerResp.status}`);
-    const configResp = await fetch(configUrl, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(configUrl) });
-    if (!configResp.ok) throw new Error(`Failed to fetch tokenizer_config.json from ${configUrl}: ${configResp.status}`);
-    const tokenizerJSON = await tokenizerResp.json();
-    const tokenizerConfig = await configResp.json();
-    const tokenizer = withoutBenignTokenizerWarning(() =>
+    const [model, settings] = await Promise.all([
+      resource(cfg.url, config, "model", profiler),
+      resource(configUrl, config, "config", profiler),
+    ]);
+    const [tokenizerJSON, tokenizerConfig] = profiler.measureSync("parse", () => [JSON.parse(model.text), JSON.parse(settings.text)]);
+    const tokenizer = await constructFromResources([model, settings], profiler, () => withoutBenignTokenizerWarning(() =>
       TokenizerLoader.fromPreTrained({ tokenizerJSON, tokenizerConfig })
-    );
-    return { count: (text: string) => tokenizer.encode(text).length };
+    ));
+    return { count: (text: string) => tokenizer.encode(text).length, ...resourceIdentity([model, settings]) };
   }
 
   throw new Error("HuggingFace tokenizer requires either 'package' or 'url' in config");
 }
 
-/**
- * Detect the OpenAI-canonical tiktoken `.model` format: many lines of
- * `<base64_token> <rank>`. js-tiktoken ships its own compressed format instead,
- * so we probe the first non-empty line to decide whether to convert.
- */
-function looksLikeStandardTiktokenFormat(bpe: string): boolean {
-  const firstLineEnd = bpe.indexOf("\n");
-  if (firstLineEnd < 0) return false; // single line — already compressed
-  const firstLine = bpe.slice(0, firstLineEnd).trim();
-  // Standard row: exactly two whitespace-separated fields, second is an integer.
-  const parts = firstLine.split(/\s+/);
-  return parts.length === 2 && /^\d+$/.test(parts[1]);
-}
-
-/**
- * Convert the OpenAI standard `<base64> <rank>\n` format into the single-line
- * compressed format js-tiktoken's `Tiktoken` constructor parses. Ranks must be
- * contiguous starting at 0 (standard tiktoken files already satisfy this).
- */
-function convertStandardToCompressedBpe(standard: string): string {
-  const lines = standard.split("\n");
-  const tokens: string[] = [];
-  for (const line of lines) {
-    if (!line) continue;
-    const sp = line.indexOf(" ");
-    if (sp < 0) continue;
-    const tok = line.slice(0, sp);
-    const rank = Number.parseInt(line.slice(sp + 1), 10);
-    if (!Number.isFinite(rank)) continue;
-    if (rank !== tokens.length) {
-      throw new Error(`tiktoken model ranks are non-contiguous at index ${tokens.length} (got rank ${rank})`);
-    }
-    tokens.push(tok);
-  }
-  // Leading `! 0` is the sentinel + starting offset js-tiktoken's parser expects.
-  return `! 0 ${tokens.join(" ")}`;
-}
-
-async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance> {
-  const { Tiktoken } = await import("js-tiktoken/lite");
+async function loadTiktoken(config: TokenizerConfig, profiler: PromptAssemblyProfiler): Promise<TokenizerInstance> {
   const cfg = config.config;
   if (!cfg.url) throw new Error("Tiktoken requires 'url' in config pointing to .model file");
 
-  await validateTokenizerUrl(cfg.url, "tiktoken model url");
-  const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
-  if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
-  const rawBpe = await resp.text();
-
-  // js-tiktoken's constructor expects its own compressed rank format
-  // (`<sentinel> <offset> <tok0> <tok1> ...` on a single line — see
-  // `js-tiktoken/dist/ranks/o200k_base.js`). The standard OpenAI tiktoken
-  // format (one `<base64> <rank>` pair per line, shipped by e.g. Moonshot's
-  // Kimi-K2.5/tiktoken.model) is different, so we transparently convert it.
-  const bpeData = looksLikeStandardTiktokenFormat(rawBpe)
-    ? convertStandardToCompressedBpe(rawBpe)
-    : rawBpe;
+  const [model, settings] = await Promise.all([
+    resource(cfg.url, config, "model", profiler),
+    cfg.configUrl ? resource(cfg.configUrl, config, "config", profiler).catch(() => null) : null,
+  ]);
 
   // Parse special tokens from tokenizer_config.json if provided
-  let specialTokens: Record<string, number> = {};
-  if (cfg.configUrl) {
+  const specialTokens: Record<string, number> = {};
+  if (settings) {
     try {
-      await validateTokenizerUrl(cfg.configUrl, "tiktoken config url");
-      const configResp = await fetch(cfg.configUrl, { headers: await hfAuthHeaders(cfg.configUrl) });
-      if (configResp.ok) {
-        const configData = await configResp.json();
-        if (configData.added_tokens_decoder) {
-          for (const [id, tok] of Object.entries(configData.added_tokens_decoder)) {
-            if ((tok as any).special) {
-              specialTokens[(tok as any).content] = parseInt(id, 10);
-            }
+      const configData = profiler.measureSync("parse-config", () => JSON.parse(settings.text));
+      if (configData.added_tokens_decoder) {
+        for (const [id, tok] of Object.entries(configData.added_tokens_decoder)) {
+          if ((tok as any).special) {
+            specialTokens[(tok as any).content] = parseInt(id, 10);
           }
         }
       }
@@ -368,8 +360,11 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   const patStr = cfg.pat_str ||
     "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 
-  const enc = new Tiktoken({ pat_str: patStr, special_tokens: specialTokens, bpe_ranks: bpeData });
-  return { count: (text: string) => enc.encode(text).length };
+  const enc = await constructFromResources(settings ? [model, settings] : [model], profiler, () => new TiktokenCounter(model.text, patStr, specialTokens));
+  const identity = resourceIdentity(settings ? [model, settings] : [model]);
+  // Retry an unavailable optional config soon without re-downloading the model.
+  if (cfg.configUrl && !settings) identity.expiresAt = Math.min(identity.expiresAt!, Date.now() + FAILURE_COOLDOWN_MS);
+  return { count: (text: string) => enc.count(text), ...identity };
 }
 
 function loadApproximate(config: TokenizerConfig): TokenizerInstance {
@@ -379,7 +374,7 @@ function loadApproximate(config: TokenizerConfig): TokenizerInstance {
 
 // ---- Instance management ----
 
-function touchInstance(tokenizerId: string, instance: TokenizerInstance): void {
+function touchInstance(tokenizerId: string, instance: LoadedTokenizer): void {
   if (instanceCache.get(tokenizerId) === instance) {
     instanceCache.delete(tokenizerId);
   }
@@ -392,31 +387,65 @@ function touchInstance(tokenizerId: string, instance: TokenizerInstance): void {
   }
 }
 
-async function getInstance(tokenizerId: string): Promise<TokenizerInstance> {
+async function getInstance(tokenizerId: string, metrics?: TokenCounterMetrics): Promise<LoadedTokenizer> {
+  const config = getConfig(tokenizerId);
+  if (!config) throw new Error(`Tokenizer not found: ${tokenizerId}`);
+  const key = configKey(config);
   const cached = instanceCache.get(tokenizerId);
-  if (cached) {
+  if (cached && cached.configKey === key && cached.expiresAt > Date.now()) {
+    if (metrics) metrics.instance = "hit";
     touchInstance(tokenizerId, cached);
     return cached;
   }
 
-  const pending = pendingInstanceLoads.get(tokenizerId);
-  if (pending) return pending;
+  const pending = pendingInstanceLoads.get(key);
+  if (pending) {
+    if (metrics) metrics.instance = "pending";
+    return pending;
+  }
 
-  const config = getConfig(tokenizerId);
-  if (!config) throw new Error(`Tokenizer not found: ${tokenizerId}`);
+  const failure = failedLoads.get(key);
+  if (failure && failure.retryAt > Date.now()) {
+    if (metrics) metrics.instance = "cooldown";
+    throw failure.error;
+  }
+  if (metrics) metrics.instance = "miss";
+  const version = invalidationVersions.get(tokenizerId) ?? 0;
+  const epoch = cacheEpoch;
+  const dbGeneration = getDbGeneration();
 
-  const loadPromise = (async () => {
+  let loadPromise!: Promise<LoadedTokenizer>;
+  loadPromise = (async () => {
     const instance = await loadTokenizer(config);
-    touchInstance(tokenizerId, instance);
-    return instance;
+    if (getDbGeneration() !== dbGeneration) throw new Error("Tokenizer database changed while loading");
+    const current = getConfig(tokenizerId);
+    if (!current) throw new Error(`Tokenizer deleted while loading: ${tokenizerId}`);
+    if ((invalidationVersions.get(tokenizerId) ?? 0) !== version || configKey(current) !== key) {
+      // Do not return or publish the obsolete encoding after a config edit.
+      if (pendingInstanceLoads.get(key) === loadPromise) pendingInstanceLoads.delete(key);
+      return getInstance(tokenizerId, metrics);
+    }
+    const loaded = { instance, configKey: key, key: `${key}\u0000${instance.revision ?? "package"}`, expiresAt: instance.expiresAt ?? Infinity };
+    if (cacheEpoch === epoch) {
+      touchInstance(tokenizerId, loaded);
+      memoContexts.set(tokenizerId, { key: loaded.key, configKey: key, expiresAt: loaded.expiresAt });
+    }
+    failedLoads.delete(key);
+    return loaded;
   })();
 
-  pendingInstanceLoads.set(tokenizerId, loadPromise);
+  pendingInstanceLoads.set(key, loadPromise);
   try {
     return await loadPromise;
+  } catch (error) {
+    if (cacheEpoch === epoch && (invalidationVersions.get(tokenizerId) ?? 0) === version) {
+      if (failedLoads.size >= 100) failedLoads.delete(failedLoads.keys().next().value!);
+      failedLoads.set(key, { retryAt: Date.now() + FAILURE_COOLDOWN_MS, error });
+    }
+    throw error;
   } finally {
-    if (pendingInstanceLoads.get(tokenizerId) === loadPromise) {
-      pendingInstanceLoads.delete(tokenizerId);
+    if (pendingInstanceLoads.get(key) === loadPromise) {
+      pendingInstanceLoads.delete(key);
     }
   }
 }
@@ -434,9 +463,20 @@ export async function countForModel(modelId: string, text: string): Promise<numb
 }
 
 export async function countWithTokenizer(tokenizerId: string, text: string): Promise<number> {
-  const instance = await getInstance(tokenizerId);
+  const config = getConfig(tokenizerId);
+  if (!config) throw new Error(`Tokenizer not found: ${tokenizerId}`);
   if (!text) return 0;
-  return countCached(tokenizerId, instance, text);
+  const context = memoContexts.get(tokenizerId);
+  if (context?.configKey === configKey(config) && context.expiresAt > Date.now()) {
+    const hit = tokenCountCache.get(countKey(context.key, text));
+    if (hit !== undefined) {
+      const resident = instanceCache.get(tokenizerId);
+      if (resident?.key === context.key) touchInstance(tokenizerId, resident);
+      return hit;
+    }
+  }
+  const loaded = await getInstance(tokenizerId);
+  return countCached(loaded.key, loaded.instance, text);
 }
 
 /**
@@ -540,19 +580,21 @@ export async function countBreakdown(
  * Intended for hot loops (e.g. context-budget clipping) that tokenize every
  * message in the assembled prompt and need to avoid async overhead per call.
  */
-export async function resolveCounter(modelId: string): Promise<{ count: (text: string) => number; name: string }> {
+export async function resolveCounter(modelId: string): Promise<ResolvedTokenCounter> {
+  const metrics: TokenCounterMetrics = { instance: "approximate", hits: 0, misses: 0, encodeMs: 0 };
   const tokenizerId = modelId ? getTokenizerIdForModel(modelId) : null;
   if (tokenizerId) {
     const config = getConfig(tokenizerId);
     try {
-      const instance = await getInstance(tokenizerId);
-      const name = config?.name || tokenizerId;
+      const loaded = await getInstance(tokenizerId, metrics);
+      const name = getConfig(tokenizerId)?.name || config?.name || tokenizerId;
       return {
         count: (text: string) => {
           if (!text) return 0;
-          try { return countCached(tokenizerId, instance, text); } catch { return Math.ceil(text.length / 4); }
+          try { return countCached(loaded.key, loaded.instance, text, metrics); } catch { return Math.ceil(text.length / 4); }
         },
         name,
+        metrics,
       };
     } catch {
       // fall through to approximate
@@ -561,6 +603,7 @@ export async function resolveCounter(modelId: string): Promise<{ count: (text: s
   return {
     count: (text: string) => (text ? Math.ceil(text.length / 4) : 0),
     name: APPROXIMATE_TOKENIZER_NAME,
+    metrics,
   };
 }
 
@@ -568,17 +611,40 @@ export { getTokenizerIdForModel, getAllConfigs, getConfig, getAllPatterns };
 
 export function invalidate(tokenizerId: string): void {
   instanceCache.delete(tokenizerId);
-  pendingInstanceLoads.delete(tokenizerId);
+  memoContexts.delete(tokenizerId);
+  invalidationVersions.set(tokenizerId, (invalidationVersions.get(tokenizerId) ?? 0) + 1);
   // The tokenizer's encoding may have changed — drop its memoized counts so we
   // don't serve stale token totals from before the config edit.
   const prefix = `${tokenizerId}\u0000`;
+  for (const key of pendingInstanceLoads.keys()) if (key.startsWith(prefix)) pendingInstanceLoads.delete(key);
+  for (const key of failedLoads.keys()) if (key.startsWith(prefix)) failedLoads.delete(key);
   for (const key of tokenCountCache.keys()) {
     if (key.startsWith(prefix)) tokenCountCache.delete(key);
   }
+  for (const listener of invalidationListeners) listener(tokenizerId);
 }
 
 export function invalidatePatterns(): void {
   patternCache = null;
+  for (const listener of invalidationListeners) listener(null);
+}
+
+/** Main-process worker hosts forward invalidation to every existing isolate. */
+export function onTokenizerInvalidation(listener: (tokenizerId: string | null) => void): () => void {
+  invalidationListeners.add(listener);
+  return () => invalidationListeners.delete(listener);
+}
+
+/** Best-effort warmup joins the same pending load used by generation. */
+export async function warmTokenizerForModel(modelId: string): Promise<void> {
+  try {
+    const id = getTokenizerIdForModel(modelId);
+    if (id) await getInstance(id);
+  } catch { /* Generation retains its normal approximate fallback. */ }
+}
+
+export function getCachedTokenizerIds(): string[] {
+  return [...instanceCache.entries()].filter(([, loaded]) => loaded.expiresAt > Date.now()).map(([id]) => id);
 }
 
 /**
@@ -735,7 +801,9 @@ function collectPrewarmTokenizerIds(): string[] {
 
 /** Release reconstructable tokenizer state when the host reports low memory. */
 export function releaseTokenizerMemory(): void {
+  cacheEpoch++;
   instanceCache.clear();
+  memoContexts.clear();
   tokenCountCache.clear();
 }
 
@@ -743,6 +811,8 @@ export function releaseTokenizerMemory(): void {
 export function _resetForTests(): void {
   releaseTokenizerMemory();
   pendingInstanceLoads.clear();
+  failedLoads.clear();
+  invalidationVersions.clear();
   patternCache = null;
 }
 
@@ -750,3 +820,5 @@ export function _resetForTests(): void {
 export function _getCachedTokenizerIdsForTests(): string[] {
   return [...instanceCache.keys()];
 }
+
+onDbReset(_resetForTests);

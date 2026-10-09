@@ -1,4 +1,12 @@
-import { Component, type ComponentType, type ErrorInfo, type ReactElement, type ReactNode } from 'react'
+import {
+  Component,
+  createContext,
+  useContext,
+  type ComponentType,
+  type ErrorInfo,
+  type ReactElement,
+  type ReactNode,
+} from 'react'
 
 /**
  * Spindle presentation/shell overrides. Separate from theme `store.componentOverrides`.
@@ -269,6 +277,18 @@ class SpindleOverrideErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   }
 }
 
+type OriginalRenderer = (slotProps: object) => ReactElement
+
+// Keep the component type handed to wrap overrides stable across host renders.
+// The renderer itself comes from context so it can still see the latest native
+// component, host props, and any slot-prop overrides.
+const SpindleOriginalRendererContext = createContext<OriginalRenderer | null>(null)
+
+function SpindleOriginal(slotProps: object): ReactElement | null {
+  const renderOriginal = useContext(SpindleOriginalRendererContext)
+  return renderOriginal?.(slotProps) ?? null
+}
+
 export function renderSpindleOverride<P extends object>(
   host: SpindleOverrideHost,
   DefaultComponent: ComponentType<P>,
@@ -287,19 +307,23 @@ export function renderSpindleOverride<P extends object>(
     return native
   }
 
-  function Original(slotProps: Partial<P> = {} as Partial<P>) {
+  const renderOriginal: OriginalRenderer = (slotProps) => {
     return <DefaultComponent {...props} {...slotProps} />
   }
 
   const Override = override.component as ComponentType<P & SpindleComponentOverrideProps<P>>
   const frozen = Object.freeze({
     ...safeProps,
-    ...(override.mode === 'wrap' ? { Original } : {}),
+    ...(override.mode === 'wrap'
+      ? { Original: SpindleOriginal as ComponentType<Partial<P>> }
+      : {}),
   }) as P & SpindleComponentOverrideProps<P>
 
   return (
-    <SpindleOverrideErrorBoundary host={host} resetKey={override.id} fallback={native}>
-      <Override {...frozen} />
-    </SpindleOverrideErrorBoundary>
+    <SpindleOriginalRendererContext.Provider value={renderOriginal}>
+      <SpindleOverrideErrorBoundary host={host} resetKey={override.id} fallback={native}>
+        <Override {...frozen} />
+      </SpindleOverrideErrorBoundary>
+    </SpindleOriginalRendererContext.Provider>
   )
 }

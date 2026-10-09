@@ -7,6 +7,7 @@ import { websocket } from "hono/bun";
 import { env } from "./env";
 import { auth } from "./auth";
 import { rewriteLegacySsoCallbackPath } from "./auth/callback-compat";
+import { renderProviderOAuthLanding } from "./auth/provider-oauth-landing";
 import { requireAuth } from "./auth/middleware";
 import { settingsRoutes } from "./routes/settings.routes";
 import { charactersRoutes } from "./routes/characters.routes";
@@ -18,6 +19,7 @@ import { secretsRoutes } from "./routes/secrets.routes";
 import { presetsRoutes } from "./routes/presets.routes";
 import { connectionsRoutes } from "./routes/connections.routes";
 import { generateRoutes } from "./routes/generate.routes";
+import { requestHistoryRoutes } from "./routes/request-history.routes";
 import { multiplayerRoutes } from "./routes/multiplayer.routes";
 import { imagesRoutes } from "./routes/images.routes";
 import { audioRoutes } from "./routes/audio.routes";
@@ -41,6 +43,7 @@ import { illarinRoutes } from "./routes/illarin.routes";
 import { systemRoutes } from "./routes/system.routes";
 import { migrateRoutes } from "./routes/migrate.routes";
 import { stMigrationRoutes } from "./routes/st-migration.routes";
+import { clMigrationRoutes } from "./routes/cl-migration.routes";
 import { googleDriveRoutes } from "./routes/google-drive.routes";
 import { dropboxRoutes } from "./routes/dropbox.routes";
 import { presetProfilesRoutes } from "./routes/preset-profiles.routes";
@@ -49,6 +52,8 @@ import { loadoutsRoutes } from "./routes/loadouts.routes";
 import { regexScriptsRoutes } from "./routes/regex-scripts.routes";
 import { expressionsRoutes } from "./routes/expressions.routes";
 import { pushRoutes } from "./routes/push.routes";
+import { desktopNotificationTransportRoutes } from "./routes/desktop-notifications.routes";
+import { desktopApiRoutes } from "./routes/desktop-api.routes";
 import { memoryCortexRoutes } from "./routes/memory-cortex.routes";
 import { operatorRoutes } from "./routes/operator.routes";
 import { openrouterRoutes } from "./routes/openrouter.routes";
@@ -75,7 +80,14 @@ import {
   isOriginAllowed,
 } from "./services/trusted-hosts.service";
 import { authLockoutService } from "./services/auth-lockout.service";
-import { getClientIp } from "./utils/client-ip";
+import {
+  getClientIp,
+  isConnectionFromExplicitTrustedProxy,
+} from "./utils/client-ip";
+import {
+  requestAtResolvedOrigin,
+  resolveDesktopRequestOrigin,
+} from "./auth/request-origin";
 import { listSsoLoginOptions } from "./services/sso-providers.service";
 import { userMediaServingHeaders } from "./utils/user-media-headers";
 import { getImageFilePathPublic } from "./services/images.service";
@@ -107,6 +119,7 @@ const PUBLIC_POST_PREFIXES = [
   "/api/v1/lumihub",
   "/api/v1/openrouter/oauth-landing",
   "/api/v1/nanogpt/oauth-landing",
+  "/api/desktop-notifications/v1",
 ];
 app.use("/api/*", async (c, next) => {
   const clientId = getClientIp(c);
@@ -151,7 +164,7 @@ app.use("/api/*", async (c, next) => {
 // sum of all images even though every individual file is well under the cap.
 app.use("/api/*", async (c, next) => {
   const path = c.req.path;
-  if (isLargeUploadBodyLimitExemptPath(path)) {
+  if (isLargeUploadBodyLimitExemptPath(path, c.req.method)) {
     return next();
   }
   return bodyLimit({
@@ -166,7 +179,21 @@ app.use("/api/*", async (c, next) => {
 app.use("/api/*", async (c, next) => {
   const clientId = getClientIp(c);
   const origin = c.req.header("origin");
-  if (!env.trustAnyOrigin && origin && !isOriginAllowed(origin)) {
+  const notificationTicket = c.req.query("notificationTicket");
+  const desktopNotificationWs = c.req.path === "/api/ws"
+    && typeof notificationTicket === "string"
+    && notificationTicket.length > 0
+    && (
+      origin === "http://tauri.localhost"
+      || origin === "tauri://localhost"
+      || origin === "http://localhost:1430"
+      || origin === "http://127.0.0.1:1430"
+    );
+  // The bundled tray host has a Tauri-local origin rather than the backend's
+  // origin. Only the notification-only, single-use-ticket upgrade may cross
+  // this boundary; ordinary API and user WebSocket traffic stays on the
+  // trusted-origin allowlist.
+  if (!env.trustAnyOrigin && origin && !isOriginAllowed(origin) && !desktopNotificationWs) {
     const result = authLockoutService.recordFailure(clientId, "origin", {
       method: c.req.method,
       path: c.req.path,
@@ -298,25 +325,20 @@ app.use("*", async (c, next) => {
 });
 
 // BetterAuth handler — BEFORE auth middleware
-// Rewrite the request URL to use the actual Host header so BetterAuth
-// constructs the correct redirect URLs and cookie domains when accessed via
-// a LAN IP instead of localhost. Respect X-Forwarded-Proto/Host from reverse
-// proxies (Cloudflare, nginx, HuggingFace Spaces) so BetterAuth generates
-// https:// callback URLs when served behind TLS termination.
+// Better Auth receives a URL rebuilt from an approved public origin. Forwarded
+// host/proto are considered only for an explicitly trusted socket peer, then
+// removed so downstream middleware cannot reinterpret attacker input.
 const betterAuthHandler: Handler = (c) => {
   if (c.req.path === "/api/auth/sign-up/email") {
     return c.json({ error: "Not found" }, 404);
   }
-  const host = c.req.header("x-forwarded-host") || c.req.header("host");
-  const proto = c.req.header("x-forwarded-proto") || "http";
   const url = new URL(c.req.url);
   const pathname = rewriteLegacySsoCallbackPath(url.pathname);
-  if (host || pathname !== url.pathname) {
-    const origin = host ? `${proto}://${host}` : url.origin;
-    const rewritten = new URL(pathname + url.search, origin);
-    return auth.handler(new Request(rewritten.toString(), c.req.raw));
-  }
-  return auth.handler(c.req.raw);
+  const origin = resolveDesktopRequestOrigin(
+    c.req.raw,
+    isConnectionFromExplicitTrustedProxy(c),
+  );
+  return auth.handler(requestAtResolvedOrigin(c.req.raw, origin, pathname + url.search));
 };
 app.get("/api/auth/*", betterAuthHandler);
 app.post("/api/auth/*", betterAuthHandler);
@@ -327,112 +349,17 @@ app.route("/api/spindle-oauth", spindleOAuthRoutes);
 // LumiHub callback — unauthenticated (PKCE code proves authorization)
 app.route("/api/v1/lumihub", lumihubCallbackRoute);
 
-// OpenRouter OAuth landing — unauthenticated (popup redirect from OpenRouter)
-// OpenRouter redirects here with ?code=<auth_code>. We relay the code back
-// to the opener window via postMessage so it can call our exchange endpoint.
-app.get("/api/v1/openrouter/oauth-landing", async (c) => {
-  const rawCode = c.req.query("code") || "";
-  const rawOpenerOrigin = c.req.query("opener_origin") || "";
-  // Whitelist the OAuth code character set. OpenRouter codes are URL-safe
-  // base64-style strings; rejecting anything outside that set blocks the
-  // </script> XSS payload entirely. JSON.stringify alone does NOT HTML-encode
-  // < or >, so a value like </script><script>alert(1)</script> would otherwise
-  // break out of the inline script context.
-  const code = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawCode) ? rawCode : "";
-  let openerOrigin = "";
-  try {
-    const parsed = new URL(rawOpenerOrigin);
-    if (parsed.origin === rawOpenerOrigin && isOriginAllowed(parsed.origin)) {
-      openerOrigin = parsed.origin;
-    }
-  } catch {
-    openerOrigin = "";
-  }
-  // Pass the code to the inline script via a data attribute. dataset reads it
-  // from the DOM as a plain string with no HTML/JS interpretation.
-  const codeAttr = code
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  const openerOriginAttr = openerOrigin
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return c.html(`<!DOCTYPE html>
-<html><head><title>OpenRouter Authorization</title>
-<style>body{background:#1c1826;color:rgba(255,255,255,.8);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
-<body>
-<div id="s" data-code="${codeAttr}" data-opener-origin="${openerOriginAttr}">Completing authorization...</div>
-<script>
-var el = document.getElementById('s');
-var code = el.dataset.code || '';
-var targetOrigin = el.dataset.openerOrigin || window.location.origin;
-if (code && window.opener) {
-  // Restrict postMessage to the known Lumiverse opener origin.
-  window.opener.postMessage({ type: 'openrouter_oauth_code', code: code }, targetOrigin);
-  el.textContent = 'Authorized! Closing...';
-  setTimeout(function(){ window.close(); }, 500);
-} else if (!code) {
-  el.textContent = 'No authorization code received.';
-} else {
-  el.textContent = 'Could not reach parent window. Copy this code: ' + code;
+// Provider callbacks are unauthenticated. Relay their PKCE codes to the
+// initiating frontend, which performs the authenticated key exchange.
+for (const provider of ["openrouter", "nanogpt"] as const) {
+  app.get(`/api/v1/${provider}/oauth-landing`, (c) => c.html(renderProviderOAuthLanding({
+    provider,
+    code: c.req.query("code"),
+    state: c.req.query("state"),
+    error: c.req.query("error"),
+    openerOrigin: c.req.query("opener_origin"),
+  }, isOriginAllowed)));
 }
-</script>
-</body></html>`);
-});
-
-// NanoGPT OAuth landing — unauthenticated (popup redirect from NanoGPT)
-app.get("/api/v1/nanogpt/oauth-landing", async (c) => {
-  const rawCode = c.req.query("code") || "";
-  const rawState = c.req.query("state") || "";
-  const rawError = c.req.query("error") || "";
-  const rawOpenerOrigin = c.req.query("opener_origin") || "";
-  const code = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawCode) ? rawCode : "";
-  const state = /^[A-Za-z0-9._~+/=-]{1,512}$/.test(rawState) ? rawState : "";
-  const error = /^[A-Za-z0-9._~+/=-]{1,128}$/.test(rawError) ? rawError : "";
-  let openerOrigin = "";
-  try {
-    const parsed = new URL(rawOpenerOrigin);
-    if (parsed.origin === rawOpenerOrigin && isOriginAllowed(parsed.origin)) {
-      openerOrigin = parsed.origin;
-    }
-  } catch {
-    openerOrigin = "";
-  }
-  const htmlAttr = (value: string) => value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  return c.html(`<!DOCTYPE html>
-<html><head><title>NanoGPT Authorization</title>
-<style>body{background:#10151e;color:rgba(255,255,255,.82);font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;font-size:14px}</style></head>
-<body>
-<div id="s" data-code="${htmlAttr(code)}" data-state="${htmlAttr(state)}" data-error="${htmlAttr(error)}" data-opener-origin="${htmlAttr(openerOrigin)}">Completing authorization...</div>
-<script>
-var el = document.getElementById('s');
-var code = el.dataset.code || '';
-var state = el.dataset.state || '';
-var error = el.dataset.error || '';
-var targetOrigin = el.dataset.openerOrigin || window.location.origin;
-if (error) {
-  el.textContent = 'Authorization failed: ' + error;
-} else if (code && state && window.opener) {
-  window.opener.postMessage({ type: 'nanogpt_oauth_code', code: code, state: state }, targetOrigin);
-  el.textContent = 'Authorized! Closing...';
-  setTimeout(function(){ window.close(); }, 500);
-} else if (!code) {
-  el.textContent = 'No authorization code received.';
-} else if (!state) {
-  el.textContent = 'No authorization state received.';
-} else {
-  el.textContent = 'Could not reach parent window. Copy this code: ' + code;
-}
-</script>
-</body></html>`);
-});
 
 // Image gen results — unauthenticated, public access for push notifications and embeds
 app.get("/api/v1/image-gen/results/:id", async (c) => {
@@ -456,6 +383,14 @@ app.get("/api/v1/image-gen/results/:id", async (c) => {
 // Stream Deck uses dedicated, hashed, revocable tokens rather than browser
 // sessions. Keep this deliberately narrow and outside the general v1 API.
 app.route("/api/integrations/stream-deck/v1", streamDeckIntegrationRoutes);
+// The desktop companion exchanges a durable, narrowly-scoped credential for
+// a single-use notification WebSocket ticket. This deliberately sits outside
+// browser-session auth so a desktop rebuild or WebView cookie loss does not
+// silently unregister the native destination.
+app.route("/api/desktop-notifications/v1", desktopNotificationTransportRoutes);
+// OAuth-protected, read-only desktop API. It performs scope and live role
+// checks independently of the browser-session API below.
+app.route("/api/desktop/v1", desktopApiRoutes);
 
 app.get("/api/v1/sso-providers/login-options", (c) => {
   return c.json(listSsoLoginOptions());
@@ -488,6 +423,7 @@ app.route("/api/v1/audio", audioRoutes);
 app.route("/api/v1/theme-assets", themeAssetsRoutes);
 app.route("/api/v1/notification-sounds", notificationSoundsRoutes);
 app.route("/api/v1/generate", generateRoutes);
+app.route("/api/v1/request-history", requestHistoryRoutes);
 app.route("/api/v1/multiplayer", multiplayerRoutes);
 app.route("/api/v1/providers", providersRoutes);
 app.route("/api/v1/macros", macrosRoutes);
@@ -506,6 +442,7 @@ app.route("/api/v1/tokenizers", tokenizersRoutes);
 app.route("/api/v1/system", systemRoutes);
 app.route("/api/v1/migrate", migrateRoutes);
 app.route("/api/v1/st-migration", stMigrationRoutes);
+app.route("/api/v1/cl-migration", clMigrationRoutes);
 app.route("/api/v1/google-drive", googleDriveRoutes);
 app.route("/api/v1/dropbox", dropboxRoutes);
 app.route("/api/v1/preset-profiles", presetProfilesRoutes);

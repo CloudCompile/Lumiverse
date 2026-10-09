@@ -57,7 +57,10 @@ function makeEnv(): MacroEnv {
   };
 }
 
-function makeRegexScript(presetId: string | null): RegexScript {
+function makeRegexScript(
+  presetId: string | null,
+  ownerExtensionIdentifier: string | null = null,
+): RegexScript {
   return {
     id: `regex-${presetId ?? "unowned"}`,
     user_id: "user",
@@ -83,7 +86,7 @@ function makeRegexScript(presetId: string | null): RegexScript {
     pack_id: null,
     preset_id: presetId,
     character_id: null,
-    owner_extension_identifier: null,
+    owner_extension_identifier: ownerExtensionIdentifier,
     metadata: {},
     created_at: 0,
     updated_at: 0,
@@ -259,5 +262,99 @@ describe("prompt source ownership", () => {
     });
 
     expect(seen).toEqual(["{{calc::2 + 3}}"]);
+  });
+
+  test("keeps extension-owned preset regex macros interceptable", async () => {
+    const env = makeEnv();
+    await withInterceptor(() => "intercepted", async () => {
+      expect(await applyRegexScripts(
+        "token",
+        [makeRegexScript("preset", "extension.a")],
+        "ai_output",
+        undefined,
+        env,
+      )).toBe("intercepted");
+    });
+  });
+});
+
+
+describe("owned regex macro evaluation", () => {
+  async function withOwner(handler: (ctx: MacroInterceptorCtx) => Promise<MacroInterceptorResult>, work: () => Promise<void>, opts: Record<string, unknown> = {}) {
+    const remove = macroInterceptorChain.register({
+      extensionId: "owned-install", extensionIdentifier: "owned", handlesOwnedSources: true,
+      userId: "user", priority: 100, handler, ...opts,
+    } as any);
+    try { await work(); } finally { remove(); }
+  }
+
+  test("keeps the owner's raw result and variable macros without native evaluation", async () => {
+    const env = makeEnv(); env.extra.userId = "user";
+    let calls = 0;
+    const template = "<user>|{{setvar::weather::Clear}}|{{calc::2+3}}|\\{{literal}}";
+    await withOwner(async (ctx) => {
+      calls++;
+      expect((ctx as any).sourceOwner).toEqual({ extensionIdentifier: "owned" });
+      expect(ctx.template).toBe(template);
+      return { text: template, touchedVars: ["weather"], volatile: true };
+    }, async () => {
+      const row = { ...makeRegexScript(null, "owned"), substitute_macros: "after" as const, replace_string: template };
+      const out = await applyRegexScripts("token", [row], "ai_output", 0, env);
+      expect(out).toBe(template);
+      expect(env.variables.local.has("weather")).toBe(false);
+      expect(calls).toBe(1);
+    });
+  });
+
+  test("routes only opted-in owned sources and preserves normal native behavior", async () => {
+    const env = makeEnv(); env.extra.userId = "user";
+    let ownCalls = 0; let otherCalls = 0;
+    const removeOther = macroInterceptorChain.register({ extensionId: "other", priority: 0, handler: async () => { otherCalls++; } });
+    try {
+      await withOwner(async (ctx) => {
+        ownCalls++;
+        return (ctx as any).sourceOwner ? { text: "{{calc::3+4}}", touchedVars: ["x"] } : undefined;
+      }, async () => {
+        const owned = await evaluate("{{calc::2+3}}", env, registry, { sourceOwner: { extensionIdentifier: "owned" } } as any);
+        expect(owned.text).toBe("{{calc::3+4}}");
+        expect([...owned.touchedVars]).toEqual(["x"]); expect(owned.cacheable).toBe(true);
+        expect(otherCalls).toBe(0); expect(ownCalls).toBe(1);
+        expect((await evaluate("{{calc::2+3}}", env, registry)).text).toBe("5");
+        expect(otherCalls).toBe(1); expect(ownCalls).toBe(2);
+        expect((await evaluate("{{calc::2+3}}", env, registry, { sourceOwner: "host" })).text).toBe("5");
+        expect(otherCalls).toBe(1); expect(ownCalls).toBe(2);
+      });
+    } finally { removeOther(); }
+  });
+
+  test("requires a valid result from the opted-in owner", async () => {
+    const env = makeEnv(); env.extra.userId = "user";
+    for (const handler of [async () => undefined, async () => { throw new Error("owner failed"); }]) {
+      await withOwner(handler, async () => {
+        await expect(evaluate("{{setvar::x::wrong}}", env, registry, { sourceOwner: { extensionIdentifier: "owned" } } as any)).rejects.toThrow();
+        expect(env.variables.local.has("x")).toBe(false);
+      });
+    }
+  });
+
+  test("does not opt in existing owners or call another account's handler", async () => {
+    const env = makeEnv(); env.extra.userId = "user";
+    await withOwner(async () => "{{calc::3+4}}", async () => {
+      expect(await applyRegexScripts("token", [makeRegexScript(null, "owned")], "ai_output", 0, env)).toBe("7");
+    }, { handlesOwnedSources: false });
+    await withOwner(async () => { throw new Error("wrong account"); }, async () => {
+      expect(await applyRegexScripts("token", [makeRegexScript(null, "owned")], "ai_output", 0, env)).toBe("5");
+    }, { userId: "different" });
+  });
+
+  test("preserves empty results and avoids dispatch for plain or empty text", async () => {
+    const env = makeEnv(); env.extra.userId = "user"; let calls = 0;
+    await withOwner(async () => { calls++; return ""; }, async () => {
+      const opts = { sourceOwner: { extensionIdentifier: "owned" } } as any;
+      expect((await evaluate("{{calc::2+3}}", env, registry, opts)).text).toBe("");
+      expect((await evaluate("plain", env, registry, opts)).text).toBe("plain");
+      expect((await evaluate("", env, registry, opts)).text).toBe("");
+      expect(calls).toBe(1);
+    });
   });
 });

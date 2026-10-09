@@ -99,11 +99,13 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
   const { t } = useTranslation('chat')
   const pillRef = useRef<HTMLSpanElement>(null)
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null)
+  const showTimings = generationMetrics?.wasStreaming !== false
   const hasGenerationDetails = !isUser && !!generationMetrics && (
-    generationMetrics.ttft != null
-    || generationMetrics.tps != null
+    (showTimings && (generationMetrics.ttft != null || generationMetrics.tps != null))
     || !!generationMetrics.model
     || !!generationMetrics.provider
+    || !!generationMetrics.presetName
+    || !!generationMetrics.presetId
   )
 
   const handleMouseEnter = useCallback(() => {
@@ -157,13 +159,21 @@ function MetaPill({ index, timestamp, tokenCount, isHidden, isUser, generationMe
               <span className={styles.tooltipValue}>{generationMetrics!.provider}</span>
             </span>
           )}
-          {generationMetrics!.ttft != null && (
+          {(generationMetrics!.presetName || generationMetrics!.presetId) && (
+            <span className={styles.tooltipRow}>
+              <span className={styles.tooltipLabel}>{t('messageMeta.preset')}</span>
+              <span className={styles.tooltipValue}>
+                {generationMetrics!.presetName || generationMetrics!.presetId}
+              </span>
+            </span>
+          )}
+          {showTimings && generationMetrics!.ttft != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.firstToken')}</span>
               <span className={styles.tooltipValue}>{formatMs(generationMetrics!.ttft)}</span>
             </span>
           )}
-          {generationMetrics!.tps != null && (
+          {showTimings && generationMetrics!.tps != null && (
             <span className={styles.tooltipRow}>
               <span className={styles.tooltipLabel}>{t('messageMeta.speed')}</span>
               <span className={styles.tooltipValue}>{t('messageMeta.tokPerSec', { count: generationMetrics!.tps })}</span>

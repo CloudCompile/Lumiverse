@@ -1,5 +1,6 @@
 import type { ThemeConfig, ResolvedMode } from '@/types/theme'
 import { DEFAULT_THEME } from '@/theme/presets'
+import { normalizeUiScale } from '@/lib/uiScale'
 
 // ── Color helpers ──
 
@@ -362,7 +363,7 @@ export function generateThemeVariables(
   vars['--lumiverse-font-scale'] = `${fs}`
 
   // UI scale: CSS zoom on body for full UI magnification.
-  const us = config.uiScale ?? 1
+  const us = normalizeUiScale(config.uiScale)
   vars['--lumiverse-ui-scale'] = `${us}`
 
   // ── Chat Shell glass tokens ──
@@ -480,6 +481,21 @@ export function generateThemeVariables(
       vars['--lumiverse-prose-italic'] = ensureReadable(bc.thoughts, isDark)
     }
   }
+
+  // ── Semantic material aliases ──
+  // Keep the newer component-facing material vocabulary tied to the canonical
+  // low-level ladder after all mode and base-color overrides have resolved.
+  // These are emitted as concrete runtime values so public theme consumers
+  // (including Spindle's variable catalog) can reason about them directly.
+  vars['--lumiverse-surface'] = vars['--lumiverse-bg']
+  vars['--lumiverse-surface-raised'] = vars['--lumiverse-bg-elevated']
+  vars['--lumiverse-surface-hover'] = vars['--lumiverse-bg-hover']
+  vars['--lumiverse-surface-muted'] = vars['--lumiverse-fill-subtle']
+  vars['--lumiverse-input-bg'] = vars['--lumiverse-fill']
+  vars['--lumiverse-border-subtle'] = vars['--lumiverse-border-light']
+  vars['--lumiverse-primary-soft'] = vars['--lumiverse-primary-015']
+  vars['--lumiverse-text-primary'] = vars['--lumiverse-text']
+  vars['--lumiverse-text-secondary'] = vars['--lumiverse-text-muted']
 
   return vars
 }

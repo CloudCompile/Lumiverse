@@ -1,5 +1,5 @@
-import { Brain, Maximize2 } from 'lucide-react'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
+import { Brain, ChevronRight, Maximize2 } from 'lucide-react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type MutableRefObject, type RefObject } from 'react'
 import { useTranslation } from 'react-i18next'
 import ExpandedTextEditor from '@/components/shared/ExpandedTextEditor'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
@@ -37,14 +37,16 @@ function autoResize(el: HTMLTextAreaElement | null) {
       ? Math.min(maxHeight, availableHeight)
       : availableHeight
   }
+  // Measure the content at its natural height. Scrolling is deliberately
+  // owned by CSS so this helper cannot strand a resized or viewport-clamped
+  // editor with an inline `overflow-y: hidden` declaration.
+  el.style.height = 'auto'
   const nextHeight = el.scrollHeight
   if (Number.isFinite(maxHeight) && maxHeight > 0) {
     el.style.height = `${Math.min(nextHeight, maxHeight)}px`
-    el.style.overflowY = nextHeight > maxHeight ? 'auto' : 'hidden'
     return
   }
   el.style.height = `${nextHeight}px`
-  el.style.overflowY = 'hidden'
 }
 
 function getEditorOcclusion(target: HTMLTextAreaElement | null) {
@@ -104,6 +106,8 @@ function MessageEditAreaNative({
   const focusCorrectionTimersRef = useRef<number[]>([])
   const contentCorrectedForFocusRef = useRef(false)
   const reasoningCorrectedForFocusRef = useRef(false)
+  const reasoningSectionId = useId()
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
   // Which field (if any) is currently open in the full-screen editor.
   const [expandedField, setExpandedField] = useState<'content' | 'reasoning' | null>(null)
   // Cursor position captured at expand time so the modal opens where the caret was.
@@ -135,7 +139,11 @@ function MessageEditAreaNative({
   }, [editContent])
   useLayoutEffect(() => {
     autoResize(reasoningRef.current)
-  }, [editReasoning])
+  }, [editReasoning, reasoningExpanded])
+
+  useEffect(() => {
+    setReasoningExpanded(false)
+  }, [messageId])
 
   useLayoutEffect(() => {
     if (!focusRequested) return
@@ -211,31 +219,47 @@ function MessageEditAreaNative({
     <div className={styles.editArea}>
       {hasReasoning && (
         <div className={styles.reasoningSection}>
-          <div className={styles.sectionLabel}>
+          <button
+            type="button"
+            className={`${styles.sectionLabel} ${styles.reasoningToggle}`}
+            onClick={() => setReasoningExpanded((open) => !open)}
+            aria-expanded={reasoningExpanded}
+            aria-controls={reasoningSectionId}
+            data-reasoning-toggle="true"
+            title={t(reasoningExpanded ? 'messageEdit.collapseReasoning' : 'messageEdit.expandReasoning')}
+          >
+            <ChevronRight
+              size={13}
+              className={`${styles.reasoningChevron} ${reasoningExpanded ? styles.reasoningChevronOpen : ''}`}
+            />
             <Brain size={13} />
             <span>{t('messageEdit.reasoning')}</span>
-          </div>
-          <div className={styles.textareaWrapper}>
-            <textarea
-              ref={reasoningRef}
-              name="message-edit-reasoning"
-              aria-label={t('messageEdit.reasoningAria')}
-              className={`${styles.editTextarea} ${styles.reasoningTextarea}`}
-              value={editReasoning}
-              onChange={handleReasoningChange}
-              onFocus={handleReasoningFocus}
-              placeholder={t('messageEdit.reasoningPlaceholder')}
-            />
-            <button
-              type="button"
-              className={styles.expandBtn}
-              onClick={expandReasoning}
-              title={ts('expandEditor')}
-              aria-label={ts('expandEditor')}
-            >
-              <Maximize2 size={13} />
-            </button>
-          </div>
+          </button>
+          {reasoningExpanded && (
+            <div id={reasoningSectionId} className={styles.reasoningEditor}>
+              <div className={styles.textareaWrapper}>
+                <textarea
+                  ref={reasoningRef}
+                  name="message-edit-reasoning"
+                  aria-label={t('messageEdit.reasoningAria')}
+                  className={`${styles.editTextarea} ${styles.reasoningTextarea}`}
+                  value={editReasoning}
+                  onChange={handleReasoningChange}
+                  onFocus={handleReasoningFocus}
+                  placeholder={t('messageEdit.reasoningPlaceholder')}
+                />
+                <button
+                  type="button"
+                  className={styles.expandBtn}
+                  onClick={expandReasoning}
+                  title={ts('expandEditor')}
+                  aria-label={ts('expandEditor')}
+                >
+                  <Maximize2 size={13} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       <div className={hasReasoning ? styles.contentSection : undefined}>

@@ -940,6 +940,47 @@
 }
 
 /* Tags */
+.tagPicker {
+  position: relative;
+  width: 220px;
+  max-width: 100%;
+}
+
+.tagSuggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  width: 100%;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+}
+
+.tagSuggestion {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--lumiverse-text);
+  font: inherit;
+  font-size: calc(11px * var(--lumiverse-font-scale, 1));
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.tagSuggestion:hover,
+.tagSuggestion[aria-selected="true"] {
+  background: var(--lumiverse-primary-015);
+}
+
 .tagsList {
   display: flex;
   flex-wrap: wrap;
@@ -1460,6 +1501,16 @@
   .tabContent {
     padding: 14px 14px calc(14px + max(env(safe-area-inset-bottom, 0px), var(--app-keyboard-inset-bottom, 0px)));
     scroll-padding-bottom: calc(14px + max(env(safe-area-inset-bottom, 0px), var(--app-keyboard-inset-bottom, 0px)));
+  }
+
+  /* Chromium/Android PWAs use interactive-widget=resizes-content, so the
+     editor viewport already ends above the software keyboard. Reserving the
+     keyboard inset again here creates a second keyboard-sized gap and makes
+     the focused field jump too far upward. Keep only the edge-to-edge safe
+     area clearance in this mode; iOS still needs the generic rule above. */
+  :global(html[data-pwa][data-resizes-content]) .tabContent {
+    padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    scroll-padding-bottom: calc(14px + env(safe-area-inset-bottom, 0px));
   }
 }
 

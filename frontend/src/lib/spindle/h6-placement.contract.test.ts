@@ -17,6 +17,6 @@ test('H6 placement contract runs in an isolated module graph', async () => {
   ])
   const summary = `${stdout}\n${stderr}`
   expect(exitCode, summary).toBe(0)
-  expect(summary).toMatch(/Ran 29 tests across 1 file/)
+  expect(summary).toMatch(/Ran 30 tests across 1 file/)
   expect(summary).toMatch(/\b[1-9]\d* expect\(\) calls\b/)
 })

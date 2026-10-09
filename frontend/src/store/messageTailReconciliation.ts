@@ -6,6 +6,16 @@ function isPersistedMessage(message: Message): boolean {
   return !LOCAL_MESSAGE_PREFIXES.some((prefix) => message.id.startsWith(prefix))
 }
 
+export function preserveNewerMessageRevisions(current: Message[], incoming: Message[]): Message[] {
+  const byId = new Map(current.map((message) => [message.id, message]))
+  return incoming.map((message) => {
+    const existing = byId.get(message.id)
+    // An edit event can arrive after the server read but before its response is applied.
+    return typeof existing?.revision === 'number' && typeof message.revision === 'number'
+      && existing.revision > message.revision ? existing : message
+  })
+}
+
 /**
  * Replace the authoritative overlap covered by a fresh tail response without
  * discarding history pages that the user has already loaded above it.
@@ -28,6 +38,6 @@ export function reconcileMessageTail(
 
   return [
     ...prefix.filter((message) => !freshIds.has(message.id)),
-    ...fresh.data,
+    ...preserveNewerMessageRevisions(persisted, fresh.data),
   ]
 }

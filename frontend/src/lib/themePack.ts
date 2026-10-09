@@ -313,14 +313,16 @@ export function createThemePack(
     }
   }
 
+  const name = meta.name?.trim() || theme?.name?.trim() || 'Untitled Theme'
+
   return {
     format: 2,
-    name: meta.name || 'Untitled Theme',
+    name,
     author: meta.author || '',
     description: meta.description || '',
     createdAt: Math.floor(Date.now() / 1000),
     bundleId: customCSS.bundleId || generateUUID(),
-    theme,
+    theme: theme ? { ...theme, name } : null,
     globalCSS: customCSS.css || '',
     components,
     assets,
@@ -440,6 +442,8 @@ export function importThemePack(): Promise<ThemePackImportResult | null> {
         resolve(decodeThemePackArchive(bytes))
       } catch {
         resolve(importError('unsupported-legacy-file', 'Selected file is not a supported Lumiverse theme bundle.'))
+      } finally {
+        input.value = ''
       }
     }
     // If user cancels the file picker

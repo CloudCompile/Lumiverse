@@ -5,12 +5,22 @@ import { requireOwner } from "../auth/middleware";
 import { getDb } from "../db/connection";
 import { scanSTData } from "../migration/st-reader";
 import { importTagLibraryBackup } from "../services/tag-library-import.service";
+import { ArchiveValidationError } from "../services/user-data/import.service";
 import {
   startStMigration,
   isMigrationRunning,
   getActiveMigration,
   getLastMigration,
 } from "../migration/st-migration.service";
+import {
+  StBackupUploadError,
+  claimStagedStBackup,
+  cleanupClaimedStBackup,
+  discardStagedStBackup,
+  getStagedStBackup,
+  stageStBackupArchive,
+  type StagedStBackup,
+} from "../migration/st-backup-upload";
 import type { FileConnectionConfig, FileSystem } from "../file-connections/types";
 import { LocalFileSystem } from "../file-connections/providers/local";
 import { createFileSystem, withFileSystem, getAvailableConnectionTypes } from "../file-connections/factory";
@@ -293,6 +303,47 @@ app.post("/scan", async (c) => {
   }
 });
 
+// ─── PUT /backup — upload and stage an ST web user-folder ZIP ──────────────
+
+app.put("/backup", async (c) => {
+  const body = c.req.raw.body;
+  if (!body) return c.json({ error: "request body is empty" }, 400);
+
+  const declaredHeader = c.req.header("content-length");
+  const declaredSize = declaredHeader ? Number(declaredHeader) : null;
+  if (declaredSize !== null && (!Number.isFinite(declaredSize) || declaredSize < 0)) {
+    return c.json({ error: "invalid Content-Length" }, 400);
+  }
+
+  try {
+    const result = await stageStBackupArchive({
+      callerUserId: c.get("userId"),
+      body,
+      declaredSize,
+      fileName: c.req.query("filename"),
+    });
+    return c.json(result, 201);
+  } catch (err: unknown) {
+    if (err instanceof ArchiveValidationError) {
+      return c.json(
+        { error: err.message, code: err.code },
+        err.code === "size" ? 413 : 400,
+      );
+    }
+    if (err instanceof StBackupUploadError) {
+      const status = err.code === "busy" ? 409 : 422;
+      return c.json({ error: err.message, code: err.code }, status);
+    }
+    const message = err instanceof Error ? err.message : "failed to process SillyTavern backup";
+    return c.json({ error: message }, 400);
+  }
+});
+
+app.delete("/backup/:uploadId", (c) => {
+  const removed = discardStagedStBackup(c.req.param("uploadId"), c.get("userId"));
+  return removed ? c.body(null, 204) : c.json({ error: "staged backup not found" }, 404);
+});
+
 app.post("/tag-library/import", async (c) => {
   const formData = await c.req.formData();
   const file = formData.get("file");
@@ -326,10 +377,19 @@ app.post("/execute", async (c) => {
   const parsed = await parseObjectBody(c);
   if ("response" in parsed) return parsed.response;
   const { body } = parsed;
-  const { dataDir, targetUserId, scope } = body;
+  const { targetUserId, scope } = body;
+  const uploadId = typeof body.uploadId === "string" ? body.uploadId : null;
+  let dataDir = body.dataDir;
   const config = parseConnectionConfig(body);
 
-  if (!dataDir || typeof dataDir !== "string") {
+  if (uploadId) {
+    if (config.type !== "local") {
+      return c.json({ error: "uploaded backups cannot use a remote file connection" }, 400);
+    }
+    const staged = getStagedStBackup(uploadId, c.get("userId"));
+    if (!staged) return c.json({ error: "staged backup not found or expired" }, 404);
+    dataDir = staged.dataDir;
+  } else if (!dataDir || typeof dataDir !== "string") {
     return c.json({ error: "dataDir is required" }, 400);
   }
   if (!targetUserId || typeof targetUserId !== "string") {
@@ -374,6 +434,12 @@ app.post("/execute", async (c) => {
     }
   }
 
+  let claimedUpload: StagedStBackup | null = null;
+  if (uploadId) {
+    claimedUpload = claimStagedStBackup(uploadId, callerUserId);
+    if (!claimedUpload) return c.json({ error: "staged backup is already in use" }, 409);
+  }
+
   void startStMigration(
     migrationId,
     callerUserId,
@@ -382,7 +448,9 @@ app.post("/execute", async (c) => {
     migrationScope,
     config,
     config.type === "local" ? localFs : undefined,
-  );
+  ).finally(() => {
+    if (claimedUpload) cleanupClaimedStBackup(claimedUpload);
+  });
 
   return c.json({ migrationId }, 202);
 });

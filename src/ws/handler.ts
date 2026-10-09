@@ -3,8 +3,9 @@ import { Buffer } from "node:buffer";
 import { eventBus } from "./bus";
 import { EventType } from "./events";
 import { auth } from "../auth";
-import { consumeTicket } from "./tickets";
+import { consumeDesktopNotificationTicket, consumeTicket } from "./tickets";
 import { getWorkerHost } from "../spindle/lifecycle";
+import { readFrontendSessionId, registerFrontendSession, frontendPresenceKey } from '../spindle/frontend-session';
 import * as managerSvc from "../spindle/manager.service";
 import { getFirstUserId } from "../auth/seed";
 import { validateRoomCredential } from "../services/room-auth";
@@ -18,7 +19,10 @@ export const wsHandler = upgradeWebSocket((c) => {
   let userId: string | null = null;
   let userRole: string | null = null;
   let sessionId: string | null = null;
+  let frontendSessionId: string | undefined;
+  let unregisterFrontendSession: (() => void) | undefined;
   let heartbeatOnly = false;
+  let desktopNotificationOnly = false;
   // Multiplayer: set when this socket is a room participant (peer or joined
   // local account). The participantId is connection-scoped and authoritative —
   // inbound room_* messages NEVER trust a participantId from the payload.
@@ -31,6 +35,41 @@ export const wsHandler = upgradeWebSocket((c) => {
       try {
         const url = new URL(c.req.url);
         heartbeatOnly = url.searchParams.get("heartbeat") === "1";
+
+        // Auth path 4: a single-use ticket issued from a durable desktop
+        // destination credential. This socket never joins the user's normal
+        // pub/sub topic and can only receive native-notification frames.
+        const desktopNotificationTicket = url.searchParams.get("notificationTicket");
+        if (desktopNotificationTicket !== null) {
+          const destination = consumeDesktopNotificationTicket(desktopNotificationTicket);
+          if (!destination) {
+            ws.send(JSON.stringify({
+              event: "AUTH_ERROR",
+              payload: { message: "Invalid or expired desktop notification ticket" },
+              timestamp: Date.now(),
+            }));
+            ws.close(1008, "Invalid desktop notification ticket");
+            return;
+          }
+
+          const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
+          if (!raw) {
+            ws.close(1011, "Notification transport unavailable");
+            return;
+          }
+          desktopNotificationOnly = true;
+          eventBus.addDesktopNotificationClient(raw, destination.userId, destination.destinationId);
+          ws.send(JSON.stringify({
+            event: EventType.CONNECTED,
+            payload: {
+              message: "Desktop notification destination connected",
+              destinationId: destination.destinationId,
+              notificationOnly: true,
+            },
+            timestamp: Date.now(),
+          }));
+          return;
+        }
 
         // Auth path 3: room token (remote multiplayer peer, synthetic identity).
         // A peer is NOT a host-local account: it gets NO userId, NO user:/system
@@ -142,6 +181,23 @@ export const wsHandler = upgradeWebSocket((c) => {
           return;
         }
 
+        if (ws.readyState !== 1) return;
+        try {
+          frontendSessionId = readFrontendSessionId(url.searchParams.get('frontend_session') ?? undefined);
+          if (frontendSessionId && userId) {
+            const owner = userId, documentId = frontendSessionId;
+            unregisterFrontendSession = registerFrontendSession(owner, documentId, {
+              executionOwner: url.searchParams.get("frontend_runtime") !== "widget",
+              send: value => { if (ws.readyState !== 1) throw new Error('Frontend session disconnected'); ws.send(value); },
+              close: () => { if (ws.readyState < 2) ws.close(1000, 'Frontend session reconnected'); },
+              closed: () => eventBus.emit(EventType.FRONTEND_SESSION_CLOSED, { frontendSessionId: documentId }, owner),
+            });
+          }
+        } catch {
+          ws.close(1008, 'Invalid frontend session');
+          return;
+        }
+
         // Self-healing: first user (user 0) is always the instance owner.
         if (userId && userRole !== "owner") {
           const cachedFirstId = getFirstUserId();
@@ -157,7 +213,7 @@ export const wsHandler = upgradeWebSocket((c) => {
 
         const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
         if (raw) {
-          eventBus.addClient(raw, userId, sessionId);
+          eventBus.addClient(raw, userId, sessionId ? frontendPresenceKey(sessionId, frontendSessionId) : undefined);
           console.log(`[WS] Client registered for user ${userId} (total: ${eventBus.clientCount})`);
         } else {
           console.warn("[WS] Could not extract raw Bun WebSocket — events will not reach this client");
@@ -216,11 +272,12 @@ export const wsHandler = upgradeWebSocket((c) => {
           return;
         }
 
+        if (desktopNotificationOnly) return;
         if (heartbeatOnly) return;
 
         if (data.type === "visibility") {
           if (userId && sessionId) {
-            eventBus.setUserVisibility(userId, sessionId, !!data.visible);
+            eventBus.setUserVisibility(userId, frontendPresenceKey(sessionId, frontendSessionId), !!data.visible);
           }
           return;
         }
@@ -384,7 +441,7 @@ export const wsHandler = upgradeWebSocket((c) => {
             }, userId);
           }
 
-          host.sendFrontendMessage(data.payload, userId!);
+          host.sendFrontendMessage(data.payload, userId!, frontendSessionId);
         }
 
         if (data.type === "SPINDLE_FRONTEND_PROCESS_EVENT") {
@@ -466,6 +523,7 @@ export const wsHandler = upgradeWebSocket((c) => {
       }
     },
     onClose(_event, ws) {
+      unregisterFrontendSession?.();
       const raw = (ws as any).raw as import("bun").ServerWebSocket<unknown>;
       if (raw) {
         eventBus.removeClient(raw);

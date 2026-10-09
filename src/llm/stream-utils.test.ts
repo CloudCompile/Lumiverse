@@ -145,6 +145,7 @@ describe("streaming abort teardown", () => {
       messages: [{ role: "user", content: "hi" }],
       parameters: {},
       signal: ac.signal,
+      onProviderRequest: () => ({ isActive: () => true, headers() {}, complete() {} }),
     } as any);
 
     // Consume a few chunks to ensure the stream is live, then abort.
@@ -171,7 +172,9 @@ describe("streaming abort teardown", () => {
     activeServer = server;
     const ac = new AbortController();
 
-    const res = await fetchWithPreflightAbort(`http://localhost:${server.port}/`, { method: "GET" }, ac.signal);
+    const res = await fetchWithPreflightAbort(`http://localhost:${server.port}/`, { method: "GET" }, ac.signal, {
+      provider: "test", model: "test", observer: () => ({ isActive: () => true, headers() {}, complete() {} }),
+    });
     const pending = readJsonWithAbort(res, ac.signal).catch((err) => err);
     // Let a chunk or two arrive so the read loop is mid-body, then abort.
     await waitFor(() => state.sent >= 2, 1000);

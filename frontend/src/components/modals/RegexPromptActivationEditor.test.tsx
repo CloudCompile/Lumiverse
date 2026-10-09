@@ -53,10 +53,13 @@ async function render(presetId: string | null, testInput = '', initialValue: str
   const initial: RegexPromptActivation = { source: 'user_input', lifetime: 'latest', mappings: [
     { capture: '0', value: initialValue, block_ids: ['rules'], enabled: true },
   ] }
+  latest = initial
   function Harness() {
     const [value, setValue] = useState<RegexPromptActivation | null>(initial)
-    latest = value
-    return <I18nextProvider i18n={i18n}><Editor presetId={presetId} value={value} onChange={setValue}
+    return <I18nextProvider i18n={i18n}><Editor presetId={presetId} value={value} onChange={(next) => {
+      latest = next
+      setValue(next)
+    }}
       findRegex="combat" flags="gi" testInput={testInput} onExample={() => {}}
       chatId="chat" characterId="char" personaId="persona" connectionId="connection"
       onInsertFindInput={(token) => insertedTokens.push(token)} /></I18nextProvider>

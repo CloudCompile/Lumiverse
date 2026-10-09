@@ -18,13 +18,11 @@ import { useStore } from '@/store'
 import { ttsApi } from '@/api/tts'
 import { audioApi } from '@/api/audio'
 import { markFreshlyAttached } from '@/lib/ttsPersistence'
-import { sanitizeForTts, parseSegments, type TextSegment } from '@/lib/speechDetection'
+import { sanitizeForTts, parseSegments, stripTtsAudioCues } from '@/lib/speechDetection'
 import { synthesizeTtsSegments, shouldUseStreamingEndpoint, type SynthesizedTtsSegment } from '@/lib/ttsSynthesis'
 import {
-  resolveMessageSpeaker,
-  resolveSegmentVoice,
+  resolveMessageVoices,
   voiceCoalesceKey,
-  type ResolvedSpeaker,
 } from '@/lib/voiceResolution'
 import { getActiveMessageId, speak, speakSegments, stop, setTTSVolume, setTTSSpeed, unlockTTSAudio } from '@/lib/ttsAudio'
 import type { TtsConnectionProfile, VoiceRef } from '@/types/api'
@@ -42,6 +40,15 @@ interface PlanItem {
   voice: VoiceRef
 }
 
+function voiceSupportsAudioCues(voice: VoiceRef | null, profiles: TtsConnectionProfile[]): boolean {
+  const profile = profiles.find((candidate) => candidate.id === voice?.connectionId)
+  return !!profile && (
+    profile.provider === 'google_tts'
+    || profile.provider === 'google_vertex_tts'
+    || (profile.provider === 'openrouter_tts' && /^google\/gemini-/i.test(profile.model))
+  )
+}
+
 /**
  * Plan the coalesced TTS requests for a message. Returns an empty array when
  * there's nothing to speak. Exported for tests / preview UIs.
@@ -53,24 +60,21 @@ export function planMessagePlayback(args: {
 }): PlanItem[] {
   const state = useStore.getState()
   const voiceSettings = state.voiceSettings
-  const characters = state.characters
-  const groupMemberIds = state.isGroupChat ? state.groupCharacterIds : null
-  const fallbackCharacterId = state.activeCharacterId
-  const chatMetadata = state.activeChatMetadata
-
-  // Resolve speaker once per message — speaker doesn't change mid-content.
-  const speaker: ResolvedSpeaker = resolveMessageSpeaker({
+  const voices = resolveMessageVoices({
     message: { name: args.messageName, is_user: args.messageIsUser },
-    characters,
-    groupMemberIds,
-    fallbackCharacterId,
+    characters: state.characters,
+    groupMemberIds: state.isGroupChat ? state.groupCharacterIds : null,
+    fallbackCharacterId: state.activeCharacterId,
+    chatMetadata: state.activeChatMetadata,
+    voiceSettings,
+    ttsProfiles: state.ttsProfiles,
   })
 
-  const character = speaker.characterId
-    ? characters.find((c) => c.id === speaker.characterId) ?? null
-    : null
-
-  const cleaned = sanitizeForTts(args.messageContent)
+  const speechSupportsCues = voiceSupportsAudioCues(voices.speech, state.ttsProfiles)
+  const narrationSupportsCues = voiceSupportsAudioCues(voices.narration, state.ttsProfiles)
+  const cleaned = sanitizeForTts(args.messageContent, {
+    preserveAudioCues: speechSupportsCues || narrationSupportsCues,
+  })
   if (!cleaned) return []
   const segments = parseSegments(cleaned, voiceSettings.speechDetectionRules)
 
@@ -80,19 +84,17 @@ export function planMessagePlayback(args: {
   // resolves to a different voice and breaks the run.
   const resolved: PlanItem[] = []
   for (const seg of segments) {
-    const { voice, action } = resolveSegmentVoice({
-      segment: seg as TextSegment,
-      speaker,
-      character,
-      chatMetadata,
-      voiceSettings,
-    })
-    if (action === 'skip' || !voice) continue
+    if (seg.action === 'skip') continue
+    const voice = seg.action === 'narration' ? voices.narration : voices.speech
+    if (!voice) continue
+    const supportsCues = seg.action === 'narration' ? narrationSupportsCues : speechSupportsCues
+    const text = supportsCues ? seg.text : stripTtsAudioCues(seg.text)
+    if (!text) continue
     const last = resolved[resolved.length - 1]
     if (last && voiceCoalesceKey(last.voice) === voiceCoalesceKey(voice)) {
-      last.text += ' ' + seg.text
+      last.text += ' ' + text
     } else {
-      resolved.push({ text: seg.text, voice })
+      resolved.push({ text, voice })
     }
   }
 

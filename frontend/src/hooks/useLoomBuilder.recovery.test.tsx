@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from 'bun:test'
 import { JSDOM } from 'jsdom'
-import { act, createElement } from 'react'
+import { act, createElement, useEffect } from 'react'
 import type { Root } from 'react-dom/client'
 import { create } from 'zustand'
 import type { CreatePresetInput, Preset, PresetRegistryItem } from '@/types/api'
@@ -74,8 +74,10 @@ const originals = new Map(Object.keys(replacements).map((key) => [key, globals[k
 Object.assign(globals, replacements)
 
 const { useLoomBuilder } = await import('./useLoomBuilder')
-const { createNewLoomPreset, marshalPreset } = await import('@/lib/loom/service')
-const { assertRenderableLoomPreset } = await import('@/lib/loom/preset-validation')
+const { createNewLoomPreset, createPortableLoomPresetExport, marshalPreset } = await import('@/lib/loom/service')
+const { InvalidLoomPresetError } = await import('@/lib/loom/preset-validation')
+const { toPresetEditorDraft } = await import('@/lib/spindle/preset-editor-adapter')
+const { importPresetFiles } = await import('@/lib/loom/preset-import-batch')
 const { resolveLoomPresetSelection } = await import('@/lib/loom/preset-recovery')
 const { configurePresetSelectionCoordinator, transitionActiveLoomPreset } = await import('@/lib/loom/preset-selection-coordinator')
 const { presetSaveCoordinator, flushPresetForGeneration } = await import('@/lib/loom/preset-save-coordinator')
@@ -87,7 +89,12 @@ let surface: ReturnType<typeof useLoomBuilder>
 /* eslint-disable react-compiler/react-compiler */
 function Harness() {
   surface = useLoomBuilder()
-  if (surface.activePreset) assertRenderableLoomPreset(surface.activePreset)
+  const preset = surface.activePreset
+  // Exercise the production projection that Loom runs when publishing its editor state.
+  // The previous harness only repeated validation, so it missed failures in this effect.
+  useEffect(() => {
+    if (preset) toPresetEditorDraft(preset)
+  }, [preset])
   return createElement('div', null, surface.activePreset?.description.trim())
 }
 /* eslint-enable react-compiler/react-compiler */
@@ -143,6 +150,84 @@ afterAll(() => {
 })
 
 describe('Loom malformed preset recovery', () => {
+  test('rejects a malformed extension draft before publishing or saving it', async () => {
+    addPreset('working')
+    await mount('working')
+    const before = presetSaveCoordinator.getDraft('working')
+    await act(async () => {
+      expect(() => surface.updatePresetDraft((draft) => ({
+        ...draft,
+        blocks: draft.blocks.map((block) => ({ ...block, extensionPayload: {} })),
+      }))).toThrow(InvalidLoomPresetError)
+    })
+    expect(presetSaveCoordinator.getDraft('working')).toEqual(before)
+    expect(presetSaveCoordinator.hasPendingChanges('working')).toBe(false)
+    expect(surface.activePreset?.id).toBe('working')
+    expect(writes).toEqual([])
+  })
+
+  test('rejects an uploaded malformed preset before it is saved or published to the editor', async () => {
+    addPreset('working')
+    await mount('working')
+    const uploaded = createNewLoomPreset('Malformed upload')
+    Object.assign(uploaded.blocks[0], { extensionPayload: {} })
+    let result!: Awaited<ReturnType<typeof importPresetFiles>>
+    await act(async () => {
+      result = await importPresetFiles([new File([JSON.stringify(uploaded)], 'malformed.json')], surface.importFromFile, {
+        invalidJson: 'Invalid JSON', importFailed: 'Import failed',
+      })
+    })
+    expect(result.imported).toBe(0)
+    expect(result.errors).toHaveLength(1)
+    expect(created).toEqual([])
+    expect(selections).toEqual([])
+    expect(surface.activePreset?.id).toBe('working')
+    expect(surface.isLoading).toBe(false)
+    expect(warnings).toContain('loomBuilder.toast.invalidPresetImport')
+  })
+
+  test('recovers an already saved preset that would throw while publishing editor state', async () => {
+    const row = addPreset('damaged')
+    Object.assign(row.prompt_order[0] as object, { extensionPayload: {} })
+    addPreset('working')
+    await mount('damaged')
+    expect(surface.activePreset?.id).toBe('working')
+    expect(surface.isLoading).toBe(false)
+    expect(warnings).toContain('loomBuilder.toast.presetRecovered')
+  })
+
+  test('still imports portable presets with no stored id', async () => {
+    addPreset('working')
+    await mount('working')
+    const exported = createPortableLoomPresetExport(createNewLoomPreset('Portable upload'))
+    expect(Object.hasOwn(exported, 'id')).toBe(false)
+    await act(async () => { await surface.importFromFile(JSON.parse(JSON.stringify(exported)), 'portable.json') })
+    expect(surface.activePreset?.name).toBe('Portable upload')
+    expect(created).toHaveLength(1)
+    expect(surface.isLoading).toBe(false)
+  })
+
+  test('continues a file upload batch after syntax and schema errors', async () => {
+    addPreset('working')
+    await mount('working')
+    const malformed = createPortableLoomPresetExport(createNewLoomPreset('Bad schema'))
+    Object.assign(malformed.blocks[0], { extensionPayload: {} })
+    const valid = createPortableLoomPresetExport(createNewLoomPreset('Valid upload'))
+    let result!: Awaited<ReturnType<typeof importPresetFiles>>
+    await act(async () => {
+      result = await importPresetFiles([
+        new File(['{"blocks": ['], 'invalid-syntax.json'),
+        new File([JSON.stringify(malformed)], 'malformed.json'),
+        new File([JSON.stringify(valid)], 'valid.json'),
+      ], surface.importFromFile, { invalidJson: 'Invalid JSON', importFailed: 'Import failed' })
+    })
+    expect(result.imported).toBe(1)
+    expect(result.errors).toHaveLength(2)
+    expect(created).toHaveLength(1)
+    expect(surface.activePreset?.name).toBe('Valid upload')
+    expect(surface.error).toBeNull()
+  })
+
   test('falls back when the first selection is malformed and there is no previous preset', async () => {
     addPreset('damaged', true)
     addPreset('working')

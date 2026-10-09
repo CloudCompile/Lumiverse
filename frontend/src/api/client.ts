@@ -1,3 +1,4 @@
+import { activeTab } from '@/lib/active-tab'
 import { isExpiredSessionResponse, signalInvalidAuthSession } from './session-lifecycle'
 
 export const BASE_URL = import.meta.env.VITE_API_BASE || '/api/v1'
@@ -47,8 +48,11 @@ export interface RequestOptions {
 }
 
 function buildSignal(options?: RequestOptions): { signal: AbortSignal; cleanup: () => void; timeoutMs: number } {
+  activeTab.assertActive()
   const timeoutMs = options?.timeout ?? DEFAULT_TIMEOUT_MS
   const controller = new AbortController()
+  const onInactive = () => controller.abort(activeTab.signal.reason)
+  activeTab.signal.addEventListener('abort', onInactive, { once: true })
 
   // If the caller provided their own signal, abort when it does
   if (options?.signal) {
@@ -68,7 +72,10 @@ function buildSignal(options?: RequestOptions): { signal: AbortSignal; cleanup: 
   return {
     signal: controller.signal,
     timeoutMs,
-    cleanup: () => { if (timer) clearTimeout(timer) },
+    cleanup: () => {
+      if (timer) clearTimeout(timer)
+      activeTab.signal.removeEventListener('abort', onInactive)
+    },
   }
 }
 
@@ -324,6 +331,7 @@ export function uploadWithProgress<T>(
   onProgress?: (percent: number) => void,
 ): Promise<T> {
   return new Promise((resolve, reject) => {
+    activeTab.assertActive()
     const xhr = new XMLHttpRequest()
     xhr.open('POST', `${BASE_URL}${path}`)
     xhr.withCredentials = true
@@ -351,6 +359,10 @@ export function uploadWithProgress<T>(
       }
     }
 
+    const onInactive = () => xhr.abort()
+    activeTab.signal.addEventListener('abort', onInactive, { once: true })
+    xhr.onloadend = () => activeTab.signal.removeEventListener('abort', onInactive)
+    xhr.onabort = () => reject(activeTab.signal.reason ?? new DOMException('Upload cancelled', 'AbortError'))
     xhr.onerror = () => reject(new Error('Network error'))
     xhr.send(formData)
   })

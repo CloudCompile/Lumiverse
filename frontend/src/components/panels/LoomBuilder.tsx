@@ -1,10 +1,10 @@
 import { useState, useMemo, useCallback, useRef, useEffect, useLayoutEffect, useDeferredValue, type ReactNode, Fragment } from 'react'
 import { useTranslation } from 'react-i18next'
 import i18n from '@/i18n'
+import { remotePresetVersionLabel } from '@/lib/remotePresetVersion'
 import { useSpindleComponentOverride } from '@/lib/spindle/use-spindle-component-override'
 
 import {
-  DndContext,
   closestCenter,
   MouseSensor,
   TouchSensor,
@@ -20,7 +20,7 @@ import {
   verticalListSortingStrategy,
   useSortable,
 } from '@dnd-kit/sortable'
-import { useScaledSortableStyle } from '@/lib/dndUiScale'
+import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import {
   GripVertical,
   ChevronDown,
@@ -74,7 +74,7 @@ import { presetsApi, type StashedPromptBlock } from '@/api/presets'
 import { imagesApi } from '@/api/images'
 import { usePresetProfiles } from '@/hooks/usePresetProfiles'
 import { getEffectivePromptVariableValues } from '@/hooks/preset-profile-prompt-variables'
-import { computeGroups, createBlock, createMarkerBlock, getRemotePresetOrigin, resolvePromptBlockPlacements } from '@/lib/loom/service'
+import { computeGroups, createBlock, createMarkerBlock, detectImportedPresetKind, getRemotePresetOrigin, isProtectedSealedSource, resolvePromptBlockPlacements } from '@/lib/loom/service'
 import { sanitizeCharacterTagTrigger, splitCharacterTagTriggerInput } from '@/lib/loom/characterTagTrigger'
 import {
   PROMPT_TEMPLATES,
@@ -101,6 +101,8 @@ import { Button } from '@/components/shared/FormComponents'
 import { toast } from '@/lib/toast'
 import { useLongPress } from '@/hooks/useLongPress'
 import { markLoomRuntimeProfileContext } from '@/lib/loom/runtimeProfile'
+import { importPresetFiles } from '@/lib/loom/preset-import-batch'
+import { subscribeWindowFileImport } from '@/lib/window-file-import'
 import SpindlePresetEditorTabContent from '@/components/spindle/SpindlePresetEditorTabContent'
 import SpindlePresetEditorToolbarItem from '@/components/spindle/SpindlePresetEditorToolbarItem'
 import { applyPresetEditorDraft, toPresetEditorDraft } from '@/lib/spindle/preset-editor-adapter'
@@ -610,7 +612,7 @@ export function BlockEditor({
   const { t } = useLb()
   const { t: tc } = useTranslation('common')
   const { injectionTriggerTypes, injectionTriggerLabel } = useLoomOptionLabels()
-  const isInstalledLumiHubSealed = trustedHostFeatures && block.sealedSource === 'lumihub'
+  const isInstalledRemoteSealed = trustedHostFeatures && isProtectedSealedSource(block.sealedSource)
   const [name, setName] = useState(block.name)
   const [role, setRole] = useState<PromptBlock['role']>(block.role || 'system')
   const [content, setContent] = useState(block.content || '')
@@ -653,13 +655,13 @@ export function BlockEditor({
     const trustedUpdates: Partial<PromptBlock> = {}
     if (trustedHostFeatures) {
       const cleanSealedKey = sanitizeSealedBlockKey(sealedKey || block.sealedKey || block.id)
-      const shouldSeal = isInstalledLumiHubSealed || (sealed && !!cleanSealedKey)
+      const shouldSeal = isInstalledRemoteSealed || (sealed && !!cleanSealedKey)
       trustedUpdates.sealed = shouldSeal ? true : undefined
       trustedUpdates.sealedKey = shouldSeal ? cleanSealedKey : undefined
-      trustedUpdates.sealedSource = isInstalledLumiHubSealed ? block.sealedSource : undefined
-      trustedUpdates.sealedOriginPresetId = isInstalledLumiHubSealed ? block.sealedOriginPresetId : undefined
-      trustedUpdates.sealedOriginVersion = isInstalledLumiHubSealed ? block.sealedOriginVersion : undefined
-      trustedUpdates.sealedSha256 = isInstalledLumiHubSealed ? block.sealedSha256 : undefined
+      trustedUpdates.sealedSource = isInstalledRemoteSealed ? block.sealedSource : undefined
+      trustedUpdates.sealedOriginPresetId = isInstalledRemoteSealed ? block.sealedOriginPresetId : undefined
+      trustedUpdates.sealedOriginVersion = isInstalledRemoteSealed ? block.sealedOriginVersion : undefined
+      trustedUpdates.sealedSha256 = isInstalledRemoteSealed ? block.sealedSha256 : undefined
     }
     return {
       name,
@@ -688,7 +690,7 @@ export function BlockEditor({
     content,
     depth,
     injectionTrigger,
-    isInstalledLumiHubSealed,
+    isInstalledRemoteSealed,
     isLocked,
     name,
     placementBinding,
@@ -762,7 +764,10 @@ export function BlockEditor({
     <div className={clsx(s.layout, compact && s.layoutCompact)}>
       {compact && (
         <div className={s.toolbar} style={{ justifyContent: 'space-between' }}>
-          <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+            <span data-spindle-mount="loom_block_editor_actions" data-spindle-scope={`loom-block:${block.id}:editor-actions`} style={{ display: 'contents' }} />
+          </div>
           <span style={{ fontSize: 'calc(13px * var(--lumiverse-font-scale, 1))', fontWeight: 600 }}>{t('blockEditor.title')}</span>
           <button className={clsx(s.btn, s.btnPrimary, s.btnSmall)} onClick={handleSave} type="button"><Check size={12} /> {t('blockEditor.save')}</button>
         </div>
@@ -770,6 +775,7 @@ export function BlockEditor({
       {!compact && (
         <div className={s.header}>
           <Button size="icon-sm" variant="ghost" onClick={onBack} title={t('blockEditor.backToList')}><ArrowLeft size={18} /></Button>
+          <span data-spindle-mount="loom_block_editor_actions" data-spindle-scope={`loom-block:${block.id}:editor-actions`} style={{ display: 'contents' }} />
           <h3 className={s.title}>{t('blockEditor.title')}</h3>
           <div style={{ flex: 1 }} />
           <button className={clsx(s.btn, s.btnPrimary)} onClick={handleSave} type="button"><Check size={14} /> {t('blockEditor.save')}</button>
@@ -890,7 +896,7 @@ export function BlockEditor({
               </button>
               {sealControlsOpen && (
                 <div className={s.sealedBlockBody}>
-                  <p className={s.sealedBlockText}>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledHint' : 'blockEditor.sealedBlockHint')}</p>
+                  <p className={s.sealedBlockText}>{t(isInstalledRemoteSealed ? 'blockEditor.sealedBlockInstalledHint' : 'blockEditor.sealedBlockHint')}</p>
                   <div className={s.formGroup}>
                     <label className={s.label}>{t('blockEditor.sealedBlockKey')}</label>
                     <input
@@ -899,18 +905,18 @@ export function BlockEditor({
                       onChange={e => setSealedKey(filterSealedBlockKeyInput(e.target.value))}
                       placeholder={t('blockEditor.sealedBlockKeyPlaceholder')}
                       spellCheck={false}
-                      disabled={isInstalledLumiHubSealed}
+                      disabled={isInstalledRemoteSealed}
                     />
                     <span className={s.settingsHint}>{t('blockEditor.sealedBlockKeyHint')}</span>
                   </div>
                   <label className={clsx(s.sealedBlockArmRow, !sealedKey.trim() && s.sealedBlockArmRowDisabled)}>
                     <input
                       type="checkbox"
-                      checked={(isInstalledLumiHubSealed || sealed) && !!sealedKey.trim()}
-                      disabled={isInstalledLumiHubSealed || !sealedKey.trim()}
+                      checked={(isInstalledRemoteSealed || sealed) && !!sealedKey.trim()}
+                      disabled={isInstalledRemoteSealed || !sealedKey.trim()}
                       onChange={e => setSealed(e.target.checked)}
                     />
-                    <span>{t(isInstalledLumiHubSealed ? 'blockEditor.sealedBlockInstalledEnable' : 'blockEditor.sealedBlockEnable')}</span>
+                    <span>{t(isInstalledRemoteSealed ? 'blockEditor.sealedBlockInstalledEnable' : 'blockEditor.sealedBlockEnable')}</span>
                   </label>
                 </div>
               )}
@@ -1061,6 +1067,7 @@ export interface ControlledLoomBlockEditorProps {
   onDraftChange?: (blockId: string, updates: Partial<PromptBlock> | null) => void
   selectedBlockId?: string | null
   onSelectedBlockChange?: (blockId: string | null) => void
+  onMoveVariable?: (sourceBlockId: string, variable: PromptVariableDef, targetBlockId: string) => boolean
   availableMacros: MacroGroup[]
   refreshMacros?: () => void
   readOnly?: boolean
@@ -1080,6 +1087,7 @@ export function ControlledLoomBlockEditor({
   onDraftChange,
   selectedBlockId,
   onSelectedBlockChange,
+  onMoveVariable,
   availableMacros,
   refreshMacros,
   readOnly = false,
@@ -1167,6 +1175,7 @@ export function ControlledLoomBlockEditor({
           explicitlyClearedDraftBlockIdRef.current = null
           onDraftChange?.(editingBlock.id, updates)
         }}
+        onMoveVariable={onMoveVariable}
         availableMacros={availableMacros}
         refreshMacros={refreshMacros}
         compact={compact}
@@ -1699,8 +1708,10 @@ function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
   const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null)
   const description = preset.description?.trim()
   const origin = getRemotePresetOrigin(preset)
+  const version = remotePresetVersionLabel(origin, preset.presetVersion,
+    preset.lumihubMeta?._lumiverse_illarin_version_number)
   const visibleCoverUrl = coverUrl && failedCoverUrl !== coverUrl ? coverUrl : null
-  if (!visibleCoverUrl && !origin && !preset.presetVersion) return null
+  if (!visibleCoverUrl && !origin && !version) return null
 
   return (
     <section className={s.presetCoverHeader} aria-label={visibleCoverUrl ? t('preset.coverAria', { name: preset.name }) : undefined}>
@@ -1728,8 +1739,8 @@ function PresetCoverHeader({ preset }: { preset: LoomPreset }) {
         <div className={s.presetCoverBadgeRow}>
           {origin === 'lumihub' && <span className={s.presetCoverBadge}>{t('preset.lumihubBadge')}</span>}
           {origin === 'illarin' && <span className={s.presetCoverBadge}>{t('preset.illarinBadge')}</span>}
-          {preset.presetVersion && (
-            <span className={s.presetCoverBadge}>{t('preset.version', { version: preset.presetVersion })}</span>
+          {version && (
+            <span className={s.presetCoverBadge}>{t('preset.version', { version })}</span>
           )}
           <span className={s.presetCoverBadge}>{t('preset.blocks', { count: preset.blocks.length })}</span>
         </div>
@@ -2480,10 +2491,12 @@ function LoomBuilderNative({
   const activePresetEditorTabRef = useRef(activePresetEditorTab)
   const updatePresetDraftRef = useRef(updatePresetDraft)
   const flushPresetDraftRef = useRef(flushPresetDraft)
+  const movePromptVariableRef = useRef(movePromptVariable)
 
   useEffect(() => { activePresetEditorTabRef.current = activePresetEditorTab }, [activePresetEditorTab])
   useEffect(() => { updatePresetDraftRef.current = updatePresetDraft }, [updatePresetDraft])
   useEffect(() => { flushPresetDraftRef.current = flushPresetDraft }, [flushPresetDraft])
+  useEffect(() => { movePromptVariableRef.current = movePromptVariable }, [movePromptVariable])
 
   useEffect(() => {
     setPresetEditorController({
@@ -2520,6 +2533,9 @@ function LoomBuilderNative({
           applyPresetEditorDraft(current, mutator(toPresetEditorDraft(current)))
         ), immediate)
       },
+      movePromptVariable: (sourceBlockId, variable, targetBlockId) => (
+        movePromptVariableRef.current(sourceBlockId, variable, targetBlockId)
+      ),
       flush: () => flushPresetDraftRef.current(),
     })
     return () => { setPresetEditorController(null) }
@@ -2568,6 +2584,7 @@ useEffect(() => {
   }, [activePreset?.blocks])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const importTypeRef = useRef<string>('json')
+  const presetImportInProgressRef = useRef(false)
   const lastCollapsedPresetRef = useRef<string | null>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
   const scrollTopRef = useRef(0)
@@ -2961,22 +2978,41 @@ useEffect(() => {
     fileInputRef.current?.click()
   }, [])
 
-  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
+  const importSelectedFiles = useCallback(async (files: File[], importType: string) => {
+    if (files.length === 0 || presetImportInProgressRef.current) return
+
+    presetImportInProgressRef.current = true
     try {
-      const text = await file.text()
-      const json = JSON.parse(text)
-      if (importTypeRef.current === 'st') {
-        await importFromST(json, file.name)
-      } else {
-        await importFromFile(json, file.name)
+      const result = await importPresetFiles(
+        files,
+        (payload, filename) => importType === 'st' || (importType === 'auto' && detectImportedPresetKind(payload) === 'legacy')
+          ? importFromST(payload, filename)
+          : importFromFile(payload, filename),
+        {
+          invalidJson: lb('toast.invalidPresetJson'),
+          importFailed: lb('toast.presetImportFailed'),
+        },
+      )
+
+      if (files.length > 1 && result.imported > 0) {
+        toast.success(lb('toast.presetsImported', { count: result.imported }))
       }
-    } catch (err) {
-      console.error('[LoomBuilder] Import failed:', err)
+      if (result.errors.length > 0) {
+        console.error('[LoomBuilder] Preset import failures:', result.errors)
+        toast.error(lb('toast.presetImportErrors', { count: result.errors.length }))
+      }
+    } finally {
+      presetImportInProgressRef.current = false
     }
+  }, [importFromFile, importFromST, lb])
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? [])
     e.target.value = ''
-  }, [importFromFile, importFromST])
+    await importSelectedFiles(files, importTypeRef.current)
+  }, [importSelectedFiles])
+
+  useEffect(() => subscribeWindowFileImport('preset', (files) => importSelectedFiles(files, 'auto')), [importSelectedFiles])
 
   const presetEditorToolbar = presetEditorToolbarItems.some((item) => item.visible) ? (
     <div className={s.extensionToolbar}>
@@ -3578,7 +3614,7 @@ useEffect(() => {
       </div>
 
       {/* Hidden file input for import */}
-      <input ref={fileInputRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleFileSelect} />
+      <input ref={fileInputRef} type="file" accept=".json" multiple style={{ display: 'none' }} onChange={handleFileSelect} />
 
       {/* Confirm legacy export */}
         <ConfirmationModal

@@ -13,8 +13,8 @@
       "tabHeaderTitle": "Raisonnement"
     },
     "loom": {
-      "shortName": "Métier à tisser",
-      "tabName": "Métier à tisser",
+      "shortName": "Préréglage",
+      "tabName": "Préréglage",
       "tabDescription": "Configurer la structure narrative et les rythmes de l'histoire",
       "tabHeaderTitle": "Métier à tisser"
     },
@@ -2620,6 +2620,13 @@
     "fontScale": "Échelle de police",
     "uiScale": "Échelle UI",
     "glassEffects": "Effets de verre",
+    "renderingMode": {
+      "label": "Rendu",
+      "hint": "Économie désactive le flou ; Qualité active le taux de rafraîchissement élevé sur les écrans macOS compatibles après le redémarrage de la fenêtre.",
+      "efficiency": "Économie",
+      "balanced": "Équilibré",
+      "quality": "Qualité"
+    },
     "desktopBackground": {
       "enable": "Utiliser un arrière-plan de bureau translucide",
       "hint": "Disponible uniquement dans l’application de bureau Lumiverse.",

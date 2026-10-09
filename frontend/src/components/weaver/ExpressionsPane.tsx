@@ -80,9 +80,11 @@ export function ExpressionsPane({ sessionId, character, onCount }: ExpressionsPa
     return provider?.capabilities.parameters ?? {}
   }, [providers, activeConnection])
   const advancedParams = useMemo(
-    () => Object.entries(schema).filter(([key]) =>
-      isComfy ? COMFY_ALLOWED.has(key) : !SKIP_PARAMS.has(key)),
-    [schema, isComfy],
+    () => Object.entries(schema).filter(([key, parameter]) =>
+      (isComfy ? COMFY_ALLOWED.has(key) : !SKIP_PARAMS.has(key))
+      && (!parameter.modelPrefixes?.length || parameter.modelPrefixes.some((prefix) => activeConnection?.model.startsWith(prefix))),
+    ),
+    [activeConnection?.model, schema, isComfy],
   )
 
   useEffect(() => {

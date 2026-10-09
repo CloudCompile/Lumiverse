@@ -10,7 +10,7 @@ Lumiverse runs on your own machine. It needs **Bun** (a fast JavaScript runtime)
 
 ## Requirements
 
-- **Bun** v1.4.0 or later — [Install Bun](https://bun.sh) (the start scripts auto-install Bun if missing and auto-upgrade older versions to latest stable)
+- **Bun** v1.4.2 or later — [Install Bun](https://bun.sh) (the start scripts auto-install Bun if missing and auto-upgrade older versions to latest stable)
 - A modern web browser (Chrome, Firefox, Edge, Safari)
 - An API key from at least one AI provider (OpenAI, Anthropic, Google, etc.)
 
@@ -20,6 +20,8 @@ Lumiverse runs on your own machine. It needs **Bun** (a fast JavaScript runtime)
 ---
 
 ## Install & Run
+
+For a step-by-step walkthrough, see [Desktop Installation](desktop-installation.md) or [Android / Termux](android-installation.md).
 
 ### 1. Clone the repository
 
@@ -69,9 +71,11 @@ After the shell opens, continue with the normal startup command below.
     ./start.sh
     ```
 
-    The script auto-detects Termux and installs required packages (`glibc-repo`, `glibc-runner`, `proot`). It uses a three-tier execution strategy to find the best way to run Bun on your device, then validates the exact `proot`-wrapped path it will later use for `bun install`. If Bun is older than 1.4.0, startup uses the `bun-termux` manager to atomically update both the Bun runtime and its wrapper before continuing.
+    The script auto-detects Termux and installs required packages (`glibc-repo`, `glibc-runner`, `proot`). It uses a three-tier execution strategy to find the best way to run Bun on your device, then validates the exact `proot`-wrapped path it will later use for `bun install`. If Bun is older than 1.4.2, startup uses the `bun-termux` manager to atomically update both the Bun runtime and its wrapper before continuing.
 
     If `grun bun --version` works but the native Termux install path is still broken, `start.sh` now attempts a `bun-termux` rebuild before it lets first-run setup continue.
+
+    For persistent runtime or build errors, see [Termux Troubleshooting](../reference/termux-troubleshooting.md), including the Ubuntu fallback.
 
 === "Docker"
 
@@ -80,10 +84,11 @@ After the shell opens, continue with the normal startup command below.
 The start script handles everything: auto-installs Bun if needed, runs `bun install`, triggers the setup wizard on first launch, and starts the server.
 
 !!! tip "Optional desktop tray"
-    On macOS, Windows, and Linux, you can build an optional menu bar/system
-    tray companion that manages a local Lumiverse checkout. The Linux icon
-    requires a desktop environment with StatusNotifier/AppIndicator support.
-    See [Experimental Lumiverse Desktop](desktop-tray.md) for requirements and setup.
+    On macOS, Windows, and Linux, you can download a pre-built optional menu
+    bar/system tray companion or build it from source. It manages a local
+    Lumiverse checkout. The Linux icon requires a desktop environment with
+    StatusNotifier/AppIndicator support.
+    See [Experimental Lumiverse Desktop](desktop-tray.md) for downloads, requirements, and setup.
 
 ### 4. Open in your browser
 
@@ -122,7 +127,7 @@ The start scripts accept flags to control behavior:
 
     | Flag | Description |
     |------|-------------|
-    | *(no flags)* | Start normally; auto-upgrade Bun to latest stable when below 1.4.0 |
+    | *(no flags)* | Start normally; auto-upgrade Bun to latest stable when below 1.4.2 |
     | `-b`, `--build` | Rebuild frontend before starting |
     | `--build-only` | Rebuild frontend only, don't start |
     | `--backend-only` | Start backend only, skip frontend |
@@ -137,15 +142,15 @@ The start scripts accept flags to control behavior:
     !!! note "Termux behavior"
         Bun's built-in `bun upgrade` command does not work on native Termux — it aborts with `'bun upgrade' is unsupported on systems without ld` because Termux uses Android's bionic libc, not glibc. On Termux:
 
-        * `--upgrade-bun` updates the Bun runtime and rebuilds the [`bun-termux`](https://github.com/Happ1ness-dev/bun-termux) wrapper at `$HOME/.bun-termux`. The upstream manager installs both through atomic renames, so an already-running wrapper does not cause Android's `Text file busy` error.
+        * `--upgrade-bun` updates the Bun runtime through [`bun-termux`](https://github.com/Happ1ness-dev/bun-termux). If the installed Bun version actually changes, Lumiverse then rebuilds the wrapper at `$HOME/.bun-termux`; if Bun is already current, the working wrapper is left untouched. The upstream manager installs updates through atomic renames, so an already-running wrapper does not cause Android's `Text file busy` error.
         * `--upgrade-bun-canary` is **not supported** — bun-termux only packages stable releases. The start script will skip the upgrade and continue with the existing binary. If you specifically need canary, run Lumiverse inside a [proot-distro Linux](https://github.com/termux/proot-distro) environment, where standard `bun upgrade --canary` works normally.
-        * If native Termux reports a broken install path before first run, the fastest repair is usually `./start.sh --upgrade-bun`, which updates the runtime and wrapper in place.
+        * If native Termux reports a broken install path, launcher validation attempts a wrapper rebuild automatically before failing the install path.
 
 === "Windows (`start.ps1`)"
 
     | Flag | Description |
     |------|-------------|
-    | *(no flags)* | Start normally; auto-upgrade Bun to latest stable when below 1.4.0 |
+    | *(no flags)* | Start normally; auto-upgrade Bun to latest stable when below 1.4.2 |
     | `-Build` or `-b` | Rebuild frontend before starting |
     | `-Mode build-only` | Rebuild frontend only |
     | `-Mode backend-only` | Start backend only |
@@ -280,7 +285,12 @@ If you'd rather throw away the cache entirely (slower, but belt-and-braces), pas
 | `TRUST_ANY_ORIGIN` | `true` | Accept requests from any origin |
 | `LUMIVERSE_SAFE_THEME` | `false` | Temporarily suppress custom CSS and component overrides for emergency recovery |
 | `TRUSTED_ORIGINS` | — | Comma-separated allowed origins (for production) |
-| `TRUSTED_PROXIES` | — | Reverse proxies trusted to supply client IPs (`X-Forwarded-For`/`Forwarded`/`X-Real-IP`), as IPs or CIDRs. Unset = trust only private-range peers; when set, only listed proxies are trusted (use this for cloud proxies with public addresses) |
+| `TRUSTED_PROXIES` | — | Proxy IPs/CIDRs allowed to supply external host/protocol headers for dynamic auth origins and client-IP headers. Host/protocol forwarding requires this explicit list. |
+| `AUTH_BASE_URL` | request origin | Optional single-origin auth/OAuth override; normally use Operator → Trusted Hostnames. |
+| `LUMIVERSE_TLS_CERT_FILE` | — | PEM certificate/full-chain file for direct HTTPS; set together with `LUMIVERSE_TLS_KEY_FILE`. |
+| `LUMIVERSE_TLS_KEY_FILE` | — | PEM private key paired with `LUMIVERSE_TLS_CERT_FILE`. |
+| `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | — | Optional file containing the encrypted private key's passphrase. |
+| `LUMIVERSE_TLS_CONFIG_FILE` | — | JSON certificate manifest for multi-certificate SNI. |
 | `AUTH_SECRET` | auto-derived | Explicit auth signing secret; usually leave unset |
 | `ENCRYPTION_KEY` | auto-generated | Legacy/manual encryption key override; usually leave unset |
 | `SPINDLE_EPHEMERAL_GLOBAL_MAX_BYTES` | `524288000` | Total extension storage limit in bytes |
@@ -333,14 +343,16 @@ The Docker setup uses a named volume (`lumiverse-data`) mounted at `/app/data`. 
 
 ## Configuration
 
-Lumiverse uses a `.env` file for runtime configuration (created by the setup wizard). Common options:
+For a step-by-step remote-access and mobile PWA setup, see [Remote Access with Tailscale](tailscale.md).
+
+Lumiverse uses a `.env` file for runtime configuration (created by the setup wizard). See [Environment Variables (.env)](../reference/environment-variables.md) for editing instructions, defaults, and additional settings. Common options:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `7860` | Server port |
 | `DATA_DIR` | `./data` | Override the data directory location |
 | `TRUSTED_ORIGINS` | — | CORS origins (comma-separated) |
-| `TRUSTED_PROXIES` | — | Reverse proxies trusted to supply client IPs (`X-Forwarded-For`/`Forwarded`/`X-Real-IP`), as IPs or CIDRs. Unset = trust only private-range peers; when set, only listed proxies are trusted (use this for cloud proxies with public addresses) |
+| `TRUSTED_PROXIES` | — | Proxy IPs/CIDRs allowed to supply external host/protocol headers for dynamic auth origins and client-IP headers. Host/protocol forwarding requires this explicit list. |
 | `TRUST_ANY_ORIGIN` | `false` | Accept requests from any origin |
 | `LUMIVERSE_SAFE_THEME` | `false` | Temporarily suppress custom CSS and component overrides for emergency recovery |
 | `FRONTEND_DIR` | — | Custom path to frontend dist folder |
@@ -349,9 +361,64 @@ Lumiverse uses a `.env` file for runtime configuration (created by the setup wiz
 | `SPINDLE_EPHEMERAL_EXTENSION_MAX_OVERRIDES` | — | Per-extension storage overrides as `extension.id:maxBytes,...` |
 | `SPINDLE_EPHEMERAL_RESERVATION_TTL_MS` | `600000` | Extension storage reservation TTL in milliseconds |
 | `AUTH_SECRET` | auto-derived | Explicit auth signing secret |
+| `AUTH_BASE_URL` | request origin | Optional single-origin auth/OAuth override; normally use Operator → Trusted Hostnames. |
+| `LUMIVERSE_TLS_CERT_FILE` | — | PEM certificate/full-chain file for direct HTTPS; set together with `LUMIVERSE_TLS_KEY_FILE`. |
+| `LUMIVERSE_TLS_KEY_FILE` | — | PEM private key paired with `LUMIVERSE_TLS_CERT_FILE`. |
+| `LUMIVERSE_TLS_KEY_PASSPHRASE_FILE` | — | Optional file containing the encrypted private key's passphrase. |
+| `LUMIVERSE_TLS_CONFIG_FILE` | — | JSON certificate manifest for multi-certificate SNI. |
 | `ENCRYPTION_KEY` | auto-generated | Legacy/manual encryption key override |
 
 API keys and account passwords are stored encrypted in the `data/` directory rather than in `.env`. Leave `AUTH_SECRET` and `ENCRYPTION_KEY` unset unless you are intentionally carrying forward an existing install.
+
+### Direct TLS and custom certificates
+
+Lumiverse can terminate TLS directly in Bun before requests reach Hono. Direct TLS negotiates HTTP/2 or HTTP/1.1 on the same port; WebSocket clients continue to use HTTP/1.1 upgrades. A reverse proxy remains a good choice when it already manages ACME issuance and renewal, but it is no longer required when you have your own certificate.
+
+For one certificate, set a PEM full chain and matching private key:
+
+```dotenv
+PORT=7860
+LUMIVERSE_TLS_CERT_FILE=/etc/lumiverse/tls/fullchain.pem
+LUMIVERSE_TLS_KEY_FILE=/etc/lumiverse/tls/privkey.pem
+```
+
+The certificate can contain multiple DNS SANs; the same Hono application is served for all of them. Direct TLS makes this listener HTTPS-only, so use `https://` for clients and health probes. Add every public HTTPS origin under **Settings → Operator → Trusted Hostnames** and restart Lumiverse. `AUTH_BASE_URL` can still pin authentication to one origin when that is preferable. It also gives the launcher a safe SAN-covered URL for the `--auto-open` option and the runner's **O** shortcut; without it, open the desired HTTPS hostname manually.
+
+For distinct certificates on one port, set only `LUMIVERSE_TLS_CONFIG_FILE`. Its JSON manifest maps each certificate to the exact hostnames clients send through SNI:
+
+```json
+{
+  "certificates": [
+    {
+      "certFile": "./customer-a/fullchain.pem",
+      "keyFile": "./customer-a/privkey.pem",
+      "serverNames": ["chat.customer-a.example"]
+    },
+    {
+      "certFile": "./customer-b/fullchain.pem",
+      "keyFile": "./customer-b/privkey.pem",
+      "keyPassphraseFile": "./customer-b/passphrase",
+      "serverNames": ["chat.customer-b.example", "alt.customer-b.example"]
+    }
+  ]
+}
+```
+
+Certificate, key, and passphrase paths in a manifest are resolved relative to the manifest. Each `serverNames` value must be an exact DNS hostname covered by that certificate's SAN; wildcard SAN certificates still list the concrete SNI hostnames they should answer. A manifest containing one certificate may omit `serverNames`, making it the default certificate just like the simple environment-variable form.
+
+Lumiverse validates the PEM files, private-key match, SAN mappings, and duplicate SNI names before starting. Certificate changes require a Lumiverse restart because Bun does not hot-reload listener TLS settings. Keep private keys and passphrase files read-only to the account running Lumiverse.
+
+For Docker, bind-mount the certificate directory read-only and use container paths:
+
+```yaml
+services:
+  lumiverse:
+    environment:
+      - LUMIVERSE_TLS_CERT_FILE=/run/lumiverse-tls/fullchain.pem
+      - LUMIVERSE_TLS_KEY_FILE=/run/lumiverse-tls/privkey.pem
+    volumes:
+      - ./certs:/run/lumiverse-tls:ro
+```
 
 ---
 

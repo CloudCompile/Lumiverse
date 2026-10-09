@@ -370,6 +370,9 @@ export const IMPORT_ORDER: readonly string[] = [
 
 /** Tables explicitly EXCLUDED from export/import. */
 export const EXCLUDED_TABLES = new Set<string>([
+  // Local import receipts; retained CL sources have their own download/delete API.
+  "cl_migration_jobs",
+  "cl_migration_items",
   // Encrypted secrets — never exported, never imported
   "secrets",
   // System auth tables
@@ -379,6 +382,7 @@ export const EXCLUDED_TABLES = new Set<string>([
   "verification",
   // Device-specific
   "push_subscriptions",
+  "desktop_notification_destinations",
   // System / built-in
   "_migrations",
   "tokenizer_configs",

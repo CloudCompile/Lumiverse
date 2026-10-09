@@ -32,6 +32,7 @@ import {
   desktopBuildCommand,
   inspectDesktopToolchain,
 } from "./desktop-toolchain";
+import { isInsideWindowsSystem32 } from "./windows-install-location";
 
 // All input goes through askText / askSecret (scripts/input.ts) so that a
 // single raw-mode consumer owns stdin.  Mixing Node's readline with a raw
@@ -83,6 +84,22 @@ async function main() {
   const envPath = join(projectRoot, ".env");
   const identityPath = join(dataDir, "lumiverse.identity");
   const credentialsPath = join(dataDir, "owner.credentials");
+
+  // start.ps1 performs this check before it installs Bun or dependencies. Keep
+  // the wizard guarded too in case a user invokes `bun run setup` directly.
+  const isFirstInstall = !existsSync(identityPath) || !existsSync(credentialsPath);
+  const windowsDirectory = process.env.SystemRoot ?? process.env.WINDIR;
+  if (
+    platform() === "win32"
+    && isFirstInstall
+    && isInsideWindowsSystem32(projectRoot, windowsDirectory)
+  ) {
+    console.error("");
+    console.error("  Setup stopped: Lumiverse cannot be installed inside the Windows System32 directory.");
+    console.error(`  Move this repository to a user-owned folder (for example, ${process.env.USERPROFILE ?? "C:\\Users\\YourName"}\\Lumiverse) and run setup again.`);
+    console.error("");
+    process.exit(1);
+  }
 
   // Guard: don't overwrite existing setup
   if (existsSync(identityPath) && existsSync(credentialsPath) && existsSync(envPath)) {

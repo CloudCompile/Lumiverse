@@ -1,5 +1,8 @@
 import { safeFetch, type SafeFetchOptions } from "../utils/safe-fetch";
 import { SYSTEM_SECRET_PRINCIPAL } from "../services/secrets.service";
+import type { ProviderRequestSnapshot, ProviderResponseObserver } from "../llm/request-observer";
+import { observeProviderFailure, observeProviderResponse } from "../llm/response-observer";
+import { transportCredentials } from "../utils/redact-request";
 
 export const PROVIDER_DESC_MAX_BYTES = 64 * 1024;
 export const PROVIDER_REQUEST_MAX_BYTES = 256 * 1024;
@@ -57,6 +60,7 @@ export type RegisteredProvider = {
 };
 
 export type BrokerRequest = {
+  providerId?: string;
   kind: ProviderBrokerKind;
   url: string;
   method?: string;
@@ -87,6 +91,7 @@ export type BrokerResponse = {
 };
 
 export type PreparedBroker = {
+  providerId?: string;
   kind: ProviderBrokerKind;
   url: string;
   method: string;
@@ -174,6 +179,7 @@ export type HostScopeContext = {
 };
 
 export type ProviderRegistryDeps = {
+  observeRequest?: (prepared: PreparedBroker, snapshot: ProviderRequestSnapshot) => ProviderResponseObserver | void;
   getSecret?: (userId: string, key: string) => Promise<string | null>;
   fetch?: (url: string, options?: SafeFetchOptions) => Promise<Response>;
   now?: () => number;
@@ -364,6 +370,7 @@ export class ProviderRegistry {
   private readonly invocations = new Map<string, PendingInvocation>();
   private readonly workers = new Map<string, (message: ProviderHostToWorker) => void>();
   private getSecret: ProviderRegistryDeps["getSecret"];
+  private observeRequest: ProviderRegistryDeps["observeRequest"];
   private fetchImpl: NonNullable<ProviderRegistryDeps["fetch"]>;
   private now: () => number;
   private timeoutMs: number;
@@ -371,6 +378,7 @@ export class ProviderRegistry {
   private approvedAllowlistKeys: ReadonlySet<string>;
 
   constructor(deps: ProviderRegistryDeps = {}) {
+    this.observeRequest = deps.observeRequest;
     this.getSecret = deps.getSecret;
     this.fetchImpl = deps.fetch ?? ((url, options) => safeFetch(url, options));
     this.now = deps.now ?? (() => Date.now());
@@ -384,6 +392,7 @@ export class ProviderRegistry {
   }
 
   configure(deps: ProviderRegistryDeps): void {
+    if (deps.observeRequest) this.observeRequest = deps.observeRequest;
     if (deps.getSecret) this.getSecret = deps.getSecret;
     if (deps.fetch) this.fetchImpl = deps.fetch;
     if (deps.now) this.now = deps.now;
@@ -696,6 +705,7 @@ export class ProviderRegistry {
     this.assertSecretAuthorized(secretKey, host.installationId);
     this.assertAllowlistKeyAuthorized(request.allowlistKey);
     const prepared: PreparedBroker = {
+      providerId: request.providerId,
       kind: request.kind,
       url,
       method: (request.method || "POST").toUpperCase(),
@@ -751,8 +761,19 @@ export class ProviderRegistry {
       init.body = this.encodeBody(prepared.body, prepared.binary);
     }
 
+    let responseObserver: ProviderResponseObserver | void = undefined;
     try {
-      const response = await this.fetchImpl(prepared.url, init);
+      if (prepared.kind === "sidecar" && this.observeRequest) {
+        try {
+          const payload = prepared.body as { model?: unknown } | null;
+          responseObserver = this.observeRequest(prepared, {
+            body: init.body, provider: prepared.providerId ?? "extension-sidecar",
+            model: typeof payload?.model === "string" ? payload.model : "",
+            credentials: transportCredentials(prepared.url, init),
+          });
+        } catch { /* Recording must never affect broker execution. */ }
+      }
+      const response = observeProviderResponse(await this.fetchImpl(prepared.url, init), responseObserver);
       const responseBytes = await this.readResponseBytes(response);
       const body = prepared.binary
         ? responseBytes
@@ -768,6 +789,7 @@ export class ProviderRegistry {
       assertByteLimit(result, PROVIDER_RESULT_MAX_BYTES, "provider result");
       return result;
     } catch (err) {
+      observeProviderFailure(responseObserver, err);
       const error = err instanceof Error ? err.message : String(err);
       return {
         ok: false,
@@ -873,6 +895,7 @@ export class ProviderRegistry {
     const kind = (broker.kind ?? record.key.kind) as ProviderBrokerKind;
     return {
       kind,
+      providerId: record.key.id,
       // Destination is immutable: always the registration-time broker URL.
       // Per-invocation `payload.url` overrides are never honoured.
       url: broker.url,

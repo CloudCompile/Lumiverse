@@ -14,6 +14,9 @@ import {
   DEFAULT_MIN_CHAT_WIDTH,
   DEFAULT_MIN_EDITOR_PANE_WIDTH,
 } from '@/lib/lorebookEditorGeometry'
+import { isMobileViewportOrDevice } from '@/lib/mobile'
+
+export { isMobileViewportOrDevice } from '@/lib/mobile'
 
 export const DEFAULT_SURFACE_RECT: SurfaceRectPrefs = {
   x: 24,
@@ -92,11 +95,6 @@ export function resolveQuickToolbarOverlayPresentation(
   if (!shouldHideQuickToolbarWhenOverlaid(input)) return 'toolbar'
   if (input.modalRestoreHandle && overlayOpen && !input.restoredOverModal) return 'restore-tab'
   return 'hidden'
-}
-
-export function isMobileViewportOrDevice(): boolean {
-  if (typeof window === 'undefined') return false
-  return window.matchMedia?.('(pointer: coarse)').matches || window.innerWidth <= 600
 }
 
 export type PendingConnectionsDeepLink = {

@@ -1,13 +1,14 @@
 import { emitSpindlePreGenerationActivity } from "./pre-generation-activity";
 
 export interface ContextHandler {
+  required?: boolean;
   extensionId: string;
   extensionName?: string;
   userId?: string | null;
   priority: number; // lower = runs first
   /** Wall-clock budget for each invocation. Defaults to 10s. */
   timeoutMs?: number;
-  handler: (context: unknown) => Promise<unknown>;
+  handler: (context: unknown, signal?: AbortSignal) => Promise<unknown>;
 }
 
 function getChatId(value: unknown): string | null {
@@ -63,23 +64,27 @@ class ContextHandlerChain {
       const timeoutMs = handler.timeoutMs ?? 10_000;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let abortHandler: (() => void) | undefined;
+      const controller = new AbortController();
       try {
         result = await Promise.race([
-          handler.handler(result),
+          handler.handler(result, controller.signal),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Context handler from ${handler.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`
-                  )
-                ),
+              () => {
+                const error = new Error(`Context handler from ${handler.extensionId} timed out (${Math.round(timeoutMs / 1000)}s)`);
+                controller.abort(error);
+                reject(error);
+              },
               timeoutMs,
             );
             if (signal) {
-              abortHandler = () =>
-                reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
+              abortHandler = () => {
+                const error = signal.reason ?? new DOMException("Aborted", "AbortError");
+                controller.abort(error);
+                reject(error);
+              };
               signal.addEventListener("abort", abortHandler, { once: true });
+              if (signal.aborted) abortHandler();
             }
           }),
         ]);
@@ -116,6 +121,7 @@ class ContextHandlerChain {
           `[Spindle] Context handler error from ${handler.extensionId}:`,
           err
         );
+        if (handler.required) throw err;
       } finally {
         if (timeout) clearTimeout(timeout);
         if (signal && abortHandler) {

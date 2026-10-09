@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
+import { env } from "../env";
 import { eventBus } from "../ws/bus";
 import { EventType, type EventMessage } from "../ws/events";
 import {
@@ -11,7 +15,10 @@ import {
   branchChat,
   convertSoloChatToGroup,
   createChat,
+  deleteChat,
   deleteChats,
+  deleteMessage,
+  bulkDeleteMessages,
   getChat,
   getChatTree,
   cycleSwipe,
@@ -24,6 +31,7 @@ import {
   listRecentChats,
   listRecentChatsGrouped,
   patchMessageExtra,
+  removeMessageAttachment,
   removeGroupMember,
   searchMessages,
   setGroupMemberAlternateFields,
@@ -104,6 +112,14 @@ function initChatsTestDb(): void {
     updated_at INTEGER NOT NULL,
     UNIQUE(chat_id, settings_key)
   )`);
+
+  db.run(`CREATE TABLE message_breakdowns (
+    message_id TEXT PRIMARY KEY,
+    chat_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at INTEGER NOT NULL DEFAULT 1
+  )`);
 }
 
 function seedCharacter(id: string, name: string): void {
@@ -156,6 +172,41 @@ function seedMessage(
       null,
       sendDate,
     );
+}
+
+function seedBreakdown(
+  messageId: string,
+  chatId: string,
+  data: unknown = { marker: messageId },
+  userId = "u1",
+): void {
+  getDb()
+    .query("INSERT INTO message_breakdowns (message_id, chat_id, user_id, data) VALUES (?, ?, ?, ?)")
+    .run(messageId, chatId, userId, JSON.stringify(data));
+}
+
+function seedStoredImageWithFiles(imageId: string): string[] {
+  getDb().run(`CREATE TABLE IF NOT EXISTS images (
+    id TEXT PRIMARY KEY,
+    user_id TEXT,
+    filename TEXT NOT NULL,
+    owner_extension_identifier TEXT
+  )`);
+
+  const filename = `${imageId}.png`;
+  getDb()
+    .query("INSERT INTO images (id, user_id, filename) VALUES (?, ?, ?)")
+    .run(imageId, "u1", filename);
+
+  const imagesDir = join(env.dataDir, "images");
+  mkdirSync(imagesDir, { recursive: true });
+  const paths = [
+    join(imagesDir, filename),
+    join(imagesDir, `${imageId}_thumb_sm_v2.webp`),
+    join(imagesDir, `${imageId}_thumb_lg_v2.webp`),
+  ];
+  for (const path of paths) writeFileSync(path, "fixture");
+  return paths;
 }
 
 beforeEach(() => {
@@ -645,7 +696,7 @@ describe("recent chats", () => {
     seedChat("chat-1", "c1", "Swipe chat", "{}", 100);
     seedMessage("msg-1", "chat-1", "first swipe", {
       tokenCount: 11,
-      generationMetrics: { model: "first-model", tps: 1.1 },
+      generationMetrics: { model: "first-model", tps: 1.1, presetId: "preset-1", presetName: "First preset" },
       usage: { completion_tokens: 11, total_tokens: 22 },
     });
 
@@ -658,25 +709,40 @@ describe("recent chats", () => {
     patchMessageExtra("u1", "msg-1", {
       ...added.extra,
       tokenCount: 33,
-      generationMetrics: { model: "second-model", tps: 3.3 },
+      generationMetrics: { model: "second-model", tps: 3.3, presetId: "preset-2", presetName: "Second preset" },
       usage: { completion_tokens: 33, total_tokens: 44 },
     });
 
     const secondSwipe = getMessage("u1", "msg-1")!;
     expect(secondSwipe.extra.tokenCount).toBe(33);
-    expect(secondSwipe.extra.generationMetrics).toEqual({ model: "second-model", tps: 3.3 });
+    expect(secondSwipe.extra.generationMetrics).toEqual({
+      model: "second-model",
+      tps: 3.3,
+      presetId: "preset-2",
+      presetName: "Second preset",
+    });
     expect(secondSwipe.extra.usage).toEqual({ completion_tokens: 33, total_tokens: 44 });
 
     const firstSwipe = cycleSwipe("u1", "msg-1", "left")!;
     expect(firstSwipe.swipe_id).toBe(0);
     expect(firstSwipe.extra.tokenCount).toBe(11);
-    expect(firstSwipe.extra.generationMetrics).toEqual({ model: "first-model", tps: 1.1 });
+    expect(firstSwipe.extra.generationMetrics).toEqual({
+      model: "first-model",
+      tps: 1.1,
+      presetId: "preset-1",
+      presetName: "First preset",
+    });
     expect(firstSwipe.extra.usage).toEqual({ completion_tokens: 11, total_tokens: 22 });
 
     const restoredSecondSwipe = cycleSwipe("u1", "msg-1", "right")!;
     expect(restoredSecondSwipe.swipe_id).toBe(1);
     expect(restoredSecondSwipe.extra.tokenCount).toBe(33);
-    expect(restoredSecondSwipe.extra.generationMetrics).toEqual({ model: "second-model", tps: 3.3 });
+    expect(restoredSecondSwipe.extra.generationMetrics).toEqual({
+      model: "second-model",
+      tps: 3.3,
+      presetId: "preset-2",
+      presetName: "Second preset",
+    });
     expect(restoredSecondSwipe.extra.usage).toEqual({ completion_tokens: 33, total_tokens: 44 });
   });
 
@@ -799,6 +865,131 @@ describe("bulk chat deletion", () => {
   });
 });
 
+describe("message breakdown deletion", () => {
+  test("deletes all breakdowns for a deleted chat and preserves other chats", () => {
+    seedChat("delete-chat", "c1", "Delete", "{}", 100);
+    seedMessage("delete-message-1", "delete-chat", "One", {}, { index: 0 });
+    seedMessage("delete-message-2", "delete-chat", "Two", {}, { index: 1 });
+    seedBreakdown("delete-message-1", "delete-chat");
+    seedBreakdown("delete-message-2", "delete-chat");
+
+    seedChat("keep-chat", "c1", "Keep", "{}", 200);
+    seedMessage("keep-message", "keep-chat", "Keep", {});
+    seedBreakdown("keep-message", "keep-chat");
+
+    expect(deleteChat("u1", "delete-chat")).toBe(true);
+
+    const deletedCount = getDb()
+      .query("SELECT COUNT(*) AS count FROM message_breakdowns WHERE chat_id = ?")
+      .get("delete-chat") as { count: number };
+    expect(deletedCount.count).toBe(0);
+    expect(getDb().query("SELECT message_id FROM message_breakdowns WHERE message_id = ?").get("keep-message")).not.toBeNull();
+  });
+
+  test("deletes the selected and later prompt breakdowns while preserving earlier ones", () => {
+    const deletedContentMarker = "deleted-sensitive-prompt-marker";
+    seedChat("message-chat", "c1", "Messages", "{}", 100);
+    seedMessage("keep-earlier", "message-chat", "Earlier", {}, { index: 0 });
+    seedMessage("delete-message", "message-chat", deletedContentMarker, {}, { index: 1 });
+    seedMessage("keep-later", "message-chat", "Later", {}, { index: 2 });
+    seedBreakdown("keep-earlier", "message-chat");
+    seedBreakdown("delete-message", "message-chat");
+    seedBreakdown("keep-later", "message-chat", {
+      messages: [
+        { role: "user", content: deletedContentMarker },
+        { role: "assistant", content: "Later" },
+      ],
+    });
+
+    expect(deleteMessage("u1", "delete-message")).toBe(true);
+
+    expect(getDb().query("SELECT message_id FROM message_breakdowns WHERE message_id = ?").get("delete-message")).toBeNull();
+    expect(getDb().query("SELECT message_id FROM message_breakdowns WHERE message_id = ?").get("keep-later")).toBeNull();
+    expect(getDb().query("SELECT message_id FROM message_breakdowns WHERE message_id = ?").get("keep-earlier")).not.toBeNull();
+    expect(getMessage("u1", "keep-later")).not.toBeNull();
+    const retainedMarkerCount = getDb()
+      .query("SELECT COUNT(*) AS count FROM message_breakdowns WHERE instr(data, ?) > 0")
+      .get(deletedContentMarker) as { count: number };
+    expect(retainedMarkerCount.count).toBe(0);
+  });
+
+  test("deletes breakdowns for bulk-deleted messages and preserves unselected messages", () => {
+    seedChat("bulk-message-chat", "c1", "Bulk", "{}", 100);
+    for (const [index, id] of ["delete-one", "keep", "delete-two"].entries()) {
+      seedMessage(id, "bulk-message-chat", id, {}, { index });
+      seedBreakdown(id, "bulk-message-chat");
+    }
+
+    expect(bulkDeleteMessages("u1", "bulk-message-chat", ["delete-one", "missing", "delete-two"])).toBe(2);
+
+    const remaining = getDb()
+      .query("SELECT message_id FROM message_breakdowns WHERE chat_id = ? ORDER BY message_id")
+      .all("bulk-message-chat") as Array<{ message_id: string }>;
+    expect(remaining).toEqual([]);
+    expect(getMessage("u1", "keep")).not.toBeNull();
+  });
+});
+
+describe("message image attachment cleanup", () => {
+  test("deletes the image row, original, and thumbnails with the owning message", () => {
+    const originalDataDir = env.dataDir;
+    const testDataDir = mkdtempSync(join(tmpdir(), "lumiverse-message-image-cleanup-"));
+    env.dataDir = testDataDir;
+
+    try {
+      const imageId = "message-image";
+      const attachment = {
+        type: "image",
+        image_id: imageId,
+        mime_type: "image/png",
+        original_filename: "attached.png",
+      };
+      seedChat("image-chat", "c1", "Images", "{}", 100);
+      seedMessage("image-message", "image-chat", "Attached", { attachments: [attachment] });
+      const paths = seedStoredImageWithFiles(imageId);
+
+      expect(deleteMessage("u1", "image-message")).toBe(true);
+
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).toBeNull();
+      expect(paths.every((path) => !existsSync(path))).toBe(true);
+    } finally {
+      env.dataDir = originalDataDir;
+      rmSync(testDataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("retains a shared image until its final message attachment is removed", () => {
+    const originalDataDir = env.dataDir;
+    const testDataDir = mkdtempSync(join(tmpdir(), "lumiverse-shared-message-image-"));
+    env.dataDir = testDataDir;
+
+    try {
+      const imageId = "shared-message-image";
+      const attachment = {
+        type: "image",
+        image_id: imageId,
+        mime_type: "image/png",
+        original_filename: "shared.png",
+      };
+      seedChat("shared-image-chat", "c1", "Shared Images", "{}", 100);
+      seedMessage("first-image-message", "shared-image-chat", "First", { attachments: [attachment] }, { index: 0 });
+      seedMessage("second-image-message", "shared-image-chat", "Second", { attachments: [attachment] }, { index: 1 });
+      const paths = seedStoredImageWithFiles(imageId);
+
+      expect(deleteMessage("u1", "first-image-message")).toBe(true);
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).not.toBeNull();
+      expect(paths.every(existsSync)).toBe(true);
+
+      expect(removeMessageAttachment("u1", "second-image-message", imageId)).not.toBeNull();
+      expect(getDb().query("SELECT id FROM images WHERE id = ?").get(imageId)).toBeNull();
+      expect(paths.every((path) => !existsSync(path))).toBe(true);
+    } finally {
+      env.dataDir = originalDataDir;
+      rmSync(testDataDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("group member alternate fields", () => {
   test("merges selections for one member without clobbering other members", () => {
     const extensions = {
@@ -908,6 +1099,30 @@ describe("avatar-bound appearance", () => {
 
     expect(result?.chat.metadata.active_avatar_id).toBe("winter-image");
     expect(result?.chat.metadata.alternate_field_selections.personality).toBe("warm");
+  });
+
+  test("a deleted variant left in an old avatar binding does not block appearance changes", () => {
+    seedCharacterWithExtensions("char1", {
+      ...appearanceExtensions,
+      alternate_fields: { personality: appearanceExtensions.alternate_fields.personality },
+    });
+    getDb().query("UPDATE characters SET alternate_greetings = ? WHERE id = ?")
+      .run(JSON.stringify(["Winter hello"]), "char1");
+    seedChat("chat1", "char1", "Chat", "{}", 1);
+
+    const selectedField = applyChatAppearance("u1", "chat1", {
+      type: "field", field: "personality", variant_id: "warm",
+    });
+    expect(selectedField?.chat.metadata.active_avatar_id).toBe("winter-image");
+    expect(selectedField?.chat.metadata.alternate_field_selections).toEqual({ personality: "warm" });
+
+    const selectedAvatar = applyChatAppearance("u1", "chat1", {
+      type: "avatar", avatar_entry_id: "winter-avatar",
+    });
+    expect(selectedAvatar?.chat.metadata.alternate_field_selections).toEqual({ personality: "warm" });
+    expect(applyChatAppearance("u1", "chat1", {
+      type: "field", field: "description", variant_id: "winter-desc",
+    })).toBeNull();
   });
 
   test("an unbound field change does not rewrite an edited greeting", () => {

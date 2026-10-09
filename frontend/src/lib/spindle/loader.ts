@@ -1,3 +1,4 @@
+import { activeTab } from '@/lib/active-tab'
 import type {
   SpindleManifest,
   SpindleFrontendContext,
@@ -9,7 +10,8 @@ import type {
   SpindleFloatWidgetHandle,
   SpindleDockPanelHandle,
 } from 'lumiverse-spindle-types'
-import { SPINDLE_HOST_CAPABILITIES } from 'lumiverse-spindle-types'
+import { SPINDLE_HOST_CAPABILITIES, SPINDLE_STT_HOST_CAPABILITIES } from 'lumiverse-spindle-types'
+import { frontendSessionId } from '@/lib/frontend-session'
 import type { MacroCatalogResponse } from '@/api/macros'
 import type {
   Chat,
@@ -30,7 +32,7 @@ import type { SpindlePresetEditorUI } from './preset-editor-types'
 import { isKnownMountPoint, type WidenedMountPoint } from './mount-points'
 import { createDOMHelper } from './dom-helper'
 import { registerTagInterceptor, unregisterTagInterceptorsByExtension } from './message-interceptors'
-import { registerDisplayResolver, unregisterDisplayResolver } from './display-resolver-registry'
+import { registerDisplayResolver, unregisterDisplayResolver, revokeInlineCardWrappingOptOut } from './display-resolver-registry'
 import { invalidateDisplayRegexCacheForVars, invalidateDisplayRegexCache } from '@/hooks/useDisplayRegex'
 import { removeMessageWidgetsByExtension, upsertMessageWidget, removeMessageWidget } from './message-widgets'
 import {
@@ -78,6 +80,7 @@ import {
 import { generateUUID } from '@/lib/uuid'
 import { installSpindleNavigationGuards } from './navigation-guards'
 import { DRAWER_TABS, ensureRegistryRoot } from '@/lib/drawer-tab-registry'
+import { resolveCouncilTabId } from '@/lib/council-navigation'
 import {
   createUIEventsHelper,
   destroyAllUIEventBindingsForExtension,
@@ -125,6 +128,9 @@ import {
 import { createNativeThemeAuthoringAPI } from './theme-authoring-native'
 import { legacyCtxPermission } from './legacy-ctx-members'
 import type { SpindleSettingsTabHandle, SpindleSettingsTabOptions } from './settings-tab-bridge'
+import type { DesktopFloatingWidgetTarget } from '@/lib/desktop-floating-widget'
+import { selectFrontendBundle } from './frontend-bundle-selection'
+import { resolveCurrentSpindleModalGeometry } from './modal-geometry'
 
 export { createFrontendExtensionContext } from './frontend-context'
 import { CORE_SETTING_KEYS } from './core-setting-keys'
@@ -163,6 +169,7 @@ import {
   type DecoratorOptions,
 } from './dom-decorator-service'
 import { registerHostIntentHandler, type HostIntentHandler, type JsonValue } from './host-intent-registry'
+import { createNativeSTTAPI } from './stt-native'
 
 declare const __APP_VERSION__: string
 
@@ -230,12 +237,25 @@ function toSettingsUpdatedEvent(value: unknown): SettingsUpdatedEvent | undefine
   }
 }
 
+interface DesktopWidgetFrontendModule {
+  setup?: SpindleFrontendModule['setup']
+  setupWidget?(
+    ctx: SpindleFrontendContext,
+    target: Omit<DesktopFloatingWidgetTarget, 'extensionId'>,
+  ): ReturnType<SpindleFrontendModule['setup']>
+  teardown?(): void | Promise<void>
+}
+
+export interface FrontendLoadOptions {
+  desktopWidgetTarget?: DesktopFloatingWidgetTarget
+}
+
 interface LoadedExtension {
   id: string
   generation: number
   identifier: string
   manifestSignature: string
-  module: SpindleFrontendModule
+  module: DesktopWidgetFrontendModule
   context: SpindleFrontendContext
   teardown?: () => void
   teardownClaimed: boolean
@@ -312,6 +332,7 @@ type FrontendExtensionHost = {
 }
 
 type FrontendExtensionContextBase = Omit<SpindleFrontendContext, 'ui' | 'messages' | 'dom'> & {
+  readonly frontendSessionId: string
   host: FrontendExtensionHost
   theme: SpindleThemeAuthoringAPI
   dom: FrontendExtensionDOM
@@ -563,16 +584,19 @@ function markExtensionReady(
   }
 }
 
-function getManifestSignature(manifest: SpindleManifest): string {
-  return `${manifest.identifier}:${manifest.version}:${manifest.entry_frontend || 'dist/frontend.js'}`
+function getManifestSignature(manifest: SpindleManifest, options: FrontendLoadOptions): string {
+  const selection = selectFrontendBundle(manifest, !!options.desktopWidgetTarget)
+  return `${manifest.identifier}:${manifest.version}:${selection.kind}:${selection.entry}`
 }
 
-function getFrontendBundleUrl(extensionId: string, manifest: SpindleManifest): string {
-  const cacheKey = (manifest as SpindleManifest & { frontend_cache_key?: unknown }).frontend_cache_key
-  const version = typeof cacheKey === 'string' && cacheKey.trim()
-    ? cacheKey
-    : getManifestSignature(manifest)
-  return `/api/v1/spindle/${extensionId}/frontend?v=${encodeURIComponent(version)}`
+function getFrontendBundleUrl(
+  extensionId: string,
+  manifest: SpindleManifest,
+  options: FrontendLoadOptions,
+): string {
+  const selection = selectFrontendBundle(manifest, !!options.desktopWidgetTarget)
+  const version = selection.cacheKey?.trim() || getManifestSignature(manifest, options)
+  return `/api/v1/spindle/${extensionId}/${selection.endpoint}?v=${encodeURIComponent(version)}`
 }
 
 function frontendLoadTimeout(identifier: string, phase: string, timeoutMs: number): Error {
@@ -584,11 +608,11 @@ function frontendLoadTimeout(identifier: string, phase: string, timeoutMs: numbe
 async function importFrontendModule(
   blobUrl: string,
   identifier: string,
-): Promise<SpindleFrontendModule> {
+): Promise<DesktopWidgetFrontendModule> {
   let timer: ReturnType<typeof setTimeout> | null = null
   try {
     return await Promise.race([
-      import(/* @vite-ignore */ blobUrl) as Promise<SpindleFrontendModule>,
+      import(/* @vite-ignore */ blobUrl) as Promise<DesktopWidgetFrontendModule>,
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => {
           reject(frontendLoadTimeout(identifier, 'module evaluation', FRONTEND_MODULE_IMPORT_TIMEOUT_MS))
@@ -604,12 +628,14 @@ async function importFrontendModule(
 async function doLoadFrontendExtension(
   extensionId: string,
   manifest: SpindleManifest,
-  force = false
+  force = false,
+  options: FrontendLoadOptions = {},
 ): Promise<void> {
+  activeTab.assertActive()
   let loaded!: LoadedExtension
   let cleanupLoadedExtension: ((reportTeardownError?: boolean) => void) | undefined
   let identityRegistered = false
-  const manifestSignature = getManifestSignature(manifest)
+  const manifestSignature = getManifestSignature(manifest, options)
   const existing = loadedExtensions.get(extensionId)
 
   if (!force && existing?.manifestSignature === manifestSignature) {
@@ -624,8 +650,9 @@ async function doLoadFrontendExtension(
   bootstrappingGenerations.set(extensionId, generation)
   loadGeneration.set(extensionId, generation)
   let frontendLifecycleActive = true
-  const currentGeneration = () => loadGeneration.get(extensionId) === generation
+  const currentGeneration = () => !activeTab.signal.aborted && loadGeneration.get(extensionId) === generation
   const assertFrontendActive = () => {
+    activeTab.assertActive()
     if (
       frontendLifecycleActive === false
       || currentGeneration() === false
@@ -651,7 +678,8 @@ async function doLoadFrontendExtension(
     if (permission.split('|').some((candidate) => cachedGrantedPermissions.includes(candidate))) return
     throw new Error(`PERMISSION_DENIED:${permission} - ${member} requires the ${permission} permission`)
   }
-  const bundleUrl = getFrontendBundleUrl(extensionId, manifest)
+  const bundleSelection = selectFrontendBundle(manifest, !!options.desktopWidgetTarget)
+  const bundleUrl = getFrontendBundleUrl(extensionId, manifest, options)
   const decoratorService = getDomDecoratorService({ extensionId, generation })
   const unloadDomDecorators = () => {
     decoratorService.unloadGeneration(extensionId, generation)
@@ -671,6 +699,7 @@ async function doLoadFrontendExtension(
     return tracked
   }
   let stateSelectors: StateSelectors | undefined
+  let speech: ReturnType<typeof createNativeSTTAPI> | undefined
   let cachedGrantedPermissions: string[] = []
   const settingsBridge = createSettingsBridge({
     manifestIdentifier: manifest.identifier,
@@ -800,6 +829,8 @@ async function doLoadFrontendExtension(
       clearComponentOverridesForOwner(extensionId, generation)
     }
     stateSelectors?.revokePermissions(revokedPermissions)
+    if (revokedPermissions.includes('media')) speech?.revoke()
+    if (revokedPermissions.includes('app_manipulation')) revokeInlineCardWrappingOptOut(manifest.identifier)
     if (previous.includes('world_books') && !next.includes('world_books')) {
       destroyComponentsForExtensionPermission(extensionId, 'world_books', generation)
     }
@@ -909,7 +940,7 @@ async function doLoadFrontendExtension(
       clearTimeout(bundleTimeout)
     }
     const blobUrl = URL.createObjectURL(blob)
-    let mod!: SpindleFrontendModule
+    let mod!: DesktopWidgetFrontendModule
     try {
       if (currentGeneration()) {
         await yieldToBrowser({ when: 'paint' })
@@ -929,8 +960,15 @@ async function doLoadFrontendExtension(
     // existing UI roots remain fully interactive. Scriptable iframe content must
     // opt into ctx.dom.createSandboxFrame() instead of replacing the base UI path.
 
-    if (typeof mod.setup !== 'function') {
-      console.warn(`[Spindle:${manifest.identifier}] Frontend module missing setup()`)
+    const setupFrontend = (bundleSelection.kind === 'widget' ? mod.setupWidget : mod.setup) as
+      | ((
+        ctx: SpindleFrontendContext,
+        target?: Omit<DesktopFloatingWidgetTarget, 'extensionId'>,
+      ) => ReturnType<SpindleFrontendModule['setup']>)
+      | undefined
+    if (typeof setupFrontend !== 'function') {
+      const expectedExport = bundleSelection.kind === 'widget' ? 'setupWidget()' : 'setup()'
+      console.warn(`[Spindle:${manifest.identifier}] Frontend module missing ${expectedExport}`)
       cleanupPermissionBootstrap()
       return
     }
@@ -1241,6 +1279,11 @@ async function doLoadFrontendExtension(
       settingIds: CORE_SETTING_KEYS.map((entry) => entry.key),
     })
     stateSelectors = stateSelectorBridge
+    speech = createNativeSTTAPI({
+      assertActive: assertFrontendActive,
+      requirePermission: assertCanonicalPermission,
+      onTeardown,
+    })
     const domain = createFrontendDomainApi({
       store: useStore,
       assertActive: assertFrontendActive,
@@ -1364,7 +1407,9 @@ async function doLoadFrontendExtension(
     const host = Object.freeze({
       descriptorVersion: 1 as const,
       lumiverseVersion: LUMIVERSE_VERSION,
-      capabilities: Object.freeze({ ...SPINDLE_HOST_CAPABILITIES, ...THEME_AUTHORING_HOST_CAPABILITIES }),
+      capabilities: Object.freeze({ ...SPINDLE_HOST_CAPABILITIES, ...THEME_AUTHORING_HOST_CAPABILITIES, ...SPINDLE_STT_HOST_CAPABILITIES,
+        'frontend-session-origin-v1': 1,
+      }),
       extensionInstallationId: extensionId,
       surfaces: createHostSurfaceAPI({
         extensionId,
@@ -1520,7 +1565,7 @@ async function doLoadFrontendExtension(
         },
         getBuiltInTabTitle(tabId: string): string | undefined {
           assertFrontendActive()
-          const tab = DRAWER_TABS.find((t) => t.id === tabId)
+          const tab = DRAWER_TABS.find((t) => t.id === resolveCouncilTabId(tabId))
           return tab ? (tab.tabHeaderTitle ?? tab.tabName) : undefined
         },
         getTabLocation(tabId: string): TabLocation {
@@ -1704,10 +1749,9 @@ async function doLoadFrontendExtension(
           })
 
           const container = document.createElement('div')
-          const w = Math.min(options?.width || 420, window.innerWidth - 40)
-          const mh = Math.min(options?.maxHeight || 520, window.innerHeight - 40)
+          const geometry = resolveCurrentSpindleModalGeometry(options)
           Object.assign(container.style, {
-            width: `${w}px`, maxHeight: `${mh}px`,
+            width: `${geometry.width}px`, maxHeight: `${geometry.maxHeight}px`,
             background: 'var(--lumiverse-bg)', borderRadius: '12px',
             border: '1px solid var(--lumiverse-border)',
             display: 'flex', flexDirection: 'column', overflow: 'hidden',
@@ -1972,6 +2016,7 @@ async function doLoadFrontendExtension(
           characterId: state.activeCharacterId ?? null,
         }
       },
+      frontendSessionId,
       sendToBackend(payload: unknown): void {
         assertFrontendActive()
         // Send via WebSocket to the backend worker
@@ -2076,6 +2121,7 @@ async function doLoadFrontendExtension(
       display: {
         registerResolver(resolver) {
           assertFrontendActive()
+          if (resolver.skipInlineCardWrapping) assertCanonicalPermission('app_manipulation', 'ctx.display.registerResolver.skipInlineCardWrapping')
           return registerDisplayResolver(manifest.identifier, resolver)
         },
         invalidate(touchedVars: string[]) {
@@ -2111,6 +2157,7 @@ async function doLoadFrontendExtension(
       state: stateSelectorBridge,
       domain,
       geometry: createFrontendGeometryAPI(),
+      stt: speech.api,
       onTeardown,
     })
 
@@ -2308,7 +2355,12 @@ async function doLoadFrontendExtension(
         finalizeFrontendLoadFailure(cleanupLoadedExtension, loaded, { superseded: true })
         return
       }
-      teardownResult = mod.setup(context)
+      if (bundleSelection.kind === 'widget') {
+        const { index, title, width, height, chromeless } = options.desktopWidgetTarget!
+        teardownResult = setupFrontend(context, { index, title, width, height, chromeless })
+      } else {
+        teardownResult = setupFrontend(context)
+      }
     } catch (err) {
       finalizeFrontendLoadFailure(cleanupLoadedExtension, loaded, { superseded: false })
       throw err
@@ -2365,9 +2417,11 @@ async function doLoadFrontendExtension(
 export async function loadFrontendExtension(
   extensionId: string,
   manifest: SpindleManifest,
-  force = false
+  force = false,
+  options: FrontendLoadOptions = {},
 ): Promise<void> {
-  const manifestSignature = getManifestSignature(manifest)
+  activeTab.assertActive()
+  const manifestSignature = getManifestSignature(manifest, options)
   const pending = loadInFlight.get(extensionId)
 
   if (force) {
@@ -2384,7 +2438,12 @@ export async function loadFrontendExtension(
     }
   }
 
-  if (pending && !pending.invalidated && (!force || (pending.force && pending.manifestSignature === manifestSignature))) {
+  if (
+    pending
+    && !pending.invalidated
+    && pending.manifestSignature === manifestSignature
+    && (!force || pending.force)
+  ) {
     await pending.promise
     return
   }
@@ -2393,7 +2452,7 @@ export async function loadFrontendExtension(
     .catch(() => {
       // continue queue even after previous failure
     })
-    .then(() => doLoadFrontendExtension(extensionId, manifest, force))
+    .then(() => doLoadFrontendExtension(extensionId, manifest, force, options))
 
   loadInFlight.set(extensionId, { promise: next, force, manifestSignature, invalidated: false })
   try {
@@ -2695,7 +2754,10 @@ export function getExtensionMountPointsVersion(): number {
 }
 
 export async function unloadAllFrontendExtensions(): Promise<void> {
-  for (const [id] of loadedExtensions) {
-    await unloadFrontendExtension(id)
-  }
+  const ids = new Set([...loadedExtensions.keys(), ...loadInFlight.keys()])
+  await Promise.all([...ids].map(id => unloadFrontendExtension(id)))
 }
+
+activeTab.signal.addEventListener('abort', () => {
+  void unloadAllFrontendExtensions().catch(error => console.error('[Spindle] Frontend shutdown failed:', error))
+}, { once: true })

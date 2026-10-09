@@ -26,17 +26,33 @@ describe('staging chat reveal regression contracts', () => {
     expect(emptyChat).toMatch(/detail:\s*\{\s*chatId\s*\}/)
   })
 
-  test('cancels a pending populated reveal so hydration can retry after rows return', async () => {
+  test('waits for the warm range and a stable settle before revealing populated rows', async () => {
     const source = await readSource('MessageList.tsx')
     const revealEffect = source.match(
-      /const hasPopulated = virtualItems\.some\([\s\S]*?\n  \}, \[chatId, hasPopulated\]\)/,
+      /const hasPopulated = virtualItems\.some\([\s\S]*?\n  \}, \[canSettleInitialDisplay, chatId, interceptorRegistryVersion\]\)/,
     )?.[0] ?? ''
 
-    expect(revealEffect).toMatch(/if \(hasFadedInRef\.current \|\| !hasPopulated\) return/)
+    expect(revealEffect).toContain('const canSettleInitialDisplay = hasPopulated && initialRangeWarm')
+    expect(revealEffect).toMatch(/if \(hasFadedInRef\.current \|\| !canSettleInitialDisplay\) return/)
     expect(revealEffect).toMatch(/let cancelled = false/)
-    expect(revealEffect).toMatch(/if \(!cancelled\) \{[\s\S]*?hasFadedInRef\.current = true/)
+    expect(revealEffect).toContain('CHAT_REVEAL_SETTLE_QUIET_MS')
+    expect(revealEffect).toMatch(/if \(!force && !isChatDisplaySettled\(chatId\)\)/)
+    expect(revealEffect).toContain('hasFadedInRef.current = true')
     expect(revealEffect).toMatch(/return \(\) => \{\s*cancelled = true/)
-    expect(revealEffect).toMatch(/\}, \[chatId, hasPopulated\]\)$/)
+    expect(revealEffect).toMatch(/cancelAnimationFrame\(firstFrame\)/)
+    expect(revealEffect).toMatch(/cancelAnimationFrame\(secondFrame\)/)
+    expect(revealEffect).toMatch(/\}, \[canSettleInitialDisplay, chatId, interceptorRegistryVersion\]\)$/)
+  })
+
+  test('keeps the scroll-to-bottom control out of the settling display', async () => {
+    const [chatView, scrollToBottom] = await Promise.all([
+      readSource('ChatView.tsx'),
+      readSource('ScrollToBottom.tsx'),
+    ])
+
+    expect(chatView).toContain('<ScrollToBottom key={chatId} displayReady={!chatChromeEntering} />')
+    expect(scrollToBottom).toContain('if (!displayReady || !visible) return null')
+    expect(scrollToBottom).toContain('}, [displayReady])')
   })
 
   test('freezes an active stream before animating it out on home navigation', async () => {

@@ -160,6 +160,11 @@ function projectPublicBlocks(value: unknown, label: string): PromptBlockDTO[] {
     .map((block, index) => projectPublicBlock(block, `${label}[${index}]`))
 }
 
+/** Share the bridge's read contract with preset loading, before React publishes editor state. */
+export function assertPresetEditorBlocksProjectable(blocks: unknown): void {
+  projectPublicBlocks(blocks, 'preset.blocks')
+}
+
 function hasLegacyVariableShape(block: PromptBlock): boolean {
   if (!Array.isArray(block.variables)) return false
   const ids = new Set<string>()

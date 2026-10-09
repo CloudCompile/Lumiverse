@@ -3,12 +3,13 @@ import { beforeEach, describe, expect, mock, test } from 'bun:test'
 import type { WorldBookEntry } from '@/types/api'
 
 const get = mock((..._args: unknown[]) => Promise.resolve(undefined))
+const post = mock((..._args: unknown[]) => Promise.resolve(undefined))
 
 mock.module('./client', () => ({
   del: mock(),
   get,
   patch: mock(),
-  post: mock(),
+  post,
   postBlob: mock(),
   put: mock(),
 }))
@@ -51,5 +52,40 @@ describe('worldBooksApi entry loading', () => {
       { limit: 1000, offset: 2000, sort_by: 'order', sort_dir: 'asc' },
     ])
     expect(get.mock.calls.every((call) => call[2] === options)).toBe(true)
+  })
+})
+
+describe('worldBooksApi organization contract', () => {
+  beforeEach(() => { get.mockClear(); post.mockClear() })
+
+  test('encodes each tag separately including commas, Unicode, slashes and query delimiters', async () => {
+    const tags = ['faction,a', '世界 / &?#', 'villain']
+    const options = { signal: new AbortController().signal }
+    await worldBooksApi.listEntries('book', { folder: '', tag: tags, type: 'trigger', search: 'alpha', limit: 50 }, options)
+    const [path, params, actualOptions] = get.mock.calls[0]
+    expect(new URL(String(path), 'https://fixture.test').searchParams.getAll('tag')).toEqual(tags)
+    expect(params).toEqual({ folder: '', type: 'trigger', search: 'alpha', limit: 50 })
+    expect(actualOptions).toBe(options)
+  })
+
+  test('omits tag parameters and folder scope when selecting All entries', async () => {
+    await worldBooksApi.listEntries('book', { tag: [] })
+    expect(get).toHaveBeenCalledWith('/world-books/book/entries', {}, undefined)
+  })
+
+  test('reads organization facets and sends folder actions through native routes', async () => {
+    await worldBooksApi.getEntryOrganization('book')
+    expect(get).toHaveBeenCalledWith('/world-books/book/entry-organization')
+    const input = { action: 'move' as const, folder: 'Characters', target_book_id: 'other', target_folder: '' }
+    await worldBooksApi.entryFolderAction('book', input)
+    expect(post).toHaveBeenCalledWith('/world-books/book/entry-folders', input)
+  })
+
+  test('forwards same-book move and additive tags without replacing unrelated metadata', async () => {
+    const move = { action: 'move' as const, entry_ids: ['entry'], target_book_id: 'book', target_folder: 'Locations', expected_revisions: { entry: 2 } }
+    const tags = { action: 'add_tags' as const, entry_ids: ['entry'], tags: ['villain'], expected_revisions: { entry: 3 } }
+    await worldBooksApi.bulkEntryAction('book', move)
+    await worldBooksApi.bulkEntryAction('book', tags)
+    expect(post.mock.calls).toEqual([['/world-books/book/entries/bulk', move], ['/world-books/book/entries/bulk', tags]])
   })
 })

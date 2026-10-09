@@ -233,18 +233,22 @@ function safeCalc(expr: string): number {
       if (cleaned[pos] === "(") {
         pos++;
         const result = parseExpr();
-        if (cleaned[pos] === ")") pos++;
+        if (cleaned[pos] !== ")") throw new Error("calc: unmatched opening parenthesis");
+        pos++;
         return result;
       }
       const start = pos;
       while (pos < cleaned.length && (/[0-9.]/.test(cleaned[pos]))) pos++;
+      if (start === pos) throw new Error("calc: expected a number");
       const num = parseFloat(cleaned.substring(start, pos));
-      return isNaN(num) ? 0 : num;
+      if (isNaN(num)) throw new Error("calc: invalid number");
+      return num;
     });
   }
 
   try {
     const result = parseExpr();
+    if (pos !== cleaned.length) throw new Error("calc: unexpected trailing input");
     return result;
   } catch {
     return 0;

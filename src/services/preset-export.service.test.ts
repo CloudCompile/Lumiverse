@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { strFromU8, unzipSync } from "fflate";
 import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import {
+  buildPortablePresetExport,
   buildPresetBulkExportStream,
   consumePreparedPresetExport,
   preparePresetBulkExport,
 } from "./preset-export.service";
+import { getPreset } from "./presets.service";
 
 function initTestDb(): void {
   closeDatabase();
@@ -40,7 +42,14 @@ function initTestDb(): void {
   )`);
 }
 
-function insertPreset(id: string, userId: string, blockKey: string): void {
+function insertPreset(
+  id: string,
+  userId: string,
+  blockKey: string,
+  sealedSource: string | null = "lumihub",
+  includeManifest = true,
+  installSource = sealedSource,
+): void {
   getDb().run(
     `INSERT INTO presets (id, name, provider, parameters, prompt_order, metadata, prompts, user_id)
      VALUES (?, 'Shared name', 'loom', '{}', ?, ?, '{}', ?)`,
@@ -52,11 +61,12 @@ function insertPreset(id: string, userId: string, blockKey: string): void {
         content: "private source text",
         sealed: true,
         sealedKey: blockKey,
-        sealedSource: "lumihub",
+        ...(sealedSource ? { sealedSource } : {}),
       }]),
       JSON.stringify({
         coverUrl: `https://cdn.example.test/${id}.webp`,
-        _lumiverse_sealed_preset: { blocks: [{ key: blockKey }] },
+        ...(installSource ? { _lumiverse_install_source: installSource } : {}),
+        ...(includeManifest ? { _lumiverse_sealed_preset: { blocks: [{ key: blockKey }] } } : {}),
       }),
       userId,
     ],
@@ -96,5 +106,20 @@ describe("streaming preset bulk export", () => {
       sealedKey: "private.a",
     });
   });
-});
 
+  test("redacts Illarin-sealed content even without a LumiHub sidecar manifest", () => {
+    insertPreset("illarin-preset", "u1", "private.illarin", null, false, "illarin");
+
+    const preset = getPreset("u1", "illarin-preset");
+    expect(preset).not.toBeNull();
+    const exported = buildPortablePresetExport("u1", preset!);
+
+    expect(exported.blocks).toEqual([expect.objectContaining({
+      content: "{{presetBlock::private.illarin}}",
+      sealed: true,
+      sealedKey: "private.illarin",
+      sealedSource: "illarin",
+    })]);
+    expect(JSON.stringify(exported)).not.toContain("private source text");
+  });
+});

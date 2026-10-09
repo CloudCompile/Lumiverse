@@ -6,7 +6,7 @@ export const sttApi = {
    */
   async transcribe(
     audioBlob: Blob,
-    options?: { language?: string; connectionId?: string; model?: string; fileName?: string }
+    options?: { language?: string; connectionId?: string; model?: string; fileName?: string; signal?: AbortSignal }
   ): Promise<{ text: string; language?: string }> {
     const form = new FormData()
     form.append('audio', audioBlob, options?.fileName || 'recording.webm')
@@ -18,6 +18,7 @@ export const sttApi = {
       method: 'POST',
       credentials: 'include',
       body: form,
+      signal: options?.signal,
     })
 
     if (!res.ok) {

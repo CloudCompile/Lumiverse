@@ -3,6 +3,8 @@ import { bodyLimit } from "hono/body-limit";
 import * as svc from "../services/settings.service";
 import { reconcileActiveLoomPreset } from "../services/presets.service";
 import { InvalidSettingError } from "../services/settings.service";
+import { eventBus } from "../ws/bus";
+import { EventType } from "../ws/events";
 
 const app = new Hono();
 
@@ -72,6 +74,7 @@ app.delete("/:key", (c) => {
   const userId = c.get("userId");
   const deleted = svc.deleteSetting(userId, c.req.param("key"));
   if (!deleted) return c.json({ error: "Not found" }, 404);
+  eventBus.emit(EventType.SETTINGS_UPDATED, { key: c.req.param("key") }, userId);
   return c.json({ success: true });
 });
 

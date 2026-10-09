@@ -24,6 +24,8 @@ These are always available:
 
 | Permission | Description |
 |---|---|
+| `"screen_capture"` | Privileged worker-only requests for a desktop screenshot. Requires a connected native capture client and explicit local approval; never auto-granted. See [Desktop capture](./desktop-capture.md). |
+| `"screen_recording"` | Privileged worker-only requests for bounded desktop video or an explicitly armed replay buffer. Never auto-granted; does not authorize silent recording. |
 | `"generation"` | Fire LLM generations (raw, quiet, batch) on behalf of the user. Also grants access to list/inspect connection profiles. |
 | `"interceptor"` | Register a pre-generation interceptor that can modify the prompt before it reaches the LLM |
 | `"tools"` | Register LLM tools (function calling). Council-eligible tools appear in the Council tools list and can be assigned to members for pre-generation analysis |
@@ -35,7 +37,7 @@ These are always available:
 | `"chats"` | CRUD on chat sessions (list, get, update, delete) + get active chat |
 | `"presets"` | CRUD on user presets, prompt blocks, and derived category groups |
 | `"world_books"` | Full CRUD on world books and their entries (list, get, create, update, delete) |
-| `"regex_scripts"` | Read the user's regex library and create/update/delete unbound scripts owned by the calling extension |
+| `"regex_scripts"` | Read the user's regex library and create/update/delete scripts owned by the calling extension, including preset-bound ones it created |
 | `"regex_scripts_unrestricted"` | Privileged, additive access to update/delete any user regex, including legacy, card-bound, preset-bound, and other-extension-owned scripts. Requires `regex_scripts` too |
 | `"databanks"` | Full CRUD on databanks and their documents (list, get, create, update, delete, reprocess, read parsed content) |
 | `"memories"` | Full CRUD on the Memory Cortex (entities, relations, consolidations, salience, vaults, chat links) and long-term chat memory (vectorized chunks, top-K retrieval, warmup, cache) |

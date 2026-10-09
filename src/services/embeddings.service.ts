@@ -23,10 +23,8 @@ import {
   collapseVectorHitsBySourceId,
   estimateChatChunkTokens,
   hashChatChunkContent,
-  splitChatChunkContent,
   type ChatChunkEmbeddingMetadata,
 } from "./chat-chunk-embedding";
-import { isChatChunkVectorizationBatchTimeoutError } from "./chat-chunk-vectorization-timeouts";
 import { chunkDocument } from "./databank/document-chunker.service";
 import {
   providerRegistry,
@@ -1334,290 +1332,20 @@ function loadChatChunkMessageIds(chunkId: string): string[] {
 async function embedChatChunkContentLeaves(
   userId: string,
   content: string,
-  initialError?: Error,
   options?: { signal?: AbortSignal },
 ): Promise<Array<{ content: string; vector: number[] }>> {
   const text = content.trim();
   if (!text) return [];
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-
-  if (initialError && !isRetryableBatchError(initialError)) {
-    throw initialError;
-  }
-  if (initialError) {
-    const forcedSlices = splitChatChunkContent(text, { forceSplit: true });
-    if (forcedSlices.length < 2) throw initialError;
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const slice of forcedSlices) {
-      out.push(...await embedChatChunkContentLeaves(userId, slice, undefined, options));
-    }
-    return out;
-  }
-
-  const proactiveSlices = buildChatChunkEmbeddingSlices(text).map((slice) => slice.content);
-  if (proactiveSlices.length > 1) {
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const slice of proactiveSlices) {
-      out.push(...await embedChatChunkContentLeaves(userId, slice, undefined, options));
-    }
-    return out;
-  }
-
-  try {
-    const [vector] = await cachedEmbedTexts(userId, [text], { signal: options?.signal });
-    if (!vector || vector.length === 0) {
-      throw new Error("No embedding vector returned");
-    }
-    return [{ content: text, vector }];
-  } catch (err) {
+  const leaves: Array<{ content: string; vector: number[] }> = [];
+  // Split before dispatch using the normal chunk limits. A failed slice is
+  // never resubmitted or split again in response to a provider error.
+  for (const slice of buildChatChunkEmbeddingSlices(text)) {
     if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-    const error = err instanceof Error ? err : new Error(String(err));
-    if (!isRetryableBatchError(error)) throw error;
-
-    const parts = splitChatChunkContent(text, { forceSplit: true });
-    if (parts.length < 2) throw error;
-
-    const out: Array<{ content: string; vector: number[] }> = [];
-    for (const part of parts) {
-      out.push(...await embedChatChunkContentLeaves(userId, part, undefined, options));
-    }
-    return out;
+    const [vector] = await cachedEmbedTexts(userId, [slice.content], { signal: options?.signal });
+    if (!vector || vector.length === 0) throw new Error("No embedding vector returned");
+    leaves.push({ content: slice.content, vector });
   }
-}
-
-export async function tryRecoverChatChunkEmbeddingWithAutoSplit(
-  userId: string,
-  chatId: string,
-  chunkId: string,
-  content: string,
-  error: Error,
-  metadata?: Record<string, any>,
-  sourceTokenCount?: number,
-  options?: { signal?: AbortSignal },
-): Promise<{
-  recovered: boolean;
-  skipped: boolean;
-  splitCount: number;
-  splitCharCounts: number[];
-  splitTokenCounts: number[];
-}> {
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-  const text = content.trim();
-  if (!text || !isRetryableBatchError(error)) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const previewSplits = splitChatChunkContent(text, { forceSplit: true });
-  if (previewSplits.length < 2) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const db = getDb();
-  const liveBefore = db
-    .query("SELECT 1 AS found FROM chat_chunks WHERE id = ? AND chat_id = ?")
-    .get(chunkId, chatId) as { found: number } | null;
-  if (!liveBefore) {
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const resolvedSourceTokenCount = Math.max(0, sourceTokenCount ?? estimateChatChunkTokens(text));
-  console.warn(
-    "[embeddings] Chat chunk auto-split triggered:",
-    {
-      chunkId,
-      chatId,
-      sourceChars: text.length,
-      sourceTokensApprox: resolvedSourceTokenCount,
-      previewSplits: previewSplits.length,
-      previewSplitChars: previewSplits.map((part) => part.length),
-      previewSplitTokensApprox: previewSplits.map((part) => estimateChatChunkTokens(part)),
-      error: error.message,
-    },
-  );
-
-  const leaves = await embedChatChunkContentLeaves(userId, text, error, options);
-  const liveAfter = db
-    .query("SELECT 1 AS found FROM chat_chunks WHERE id = ? AND chat_id = ?")
-    .get(chunkId, chatId) as { found: number } | null;
-  if (!liveAfter) {
-    console.info(`[embeddings] Chat chunk auto-split skipped write for deleted chunk ${chunkId}`);
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-  if (options?.signal?.aborted) throw resolveAbortError(options.signal);
-
-  const rows = buildChatChunkEmbeddingRows(
-    userId,
-    chatId,
-    chunkId,
-    text,
-    leaves,
-    metadata,
-    Math.floor(Date.now() / 1000),
-    resolvedSourceTokenCount,
-  );
-  await replaceChatChunkEmbeddingRows(userId, [{ chatId, chunkId }], rows);
-  await scheduleStoreOptimize("chat_chunk");
-
-  const splitCharCounts = rows.map((row) => row.content.length);
-  const splitTokenCounts = rows.map((row) => estimateChatChunkTokens(row.content));
-  console.info(
-    "[embeddings] Chat chunk auto-split recovered:",
-    {
-      chunkId,
-      chatId,
-      splitCount: rows.length,
-      splitCharCounts,
-      splitTokenCountsApprox: splitTokenCounts,
-    },
-  );
-
-  return {
-    recovered: true,
-    skipped: false,
-    splitCount: rows.length,
-    splitCharCounts,
-    splitTokenCounts,
-  };
-}
-
-async function tryRecoverVaultChunkEmbeddingWithAutoSplit(
-  userId: string,
-  vaultId: string,
-  vaultChunkId: string,
-  content: string,
-  error: Error,
-  metadata?: Record<string, any>,
-  sourceTokenCount?: number,
-): Promise<{
-  recovered: boolean;
-  skipped: boolean;
-  splitCount: number;
-  splitCharCounts: number[];
-  splitTokenCounts: number[];
-}> {
-  const text = content.trim();
-  if (!text || !isRetryableBatchError(error)) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const previewSplits = splitChatChunkContent(text, { forceSplit: true });
-  if (previewSplits.length < 2) {
-    return {
-      recovered: false,
-      skipped: false,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const db = getDb();
-  const liveBefore = db
-    .query("SELECT 1 AS found FROM cortex_vault_chunks WHERE id = ? AND vault_id = ?")
-    .get(vaultChunkId, vaultId) as { found: number } | null;
-  if (!liveBefore) {
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const resolvedSourceTokenCount = Math.max(0, sourceTokenCount ?? estimateChatChunkTokens(text));
-  console.warn(
-    "[embeddings] Vault chunk auto-split triggered:",
-    {
-      vaultChunkId,
-      vaultId,
-      sourceChars: text.length,
-      sourceTokensApprox: resolvedSourceTokenCount,
-      previewSplits: previewSplits.length,
-      previewSplitChars: previewSplits.map((part) => part.length),
-      previewSplitTokensApprox: previewSplits.map((part) => estimateChatChunkTokens(part)),
-      error: error.message,
-    },
-  );
-
-  const leaves = await embedChatChunkContentLeaves(userId, text, error);
-  const liveAfter = db
-    .query("SELECT 1 AS found FROM cortex_vault_chunks WHERE id = ? AND vault_id = ?")
-    .get(vaultChunkId, vaultId) as { found: number } | null;
-  if (!liveAfter) {
-    console.info(`[embeddings] Vault chunk auto-split skipped write for deleted chunk ${vaultChunkId}`);
-    return {
-      recovered: true,
-      skipped: true,
-      splitCount: 0,
-      splitCharCounts: [],
-      splitTokenCounts: [],
-    };
-  }
-
-  const rows = buildVaultChunkEmbeddingRows(
-    userId,
-    vaultId,
-    vaultChunkId,
-    text,
-    leaves,
-    metadata,
-    Math.floor(Date.now() / 1000),
-    resolvedSourceTokenCount,
-  );
-  await replaceVaultChunkEmbeddingRows(userId, vaultId, [vaultChunkId], rows);
-  await scheduleStoreOptimize();
-
-  const splitCharCounts = rows.map((row) => row.content.length);
-  const splitTokenCounts = rows.map((row) => estimateChatChunkTokens(row.content));
-  console.info(
-    "[embeddings] Vault chunk auto-split recovered:",
-    {
-      vaultChunkId,
-      vaultId,
-      splitCount: rows.length,
-      splitCharCounts,
-      splitTokenCountsApprox: splitTokenCounts,
-    },
-  );
-
-  return {
-    recovered: true,
-    skipped: false,
-    splitCount: rows.length,
-    splitCharCounts,
-    splitTokenCounts,
-  };
+  return leaves;
 }
 
 async function deleteStoreRows(collection: CollectionName, filter: VectorFilter): Promise<void> {
@@ -2903,86 +2631,18 @@ export async function cachedEmbedTexts(
   return results as number[][];
 }
 
-/**
- * llama.cpp's /v1/embeddings endpoint rejects requests whose cumulative token
- * count exceeds the server's `n_ubatch` (physical batch size, default 512).
- * The error surfaces as HTTP 500 "input is too large to process. increase the
- * physical batch size" — not a timeout — so the caller's timeout-only retry
- * never kicks in. Detect it (plus timeouts and a few other transient shapes)
- * so callers can halve and retry down to size 1 without user intervention.
- */
-function isRetryableBatchError(err: Error): boolean {
-  if (isChatChunkVectorizationBatchTimeoutError(err)) return false;
-  const m = err.message;
-  if (/timed out|abort/i.test(m)) return true;
-  if (/too large to process|physical batch size|increase.*batch.*size/i.test(m)) return true;
-  if (/exceeds.*context|context.*exceed/i.test(m)) return true;
-  if (/\(413\)|\(500\)|\(503\)/.test(m)) return true;
-  return false;
-}
-
-function looksLikePhysicalBatchLimit(err: Error): boolean {
-  return /too large to process|physical batch size|exceeds.*context/i.test(err.message);
-}
-
-/**
- * Next (shorter) length to retry an over-budget query embed at, or null when
- * we've hit the floor and should give up. Halving mirrors
- * embedWithAdaptiveBatching's backoff; the floor stops us from spinning on a
- * backend that rejects everything.
- */
-export function nextQueryEmbedLength(currentLen: number, minChars: number): number | null {
-  if (currentLen <= minChars) return null;
-  const next = Math.max(minChars, Math.floor(currentLen / 2));
-  return next < currentLen ? next : null;
-}
-
-/**
- * Embed a single retrieval query, shrinking it on retryable "input too large"
- * errors instead of letting the caller collapse to a recency fallback.
- * Token-limited embedding backends (llama.cpp `n_ubatch`, 512-token BERT
- * models) reject oversized inputs with 413/500 — and a multi-message LTCM
- * query easily exceeds that. We keep the most-recent tail (consistent with how
- * the query is built) and halve until the backend accepts it or we hit the
- * floor, at which point the original error propagates.
- */
-export async function embedQueryAdaptive(
+/** Embed the retrieval query once per configured connection. */
+export async function embedQuery(
   userId: string,
   text: string,
-  options?: { signal?: AbortSignal; minChars?: number },
+  options?: { signal?: AbortSignal },
 ): Promise<number[]> {
-  const minChars = Math.max(64, options?.minChars ?? 512);
-  let current = text;
-  for (;;) {
-    try {
-      const [vec] = await cachedEmbedTexts(userId, [current], { signal: options?.signal, inputType: "query" });
-      return vec ?? [];
-    } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      // Never swallow a genuine cancellation by retrying a smaller input.
-      if (options?.signal?.aborted || /abort/i.test(e.message)) throw e;
-      const nextLen = isRetryableBatchError(e) ? nextQueryEmbedLength(current.length, minChars) : null;
-      if (nextLen == null) throw e;
-      console.warn(
-        `[embeddings] Query embed of ${current.length} chars failed (${e.message}); retrying truncated to ${nextLen} chars`,
-      );
-      current = current.slice(-nextLen);
-    }
-  }
+  const [vector] = await cachedEmbedTexts(userId, [text], { signal: options?.signal, inputType: "query" });
+  return vector ?? [];
 }
 
-/**
- * Embed a list of items with automatic batch-halving on transient errors.
- *
- * For llama.cpp-style backends where the server's `n_ubatch` caps per-request
- * token volume, the user can't know the right `batch_size` in advance — a
- * batch that works for 256-token chunks will blow up on 2048-token ones. This
- * wrapper starts at `initialBatchSize`, halves on retryable failures, and
- * processes surviving sub-batches via `onBatchReady`. Items that still fail
- * at size 1 are surfaced via `onItemFailed` so callers can record error state
- * and move on rather than aborting the whole run.
- */
-export async function embedWithAdaptiveBatching<T>(
+/** Embed configured batches once and report failed items without resubmitting them. */
+export async function embedInBatches<T>(
   userId: string,
   items: T[],
   initialBatchSize: number,
@@ -2993,9 +2653,8 @@ export async function embedWithAdaptiveBatching<T>(
 ): Promise<void> {
   if (items.length === 0) return;
   const bs = Math.max(1, Math.min(initialBatchSize, 200));
-  const label = options?.label ?? "embed";
 
-  const process = async (batch: T[], currentSize: number): Promise<void> => {
+  const process = async (batch: T[]): Promise<void> => {
     if (options?.signal?.aborted) {
       await onItemFailed(batch, resolveAbortError(options.signal));
       return;
@@ -3010,33 +2669,12 @@ export async function embedWithAdaptiveBatching<T>(
         return;
       }
       const e = err instanceof Error ? err : new Error(String(err));
-      if (isRetryableBatchError(e) && currentSize > 1) {
-        const half = Math.max(1, Math.floor(currentSize / 2));
-        console.warn(
-          `[embeddings] ${label}: batch of ${batch.length} failed (${e.message}); retrying in sub-batches of ${half}`,
-        );
-        for (let j = 0; j < batch.length; j += half) {
-          await process(batch.slice(j, j + half), half);
-        }
-        return;
-      }
-      if (currentSize === 1 && looksLikePhysicalBatchLimit(e)) {
-        await onItemFailed(
-          batch,
-          new Error(
-            `${e.message} — a single input still exceeds the server's physical batch size. ` +
-            `For llama.cpp, restart llama-server with a larger --ubatch-size / -ub (and matching --batch-size / -b), ` +
-            `or reduce the source chunk size.`,
-          ),
-        );
-      } else {
-        await onItemFailed(batch, e);
-      }
+      await onItemFailed(batch, e);
     }
   };
 
   for (let i = 0; i < items.length; i += bs) {
-    await process(items.slice(i, i + bs), bs);
+    await process(items.slice(i, i + bs));
   }
 }
 
@@ -3838,7 +3476,6 @@ export async function reindexWorldBookEntries(
 
   const processGroupBatch = async (
     groups: Array<{ entry: WorldBookEntry; chunks: Array<{ chunkIndex: number; content: string; searchText: string; chunkCount: number }> }>,
-    currentSize: number,
   ): Promise<void> => {
     if (groups.length === 0) return;
     const payloads = groups.flatMap((group) => group.chunks.map((chunk) => ({ entry: group.entry, chunk })));
@@ -3904,16 +3541,6 @@ export async function reindexWorldBookEntries(
       emitProgress();
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
-      if (isRetryableBatchError(error) && currentSize > 1) {
-        const half = Math.max(1, Math.floor(currentSize / 2));
-        console.warn(
-          `[embeddings] WB reindex: batch of ${groups.length} failed (${error.message}); retrying in sub-batches of ${half}`,
-        );
-        for (let i = 0; i < groups.length; i += half) {
-          await processGroupBatch(groups.slice(i, i + half), half);
-        }
-        return;
-      }
       console.warn("[embeddings] Batch embedding failed:", error);
       const failed = await markWorldBookEntriesVectorErrorIfCurrent(
         userId,
@@ -3929,7 +3556,7 @@ export async function reindexWorldBookEntries(
   };
 
   for (let i = 0; i < entryGroups.length; i += batchSize) {
-    await processGroupBatch(entryGroups.slice(i, i + batchSize), batchSize);
+    await processGroupBatch(entryGroups.slice(i, i + batchSize));
   }
 
   // Compact all fragments into fewer files, prune old versions, and optionally
@@ -4594,7 +4221,7 @@ export async function reindexChatMessages(
   }
 
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
-  await embedWithAdaptiveBatching(
+  await embedInBatches(
     userId,
     chunksToUpsert,
     batchSize,
@@ -4617,19 +4244,7 @@ export async function reindexChatMessages(
         rows,
       );
     },
-    async (failedBatch, err) => {
-      if (failedBatch.length === 1) {
-        const [failed] = failedBatch;
-        const recovered = await tryRecoverChatChunkEmbeddingWithAutoSplit(
-          userId,
-          chatId,
-          failed.chunkId,
-          failed.content,
-          err,
-          { chunkId: failed.chunkId, ...(failed.metadata || {}) },
-        );
-        if (recovered.recovered) return;
-      }
+    async (_failedBatch, err) => {
       console.warn("[embeddings] Batch chat embedding failed:", err);
     },
     { label: "chat memory" },
@@ -5002,7 +4617,7 @@ export async function rebuildVaultEmbeddings(
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
   const embeddedChunkIds = new Set<string>();
 
-  await embedWithAdaptiveBatching(
+  await embedInBatches(
     userId,
     valid,
     batchSize,
@@ -5027,38 +4642,7 @@ export async function rebuildVaultEmbeddings(
       );
       for (const chunk of batch) embeddedChunkIds.add(chunk.vaultChunkId);
     },
-    async (failedBatch, err) => {
-      if (failedBatch.length === 1) {
-        const [chunk] = failedBatch;
-        const sourceTokenCount = estimateChatChunkTokens(chunk.content.trim());
-        console.warn("[embeddings] Terminal vault chunk rebuild failure:", {
-          vaultChunkId: chunk.vaultChunkId,
-          vaultId,
-          sourceChars: chunk.content.length,
-          sourceTokensApprox: sourceTokenCount,
-          model: cfg.model,
-          timeoutSeconds: cfg.request_timeout,
-          error: err.message,
-        });
-
-        const recovered = await tryRecoverVaultChunkEmbeddingWithAutoSplit(
-          userId,
-          vaultId,
-          chunk.vaultChunkId,
-          chunk.content,
-          err,
-          {
-            vaultId,
-            rebuiltAt: Math.floor(Date.now() / 1000),
-            vaultChunkId: chunk.vaultChunkId,
-          },
-          sourceTokenCount,
-        );
-        if (recovered.recovered) {
-          if (!recovered.skipped) embeddedChunkIds.add(chunk.vaultChunkId);
-          return;
-        }
-      }
+    async (_failedBatch, err) => {
       console.warn("[embeddings] Batch vault rebuild failed:", err);
     },
     { label: "vault rebuild" },

@@ -126,6 +126,16 @@ export function createSimpleProviderAdapter(
     supportsWorkflowImport: false,
     supportsAdvancedMode: false,
     imageInput: IMAGE_INPUT[provider],
+    checkImageInput(connection) {
+      if (provider === "novelai" && connection.model.startsWith("nai-diffusion-5")) {
+        return {
+          supported: false,
+          mechanism: null,
+          reason: "NovelAI V5 does not currently support Vibe Transfer or Precise Reference.",
+        };
+      }
+      return { supported: true, mechanism: IMAGE_INPUT[provider] };
+    },
     async validate(asset, connection) {
       const errors: string[] = [];
       if (connection.provider !== provider) {
@@ -136,6 +146,9 @@ export function createSimpleProviderAdapter(
       }
       if (!connection.model?.trim()) {
         errors.push("Connection model is required.");
+      }
+      if (provider === "novelai" && connection.model.startsWith("nai-diffusion-5") && asset.source_image) {
+        errors.push("NovelAI V5 does not currently support Vibe Transfer or Precise Reference.");
       }
       return errors;
     },

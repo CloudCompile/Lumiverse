@@ -1400,7 +1400,7 @@ async function triggerHostGeneration(room: Room): Promise<void> {
       chat_id: room.chat_id,
       connection_id: resolveHostConnectionId(room.host_user_id),
       generation_type: "normal",
-    });
+    }, { requestOrigin: { kind: "chat", name: "Multiplayer", operation: "normal" } });
   } catch (err) {
     const message = clampErrorMessage(describeProviderError(err, "Room generation failed"));
     console.error(`[multiplayer] startGeneration error: ${message}`);

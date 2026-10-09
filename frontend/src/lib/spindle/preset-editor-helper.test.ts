@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  canMovePresetEditorPromptVariables,
   createPresetEditorScopedHelper,
   flushPresetEditorDraft,
   getPresetEditorState,
+  movePresetEditorPromptVariable,
   setPresetEditorController,
   subscribePresetEditorState,
   syncPresetEditorState,
@@ -11,6 +13,7 @@ import {
 import { createPresetEditorAccess } from './preset-editor-access'
 import type { PromptBlockDTO } from 'lumiverse-spindle-types'
 import type { PromptVariableValuesDTO } from 'lumiverse-spindle-types'
+import type { PromptVariableDef } from '@/lib/loom/types'
 import type {
   SpindlePresetEditorDraft,
   SpindlePresetEditorExtensionState,
@@ -105,6 +108,54 @@ afterEach(() => {
   for (const unsubscribe of [...activeSubscriptions]) unsubscribe()
   expect(activeSubscriptions.size).toBe(0)
   setPresetEditorController(null)
+})
+
+describe('preset editor native variable move bridge', () => {
+  test('routes only an exact active preset block graph through the canonical mover', () => {
+    const current = publishedDraft()
+    const target = sealedBlock()
+    target.id = 'target-block'
+    target.name = 'Target'
+    target.variables = []
+    current.blocks = [current.blocks[0]!, target]
+    const moves: Array<{ sourceBlockId: string; variableName: string; targetBlockId: string }> = []
+
+    setPresetEditorController({
+      getState: () => ({
+        open: true,
+        presetId: current.id,
+        activeTabId: 'preset',
+        preset: current,
+      }),
+      getPromptVariableValues: () => ({ 'sealed-block': { tone: 'neutral' } }),
+      setActiveTab() {},
+      updatePreset() {},
+      movePromptVariable(sourceBlockId, variable, targetBlockId) {
+        moves.push({ sourceBlockId, variableName: variable.name, targetBlockId })
+        variable.name = 'mutated by controller'
+        return true
+      },
+      async flush() {},
+    })
+
+    const expectedBlocks = current.blocks.map(({ id }) => ({ id }))
+    expect(canMovePresetEditorPromptVariables(expectedBlocks)).toBe(true)
+    expect(canMovePresetEditorPromptVariables([...expectedBlocks].reverse())).toBe(false)
+    expect(canMovePresetEditorPromptVariables([{ id: 'sealed-block' }, { id: 'sealed-block' }])).toBe(false)
+
+    const variable = current.blocks[0]!.variables![0]!
+    expect(movePresetEditorPromptVariable(expectedBlocks, 'sealed-block', variable as PromptVariableDef, 'target-block')).toBe(true)
+    expect(moves).toEqual([{ sourceBlockId: 'sealed-block', variableName: 'tone', targetBlockId: 'target-block' }])
+    expect(variable.name).toBe('tone')
+
+    expect(movePresetEditorPromptVariable(
+      [{ id: 'sealed-block' }],
+      'sealed-block',
+      variable as PromptVariableDef,
+      'target-block',
+    )).toBe(false)
+    expect(moves).toHaveLength(1)
+  })
 })
 
 describe('scoped preset editor helper', () => {

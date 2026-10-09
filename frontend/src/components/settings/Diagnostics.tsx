@@ -7,7 +7,6 @@ import { IconPlugConnected, IconStethoscope } from '@tabler/icons-react'
 import { spinClass } from '@/components/shared/Spinner'
 import { useStore } from '@/store'
 import { systemApi, type SystemInfo } from '@/api/system'
-import { pushApi } from '@/api/push'
 import { chatsApi } from '@/api/chats'
 import { BASE_URL } from '@/api/client'
 import { usePushSubscription } from '@/hooks/usePushSubscription'
@@ -402,6 +401,9 @@ function PwaCapabilitiesSection() {
     unsupportedReason,
     registrationStatus,
     registrationReason,
+    registrationKind,
+    nativeTransportStatus,
+    testPush,
   } = usePushSubscription()
   const [countdown, setCountdown] = useState<number | null>(null)
   const [sending, setSending] = useState(false)
@@ -438,7 +440,7 @@ function PwaCapabilitiesSection() {
     // Send the push after 10 seconds
     setTimeout(async () => {
       try {
-        const result = await pushApi.test()
+        const result = await testPush()
         if (!result.success) {
           addToast({ type: 'warning', message: describeTestFailure(result.reason) })
         }
@@ -448,7 +450,7 @@ function PwaCapabilitiesSection() {
         setSending(false)
       }
     }, 10_000)
-  }, [addToast, describeTestFailure, t])
+  }, [addToast, describeTestFailure, t, testPush])
 
   return (
     <div className={styles.section}>
@@ -485,6 +487,28 @@ function PwaCapabilitiesSection() {
           <span className={styles.infoLabel}>{t('diagnostics.swRegistrationState')}</span>
           <span className={styles.infoValue}>{pushRegistrationLabel(registrationStatus)}</span>
         </div>
+        {registrationKind === 'native' && (
+          <div className={styles.infoRow}>
+            <span className={styles.infoLabel}>
+              {t('diagnostics.nativeNotificationTransport', { defaultValue: 'Native Notification Transport' })}
+            </span>
+            <span className={styles.infoValue}>
+              {nativeTransportStatus
+                ? nativeTransportStatus.state.replaceAll('_', ' ')
+                : t('diagnostics.desktopUpdateRequired', { defaultValue: 'Desktop update required' })}
+            </span>
+          </div>
+        )}
+        {registrationKind === 'native' && nativeTransportStatus?.lastReceivedAt && (
+          <div className={styles.infoRow}>
+            <span className={styles.infoLabel}>
+              {t('diagnostics.nativeTransportLastContact', { defaultValue: 'Native Transport Last Contact' })}
+            </span>
+            <span className={styles.infoValue}>
+              {new Date(nativeTransportStatus.lastReceivedAt).toLocaleString()}
+            </span>
+          </div>
+        )}
         <div className={styles.infoRow}>
           <span className={styles.infoLabel}>{t('diagnostics.secureContext')}</span>
           <span className={styles.infoValue}>{window.isSecureContext ? t('diagnostics.yes') : t('diagnostics.no')}</span>

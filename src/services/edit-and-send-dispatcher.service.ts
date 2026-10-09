@@ -1,5 +1,6 @@
 import { getDb } from "../db/connection";
 import type { SQLQueryBindings } from "bun:sqlite";
+import type { EditAndSendContext } from "../llm/types";
 import { clampErrorMessage, ConnectionCredentialError } from "../utils/provider-errors";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
@@ -83,6 +84,8 @@ export interface StartGenerationOptions {
    * unchanged legacy ladder.
    */
   connectionId?: string;
+  /** Trusted cursor identity, kept out of the client-controlled request body. */
+  editAndSendContext?: EditAndSendContext;
 }
 
 export type StartEditAndSendGenerationFn = (
@@ -94,7 +97,9 @@ export type StopEditAndSendGenerationFn = (userId: string, generationId: string)
 export type IsEditAndSendGenerationActiveFn = (userId: string, generationId: string) => boolean;
 
 const LEASE_MS = 30_000;
-const MAX_ATTEMPTS = 8;
+// A claimed dispatch may already have reached a provider when the process dies.
+// Never reclaim it for another generation attempt.
+const MAX_ATTEMPTS = 1;
 /** Slack (seconds) absorbing clock skew between outbox (ms) and
  *  messages.created_at (unixepoch seconds) during crash verification. */
 const RECOVERY_TIMESTAMP_SLACK_SECONDS = 5;
@@ -124,10 +129,6 @@ export function resetEditAndSendDispatcherForTests(): void {
 
 function nowMs(): number {
   return Date.now();
-}
-
-function backoffMs(attemptCount: number): number {
-  return Math.min(60_000, 1000 * (2 ** Math.max(0, attemptCount - 1)));
 }
 
 function withImmediateTransaction<T>(fn: () => T): T {
@@ -198,6 +199,46 @@ export function getGenerationOutboxByGenerationId(generationId: string): Generat
     .query("SELECT * FROM generation_outbox WHERE generation_id = ?")
     .get(generationId) as any;
   return row ? rowToOutbox(row) : null;
+}
+
+/** Validate the stored cursor against the tenant, request, generation, and targets. */
+function readCommittedEditAndSendContext(
+  row: GenerationOutboxRow,
+): EditAndSendContext | null {
+  const stored = getDb()
+    .query(
+      `SELECT cursor FROM edit_and_send_requests
+       WHERE user_id = ? AND chat_id = ? AND request_id = ?`,
+    )
+    .get(row.user_id, row.chat_id, row.request_id) as { cursor?: string } | undefined;
+  if (!stored || typeof stored.cursor !== "string") return null;
+
+  let cursor: unknown;
+  try {
+    cursor = JSON.parse(stored.cursor);
+  } catch {
+    return null;
+  }
+  if (!cursor || typeof cursor !== "object") return null;
+  const record = cursor as Record<string, unknown>;
+
+  if (record.generationId !== row.generation_id) return null;
+  if (record.chatId !== row.branch_chat_id) return null;
+
+  const context = record.editAndSendContext;
+  if (!context || typeof context !== "object") return null;
+  const { editedUserMessageId, committedRevision } = context as Record<string, unknown>;
+
+  if (editedUserMessageId !== row.edited_message_id) return null;
+  if (
+    typeof committedRevision !== "number" ||
+    !Number.isInteger(committedRevision) ||
+    committedRevision < 1
+  ) {
+    return null;
+  }
+
+  return { editedUserMessageId, committedRevision };
 }
 
 function isClaimable(row: GenerationOutboxRow, now: number): boolean {
@@ -331,41 +372,12 @@ function markDispatchFailure(
   terminalReason?: string,
 ): void {
   const now = nowMs();
-  // A terminal reason bypasses the backoff/attempt path entirely: the row is
-  // closed with no `next_attempt_at`, so it is never re-claimed and never
-  // re-dispatched with the identical (unusable) credentials. `terminal_reason`
-  // is an unconstrained column, exactly like the existing 'max_attempts' and
-  // 'duplicate_generation_id' values, so no schema/CHECK change is involved.
-  if (terminalReason) {
-    markOutbox(row.id, {
-      status: "failed",
-      last_error_code: errorCode,
-      terminal_reason: terminalReason,
-      completed_at: now,
-      lease_owner: null,
-      lease_expires_at: null,
-    });
-    return;
-  }
-  if (row.attempt_count >= MAX_ATTEMPTS) {
-    markOutbox(row.id, {
-      status: "failed",
-      last_error_code: errorCode,
-      terminal_reason: "max_attempts",
-      completed_at: now,
-      lease_owner: null,
-      lease_expires_at: null,
-    });
-    return;
-  }
   markOutbox(row.id, {
-    status: "pending",
+    status: "failed",
     last_error_code: errorCode,
-    next_attempt_at: now + backoffMs(row.attempt_count),
-    // Clear the previous attempt's dispatch marker: a pending row must be
-    // fully re-dispatchable (dispatchClaimedEditAndSendOutbox skips rows
-    // whose dispatched_at is still set).
-    dispatched_at: null,
+    terminal_reason: terminalReason ?? "dispatch_failed",
+    completed_at: now,
+    next_attempt_at: null,
     lease_owner: null,
     lease_expires_at: null,
   });
@@ -384,6 +396,25 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
     return getGenerationOutboxById(row.id);
   }
   if (row.dispatched_at) return row;
+
+  // An invalid immutable cursor is terminal; retry cannot repair it.
+  const editAndSendContext = readCommittedEditAndSendContext(row);
+  if (!editAndSendContext) {
+    markDispatchFailure(row, "edit_and_send_context_invalid", "edit_and_send_context_invalid");
+    eventBus.emit(
+      EventType.GENERATION_ENDED,
+      {
+        generationId: row.generation_id,
+        chatId: row.branch_chat_id,
+        error: "Edit-and-Send context is no longer valid",
+        errorCode: "edit_and_send_context_invalid",
+        errorMessage: "Edit-and-Send context is no longer valid",
+        generationType: row.mode,
+      },
+      row.user_id,
+    );
+    return getGenerationOutboxById(row.id);
+  }
 
   const input: StartEditAndSendGenerationInput = {
     userId: row.user_id,
@@ -407,6 +438,7 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
   const options: StartGenerationOptions = {
     origin: "edit_and_send",
     connectionId: row.connection_id ?? undefined,
+    editAndSendContext,
   };
 
   try {
@@ -452,6 +484,9 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
           generationId: row.generation_id,
           chatId: row.branch_chat_id,
           error: clampErrorMessage(err.message),
+          errorCode: err.code,
+          errorMessage: clampErrorMessage(err.message),
+          connectionName: err.connectionName,
           generationType: row.mode,
         },
         row.user_id,
@@ -459,6 +494,19 @@ export async function dispatchClaimedEditAndSendOutbox(row: GenerationOutboxRow)
       return getGenerationOutboxById(row.id);
     }
     markDispatchFailure(row, code || "dispatch_failed");
+    const message = clampErrorMessage(code || "Generation dispatch failed");
+    eventBus.emit(
+      EventType.GENERATION_ENDED,
+      {
+        generationId: row.generation_id,
+        chatId: row.branch_chat_id,
+        error: message,
+        errorCode: "dispatch_failed",
+        errorMessage: message,
+        generationType: row.mode,
+      },
+      row.user_id,
+    );
     return getGenerationOutboxById(row.id);
   }
 }
@@ -530,6 +578,7 @@ export function reconcileEditAndSendOutbox(now = nowMs()): number {
      SET status = 'failed',
          terminal_reason = COALESCE(terminal_reason, 'max_attempts'),
          completed_at = COALESCE(completed_at, ?),
+         next_attempt_at = NULL,
          lease_owner = NULL,
          lease_expires_at = NULL,
          updated_at = ?
@@ -550,8 +599,8 @@ export function reconcileEditAndSendOutbox(now = nowMs()): number {
       // In-memory pool liveness is ONLY a skip signal: a live generation on
       // this instance is still in flight, so leave its row alone. Anything
       // else (crashed generation, cleared pool entry) goes through the SAME
-      // durable verification as startup recovery - persisted-output check
-      // plus attempt/backoff/max_attempts - never a blind completion.
+      // durable verification as startup recovery: preserve saved output or
+      // fail the interrupted dispatch without replaying it.
       if (invokeIsGenerationActive(row.user_id, row.generation_id)) continue;
       resolveOrphanedRunningRow(row, now);
       changed++;
@@ -564,6 +613,7 @@ export function reconcileEditAndSendOutbox(now = nowMs()): number {
           status: "failed",
           lease_owner: null,
           lease_expires_at: null,
+          next_attempt_at: null,
           last_error_code: "max_attempts",
           terminal_reason: "max_attempts",
           completed_at: now,
@@ -622,7 +672,7 @@ function hasPersistedEditAndSendOutput(row: GenerationOutboxRow): boolean {
  * Durable resolution for a dispatched-but-unfinished running row whose
  * generating instance is gone. Shared by startup crash recovery and the
  * periodic reconcile tick: verify persisted output before completing;
- * otherwise retry with backoff until MAX_ATTEMPTS, then fail terminally.
+ * otherwise mark it failed without issuing another generation request.
  */
 function resolveOrphanedRunningRow(row: GenerationOutboxRow, now: number): void {
   if (hasPersistedEditAndSendOutput(row)) {
@@ -637,31 +687,14 @@ function resolveOrphanedRunningRow(row: GenerationOutboxRow, now: number): void 
     return;
   }
 
-  const attempts = row.attempt_count + 1;
-  if (attempts >= MAX_ATTEMPTS) {
-    markOutbox(row.id, {
-      status: "failed",
-      lease_owner: null,
-      lease_expires_at: null,
-      attempt_count: attempts,
-      last_error_code: "output_not_verified",
-      terminal_reason: "max_attempts",
-      completed_at: now,
-    });
-    return;
-  }
-
   markOutbox(row.id, {
-    status: "pending",
+    status: "failed",
     lease_owner: null,
     lease_expires_at: null,
-    attempt_count: attempts,
-    next_attempt_at: now + backoffMs(attempts),
+    next_attempt_at: null,
     last_error_code: "output_not_verified",
-    terminal_reason: null,
-    // Clear the previous attempt's dispatch marker so the periodic sweep can
-    // re-claim and fully re-dispatch this row (see markDispatchFailure).
-    dispatched_at: null,
+    terminal_reason: "output_not_verified",
+    completed_at: now,
   });
 }
 
@@ -692,5 +725,6 @@ export async function recoverEditAndSendOutbox(): Promise<number> {
       resolveOrphanedRunningRow(rowToOutbox(raw), now);
     }
   });
+  reconcileEditAndSendOutbox(now);
   return dispatchPendingEditAndSendOutbox();
 }

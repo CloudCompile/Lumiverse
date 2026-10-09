@@ -1,4 +1,6 @@
 import { getProvider } from "../../llm/registry";
+import type { GenerationCallOptions } from "../../llm/request-observer";
+import { createRequestObserver } from "../request-history.service";
 import type { LlmProvider } from "../../llm/provider";
 import type {
   GenerationParameters,
@@ -131,6 +133,7 @@ async function consumeStream(
 async function prepareRawCall(
   userId: string,
   input: RawGenerateInput & { signal?: AbortSignal },
+  options?: GenerationCallOptions,
 ): Promise<PreparedGenerationCall> {
   const { provider, apiKey, apiUrl, connection } =
     await resolveRawProviderAndKey(userId, input);
@@ -158,6 +161,9 @@ async function prepareRawCall(
     apiKey,
     apiUrl,
     request: {
+      onProviderRequest: createRequestObserver(userId, options?.origin ?? { kind: "api", name: "Local API", operation: "raw" }, {
+        connectionId: connection?.id, chatId: options?.chatId, generationId: options?.generationId,
+      }, [apiKey]),
       messages: cached.messages,
       model: input.model,
       parameters: cached.params,
@@ -170,6 +176,7 @@ async function prepareRawCall(
 async function prepareQuietCall(
   userId: string,
   input: QuietGenerateInput,
+  options?: GenerationCallOptions,
 ): Promise<PreparedGenerationCall> {
   const connection = resolveConnection(userId, input.connection_id);
   const { provider, apiKey, apiUrl } = await resolveProviderAndKey(
@@ -209,6 +216,9 @@ async function prepareQuietCall(
     apiKey,
     apiUrl,
     request: {
+      onProviderRequest: createRequestObserver(userId, options?.origin ?? { kind: "api", name: "Local API", operation: "quiet" }, {
+        connectionId: connection.id, chatId: options?.chatId ?? input.chat_id, generationId: options?.generationId,
+      }, [apiKey]),
       messages: cached.messages,
       model: resolvedModel,
       parameters: cached.params,
@@ -221,10 +231,12 @@ async function prepareQuietCall(
 export async function rawGenerate(
   userId: string,
   input: RawGenerateInput & { signal?: AbortSignal },
+  options?: GenerationCallOptions,
 ): Promise<GenerationResponse> {
   const { provider, apiKey, apiUrl, request } = await prepareRawCall(
     userId,
     input,
+    options,
   );
   if (input.tools && input.tools.length > 0) {
     return consumeStream(
@@ -241,10 +253,12 @@ export async function rawGenerate(
 export async function quietGenerate(
   userId: string,
   input: QuietGenerateInput,
+  options?: GenerationCallOptions,
 ): Promise<GenerationResponse> {
   const { provider, apiKey, apiUrl, request } = await prepareQuietCall(
     userId,
     input,
+    options,
   );
   if (request.tools && request.tools.length > 0) {
     return consumeStream(
@@ -265,8 +279,9 @@ export async function quietGenerate(
 export async function rawGenerateStream(
   userId: string,
   input: RawGenerateInput & { signal?: AbortSignal },
+  options?: GenerationCallOptions,
 ): Promise<AsyncGenerator<StreamChunk, void, unknown>> {
-  const { provider, apiKey, apiUrl, request } = await prepareRawCall(userId, input);
+  const { provider, apiKey, apiUrl, request } = await prepareRawCall(userId, input, options);
   return wrapDelimitedReasoningForUser(
     userId,
     provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),
@@ -280,8 +295,9 @@ export async function rawGenerateStream(
 export async function quietGenerateStream(
   userId: string,
   input: QuietGenerateInput,
+  options?: GenerationCallOptions,
 ): Promise<AsyncGenerator<StreamChunk, void, unknown>> {
-  const { provider, apiKey, apiUrl, request } = await prepareQuietCall(userId, input);
+  const { provider, apiKey, apiUrl, request } = await prepareQuietCall(userId, input, options);
   return wrapDelimitedReasoningForUser(
     userId,
     provider.generateStream(apiKey, apiUrl, { ...request, stream: true }),

@@ -21,8 +21,7 @@ afterEach(() => {
 });
 
 describe("chat pipeline coordinator", () => {
-  test("exclusive tasks supersede queued ingests and wait for the active task", async () => {
-    const blocker = deferred<void>();
+  test("chunk rebuilds abort active cortex work and supersede queued ingests", async () => {
     const order: string[] = [];
 
     const active = enqueueChatPipelineTask({
@@ -30,10 +29,14 @@ describe("chat pipeline coordinator", () => {
       kind: "cortex_ingest",
       dedupeKey: "chunk-1",
       revision: 1,
-      run: async () => {
+      run: async (signal) => {
         order.push("ingest-active:start");
-        await blocker.promise;
-        order.push("ingest-active:end");
+        await new Promise<void>((resolve) => {
+          signal.addEventListener("abort", () => {
+            order.push("ingest-active:aborted");
+            resolve();
+          }, { once: true });
+        });
       },
     });
 
@@ -60,14 +63,12 @@ describe("chat pipeline coordinator", () => {
 
     expect((await queued).status).toBe("superseded");
 
-    blocker.resolve();
-
-    expect((await active).status).toBe("completed");
+    expect((await active).status).toBe("superseded");
     expect((await rebuild).status).toBe("completed");
-    expect(order).toEqual(["ingest-active:start", "ingest-active:end", "rebuild"]);
+    expect(order).toEqual(["ingest-active:start", "ingest-active:aborted", "rebuild"]);
 
     const status = getChatPipelineStatus("chat-a");
-    expect(status?.supersededTasks).toBe(1);
+    expect(status?.supersededTasks).toBe(2);
     expect(status?.queuedCounts.cortex_ingest).toBe(0);
   });
 

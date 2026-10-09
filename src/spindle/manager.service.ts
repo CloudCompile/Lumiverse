@@ -21,6 +21,7 @@ import {
   copyFileSync,
   cpSync,
   realpathSync,
+  writeFileSync,
 } from "fs";
 import { join, resolve, dirname, sep } from "path";
 import { getUserExtensionPath } from "../auth/provision";
@@ -34,6 +35,9 @@ import {
 import { deriveEffectiveScope } from "./provider-registry";
 
 export type InstallScope = "operator" | "user";
+type WidgetFrontendManifest = SpindleManifest & {
+  entry_frontend_widget?: string;
+};
 export interface ExtensionUpdateCandidate {
   id: string;
   identifier: string;
@@ -43,7 +47,8 @@ export interface ExtensionUpdateCandidate {
 }
 
 function isManagedPermission(permission: string): permission is SpindlePermission {
-  return isValidPermission(permission) || permission === "mcp_servers" || permission === "mcp_servers.create";
+  return isValidPermission(permission) || permission === "mcp_servers" || permission === "mcp_servers.create"
+    || permission === "screen_capture" || permission === "screen_recording";
 }
 
 type BackendSafetyCheck = {
@@ -832,6 +837,8 @@ function insertExtensionFromManifest(manifest: SpindleManifest): void {
 
 // Permissions that require explicit admin approval before granting
 export const PRIVILEGED_PERMISSIONS = new Set([
+  "screen_capture",
+  "screen_recording",
   "app_manipulation",
   "cors_proxy",
   "generation",
@@ -870,6 +877,14 @@ function grantRequestedPermissionsByDefault(
   }
 }
 
+function hasIllarinSource(metadata: string | null): boolean {
+  try {
+    return Boolean(JSON.parse(metadata || "{}")?.illarin);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Reconcile extension_grants with the current manifest permissions:
  * - Ensure every non-privileged manifest permission has a grant row
@@ -880,7 +895,8 @@ function grantRequestedPermissionsByDefault(
 function syncPermissionGrants(
   identifier: string,
   manifestPermissions: readonly string[],
-  previousPermissions: readonly string[]
+  previousPermissions: readonly string[],
+  autoGrantNonPrivileged = true,
 ): void {
   const manifestSet = new Set(manifestPermissions);
   const previousSet = new Set(previousPermissions);
@@ -898,7 +914,7 @@ function syncPermissionGrants(
       }
       // If it was in previousPermissions but grant is missing, it was
       // intentionally revoked by an admin — don't re-grant
-    } else {
+    } else if (autoGrantNonPrivileged) {
       // Non-privileged: always ensure granted
       grantPermission(identifier, perm);
     }
@@ -906,7 +922,7 @@ function syncPermissionGrants(
 
   // Revoke grants for permissions removed from the manifest
   for (const perm of granted) {
-    if (!manifestSet.has(perm)) {
+    if (autoGrantNonPrivileged && !manifestSet.has(perm)) {
       revokePermission(identifier, perm);
     }
   }
@@ -928,10 +944,10 @@ export async function syncManifestToDb(identifier: string): Promise<void> {
 
   const db = getDb();
   const row = db
-    .query("SELECT name, version, author, description, github, homepage, permissions FROM extensions WHERE identifier = ?")
+    .query("SELECT name, version, author, description, github, homepage, permissions, metadata FROM extensions WHERE identifier = ?")
     .get(identifier) as {
       name: string; version: string; author: string; description: string;
-      github: string; homepage: string; permissions: string;
+      github: string; homepage: string; permissions: string; metadata: string | null;
     } | null;
   if (!row) return;
 
@@ -970,7 +986,7 @@ export async function syncManifestToDb(identifier: string): Promise<void> {
   // Always reconcile grants against the manifest — even when the permissions
   // column hasn't changed, the extension_grants table may be out of sync
   // (e.g. manual DB edits, interrupted previous sync, etc.)
-  syncPermissionGrants(identifier, manifestPermissions, dbPermissions);
+  syncPermissionGrants(identifier, manifestPermissions, dbPermissions, !hasIllarinSource(row.metadata));
 }
 
 function resolveWithin(base: string, requestedPath: string, label: string): string {
@@ -983,7 +999,7 @@ function resolveWithin(base: string, requestedPath: string, label: string): stri
   return resolved;
 }
 
-function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void {
+function applyStorageSeeds(identifier: string, manifest: SpindleManifest, allowOverwrite = true): void {
   const seeds = Array.isArray(manifest.storage_seed_files)
     ? manifest.storage_seed_files
     : [];
@@ -998,7 +1014,7 @@ function applyStorageSeeds(identifier: string, manifest: SpindleManifest): void 
     const from = typeof seed.from === "string" ? seed.from.trim() : "";
     if (!from) continue;
     const to = typeof seed.to === "string" && seed.to.trim() ? seed.to.trim() : from;
-    const overwrite = seed.overwrite === true;
+    const overwrite = allowOverwrite && seed.overwrite === true;
     const required = seed.required === true;
 
     const sourcePath = resolveWithin(repo, from, "storage_seed_files.from");
@@ -1141,12 +1157,16 @@ function formatCommandFailure(
 
 export async function buildExtension(identifier: string): Promise<void> {
   const repo = repoDir(identifier);
-  const manifest = await readManifest(identifier);
+  const manifest = await readManifest(identifier) as WidgetFrontendManifest;
 
   const backendEntry = manifest.entry_backend || "dist/backend.js";
   const frontendEntry = manifest.entry_frontend || "dist/frontend.js";
+  const widgetFrontendEntry = manifest.entry_frontend_widget;
   const backendOut = resolveWithin(repo, backendEntry, "entry_backend");
   const frontendOut = resolveWithin(repo, frontendEntry, "entry_frontend");
+  const widgetFrontendOut = widgetFrontendEntry
+    ? resolveWithin(repo, widgetFrontendEntry, "entry_frontend_widget")
+    : null;
 
   // Always install dependencies first if package.json exists
   const pkgJson = join(repo, "package.json");
@@ -1183,8 +1203,13 @@ export async function buildExtension(identifier: string): Promise<void> {
   // Determine what needs building
   const backendSrc = join(srcDir, "backend.ts");
   const frontendSrc = join(srcDir, "frontend.ts");
+  const widgetFrontendSrc = join(srcDir, "widget.ts");
   const needsBackendBuild = existsSync(backendSrc) && !existsSync(backendOut);
   const needsFrontendBuild = existsSync(frontendSrc) && !existsSync(frontendOut);
+  const needsWidgetFrontendBuild = !!widgetFrontendEntry
+    && !!widgetFrontendOut
+    && existsSync(widgetFrontendSrc)
+    && !existsSync(widgetFrontendOut);
 
   // Build backend entry if source exists
   if (needsBackendBuild) {
@@ -1211,6 +1236,29 @@ export async function buildExtension(identifier: string): Promise<void> {
     );
     if (proc.exitCode !== 0) {
       throw new Error(`Frontend build failed: ${formatCommandFailure(proc, "bun build")}`);
+    }
+  }
+
+  // Widget entries are deliberately separate so desktop pop-outs can avoid
+  // evaluating an extension's settings panels, drawer tabs, and other page UI.
+  if (needsWidgetFrontendBuild) {
+    const proc = await runSpindleBunSubprocess(
+      bunCmd(
+        "build",
+        "src/widget.ts",
+        "--outfile",
+        widgetFrontendEntry!,
+        "--target",
+        "browser",
+        "--minify",
+      ),
+      {
+        cwd: repo,
+        context: `widget frontend build for ${identifier}`,
+      }
+    );
+    if (proc.exitCode !== 0) {
+      throw new Error(`Widget frontend build failed: ${formatCommandFailure(proc, "bun build")}`);
     }
   }
 
@@ -1257,11 +1305,6 @@ export async function install(
 
   const baseDir = extensionsDir();
   mkdirSync(baseDir, { recursive: true });
-  const installScope: InstallScope = options?.installScope === "user" ? "user" : "operator";
-  const installedByUserId =
-    options?.installedByUserId && options.installedByUserId.trim()
-      ? options.installedByUserId.trim()
-      : null;
   const branch = options?.branch && options.branch.trim() ? options.branch.trim() : null;
 
   // Clone to a temp dir first so we can read the manifest
@@ -1278,6 +1321,47 @@ export async function install(
     rmSync(tempDir, { recursive: true, force: true });
     throw new Error(`git clone failed: ${cloneProc.stderr.toString()}`);
   }
+  return installCheckout(tempDir, { ...options, branch, github: githubUrl });
+}
+
+export async function installFromFiles(
+  files: ReadonlyMap<string, Uint8Array>,
+  metadata: Record<string, unknown>,
+): Promise<ExtensionInfo> {
+  return installCheckout(writeCheckout(files), { metadata });
+}
+
+function writeCheckout(files: ReadonlyMap<string, Uint8Array>): string {
+  const checkout = join(extensionsDir(), `_temp_${Date.now()}`);
+  try {
+    for (const [path, data] of files) {
+      const target = resolveWithin(checkout, path, "archive path");
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, data);
+    }
+  } catch (err) {
+    rmSync(checkout, { recursive: true, force: true });
+    throw err;
+  }
+  return checkout;
+}
+
+async function installCheckout(
+  tempDir: string,
+  options: {
+    installScope?: InstallScope;
+    installedByUserId?: string | null;
+    branch?: string | null;
+    github?: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<ExtensionInfo> {
+  const installScope: InstallScope = options.installScope === "user" ? "user" : "operator";
+  const installedByUserId =
+    options.installedByUserId && options.installedByUserId.trim()
+      ? options.installedByUserId.trim()
+      : null;
+  const branch = options.branch ?? null;
 
   // Read manifest from cloned repo
   const manifestPath = join(tempDir, "spindle.json");
@@ -1295,7 +1379,7 @@ export async function install(
       `Invalid identifier "${manifest.identifier}". Must match /^[a-z][a-z0-9_]*$/`
     );
   }
-  manifest.github = normalizeSpindleHttpsUrl(manifest.github || githubUrl, "github", {
+  manifest.github = normalizeSpindleHttpsUrl(manifest.github || options.github, "github", {
     required: true,
   });
   manifest.homepage = normalizeSpindleHttpsUrl(manifest.homepage, "homepage");
@@ -1337,7 +1421,7 @@ export async function install(
       id, identifier, name, version, author, description, github, homepage,
       permissions, enabled, metadata, install_scope, installed_by_user_id, branch
     )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, '{}', ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
     [
       id,
       manifest.identifier,
@@ -1348,6 +1432,7 @@ export async function install(
       manifest.github,
       manifest.homepage || "",
       JSON.stringify(manifest.permissions || []),
+      JSON.stringify(options.metadata ?? {}),
       installScope,
       installedByUserId,
       branch,
@@ -1456,15 +1541,6 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
   // dev mode we already have the current version.
   const manifest = devMode ? initialManifest : await readManifest(identifier);
 
-  const db = getDb();
-  const existing = db
-    .query("SELECT permissions FROM extensions WHERE identifier = ?")
-    .get(identifier) as { permissions: string } | null;
-  const existingPermissions = existing
-    ? (JSON.parse(existing.permissions || "[]") as string[])
-    : [];
-  const existingPermissionSet = new Set(existingPermissions);
-
   // Rebuild — only delete dist/ if it was locally built (not tracked in git).
   // Repos that ship pre-built dist/ should have those files preserved.
   const srcDir = join(repo, "src");
@@ -1482,8 +1558,39 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
       }
     }
   }
+  return finishUpdate(identifier, manifest);
+}
+
+export async function replaceFromFiles(
+  identifier: string,
+  files: ReadonlyMap<string, Uint8Array>,
+): Promise<ExtensionInfo> {
+  const checkout = writeCheckout(files);
+  try {
+    const manifest = await readManifestFromPath(join(checkout, "spindle.json"));
+    if (manifest.identifier !== identifier) {
+      throw new Error(`The delivered extension is "${manifest.identifier}", not "${identifier}"`);
+    }
+  } catch (err) {
+    rmSync(checkout, { recursive: true, force: true });
+    throw err;
+  }
+  rmSync(repoDir(identifier), { recursive: true, force: true });
+  moveSync(checkout, repoDir(identifier));
+  return finishUpdate(identifier, await readManifest(identifier), true);
+}
+
+async function finishUpdate(identifier: string, manifest: SpindleManifest, fromIllarin = false): Promise<ExtensionInfo> {
+  const db = getDb();
+  const existing = db
+    .query("SELECT permissions FROM extensions WHERE identifier = ?")
+    .get(identifier) as { permissions: string } | null;
+  const existingPermissions = existing
+    ? (JSON.parse(existing.permissions || "[]") as string[])
+    : [];
+
   await buildExtension(identifier);
-  applyStorageSeeds(identifier, manifest);
+  applyStorageSeeds(identifier, manifest, !fromIllarin);
 
   // Update DB
   db.run(
@@ -1505,7 +1612,8 @@ export async function update(identifier: string): Promise<ExtensionInfo> {
   syncPermissionGrants(
     identifier,
     manifest.permissions || [],
-    existingPermissions
+    existingPermissions,
+    !fromIllarin,
   );
 
   return (await getExtensionByIdentifier(identifier))!;
@@ -1541,11 +1649,13 @@ export function enable(identifier: string): void {
 
   // Grant non-privileged requested permissions on first enable
   const row = db
-    .query("SELECT permissions FROM extensions WHERE identifier = ?")
-    .get(identifier) as { permissions: string } | null;
+    .query("SELECT permissions, metadata FROM extensions WHERE identifier = ?")
+    .get(identifier) as { permissions: string; metadata: string | null } | null;
   if (row) {
-    const requested = parsePermissionsSafe<string>(row.permissions);
-    grantRequestedPermissionsByDefault(identifier, requested);
+    if (!hasIllarinSource(row.metadata)) {
+      const requested = parsePermissionsSafe<string>(row.permissions);
+      grantRequestedPermissionsByDefault(identifier, requested);
+    }
   }
 }
 
@@ -1556,6 +1666,13 @@ export function disable(identifier: string): void {
     [identifier]
   );
   if (result.changes === 0) throw new Error(`Extension not found: ${identifier}`);
+}
+
+export function setMetadataEntry(identifier: string, key: string, value: unknown): void {
+  getDb().run(
+    "UPDATE extensions SET metadata = json_set(COALESCE(metadata, '{}'), ?, json(?)) WHERE identifier = ?",
+    [`$.${key}`, JSON.stringify(value), identifier],
+  );
 }
 
 // ─── Permissions ─────────────────────────────────────────────────────────
@@ -1714,7 +1831,7 @@ export function listExtensionUpdateCandidates(): ExtensionUpdateCandidate[] {
     .query(
       `SELECT id, identifier, name, version, branch
        FROM extensions
-       WHERE enabled = 1
+       WHERE enabled = 1 AND json_extract(COALESCE(metadata, '{}'), '$.illarin') IS NULL
        ORDER BY installed_at DESC`
     )
     .all() as Array<{
@@ -1845,12 +1962,39 @@ async function getFrontendBundlePathFromManifest(
   return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
 }
 
+async function getWidgetFrontendBundlePathFromManifest(
+  identifier: string,
+  manifest: SpindleManifest,
+): Promise<string | null> {
+  const entry = (manifest as WidgetFrontendManifest).entry_frontend_widget;
+  if (!entry) return null;
+  const repo = repoDir(identifier);
+  const bundlePath = resolveWithin(repo, entry, "entry_frontend_widget");
+  return (await Bun.file(bundlePath).exists()) ? bundlePath : null;
+}
+
 export async function getFrontendBundlePath(identifier: string): Promise<string | null> {
   return getFrontendBundlePathFromManifest(identifier, await readManifest(identifier));
 }
 
 export async function getFrontendBundleCacheKey(identifier: string): Promise<string | null> {
   const bundlePath = await getFrontendBundlePath(identifier);
+  if (!bundlePath) return null;
+
+  try {
+    const stat = statSync(bundlePath);
+    return `${stat.size}-${Math.floor(stat.mtimeMs)}`;
+  } catch {
+    return null;
+  }
+}
+
+export async function getWidgetFrontendBundlePath(identifier: string): Promise<string | null> {
+  return getWidgetFrontendBundlePathFromManifest(identifier, await readManifest(identifier));
+}
+
+export async function getWidgetFrontendBundleCacheKey(identifier: string): Promise<string | null> {
+  const bundlePath = await getWidgetFrontendBundlePath(identifier);
   if (!bundlePath) return null;
 
   try {

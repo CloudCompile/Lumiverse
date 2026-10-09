@@ -4,14 +4,8 @@
   gap: 4px;
 }
 
-/* Match the other settings section headers (.sectionTitle / .helperText) so the
-   language block reads as a peer section rather than a divergent mini-label. */
-.label {
-  font-size: calc(15px * var(--lumiverse-font-scale, 1));
-  font-weight: 600;
-  color: var(--lumiverse-text);
-  margin-bottom: 4px;
-}
+/* Keep the local class available for component styling alongside the shared title. */
+.label {}
 
 .helper {
   margin: 0;

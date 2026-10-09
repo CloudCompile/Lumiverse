@@ -172,7 +172,7 @@ describe('Property 2 preservation: productivity feature toggles', () => {
     expect(withoutSuite).not.toContain('data-productivity-feature-flag="showCortexSecondaryUi"')
     expect(withoutSuite).not.toContain('data-productivity-feature-flag="showEditAndSend"')
     expect(withoutSuite).not.toContain('data-productivity-feature-flag="enableToolbarIconReorder"')
-    expect(withoutSuite).not.toContain('data-productivity-feature-flag="showComposerCustomizeGear"')
+    expect(withoutSuite).toContain('data-productivity-feature-flag="showComposerCustomizeGear"')
     expect(withoutSuite).toContain('After Display &amp; Layout (Default)')
     expect(withoutSuite).toContain('After Advanced')
 

@@ -1,4 +1,5 @@
 import type { ReasoningBindings, ReasoningEffort, ReasoningSettings } from '@/types/store'
+import { supportsClaudeOpusXhigh } from './claude-model'
 
 const REASONING_PRESETS: Array<{ label: string; prefix: string; suffix: string }> = [
   { label: 'DeepSeek', prefix: '<think>\n', suffix: '\n</think>' },
@@ -129,7 +130,7 @@ export function getEffortOptions(provider: string | null | undefined, model: str
     case 'google_vertex':
       return GOOGLE_EFFORTS
     case 'anthropic':
-      return model && /claude-opus-4[-.](7|8)/i.test(model) ? ANTHROPIC_OPUS_XHIGH_EFFORTS : ANTHROPIC_EFFORTS
+      return supportsClaudeOpusXhigh(model) ? ANTHROPIC_OPUS_XHIGH_EFFORTS : ANTHROPIC_EFFORTS
     case 'nanogpt':
       return NANOGPT_EFFORTS
     case 'bedrock':

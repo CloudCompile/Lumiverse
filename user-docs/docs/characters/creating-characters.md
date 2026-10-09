@@ -76,7 +76,7 @@ Notes for other users (or yourself) about the character. These are **never sent 
 
 ### Original Source
 
-Link back to the character's source on Chub, CharacterHub, LumiHub (`lumi.spot`), or Illarin (`illarin.xyz`). LumiHub and Illarin links can point to a character or a creator's profile. You can also enter a Chub `creator/character` path.
+Link back to the character's source on Chub, CharacterHub, LumiHub (`lumi.spot`), or Illarin (`illarin.com`). LumiHub and Illarin links can point to a character or a creator's profile. You can also enter a Chub `creator/character` path.
 
 Press Enter or leave the field to save it. The link button opens the saved source, and the source travels with exported character cards. Clear the field to remove it.
 

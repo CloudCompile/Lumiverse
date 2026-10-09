@@ -11,6 +11,7 @@ import type {
 } from "./types";
 import { parse, ESCAPED_OPEN, ESCAPED_CLOSE } from "./MacroParser";
 import { MacroRegistry } from "./MacroRegistry";
+import { restoreLiteralBraces } from "./literal-braces";
 import {
   macroInterceptorChain,
   type MacroInterceptorPhase,
@@ -22,9 +23,11 @@ const ASYNC_UNWIND_INTERVAL = 64;
 export interface EvaluateOptions {
   phase?: MacroInterceptorPhase;
   sourceHint?: string;
-  sourceOwner?: "host";
+  sourceOwner?: "host" | { extensionIdentifier: string };
   /** Safety budget for one evaluate() call. This is a work cap, not a nesting cap. */
   maxMacroResolutions?: number;
+  /** Keep literal-brace shielding for a later macro pass in prompt assembly. */
+  deferLiteralBraceRestore?: boolean;
 }
 
 interface EvaluationState {
@@ -53,7 +56,27 @@ export async function evaluate(
   // Fast-path: skip the entire lex/parse/evaluate pipeline when there are
   // no macro markers in the input (the vast majority of stored chat messages).
   if (!HAS_MACRO_RE.test(input)) {
-    return { text: input, diagnostics: [], touchedVars: EMPTY_TOUCHED_VARS, cacheable: true };
+    return {
+      text: options?.deferLiteralBraceRestore
+        ? input
+        : restoreLiteralBraces(input),
+      diagnostics: [],
+      touchedVars: EMPTY_TOUCHED_VARS,
+      cacheable: true,
+    };
+  }
+
+  if (typeof options?.sourceOwner === "object") {
+    const owned = await macroInterceptorChain.runOwned({
+      template: input, env: snapshotEnvForInterceptor(env), commit: env.commit !== false,
+      phase: options.phase ?? "other", sourceHint: options.sourceHint,
+      sourceOwner: options.sourceOwner,
+      userId: typeof env.extra?.userId === "string" ? env.extra.userId : undefined,
+    });
+    if (owned) return {
+      text: owned.text, diagnostics: [], touchedVars: new Set(owned.touchedVars),
+      cacheable: !owned.volatile && !owned.opaque,
+    };
   }
 
   // Pre-process: legacy syntax conversion
@@ -114,7 +137,10 @@ export async function evaluate(
   }
 
   // Post-process: unescape remaining escaped braces
-  const final = postprocess(text);
+  const postprocessed = postprocess(text);
+  const final = options?.deferLiteralBraceRestore
+    ? postprocessed
+    : restoreLiteralBraces(postprocessed);
 
   return { text: final, diagnostics, touchedVars: fingerprint.touched, cacheable: fingerprint.cacheable };
 }
@@ -276,7 +302,7 @@ async function evaluateNodes(
  * Returns the original array unchanged (no allocation) when nothing is trimmed,
  * which is the common case. Never mutates the input (the AST is cached).
  */
-function stripArgFraming(nodes: AstNode[]): AstNode[] {
+export function stripArgFraming(nodes: AstNode[]): AstNode[] {
   if (nodes.length === 0) return nodes;
 
   // Single text node: strip both ends.
@@ -503,6 +529,7 @@ async function evaluateScopedMacroNode(
     commit: env.commit !== false,
     isScoped: true,
     body,
+    bodySource: node.bodySource ?? body,
     bodyRaw: node.body,
     offset: node.offset,
     globalOffset,
@@ -561,6 +588,7 @@ function buildExecContext(
     commit: env.commit !== false,
     isScoped: false,
     body: "",
+    bodySource: "",
     bodyRaw: [],
     offset: node.offset,
     globalOffset,

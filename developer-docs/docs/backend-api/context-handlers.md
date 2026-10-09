@@ -58,7 +58,20 @@ Each invocation runs inside a 10-second wall-clock budget by default. Handlers t
 spindle.registerContextHandler(handler, 100, { timeoutMs: 30_000 })
 ```
 
-On timeout the host logs an error and continues with the previous context, so a slow handler delays but never blocks generation.
+By default, errors and timeouts are logged and generation continues with the previous context.
+
+## Required handlers and cancellation
+
+Hosts advertising `spindle.host.capabilities['required-context-handlers-v1'] >= 1` support `{ required: true }` in the third argument. A required handler's error or timeout stops generation before the provider request. This is opt-in; existing registrations retain their failure policy.
+
+```ts
+spindle.registerContextHandler(async (context, signal) => {
+  signal?.throwIfAborted()
+  return prepareContext(context, signal)
+}, 100, { required: true, timeoutMs: 30_000 })
+```
+
+The second handler argument is an `AbortSignal`. The host aborts it on timeout or generation cancellation. Pass it to cancellable work and check it before committing effects; cancellation cannot undo effects already accepted by another service. Late replies do not resume the cancelled generation.
 
 !!! tip "Context Handlers vs Interceptors"
     **Context handlers** run _before_ prompt assembly and modify the context that drives assembly. **Interceptors** run _after_ assembly and modify the final message array. Use context handlers when you need to affect how the prompt is constructed; use interceptors when you need to tweak the finished output.

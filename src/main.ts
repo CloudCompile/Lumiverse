@@ -11,10 +11,17 @@ import { initVapidKeys } from "./crypto/vapid";
 import { eventBus } from "./ws/bus";
 import { isTermuxLikeEnvironment } from "./utils/termux";
 import { ensureDataDirectory } from "./utils/data-directory";
+import { loadTlsConfig } from "./tls-config";
 import {
   startExtensionUpdateMonitor,
   stopExtensionUpdateMonitor,
 } from "./spindle/update-check.service";
+import { sendRunnerMessage } from "./services/runner-channel";
+
+// TLS terminates at Bun, before Hono receives a Request. Resolve and validate
+// certificate material before performing the rest of the (potentially lengthy)
+// startup so a bad key, SAN, or SNI mapping fails fast.
+const tlsConfig = loadTlsConfig();
 
 // Validate data directory is accessible and writable before any file operations.
 // This catches permission issues early (common on Termux/Android) instead of
@@ -108,7 +115,8 @@ try {
 try {
   const { providerRegistry } = await import("./spindle/provider-registry");
   const { getSecret } = await import("./services/secrets.service");
-  providerRegistry.configure({ getSecret });
+  const { observeSidecarBrokerRequest } = await import("./services/request-history.service");
+  providerRegistry.configure({ getSecret, observeRequest: observeSidecarBrokerRequest });
 } catch (err) {
   console.error("[startup] provider registry secret hook failed:", err);
 }
@@ -214,6 +222,34 @@ import("./services/tokenizer.service").then(({ prewarm }) => prewarm()).catch(()
 // Import app after database is ready (auth config needs getDb())
 const { default: app, websocket } = await import("./app");
 
+// Desktop access-token verification fetches this instance's public JWKS. An
+// HTTPS-only listener cannot also accept the historical plaintext loopback
+// request on the same port, and a public SAN certificate normally does not
+// cover 127.0.0.1. Keep that fetch local and certificate-independent via a
+// narrowly scoped ephemeral HTTP listener that serves only the public JWKS.
+let tlsLoopbackJwksServer: Bun.Server<undefined> | undefined;
+if (tlsConfig) {
+  tlsLoopbackJwksServer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const url = new URL(request.url);
+      if (request.method !== "GET" || url.pathname !== "/api/auth/jwks") {
+        return new Response("Not Found", { status: 404 });
+      }
+      return app.fetch(new Request(`http://127.0.0.1:${env.port}/api/auth/jwks`, {
+        headers: { host: `127.0.0.1:${env.port}` },
+      }));
+    },
+  });
+  const { setDesktopJwksLoopbackPort } = await import("./routes/desktop-api.routes");
+  const loopbackPort = tlsLoopbackJwksServer.port;
+  if (loopbackPort === undefined) {
+    throw new Error("[TLS] Failed to allocate the desktop JWKS loopback port");
+  }
+  setDesktopJwksLoopbackPort(loopbackPort);
+}
+
 // Bun 1.4 surfaces native low-memory notifications. Release reconstructable
 // caches before the OS resorts to terminating this long-running server.
 const { installMemoryPressureHandler } = await import("./services/memory-pressure.service");
@@ -233,7 +269,15 @@ await startAllExtensions().catch((err) => {
   console.error("[Spindle] Failed to start extensions:", err);
 });
 
-console.log(`Lumiverse Backend starting on port ${env.port}...`);
+console.log(`Lumiverse Backend starting on port ${env.port} (${tlsConfig ? "HTTPS" : "HTTP"})...`);
+if (tlsConfig) {
+  const mapping = tlsConfig.serverNames.length > 0
+    ? ` for ${tlsConfig.serverNames.join(", ")}`
+    : " (default certificate; hostname coverage comes from its SANs)";
+  console.log(
+    `[TLS] Loaded ${tlsConfig.certificateCount} certificate${tlsConfig.certificateCount === 1 ? "" : "s"}${mapping}`,
+  );
+}
 
 // Use explicit Bun.serve() so we get the Server reference for native pub/sub.
 // idleTimeout: 255 (Bun's maximum) guards against slowloris-style attacks where
@@ -246,6 +290,10 @@ const server = Bun.serve({
   hostname: "::",
   fetch: app.fetch,
   websocket,
+  // Bun 1.4.1+ negotiates HTTP/2 and HTTP/1.1 on the same TLS listener.
+  // Keeping HTTP/1.1 enabled preserves WebSocket upgrades, which HTTP/2 does
+  // not support in Bun yet.
+  ...(tlsConfig ? { tls: tlsConfig.options, http2: true } : {}),
   // Sized for the user-data import endpoint (full-account archives). Other
   // upload routes self-cap at the service layer (character imports stay at
   // MAX_CHARX_SIZE ≈ 1000 MB, image/avatar uploads at a few MB, etc.), so
@@ -269,12 +317,12 @@ initMultiplayer();
 const { registerIdentityServerAttestation } = await import("./multiplayer/attestation");
 registerIdentityServerAttestation();
 
-console.log(`Lumiverse Backend listening on ${server.hostname}:${server.port}`);
+console.log(`Lumiverse Backend listening on ${server.protocol}://${server.hostname}:${server.port}`);
 startExtensionUpdateMonitor();
 
 // Notify runner (if present) that the server is ready
-if (process.env.LUMIVERSE_RUNNER_IPC === "1" && typeof process.send === "function") {
-  process.send({ type: "ready", payload: { port: env.port, pid: process.pid } });
+if (process.env.LUMIVERSE_RUNNER_IPC === "1") {
+  sendRunnerMessage({ type: "ready", payload: { port: env.port, pid: process.pid } });
 }
 
 // LanceDB compaction and index replacement can monopolize Bun's runtime even
@@ -372,6 +420,7 @@ async function gracefulShutdown(signal: string) {
 
   // 1. Stop accepting new connections
   server.stop(true);
+  tlsLoopbackJwksServer?.stop(true);
 
   // 2. Abort all active LLM generations
   const { stopAllGenerations, stopGenerationSweep } = await import("./services/generate.service");

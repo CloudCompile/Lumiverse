@@ -5,7 +5,10 @@ import type { WorldBookEntry } from '@/types/api'
 const noop = () => null
 mock.module('@/lib/i18n/worldBookEntryLabels', () => ({ useWorldBookEntryLabels: () => ({}) }))
 mock.module('@/lib/i18n/loomOptionLabels', () => ({ useLoomOptionLabels: () => ({}) }))
-mock.module('@/lib/dndUiScale', () => ({ useScaledSortableStyle: (input: unknown) => input }))
+mock.module('@/lib/dndUiScale', () => ({
+  DndContext: ({ children }: { children?: unknown }) => children,
+  useScaledSortableStyle: (input: unknown) => input,
+}))
 mock.module('@/hooks/useScrollGate', () => ({ useScrollGate: noop }))
 mock.module('@/hooks/useIsMobile', () => ({ default: () => false }))
 mock.module('@/api/world-books', () => ({ worldBooksApi: {} }))
@@ -32,6 +35,7 @@ mock.module('@dnd-kit/sortable', () => ({
 mock.module('lucide-react', () => ({
   ArrowDown: noop, ArrowUp: noop, ArrowUpDown: noop, CheckSquare: noop,
   ChevronDown: noop, ChevronRight: noop, Copy: noop, FileText: noop, GripVertical: noop,
+  Files: noop, Folder: noop, FolderOpen: noop,
   Hash: noop, MoreVertical: noop, MoveRight: noop, Plus: noop, Plug: noop,
   Search: noop, Square: noop, Tag: noop, Trash2: noop, X: noop,
   ArrowBigUp: noop, ArrowBigDown: noop, BetweenHorizontalStart: noop,

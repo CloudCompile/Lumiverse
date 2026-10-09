@@ -118,6 +118,9 @@ export function parseHfSource(config: Record<string, any> | undefined | null): H
 }
 
 export const tokenizersApi = {
+  warm(connectionId: string, chatId?: string) {
+    return post<{ queued: boolean }>('/tokenizers/warm', { connection_id: connectionId, chat_id: chatId })
+  },
   // Configs
   list() {
     return get<TokenizerConfig[]>('/tokenizers')

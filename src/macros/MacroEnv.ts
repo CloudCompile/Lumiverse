@@ -1,3 +1,5 @@
+import { shieldMessageLiterals } from "./message-literals";
+import { macroInterceptorChain } from "../spindle/macro-interceptor";
 import type { Character } from "../types/character";
 import { getEffectiveCharacterName } from "../types/character";
 import type { Persona } from "../types/persona";
@@ -58,7 +60,11 @@ export function resolvePersonaPronouns(persona: Persona | null): {
 }
 
 export function buildEnv(ctx: BuildEnvContext): MacroEnv {
-  const { character, persona, chat, messages, generationType, connection } = ctx;
+  const { character, persona, chat, generationType, connection } = ctx;
+  const messages = ctx.messages.map((message) => {
+    const content = shieldMessageLiterals(message.content, message);
+    return content === message.content ? message : { ...message, content };
+  });
   const focusedCharacter = ctx.focusedCharacter ?? character;
   const personaPronouns = resolvePersonaPronouns(persona);
   const personaAddonOutlets = buildPersonaAddonOutlets(persona);
@@ -156,6 +162,7 @@ export function buildEnv(ctx: BuildEnvContext): MacroEnv {
     extra: {
       userId: ctx.userId ?? (chat as any).user_id as string | undefined,
       characterId: character.id,
+      preserveMessageSource: macroInterceptorChain.ownsMessageSource(character.extensions, ctx.userId ?? (chat as any).user_id),
       groupFocusedCharacter: buildFocusedCharacterMacroState(focusedCharacter, chat, messages),
       messages: messages.map((m) => ({ content: m.content, name: m.name, is_user: m.is_user })),
       chatCreatedAt: (chat as any).created_at as number | undefined,

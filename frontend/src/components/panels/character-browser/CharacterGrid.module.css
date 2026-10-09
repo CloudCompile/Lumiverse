@@ -38,3 +38,22 @@
   overflow: hidden;
   contain: strict;
 }
+
+/* Mirrors the inherited, unitless --character-grid-columns value into
+   observable geometry while remaining completely outside normal layout. */
+.columnCountProbe {
+  position: fixed;
+  inset: 0 auto auto 0;
+  display: block;
+  width: calc(var(--character-grid-columns, 0) * 1px);
+  height: 0;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  contain: strict;
+}

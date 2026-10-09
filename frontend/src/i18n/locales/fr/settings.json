@@ -122,6 +122,7 @@
     "saving": "Enregistrement..."
   },
   "display": {
+    "zoom": { "title": "Zoom", "desktopPinchZoom": "Pincer pour zoomer sur ordinateur" },
     "longMessages": {
       "title": "Messages longs",
       "helper": "Limitez la hauteur des messages longs jusqu’à leur développement.",
@@ -453,9 +454,12 @@
     "messagesPerPage": "MESSAGES PAR PAGE",
     "customValue": "VALEUR PERSONNALISÉE",
     "inputTitle": "Entrée",
-    "enterToSend": "Appuyez sur Entrée pour envoyer",
+    "enterToSendDesktop": "Appuyer sur Entrée pour envoyer sur ordinateur",
+    "enterToSendMobile": "Appuyer sur Entrée pour envoyer sur mobile",
     "saveDraft": "Enregistrez le brouillon d'entrée",
     "saveDraftHint": "Enregistre automatiquement votre message non envoyé afin qu'il persiste lors des actualisations de page et des changements de discussion.",
+    "defaultImpersonationMode": "Mode d'usurpation d'identité par défaut",
+    "defaultImpersonationModeHint": "Utilisé par les discussions et groupes qui ne définissent pas leur propre mode d'usurpation d'identité.",
     "portraitSide": "Côté panneau Portrait",
     "none": "Aucun",
     "regenTitle": "Commentaires sur la régénération",
@@ -618,7 +622,7 @@
     "unlinking": "Dissociation...",
     "unlink": "Dissocier de LumiHub",
     "instanceName": "Nom de l'instance",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "Mon Lumiverse",
     "instanceHint": "Une étiquette pour identifier cette instance sur LumiHub (par exemple, \"Home PC\", \"Laptop\")",
     "waitingApproval": "En attente d'approbation...",

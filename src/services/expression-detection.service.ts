@@ -1,4 +1,5 @@
 import type { LlmMessage, GenerationResponse } from "../llm/types";
+import type { GenerationCallOptions } from "../llm/request-observer";
 import * as connectionsSvc from "./connections.service";
 import * as settingsSvc from "./settings.service";
 import { getSidecarSettings } from "./sidecar-settings.service";
@@ -9,7 +10,7 @@ type RawGenerateFn = (userId: string, input: {
   messages: LlmMessage[];
   connection_id: string;
   parameters?: Record<string, unknown>;
-}) => Promise<GenerationResponse>;
+}, options?: GenerationCallOptions) => Promise<GenerationResponse>;
 
 interface DetectExpressionInput {
   userId: string;
@@ -19,6 +20,29 @@ interface DetectExpressionInput {
   recentMessages: LlmMessage[];
   connectionId?: string;
   modelOverride?: string;
+  /** Named expression group to evaluate on a multi-character card. */
+  characterName?: string;
+}
+
+export function buildExpressionSelectionPrompt(labels: string[], characterName?: string): string {
+  const target = characterName
+    ? ` for ${JSON.stringify(characterName)}`
+    : "";
+  const characterRule = characterName
+    ? `\n- Evaluate ONLY ${JSON.stringify(characterName)}. Other characters may appear in the message; do not use their dialogue, actions, or emotions to choose this sprite.`
+    : "";
+
+  return `Select a character sprite image${target}. Read the LAST assistant message and choose the single available label that best matches ${characterName ? `the visible state of ${JSON.stringify(characterName)}` : "the character's visible state"} in that moment.
+
+Rules:
+- Base your choice ONLY on the last assistant message, not the overall conversation.${characterRule}
+- Treat labels as full sprite states, not just facial emotions. Outfit, pose, action, body position, and facial expression can all matter.
+- Prefer the most specific matching label. Only choose a generic "neutral" or "default" state if no specific action/pose/expression label fits.
+- Look for cues in dialogue tone, actions, body language, and narration.
+
+Available expressions${characterName ? ` for ${JSON.stringify(characterName)}` : ""}: ${labels.join(", ")}
+
+Reply with ONLY one label from the list above, exactly as written.`;
 }
 
 /**
@@ -48,22 +72,17 @@ export async function detectExpression(input: DetectExpressionInput, generateFn:
   if (!conn) return null;
   connectionId = conn.id;
 
-  const systemPrompt = `Select a character sprite image. Read the LAST assistant message and choose the single available label that best matches the character's visible state in that moment.
-
-Rules:
-- Base your choice ONLY on the last assistant message, not the overall conversation.
-- Treat labels as full sprite states, not just facial emotions. Outfit, pose, action, body position, and facial expression can all matter.
-- Prefer the most specific matching label. Only choose a generic "neutral" or "default" state if no specific action/pose/expression label fits.
-- Look for cues in dialogue tone, actions, body language, and narration.
-
-Available expressions: ${labels.join(", ")}
-
-Reply with ONLY one label from the list above, exactly as written.`;
+  const systemPrompt = buildExpressionSelectionPrompt(labels, input.characterName);
 
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...recentMessages.slice(-5),
-    { role: "user", content: "Which expression matches the character in the last message?" },
+    {
+      role: "user",
+      content: input.characterName
+        ? `Which expression matches ${JSON.stringify(input.characterName)} in the last message?`
+        : "Which expression matches the character in the last message?",
+    },
   ];
 
   const response = await generateFn(userId, {
@@ -75,7 +94,7 @@ Reply with ONLY one label from the list above, exactly as written.`;
       temperature,
       max_tokens: maxTokens,
     },
-  });
+  }, { chatId: input.chatId, origin: { kind: "sidecar", name: "Expression Detection", operation: input.characterName ?? "expression" } });
 
   return resolveDetectedExpressionLabel(response.content || "", labels);
 }
@@ -173,7 +192,7 @@ interface DetectMultiCharExpressionInput {
 }
 
 export interface MultiCharExpressionResult {
-  /** Which character group was identified as the focus. */
+  /** Which character-specific expression group this result belongs to. */
   characterGroup: string;
   /** The clean expression label (e.g., "Clothed_angry"). */
   expression: string;
@@ -184,15 +203,16 @@ export interface MultiCharExpressionResult {
 /**
  * Two-stage expression detection for multi-character cards:
  *
- * 1. **Character steering** — identify which character is the focus of the
- *    latest response via heuristic name matching, with LLM fallback.
- * 2. **Expression detection** — run standard expression detection scoped
- *    to the identified character's label set.
+ * 1. **Character steering** — identify every character whose visible state is
+ *    established by the latest response. A multi-character sprite display can
+ *    show all of them at once.
+ * 2. **Expression detection** — run expression detection independently for
+ *    each identified character, scoped to that character's own label set.
  */
-export async function detectMultiCharacterExpression(
+export async function detectMultiCharacterExpressions(
   input: DetectMultiCharExpressionInput,
   generateFn: RawGenerateFn,
-): Promise<MultiCharExpressionResult | null> {
+): Promise<MultiCharExpressionResult[] | null> {
   const { userId, groups, recentMessages } = input;
 
   // Collect named character groups (exclude "_default" outfit-only bucket)
@@ -205,77 +225,118 @@ export async function detectMultiCharacterExpression(
     const labels = Object.keys(defaultGroup);
     const detected = await detectExpression({ ...input, labels }, generateFn);
     if (!detected || !defaultGroup[detected]) return null;
-    return { characterGroup: "_default", expression: detected, imageId: defaultGroup[detected] };
+    return [{ characterGroup: "_default", expression: detected, imageId: defaultGroup[detected] }];
   }
 
-  // Stage 1: identify which character is the focus of the latest response
-  let targetCharacter = identifyCharacterHeuristic(recentMessages, characterNames);
+  // Stage 1: ask for every displayable character, not a single "primary" one.
+  // Fall back to explicit name mentions only if the steering call itself fails.
+  const llmCharacters = await identifyCharactersLLM(
+    userId, characterNames, recentMessages, generateFn, input.connectionId, input.modelOverride,
+  );
+  const targetCharacters = llmCharacters ?? identifyCharactersHeuristic(recentMessages, characterNames);
 
-  // LLM fallback when heuristic is inconclusive (no names found in text)
-  if (!targetCharacter) {
-    targetCharacter = await identifyCharacterLLM(
-      userId, characterNames, recentMessages, generateFn, input.connectionId, input.modelOverride,
+  if (targetCharacters.length === 0) return [];
+
+  // Stage 2: each character is evaluated against only their own expression set.
+  // One failed character must not suppress valid sprites selected for the rest.
+  const detections = await Promise.allSettled(targetCharacters.map(async (targetCharacter) => {
+    const groupLabels = groups[targetCharacter];
+    if (!groupLabels) return null;
+    const labels = Object.keys(groupLabels);
+    if (labels.length === 0) return null;
+
+    const detected = await detectExpression(
+      { ...input, labels, characterName: targetCharacter },
+      generateFn,
     );
-  }
+    if (!detected || !groupLabels[detected]) return null;
 
-  if (!targetCharacter || !groups[targetCharacter]) return null;
+    return {
+      characterGroup: targetCharacter,
+      expression: detected,
+      imageId: groupLabels[detected],
+    };
+  }));
 
-  // Stage 2: detect expression within the identified character's label set
-  const groupLabels = groups[targetCharacter];
-  const labels = Object.keys(groupLabels);
-  if (labels.length === 0) return null;
-
-  const detected = await detectExpression({ ...input, labels }, generateFn);
-  if (!detected || !groupLabels[detected]) return null;
-
-  return { characterGroup: targetCharacter, expression: detected, imageId: groupLabels[detected] };
+  const resolved = detections.flatMap((settled) =>
+    settled.status === "fulfilled" && settled.value ? [settled.value] : []
+  );
+  return resolved.length > 0 ? resolved : null;
 }
 
 /**
- * Fast heuristic: scan the last assistant message for character name mentions.
- * Returns the character whose name appears latest in the text (closest to the
- * end = most recently acting/speaking), or null if no names are found.
+ * Fallback heuristic: retain every group name explicitly mentioned in the last
+ * assistant message when the steering model is unavailable.
  */
-function identifyCharacterHeuristic(
+function identifyCharactersHeuristic(
   recentMessages: LlmMessage[],
   characterNames: string[],
-): string | null {
+): string[] {
   // Find the last assistant message
   const lastAssistant = [...recentMessages].reverse().find((m) => m.role === "assistant");
-  if (!lastAssistant) return null;
+  if (!lastAssistant) return [];
 
   const content = typeof lastAssistant.content === "string" ? lastAssistant.content : "";
-  if (!content) return null;
+  if (!content) return [];
 
   const contentLower = content.toLowerCase();
 
-  let latestPos = -1;
-  let latestChar: string | null = null;
+  return characterNames.filter((name) => contentLower.includes(name.toLowerCase()));
+}
 
-  for (const name of characterNames) {
-    const pos = contentLower.lastIndexOf(name.toLowerCase());
-    if (pos > latestPos) {
-      latestPos = pos;
-      latestChar = name;
-    }
+export function buildMultiCharacterSelectionPrompt(characterNames: string[]): string {
+  return `You are steering a multi-character sprite display for a roleplay conversation. Read the LAST assistant message and identify EVERY listed character whose current visible state is conveyed: anyone speaking, acting, reacting, or being visibly described.
+
+The display can show multiple character sprites at the same time. Do not reduce the answer to one "primary" character when several characters participate. Each selected character will be evaluated against their own unique expression set in the next step.
+
+Available characters: ${characterNames.map((name) => JSON.stringify(name)).join(", ")}
+
+Rules:
+- Use ONLY the last assistant message to decide who is currently displayable.
+- Include every matching available character, even when several appear together.
+- Do not include a character merely because they appeared earlier in the conversation.
+- Never invent or rename a character.
+
+Reply with ONLY a JSON array of names exactly as listed, for example ["Character A", "Character B"]. Reply [] if none are present.`;
+}
+
+export function resolveDetectedCharacterNames(rawResponse: string, characterNames: string[]): string[] | null {
+  const cleaned = cleanDetectionResponse(rawResponse);
+  if (!cleaned) return null;
+
+  let values: unknown;
+  try {
+    values = JSON.parse(cleaned);
+  } catch {
+    // Preserve compatibility with small models that still return a bare name.
+    values = [cleaned];
   }
 
-  return latestChar;
+  if (!Array.isArray(values)) return null;
+  if (values.length === 0) return [];
+
+  const resolved: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const normalized = cleanDetectionResponse(value).toLowerCase();
+    const match = characterNames.find((name) => name.toLowerCase() === normalized);
+    if (match && !resolved.includes(match)) resolved.push(match);
+  }
+  return resolved.length > 0 ? resolved : null;
 }
 
 /**
- * LLM-based character identification fallback. Uses a very short prompt
- * and low max_tokens to minimize cost when the heuristic can't determine
- * which character is the focus.
+ * LLM-based multi-character identification. The explicit array contract is
+ * deliberately small-model friendly while allowing more than one sprite.
  */
-async function identifyCharacterLLM(
+async function identifyCharactersLLM(
   userId: string,
   characterNames: string[],
   recentMessages: LlmMessage[],
   generateFn: RawGenerateFn,
   connectionIdOverride?: string,
   modelOverride?: string,
-): Promise<string | null> {
+): Promise<string[] | null> {
   const sidecar = getSidecarSettings(userId);
 
   let connectionId = connectionIdOverride || sidecar.connectionProfileId;
@@ -292,16 +353,15 @@ async function identifyCharacterLLM(
   if (!conn) return null;
   connectionId = conn.id;
 
-  const systemPrompt = `You are analyzing a roleplay conversation. Identify which character is the primary focus of the most recent response (the one speaking, acting, or being described).
-
-Available characters: ${characterNames.join(", ")}
-
-Respond with ONLY the character's name, exactly as listed above. Nothing else.`;
+  const systemPrompt = buildMultiCharacterSelectionPrompt(characterNames);
 
   const messages: LlmMessage[] = [
     { role: "system", content: systemPrompt },
     ...recentMessages.slice(-3),
-    { role: "user", content: "Which character is the primary focus of the last response? Reply with only their name." },
+    {
+      role: "user",
+      content: "Which characters should be displayed for the last response? Return every matching name as a JSON array.",
+    },
   ];
 
   try {
@@ -310,27 +370,12 @@ Respond with ONLY the character's name, exactly as listed above. Nothing else.`;
       model: model || conn.model || "",
       messages,
       connection_id: connectionId,
-      parameters: { temperature: 0.1, max_tokens: 30 },
-    });
+      parameters: { temperature: 0.1, max_tokens: 150 },
+    }, { origin: { kind: "sidecar", name: "Expression Detection", operation: "visible characters" } });
 
-    const raw = (response.content || "").trim();
-    if (!raw) return null;
-
-    const rawLower = raw.toLowerCase();
-
-    // Exact match
-    const exact = characterNames.find((n) => n.toLowerCase() === rawLower);
-    if (exact) return exact;
-
-    // Response contains a character name
-    const contains = characterNames.find((n) => rawLower.includes(n.toLowerCase()));
-    if (contains) return contains;
-
-    // Character name contains the response (handles partial/shortened names)
-    const reverse = characterNames.find((n) => n.toLowerCase().includes(rawLower));
-    if (reverse) return reverse;
+    return resolveDetectedCharacterNames(response.content || "", characterNames);
   } catch {
-    // LLM call failed — return null so expression detection is skipped
+    // Let the caller fall back to explicit name mentions.
   }
 
   return null;

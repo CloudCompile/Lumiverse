@@ -382,6 +382,51 @@
   border-color: var(--lumiverse-primary-050);
 }
 
+.impersonationModeOptions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.impersonationModeOption {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  padding: 9px 11px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 8px;
+  background: var(--lumiverse-fill-subtle, rgba(255, 255, 255, 0.02));
+  color: var(--lumiverse-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.impersonationModeOption:hover {
+  border-color: var(--lumiverse-primary-050);
+  background: var(--lumiverse-fill-hover, rgba(255, 255, 255, 0.05));
+}
+
+.impersonationModeOptionActive {
+  border-color: var(--lumiverse-primary-050);
+  background: var(--lumiverse-primary-010);
+  box-shadow: 0 0 0 1px var(--lumiverse-primary-020);
+}
+
+.impersonationModeTitle {
+  font-size: calc(12px * var(--lumiverse-font-scale, 1));
+  font-weight: 600;
+}
+
+.impersonationModeDescription {
+  font-size: calc(10.5px * var(--lumiverse-font-scale, 1));
+  line-height: 1.35;
+  color: var(--lumiverse-text-dim);
+}
+
 .talkSlider {
   display: flex;
   align-items: center;

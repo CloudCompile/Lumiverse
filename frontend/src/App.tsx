@@ -6,17 +6,20 @@ import { LazyMotion, MotionConfig, domAnimation } from 'motion/react'
 import { useWebSocket } from '@/ws/useWebSocket'
 import { useStore } from '@/store'
 import { useThemeApplicator } from '@/hooks/useThemeApplicator'
+import { installDesktopViewportZoom } from '@/lib/desktopViewportZoom'
 import { useCharacterTheme } from '@/hooks/useCharacterTheme'
 import { useCustomCSSApplicator } from '@/hooks/useCustomCSSApplicator'
 import { useAppInit } from '@/hooks/useAppInit'
 import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import AuthGuard from '@/components/auth/AuthGuard'
+import ActiveTabGuard from '@/components/auth/ActiveTabGuard'
 import ViewportDrawer from '@/components/panels/ViewportDrawer'
 import CharacterEditorPage from '@/components/panels/character-browser/CharacterEditorPage'
 import ModalContainer from '@/components/modals/ModalContainer'
 import SpindleUIManager from '@/components/spindle/SpindleUIManager'
 import ToastContainer from '@/components/shared/ToastContainer'
+import WindowFileDropHost from '@/components/shared/WindowFileDropHost'
 import ConnectionLostOverlay from '@/components/shared/ConnectionLostOverlay'
 import ChatHeads from '@/components/chat-heads/ChatHeads'
 import WallpaperLayer from '@/components/shared/WallpaperLayer'
@@ -46,16 +49,32 @@ import {
 import styles from './App.module.css'
 import { acknowledgePendingConnectionsDeepLink } from '@/lib/uiProductivityDefaults'
 import { filterEnabledFrontendContributions } from '@/lib/spindle/frontend-extension-availability'
+import { createDesktopDownloadFeedback, type DesktopDownloadEvent } from '@/lib/desktop-download-feedback'
+import { toast } from '@/lib/toast'
 
 const CustomCSSDock = lazy(() => import('@/components/modals/CustomCSSDock'))
 
 export { acknowledgePendingConnectionsDeepLink }
 
 export default function App() {
+  return (
+    <AuthGuard>
+      {isDesktopFloatingWidgetWindow()
+        ? <Application />
+        : <ActiveTabGuard><Application /></ActiveTabGuard>}
+    </AuthGuard>
+  )
+}
+
+function Application() {
+  'use memo'
+
   const { t } = useTranslation('common')
   const safeTheme = getSafeThemeState()
   useWebSocket()
   useThemeApplicator()
+  const desktopPinchZoomEnabled = useStore((s) => s.desktopPinchZoomEnabled)
+  useEffect(() => desktopPinchZoomEnabled ? installDesktopViewportZoom() : undefined, [desktopPinchZoomEnabled])
   useCharacterTheme()
   useCustomCSSApplicator()
   useAppInit()
@@ -67,6 +86,32 @@ export default function App() {
   usePresetRegexActivation()
 
   useEffect(() => installNotificationAudioPrimer(), [])
+
+  useEffect(() => {
+    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    const feedback = createDesktopDownloadFeedback(
+      {
+        title: t('toast.desktopDownloadTitle'),
+        started: (fileName) => t('toast.desktopDownloadStarted', { fileName }),
+        complete: (fileName) => t('toast.desktopDownloadComplete', { fileName }),
+        failed: (fileName) => t('toast.desktopDownloadFailed', { fileName }),
+      },
+      toast,
+    )
+    let unlisten: (() => void) | undefined
+    let disposed = false
+    void listen<DesktopDownloadEvent>('desktop-download', ({ payload }) => feedback.handle(payload))
+      .then((stop) => {
+        if (disposed) stop()
+        else unlisten = stop
+      })
+      .catch((error) => console.warn('[desktop-download] Native feedback listener unavailable:', error))
+    return () => {
+      disposed = true
+      unlisten?.()
+      feedback.dispose()
+    }
+  }, [t])
 
   const isMobile = useIsMobile()
   const customCSSDockUnavailable = useIsMobile(CUSTOM_CSS_DOCK_BREAKPOINT)
@@ -148,7 +193,13 @@ export default function App() {
         !Number.isInteger(detail.height)
       ) return
       console.info('[desktop-widget] primary frontend received size request', detail)
-      void resizeDesktopFloatingWidget(detail.widgetId, detail.width, detail.height)
+      const widget = useStore.getState().floatWidgets.find((entry) => entry.id === detail.widgetId)
+      void resizeDesktopFloatingWidget(
+        detail.widgetId,
+        detail.width,
+        detail.height,
+        widget?.chromeless === true,
+      )
         .then(() => console.info('[desktop-widget] primary frontend forwarded size request', detail))
         .catch((error) => console.warn('[desktop-widget] primary frontend failed to forward size request', detail, error))
     }
@@ -319,6 +370,7 @@ export default function App() {
                   <Outlet />
                 </main>
                 <ViewportDrawer />
+                {!isDesktopFloatingWidgetWindow() && <WindowFileDropHost />}
                 {editingCharacterId && <CharacterEditorPage />}
                 <ModalContainer />
                 {customCSSDockOpen && !customCSSDockUnavailable && (
@@ -337,9 +389,5 @@ export default function App() {
     </>
   )
 
-  return (
-    <AuthGuard>
-      {content}
-    </AuthGuard>
-  )
+  return content
 }

@@ -88,7 +88,7 @@ Every document gets an auto-generated, kebab-cased **slug** based on its name:
 
 Type `#` in the chat input and an autocomplete popover lets you pick a document from any attached databank. The mention is removed from the message before it's sent — the AI sees the document content instead.
 
-**Sizing behavior:** if a full document fits within a 2,000-token budget, the entire text is injected. If it doesn't, Lumiverse runs a semantic search inside the mentioned document and injects the most relevant chunks. Either way, the inserted content is labeled with `[Source: <document name>]` so the AI knows where it came from.
+An explicit mention injects the document's entire parsed text. It bypasses semantic chunk retrieval; automatic retrieval still selects relevant chunks normally. Full documents can consume substantial context, so the model's configured context-window limit still applies to the assembled prompt.
 
 **Renaming changes the slug.** If you rename a document, update any presets or chat templates that reference it.
 
@@ -152,7 +152,7 @@ Databank content is available in your presets through dedicated macros:
 Aliases for `{{databank}}`: `{{databankMemory}}`, `{{documents}}`, `{{knowledgeBank}}`.
 
 !!! note "The macro controls *placement*, not *whether* databank content injects"
-    Like [long-term memory](memory.md), databank retrieval injects automatically whenever active banks return chunks. The `{{databank}}` macro only controls **where** that content appears — without it, retrieved chunks are inserted as a system message just before the chat history. To stop injection entirely, deactivate the bank for this chat/character or disable embeddings, rather than removing the macro.
+    Databank retrieval injects automatically whenever active banks return chunks. The `{{databank}}` macro controls **where** that content appears — without it, retrieved chunks are inserted as a system message just before the chat history. To stop injection entirely, deactivate the bank for this chat/character or disable embeddings, rather than removing the macro. [Chat Memory](memory.md#injection-strategy) has its own Injection Strategy and defaults to Macro only.
 
 Use `{{databankActive}}` to wrap databank content in a conditional so the section disappears cleanly when nothing retrieves:
 

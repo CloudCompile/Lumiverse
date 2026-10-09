@@ -1,3 +1,4 @@
+import { shieldMessageLiterals } from "../macros/message-literals";
 import { getDb } from "../db/connection";
 import * as embeddingsSvc from "./embeddings.service";
 import { type SanitizeOptions } from "../utils/content-sanitizer";
@@ -125,7 +126,7 @@ async function buildQueryText(
     case "last_user_message": {
       const lastUser = [...visibleMessages].reverse().find(m => m.is_user);
       if (!lastUser) return "";
-      const sanitized = await resolveAndSanitizeForVectorization(lastUser.content, env, reasoningStrip);
+      const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(lastUser.content, lastUser), env, reasoningStrip);
       return truncateToContextSize(
         `[USER | ${lastUser.name}]: ${sanitized}`,
         settings.queryMaxTokens,
@@ -134,7 +135,7 @@ async function buildQueryText(
     case "weighted_recent": {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async m => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       if (parts.length > 0) parts.push(parts[parts.length - 1]);
@@ -144,7 +145,7 @@ async function buildQueryText(
     default: {
       const queryMessages = visibleMessages.slice(-contextSize);
       const parts = await Promise.all(queryMessages.map(async m => {
-        const sanitized = await resolveAndSanitizeForVectorization(m.content, env, reasoningStrip);
+        const sanitized = await resolveAndSanitizeForVectorization(shieldMessageLiterals(m.content, m), env, reasoningStrip);
         return `[${m.is_user ? "USER" : "CHARACTER"} | ${m.name}]: ${sanitized}`;
       }));
       return truncateToContextSize(parts.join("\n").trim(), settings.queryMaxTokens);
@@ -216,7 +217,10 @@ function getRecentFallbackChunks(
     .query(
       `SELECT id, content, message_ids FROM chat_chunks
        WHERE chat_id = ?
-       ORDER BY created_at DESC
+       ORDER BY message_range_start IS NULL ASC,
+                message_range_start DESC,
+                message_range_end DESC,
+                id DESC
        LIMIT ?`,
     )
     .all(chatId, fetchLimit) as Array<{ id: string; content: string; message_ids: string | null }>;
@@ -452,10 +456,8 @@ async function computeFreshMemoryResult(
   }
 
   try {
-    // Shrink-and-retry on oversized-input errors so a long multi-message query
-    // doesn't silently collapse to the recency fallback on token-limited
-    // embedding backends (llama.cpp n_ubatch, 512-token models, etc.).
-    const queryVector = await embeddingsSvc.embedQueryAdaptive(userId, queryText);
+    // Provider failures use the recency fallback below without resending the query.
+    const queryVector = await embeddingsSvc.embedQuery(userId, queryText);
     if (!queryVector || queryVector.length === 0) {
       return {
         settingsKey,

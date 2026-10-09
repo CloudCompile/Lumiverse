@@ -5,6 +5,8 @@ import { Send, RotateCw, CornerDownLeft, Square, FilePlus, Eye, UserCircle, Comp
 import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { sendRoomAction } from '@/ws/relayClient'
+import { wsClient } from '@/ws/client'
+import { EventType } from '@/types/ws-events'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { presetsApi } from '@/api/presets'
 import { presetProfilesApi, type PresetProfileBinding } from '@/api/preset-profiles'
@@ -19,6 +21,11 @@ import { audioApi } from '@/api/audio'
 import { getPersonaAvatarThumbUrl, getPersonaAvatarThumbUrlById, getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { uuidv7 } from '@/lib/uuid'
 import { toast } from '@/lib/toast'
+import {
+  resolveImpersonationModeOverride,
+  resolveImpersonationPresetSelection,
+  type ImpersonationPreference,
+} from '@/lib/impersonationPreset'
 import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import { unmarshalPreset } from '@/lib/loom/service'
 import {
@@ -69,6 +76,8 @@ import {
   type RegexActionActivation,
 } from '@/lib/regex/actionBus'
 import { createSTTEngine, getSupportedSTTAudioFormat, isWebSpeechAvailable, type STTAudioFrame, type STTEngine } from '@/lib/sttEngine'
+import { isWhistleAvailable } from '@/lib/whistle/config'
+import { whistleClient } from '@/lib/whistle/client'
 import { composeChatSafeZones } from '@/lib/chatSurfaceLayout'
 import { renderedPxToLayoutPx } from '@/lib/uiScale'
 import { applyChatAppearance } from '@/lib/chatAppearance'
@@ -91,8 +100,12 @@ import InputAreaCustomizeModal, {
   type ComposerActionId,
 } from './InputAreaCustomizeModal'
 import { ComposerActionBarLive } from './InputAreaComposerBar'
-import { isExtensionComposerActionId } from './composerActionOwnership'
+import { isCoreOwnedComposerActionId, isExtensionComposerActionId } from './composerActionOwnership'
 import { isGuideActive, isGuideAutoEnabled } from '@/lib/guided-generations'
+import {
+  chatHasDisplayableExpressions,
+  getChatExpressionCharacterIds,
+} from '@/lib/chatExpressionAvailability'
 
 interface InputAreaProps {
   chatId: string
@@ -315,6 +328,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   }>>([])
   const [characterName, setCharacterName] = useState('')
   const [impersonationPresetId, setImpersonationPresetId] = useState<string | null>(null)
+  const [impersonationModeOverride, setImpersonationModeOverride] = useState<ImpersonationPreference | null>(null)
   const [promptVariablesModalOpen, setPromptVariablesModalOpen] = useState(false)
   const [promptVariablesPreset, setPromptVariablesPreset] = useState<LoomPreset | null>(null)
   const [promptVariablesBinding, setPromptVariablesBinding] = useState<PromptVariableProfileTarget | null>(null)
@@ -375,8 +389,11 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   )
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const activeGroupCharacterId = useStore((s) => s.activeGroupCharacterId)
-  const enterToSend = useStore((s) => s.inputBarEnterToSend)
+  const enterToSendSettings = useStore((s) => s.inputBarEnterToSend)
+  const enterToSend = isMobile ? enterToSendSettings.mobile : enterToSendSettings.desktop
   const saveDraftInput = useStore((s) => s.saveDraftInput)
+  const defaultImpersonationMode = useStore((s) => s.defaultImpersonationMode)
+  const impersonationMode = impersonationModeOverride ?? defaultImpersonationMode
   const activeProfileId = useStore((s) => s.activeProfileId)
   const profiles = useStore((s) => s.profiles)
   const setActiveProfile = useStore((s) => s.setActiveProfile)
@@ -450,14 +467,32 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     mutedCharacterIds,
   ])
 
-  // Track whether the active character has expressions configured
+  // Track whether the solo character or any group member has expressions configured.
   const [hasExpressions, setHasExpressions] = useState(false)
+  const expressionCharacterIds = useMemo(
+    () => getChatExpressionCharacterIds(activeCharacterId, isGroupChat, groupCharacterIds),
+    [activeCharacterId, groupCharacterIds, isGroupChat],
+  )
   useEffect(() => {
-    if (!activeCharacterId) { setHasExpressions(false); return }
-    expressionsApi.get(activeCharacterId)
-      .then((cfg) => setHasExpressions(!!cfg?.enabled && Object.keys(cfg.mappings || {}).length > 0))
-      .catch(() => setHasExpressions(false))
-  }, [activeCharacterId])
+    let cancelled = false
+
+    const refresh = async () => {
+      const available = await chatHasDisplayableExpressions(expressionCharacterIds, expressionsApi.get)
+      if (!cancelled) setHasExpressions(available)
+    }
+
+    setHasExpressions(false)
+    void refresh()
+
+    const unsubscribe = wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string }) => {
+      if (expressionCharacterIds.includes(payload.id)) void refresh()
+    })
+
+    return () => {
+      cancelled = true
+      unsubscribe()
+    }
+  }, [expressionCharacterIds])
 
   // Track alternate fields for the active character or group members.
   type AltFieldVariant = { id: string; label: string; content: string }
@@ -616,22 +651,36 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       setAltFieldSelections({})
       setGroupAltFieldSelections({})
       setGroupScenarioMode('individual')
+      setImpersonationModeOverride(null)
       return
     }
     setAltFieldSelections((activeChatMetadata?.alternate_field_selections as Record<string, string>) || {})
     setGroupAltFieldSelections((activeChatMetadata?.group_alternate_field_selections as Record<string, Record<string, string>>) || {})
     const mode = activeChatMetadata?.group_scenario_override?.mode
     setGroupScenarioMode(mode === 'member' || mode === 'custom' ? mode : 'individual')
+    setImpersonationModeOverride(resolveImpersonationModeOverride(activeChatMetadata?.impersonation_mode))
   }, [activeChatMetadata, chatId])
 
   useEffect(() => {
-    if (!chatId) { setImpersonationPresetId(null); return }
+    if (!chatId) {
+      setImpersonationPresetId(null)
+      setImpersonationModeOverride(null)
+      return
+    }
+    let cancelled = false
     chatsApi.get(chatId, { messages: false })
       .then((chat) => {
+        if (cancelled) return
         const value = chat.metadata?.impersonation_preset_id
         setImpersonationPresetId(typeof value === 'string' && value ? value : null)
+        setImpersonationModeOverride(resolveImpersonationModeOverride(chat.metadata?.impersonation_mode))
       })
-      .catch(() => setImpersonationPresetId(null))
+      .catch(() => {
+        if (cancelled) return
+        setImpersonationPresetId(null)
+        setImpersonationModeOverride(null)
+      })
+    return () => { cancelled = true }
   }, [chatId])
 
   const handleAltFieldSelect = useCallback(async (field: string, variantId: string | null) => {
@@ -959,6 +1008,8 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const screenCornerRadius = useDeviceFrameRadius()
   const [inputFocused, setInputFocused] = useState(false)
   const [sttStatus, setSttStatus] = useState<'idle' | 'starting' | 'listening' | 'processing'>('idle')
+  const [sttLoadingProgress, setSttLoadingProgress] = useState<number | null>(null)
+  const sttSessionConfigRef = useRef<{ provider: string; language: string; connectionId: string | null } | null>(null)
   const [sttAudioFrame, setSttAudioFrame] = useState<STTAudioFrame | null>(null)
   const sttEngineRef = useRef<STTEngine | null>(null)
   const sttDraftBaseRef = useRef('')
@@ -970,16 +1021,26 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
   const isSTTSupported = useMemo(() => {
     if (voiceSettings.sttProvider === 'webspeech') return isWebSpeechAvailable()
+    if (voiceSettings.sttProvider === 'whistle') return isWhistleAvailable()
     return getSupportedSTTAudioFormat() != null && typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia
   }, [voiceSettings.sttProvider])
+  useEffect(() => {
+    if (voiceSettings.sttProvider === 'whistle' && isSTTSupported) {
+      // Prepare during normal chat use, without opening the microphone.
+      void whistleClient.prepare().catch(() => {})
+    }
+  }, [voiceSettings.sttProvider, isSTTSupported])
   const isListeningToSTT = sttStatus === 'starting' || sttStatus === 'listening' || sttStatus === 'processing'
   const showSTTIndicator = isListeningToSTT
   const sttIndicatorLabel = useMemo(() => {
+    if (sttStatus === 'starting' && voiceSettings.sttProvider === 'whistle' && sttLoadingProgress !== null) {
+      return t('input.sttWhistleLoading', { percent: Math.round(sttLoadingProgress * 100) })
+    }
     if (sttStatus === 'starting') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttStartingMic') : t('input.sttPreparingRecording')
     if (sttStatus === 'processing') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttFinalizingTranscript') : t('input.sttTranscribingAudio')
     if (sttStatus === 'listening') return voiceSettings.sttProvider === 'webspeech' ? t('input.sttListening') : t('input.sttRecording')
     return ''
-  }, [sttStatus, voiceSettings.sttProvider, t])
+  }, [sttStatus, voiceSettings.sttProvider, sttLoadingProgress, t])
   const sttVisualizerBars = sttAudioFrame?.frequencies?.length ? sttAudioFrame.frequencies : STT_IDLE_BARS
   const sttVisualizerLevel = sttAudioFrame ? Math.max(sttAudioFrame.amplitude, sttAudioFrame.peak * 0.65) : 0.16
 
@@ -2405,15 +2466,20 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       requestAnimationFrame(() => resizeTextarea(textareaRef.current))
     }
     try {
-      const forcedPresetId = mode === 'oneliner' ? impersonationPresetId : null
-      const presetId = forcedPresetId || getActivePresetForGeneration() || undefined
+      const presetSelection = resolveImpersonationPresetSelection(
+        mode,
+        impersonationPresetId,
+        getActivePresetForGeneration(),
+      )
+      const presetId = presetSelection.presetId
       const res = await generateApi.start({
         chat_id: chatId,
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         persona_addon_states: activeGenerationAddonStates,
         preset_id: presetId,
-        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
+        force_preset_id: presetSelection.forcePresetId
+          || shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         generation_type: 'impersonate',
         impersonate_mode: mode,
         impersonate_input: impersonateInput || undefined,
@@ -2566,6 +2632,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
           onSaved: (updatedChat: import('@/types/api').Chat) => {
             const value = updatedChat.metadata?.impersonation_preset_id
             setImpersonationPresetId(typeof value === 'string' && value ? value : null)
+            setImpersonationModeOverride(resolveImpersonationModeOverride(updatedChat.metadata?.impersonation_mode))
             const mode = updatedChat.metadata?.group_scenario_override?.mode
             setGroupScenarioMode(mode === 'member' || mode === 'custom' ? mode : 'individual')
           },
@@ -2935,6 +3002,12 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
   const handleSTTToggle = useCallback(async () => {
     if (isListeningToSTT) {
+      if (voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')) {
+        stopSTTSession('destroy')
+        setSttStatus('idle')
+        setSttLoadingProgress(null)
+        return
+      }
       setSttStatus('processing')
       stopSTTSession('stop')
       return
@@ -2957,6 +3030,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
 
     try {
       setSttStatus('starting')
+      setSttLoadingProgress(null)
       setSttAudioFrame(null)
       sttDraftBaseRef.current = text.trimEnd()
       sttInterimTextRef.current = ''
@@ -2975,12 +3049,23 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
       sttEngineRef.current?.destroy()
       sttEngineRef.current = engine
+      sttSessionConfigRef.current = {
+        provider: voiceSettings.sttProvider, language: voiceSettings.sttLanguage, connectionId: voiceSettings.sttConnectionId,
+      }
+
+      engine.onStatus?.((status) => {
+        if (sttEngineRef.current !== engine) return
+        setSttLoadingProgress(status.phase === 'loading' ? status.progress ?? 0 : null)
+        setSttStatus(status.phase === 'loading' ? 'starting' : status.phase)
+      })
 
       engine.onAudioFrame((frame) => {
+        if (sttEngineRef.current !== engine) return
         setSttAudioFrame(frame)
       })
 
       engine.onResult((result) => {
+        if (sttEngineRef.current !== engine) return
         if (result.isFinal) {
           const { text: commandStrippedText, shouldSend } = stripSTTSendCommand(result.text)
           if (shouldSend) sttShouldSendRef.current = true
@@ -3000,11 +3085,14 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
 
       engine.onStop(() => {
+        if (sttEngineRef.current !== engine) return
+        setSttLoadingProgress(null)
         setSttAudioFrame(null)
         void finalizeSTTTranscript()
       })
 
       engine.onError((err) => {
+        if (sttEngineRef.current !== engine) return
         const msg = err.message || 'Speech-to-text failed'
         stopSTTSession('destroy')
         sttInterimTextRef.current = ''
@@ -3018,13 +3106,30 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
       })
 
       await engine.start()
+      if (sttEngineRef.current !== engine) return
       setSttStatus(engine.isListening() ? 'listening' : 'idle')
     } catch (err: any) {
       stopSTTSession('destroy')
       setSttStatus('idle')
       toast.error(err?.message || t('toast.sttFailed'), { title: t('toast.sttFailed') })
     }
-  }, [isListeningToSTT, isSTTSupported, voiceSettings, text, openModal, applySTTTranscript, stopSTTSession, finalizeSTTTranscript, t])
+  }, [isListeningToSTT, isSTTSupported, sttStatus, voiceSettings, text, openModal, applySTTTranscript, stopSTTSession, finalizeSTTTranscript, t])
+
+  useEffect(() => {
+    const config = sttSessionConfigRef.current
+    if (sttEngineRef.current && config && (config.provider !== voiceSettings.sttProvider
+      || config.language !== voiceSettings.sttLanguage || config.connectionId !== voiceSettings.sttConnectionId)) {
+      stopSTTSession('destroy')
+      setSttStatus('idle')
+      setSttLoadingProgress(null)
+    }
+  }, [voiceSettings.sttProvider, voiceSettings.sttLanguage, voiceSettings.sttConnectionId, stopSTTSession])
+
+  useEffect(() => {
+    stopSTTSession('destroy')
+    setSttStatus('idle')
+    setSttLoadingProgress(null)
+  }, [chatId, stopSTTSession])
 
   useEffect(() => {
     if (isGeneratingInChat && isListeningToSTT) {
@@ -3282,9 +3387,15 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
             <button
               type="button"
               className={styles.actionBtn}
-              onClick={() => handleImpersonate('oneliner')}
-              title={`${t('quickMenu.oneLiner')}: ${t('quickMenu.oneLinerDesc')}`}
-              aria-label={t('quickMenu.oneLiner')}
+              onClick={() => handleImpersonate(impersonationMode)}
+              title={`${t('quickMenu.impersonate')}: ${
+                impersonationMode === 'prompts'
+                  ? t('quickMenu.presetPrompts')
+                  : impersonationMode === 'preset'
+                    ? t('quickMenu.impersonationPreset')
+                    : t('quickMenu.oneLiner')
+              }`}
+              aria-label={t('quickMenu.impersonate')}
               disabled={isGeneratingInChat}
               style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
             >
@@ -3433,6 +3544,9 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
                   return composerActions[id]
                 }
                 const extraId = fromComposerExtraId(id)
+                // The pinned native launcher is the sole composer presentation.
+                // Ignore the catalog contribution and any legacy persisted copy.
+                if (isCoreOwnedComposerActionId(extraId)) return null
                 if (!hasLumiverseSuite && isExtensionComposerActionId(extraId)) return null
                 if (extraId === 'lumiverse_suite.connections_picker.open') return composerActions.connectionsPicker
                 const action = qtActionById.get(extraId)
@@ -3454,7 +3568,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
               }}
             >
               <span data-spindle-mount="chat_actions" data-spindle-scope={`chat:${chatId}:actions`} style={{ display: 'contents' }} />
-              {hasLumiverseSuite && showComposerCustomizeGear && (
+              {showComposerCustomizeGear && (
                 <button
                   type="button"
                   className={clsx(styles.actionBtn, styles.composerCustomizeGear, customizeOpen && styles.actionBtnActive)}
@@ -3477,7 +3591,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
         )
       })()}
 
-      {hasLumiverseSuite && customizeOpen && (
+      {customizeOpen && (
         <InputAreaCustomizeModal
           onClose={() => setCustomizeOpen(false)}
           order={composerActionBar.order}
@@ -3845,42 +3959,6 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
                     </span>
                   </button>
                 )}
-                <button
-                  type="button"
-                  className={styles.popRowBtn}
-                  onClick={() => {
-                    setOpenPopover(null)
-                    handleImpersonate('prompts')
-                  }}
-                  disabled={isGeneratingInChat}
-                  style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
-                >
-                  <span className={styles.personaMain}>
-                    <ScrollText size={14} />
-                    <span className={styles.personaNameGroup}>
-                      <span>{t('quickMenu.presetPrompts')}</span>
-                      <span className={styles.personaTitle}>{t('quickMenu.presetPromptsDesc')}</span>
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={styles.popRowBtn}
-                  onClick={() => {
-                    setOpenPopover(null)
-                    handleImpersonate('oneliner')
-                  }}
-                  disabled={isGeneratingInChat}
-                  style={isGeneratingInChat ? { opacity: 0.5 } : undefined}
-                >
-                  <span className={styles.personaMain}>
-                    <MessageSquare size={14} />
-                    <span className={styles.personaNameGroup}>
-                      <span>{t('quickMenu.oneLiner')}</span>
-                      <span className={styles.personaTitle}>{t('quickMenu.oneLinerDesc')}</span>
-                    </span>
-                  </span>
-                </button>
                 <button
                   type="button"
                   className={styles.popRowBtn}
@@ -4331,10 +4409,12 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
             '--stt-glow-x': `${12 + sttVisualizerLevel * 12}%`,
             '--stt-glow-size': `${10 + sttVisualizerLevel * 24}px`,
           } as CSSProperties}
-          onClick={sttStatus === 'processing' ? undefined : handleSTTToggle}
-          disabled={sttStatus === 'processing'}
-          title={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
-          aria-label={sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          onClick={sttStatus === 'processing' && voiceSettings.sttProvider !== 'whistle' ? undefined : handleSTTToggle}
+          disabled={sttStatus === 'processing' && voiceSettings.sttProvider !== 'whistle'}
+          title={voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+            ? t('input.sttCancel') : sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
+          aria-label={voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+            ? t('input.sttCancel') : sttStatus === 'processing' ? t('input.processingSpeech') : t('input.stopStt')}
           aria-live="polite"
         >
           <span className={styles.sttRecordingStatus}>
@@ -4363,7 +4443,8 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
             })}
           </span>
           <span className={styles.sttRecordingHint}>
-            {sttStatus === 'processing' ? t('input.transcribing') : t('input.tapToStopTranscribe')}
+            {voiceSettings.sttProvider === 'whistle' && (sttStatus === 'starting' || sttStatus === 'processing')
+              ? t('input.sttTapToCancel') : sttStatus === 'processing' ? t('input.transcribing') : t('input.tapToStopTranscribe')}
           </span>
         </button>
       ) : (

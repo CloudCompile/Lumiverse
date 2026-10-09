@@ -27,9 +27,11 @@
 }
 
 /* The normal card is paint-contained and clipped to keep its glass treatment
-   cheap. Authored HTML islands need visual overflow for box/text shadows and
-   transformed corners, so relax both clips only for cards containing one. */
-.card:has([data-lumiverse-html-island]) {
+   cheap. Authored HTML islands and inline-card spacing shells need visual
+   overflow for box/text shadows and transformed corners, so relax both clips
+   only for cards containing either one. */
+.card:has([data-lumiverse-html-island]),
+.card:has([data-lumiverse-inline-html-card]) {
   overflow: visible;
   contain: layout style;
 }

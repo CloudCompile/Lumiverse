@@ -1,3 +1,12 @@
+export const MIN_UI_SCALE = 0.5
+export const MAX_UI_SCALE = 1.5
+
+/** Saved/imported settings must stay within the range offered by the UI. */
+export function normalizeUiScale(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return 1
+  return Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, value))
+}
+
 export function getUiScale(): number {
   if (typeof window === 'undefined' || typeof document === 'undefined' || typeof getComputedStyle !== 'function') return 1
   const raw = getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale')

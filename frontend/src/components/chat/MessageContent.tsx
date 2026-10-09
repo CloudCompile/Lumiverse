@@ -9,6 +9,7 @@ import { parseOOC } from '@/lib/oocParser'
 import { createEmphasisAwareRenderer } from '@/lib/markedEmphasisRenderer'
 import { createStrictTildeTokenizer } from '@/lib/markedTokenizer'
 import { healFormattingArtifacts } from '@/lib/formatHealing'
+import { shouldSkipFormattingHealing, shouldSkipInlineCardWrapping, subscribeDisplayFormatting } from '@/lib/spindle/display-resolver-registry'
 import { normalizeLegacyFontTags } from '@/lib/legacyFontTags'
 import { resolveDisplayMacros } from '@/lib/resolveDisplayMacros'
 import { copyTextToClipboard } from '@/lib/clipboard'
@@ -304,9 +305,9 @@ function escapeIsolatedOrderedListItems(text: string): string {
   }).join('\n')
 }
 
-function formatContent(raw: string): string {
+function formatContent(raw: string, skipFormattingHealing = false): string {
   if (!raw) return ''
-  const healed = healFormattingArtifacts(raw)
+  const healed = skipFormattingHealing ? raw : healFormattingArtifacts(raw)
   const normalized = normalizeQuotes(healed)
   const listSafe = escapeIsolatedOrderedListItems(normalized)
   let html = marked.parse(listSafe, { async: false }) as string
@@ -327,8 +328,8 @@ marked.setOptions({
 })
 
 // ── HTML Island Isolation ──
-// Detects self-contained HTML blocks containing <style> tags or significant
-// inline styling and extracts them for Shadow DOM rendering, preventing markdown
+// Detects self-contained HTML blocks containing <style> tags
+// and extracts them for Shadow DOM rendering, preventing markdown
 // parsing from breaking interactive/styled HTML (CSS checkbox/radio hacks, tabs,
 // phone screens, etc.) and isolating their styles.
 
@@ -347,9 +348,24 @@ const YOUTUBE_EMBED_ALLOWED_QUERY_PARAMS = new Set([
   ...YOUTUBE_EMBED_TOKEN_QUERY_PARAMS,
 ])
 const SAFE_YOUTUBE_EMBED_TOKEN_RE = /^[A-Za-z0-9_-]{1,128}$/
-const INLINE_STYLE_ATTR_RE = /\bstyle\s*=/gi
 const NO_ISLAND_ATTR_RE = /\bdata-no-island(?=[\s=>"'/]|$)/i
-const ROOT_HTML_TAG_RE = /^<([a-z][\w:-]*)\b[^>]*>/i
+const ROOT_HTML_TAG_PREFIX_RE = /^<([a-z][\w:-]*)\b/i
+const INLINE_HTML_CARD_ATTR = 'data-lumiverse-inline-html-card'
+const INLINE_HTML_CARD_STYLE_THRESHOLD = 3
+const INLINE_HTML_CARD_TAGS = new Set([
+  'article',
+  'aside',
+  'details',
+  'div',
+  'fieldset',
+  'figure',
+  'footer',
+  'form',
+  'header',
+  'main',
+  'nav',
+  'section',
+])
 const VOID_HTML_TAGS = new Set([
   'area',
   'base',
@@ -726,59 +742,145 @@ const ISLAND_BASE_CSS = `
   }
 `
 
-/** Detect HTML blocks with enough inline styling to warrant island extraction. */
-function hasSignificantInlineStyles(html: string): boolean {
-  INLINE_STYLE_ATTR_RE.lastIndex = 0
-  let count = 0
-  while (INLINE_STYLE_ATTR_RE.exec(html)) {
-    if (++count >= 3) return true
-  }
-  return false
-}
-
 function escapeRegexLiteral(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 interface HtmlElementMatch {
-  openingTag: string
+  noIsland: boolean
   end: number
 }
 
-function findStyleBlockEnd(raw: string, start: number): number | null {
-  const open = raw.slice(start).match(/^<style(?=[\s>])[^>]*>/i)
+function lowerBound(positions: readonly number[], start: number): number {
+  let low = 0
+  let high = positions.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if (positions[middle] < start) low = middle + 1
+    else high = middle
+  }
+  return low
+}
+
+function createHtmlIslandIndex(raw: string) {
+  const greaterEnds: number[] = []
+  const selfClosingEnds = new Set<number>()
+  for (let at = raw.indexOf('>'); at >= 0; at = raw.indexOf('>', at + 1)) {
+    greaterEnds.push(at + 1)
+    let last = at - 1
+    while (last >= 0 && /\s/.test(raw[last])) last--
+    if (raw[last] === '/') selfClosingEnds.add(at + 1)
+  }
+  const openingEnd = (start: number) => greaterEnds[lowerBound(greaterEnds, start + 1)] ?? 0
+  const styles = Array.from(raw.matchAll(/<style[\s>]/gi), match => match.index!)
+  const noIslands = Array.from(raw.matchAll(new RegExp(NO_ISLAND_ATTR_RE.source, 'gi')), match => match.index!)
+  const styleCloses = Array.from(raw.matchAll(/<\/style\s*>/gi), match => [match.index!, match.index! + match[0].length])
+  const styleCloseStarts = styleCloses.map(close => close[0])
+  const tags = new Map<string, {
+    starts: number[]
+    tokens: Array<{ group: number; kind: number }>
+    groups: Array<{ end: number; kind: number }>
+    nextClose: number[]
+  }>()
+  let end = 0
+  for (const match of raw.matchAll(/<\/?([a-z][\w:-]*)(?=[\s>/])/gi)) {
+    const start = match.index!
+    if (start >= end) end = openingEnd(start)
+    if (!end) break
+    const name = match[1].toLowerCase()
+    let tag = tags.get(name)
+    if (!tag) {
+      tag = { starts: [], tokens: [], groups: [], nextClose: [] }
+      tags.set(name, tag)
+    }
+    const kind = raw[start + 1] === '/' ? -1 : selfClosingEnds.has(end) ? 0 : 1
+    // Tokens inside an attribute share its '>'; the old per-tag regex consumes only the first.
+    if (tag.groups.at(-1)?.end !== end) tag.groups.push({ end, kind })
+    tag.starts.push(start)
+    tag.tokens.push({ group: tag.groups.length - 1, kind })
+  }
+  for (const tag of tags.values()) {
+    for (let i = tag.groups.length - 1; i >= 0; i--) {
+      const next = tag.nextClose[i + 1] ?? -1
+      tag.nextClose[i] = tag.groups[i].kind === -1 ? i
+        : tag.groups[i].kind === 0 ? next
+          : next < 0 ? -1 : tag.nextClose[next + 1] ?? -1
+    }
+  }
+  return {
+    openingEnd,
+    selfClosingEnds,
+    closingTrails: new Map<number, number>(),
+    styleEnd: (start: number) => styleCloses[lowerBound(styleCloseStarts, start)]?.[1] ?? null,
+    hasStyle: (start: number, end: number) => (styles[lowerBound(styles, start)] ?? Infinity) + 7 <= end,
+    noIsland: (start: number, end: number) => (noIslands[lowerBound(noIslands, start)] ?? Infinity) + 14 <= end,
+    elementEnd: (name: string, start: number): number | null => {
+      const tag = tags.get(name)
+      const first = tag?.tokens[lowerBound(tag.starts, start)]
+      if (!tag || !first) return null
+      if (first.kind <= 0) return tag.groups[first.group].end
+      const close = tag.nextClose[first.group + 1] ?? -1
+      return close < 0 ? null : tag.groups[close].end
+    },
+  }
+}
+
+type HtmlIslandIndex = ReturnType<typeof createHtmlIslandIndex>
+
+function findStyleBlockEnd(raw: string, start: number, index?: HtmlIslandIndex, work?: { characters: number }): number | null {
+  const open = raw.slice(start).match(/^<style(?=[\s>])/i)
   if (!open) return null
 
+  const openingEnd = index ? index.openingEnd(start) : raw.indexOf('>', start) + 1
+  if (!openingEnd) {
+    if (work && !index) work.characters += raw.length - start
+    return null
+  }
+  if (index) return index.styleEnd(openingEnd)
   const closeRe = /<\/style\s*>/gi
-  closeRe.lastIndex = start + open[0].length
+  closeRe.lastIndex = openingEnd
   const close = closeRe.exec(raw)
+  if (work) work.characters += (close ? close.index + close[0].length : raw.length) - start
   return close ? close.index + close[0].length : null
 }
 
-function parseHtmlElementAt(raw: string, start: number): HtmlElementMatch | null {
-  const open = raw.slice(start).match(ROOT_HTML_TAG_RE)
+function parseHtmlElementAt(raw: string, start: number, index?: HtmlIslandIndex, work?: { characters: number }): HtmlElementMatch | null {
+  const open = raw.slice(start).match(ROOT_HTML_TAG_PREFIX_RE)
   if (!open) return null
 
   const tag = open[1].toLowerCase()
-  const openingTag = open[0]
-  const openingEnd = start + openingTag.length
+  const openingEnd = index ? index.openingEnd(start) : raw.indexOf('>', start) + 1
+  if (!openingEnd) {
+    if (work && !index) work.characters += raw.length - start
+    return null
+  }
+  const openingTag = index ? '' : raw.slice(start, openingEnd)
+  const noIsland = index ? index.noIsland(start, openingEnd) : NO_ISLAND_ATTR_RE.test(openingTag)
 
   if (tag === 'style') {
-    const end = findStyleBlockEnd(raw, start)
-    return end == null ? null : { openingTag, end }
+    const end = findStyleBlockEnd(raw, start, index, work)
+    return end == null ? null : { noIsland, end }
   }
 
-  if (VOID_HTML_TAGS.has(tag) || /\/\s*>$/.test(openingTag)) {
-    return { openingTag, end: openingEnd }
+  if (VOID_HTML_TAGS.has(tag) || (index ? index.selfClosingEnds.has(openingEnd) : /\/\s*>$/.test(openingTag))) {
+    if (work && !index) work.characters += openingEnd - start
+    return { noIsland, end: openingEnd }
+  }
+  if (index) {
+    const end = index.elementEnd(tag, start)
+    return end == null ? null : { noIsland, end }
   }
 
-  const tagRe = new RegExp(`</?${escapeRegexLiteral(tag)}(?=[\\s>/])[^>]*>`, 'gi')
+  const tagRe = new RegExp(`</?${escapeRegexLiteral(tag)}(?=[\\s>/])`, 'gi')
   tagRe.lastIndex = start
 
   let depth = 0
   let match: RegExpExecArray | null
   while ((match = tagRe.exec(raw)) !== null) {
-    const token = match[0]
+    const tokenEnd = raw.indexOf('>', tagRe.lastIndex) + 1
+    if (!tokenEnd) break
+    const token = raw.slice(match.index, tokenEnd)
+    tagRe.lastIndex = tokenEnd
     if (/^<\//.test(token)) {
       depth -= 1
     } else if (!/\/\s*>$/.test(token)) {
@@ -786,10 +888,12 @@ function parseHtmlElementAt(raw: string, start: number): HtmlElementMatch | null
     }
 
     if (depth <= 0) {
-      return { openingTag, end: match.index + token.length }
+      if (work) work.characters += tokenEnd - start
+      return { noIsland, end: tokenEnd }
     }
   }
 
+  if (work) work.characters += raw.length - start
   return null
 }
 
@@ -799,14 +903,14 @@ function skipWhitespace(raw: string, start: number): number {
   return i
 }
 
-function extendThroughAdjacentHtmlSiblings(raw: string, start: number): number {
+function extendThroughAdjacentHtmlSiblings(raw: string, start: number, index?: HtmlIslandIndex): number {
   let end = start
   let pos = start
 
   while (pos < raw.length) {
     const next = skipWhitespace(raw, pos)
-    const element = parseHtmlElementAt(raw, next)
-    if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) break
+    const element = parseHtmlElementAt(raw, next, index)
+    if (!element || element.noIsland) break
 
     end = element.end
     pos = element.end
@@ -817,7 +921,7 @@ function extendThroughAdjacentHtmlSiblings(raw: string, start: number): number {
 
 function getMarkdownFenceRanges(raw: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = []
-  const lines = raw.match(/.*(?:\n|$)/g) || []
+  const lines = raw.match(/[^\r\n]*(?:\r\n?|\n|$)/g) || []
   let offset = 0
   let openFence: MarkdownFence | null = null
   let openStart = 0
@@ -852,37 +956,46 @@ function getFenceRangeContaining(ranges: Array<[number, number]>, pos: number, s
   return -1
 }
 
-function getIslandEndAt(raw: string, start: number, isStreaming: boolean): number | null {
-  const styleEnd = findStyleBlockEnd(raw, start)
+function getIslandEndAt(raw: string, start: number, isStreaming: boolean, index?: HtmlIslandIndex, work?: { characters: number }): number | null {
+  const styleEnd = findStyleBlockEnd(raw, start, index, work)
   if (styleEnd != null) {
-    return extendThroughAdjacentHtmlSiblings(raw, styleEnd)
+    return extendThroughAdjacentHtmlSiblings(raw, styleEnd, index)
   }
 
   if (isStreaming && /^<style(?=[\s>])/i.test(raw.slice(start))) return null
 
-  const element = parseHtmlElementAt(raw, start)
-  if (!element || NO_ISLAND_ATTR_RE.test(element.openingTag)) return null
+  const element = parseHtmlElementAt(raw, start, index, work)
+  if (!element || element.noIsland) return null
 
-  const fragment = raw.slice(start, element.end)
-  if (/<style[\s>]/i.test(fragment) || hasSignificantInlineStyles(fragment)) {
+  if (index ? index.hasStyle(start, element.end) : /<style[\s>]/i.test(raw.slice(start, element.end))) {
     return element.end
   }
 
-  let peekStart = skipWhitespace(raw, element.end)
-  while (raw.startsWith('</', peekStart)) {
-    const closeEnd = raw.indexOf('>', peekStart + 2)
-    if (closeEnd < 0) break
-    peekStart = skipWhitespace(raw, closeEnd + 1)
+  const trail: number[] = []
+  let peekStart = element.end
+  while (true) {
+    const cached = index?.closingTrails.get(peekStart)
+    if (cached != null) {
+      peekStart = cached
+      break
+    }
+    if (index) trail.push(peekStart)
+    peekStart = skipWhitespace(raw, peekStart)
+    if (!raw.startsWith('</', peekStart)) break
+    const closeEnd = index ? index.openingEnd(peekStart) : raw.indexOf('>', peekStart + 2) + 1
+    if (!closeEnd) break
+    peekStart = closeEnd
   }
-  const trailingStyleEnd = findStyleBlockEnd(raw, peekStart)
-  if (trailingStyleEnd != null) return extendThroughAdjacentHtmlSiblings(raw, trailingStyleEnd)
+  for (const start of trail) index!.closingTrails.set(start, peekStart)
+  const trailingStyleEnd = findStyleBlockEnd(raw, peekStart, index)
+  if (trailingStyleEnd != null) return extendThroughAdjacentHtmlSiblings(raw, trailingStyleEnd, index)
 
   return null
 }
 
 function renderIslandMarkdownText(markdown: string, messageProse = false): string {
   const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
-  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/(?<!\s)\s*$/)?.[0] ?? ''
   const core = markdown.trim()
 
   if (!core) return markdown
@@ -907,7 +1020,7 @@ function renderIslandMarkdownText(markdown: string, messageProse = false): strin
 
 function renderIslandInlineMarkdownText(markdown: string): string {
   const leadingWhitespace = markdown.match(/^\s*/)?.[0] ?? ''
-  const trailingWhitespace = markdown.match(/\s*$/)?.[0] ?? ''
+  const trailingWhitespace = markdown.match(/(?<!\s)\s*$/)?.[0] ?? ''
   const core = markdown.trim()
 
   if (!core) return markdown
@@ -918,7 +1031,7 @@ function renderIslandInlineMarkdownText(markdown: string): string {
   return `${leadingWhitespace}${html}${trailingWhitespace}`
 }
 
-function extractHtmlIslands(
+export function extractHtmlIslands(
   raw: string,
   isStreaming: boolean,
 ): { content: string; islands: string[] } {
@@ -932,14 +1045,24 @@ function extractHtmlIslands(
   ) {
     return { content: `<!--${HTML_ISLAND_TOKEN}_0-->`, islands: [raw] }
   }
+  if (!hasStyleTag) return { content: raw, islands: [] }
 
   const islands: string[] = []
+  let index: HtmlIslandIndex | undefined
+  let lastStyle: number | undefined
+  const work = { characters: 0 }
   const fences = getMarkdownFenceRanges(raw)
   let fenceIdx = 0
   let content = ''
   let pos = 0
 
   while (pos < raw.length) {
+    // An island can consume several fences; never revisit those ranges.
+    while (fenceIdx < fences.length && fences[fenceIdx][1] <= pos) fenceIdx++
+    if (lastStyle !== undefined && lastStyle < pos && fenceIdx >= fences.length) {
+      content += raw.slice(pos)
+      break
+    }
     const containingFence = getFenceRangeContaining(fences, pos, fenceIdx)
     if (containingFence >= 0) {
       const [, end] = fences[containingFence]
@@ -965,13 +1088,18 @@ function extractHtmlIslands(
 
     content += raw.slice(pos, nextTag)
 
-    const islandEnd = getIslandEndAt(raw, nextTag, isStreaming)
+    const islandEnd = getIslandEndAt(raw, nextTag, isStreaming, index, work)
     if (islandEnd != null && islandEnd > nextTag) {
       const idx = islands.length
       islands.push(raw.slice(nextTag, islandEnd))
       content += `<!--${HTML_ISLAND_TOKEN}_${idx}-->`
       pos = islandEnd
     } else {
+      if (lastStyle === undefined) {
+        for (const match of raw.matchAll(/<style[\s>]/gi)) lastStyle = match.index
+      }
+      // Bound repeated subtree scans before paying for an index on simple HTML.
+      if (!index && work.characters > raw.length * 2) index = createHtmlIslandIndex(raw)
       content += raw[nextTag]
       pos = nextTag + 1
     }
@@ -1095,17 +1223,17 @@ function balanceStreamingDetails(raw: string): string {
   return raw + suffix
 }
 
-function formatContentPieces(raw: string, isStreaming: boolean): ContentPiece[] {
+function formatContentPieces(raw: string, isStreaming: boolean, skipFormattingHealing = false): ContentPiece[] {
   if (!raw) return []
 
   const { content: rawWithoutEmbeds, embeds } = extractTrustedYouTubeEmbeds(raw)
   const { content, islands } = extractHtmlIslands(rawWithoutEmbeds, isStreaming)
 
   if (islands.length === 0 && embeds.length === 0) {
-    return [{ type: 'markup', content: sanitizeRichHtml(formatContent(rawWithoutEmbeds)) }]
+    return [{ type: 'markup', content: sanitizeRichHtml(formatContent(rawWithoutEmbeds, skipFormattingHealing)) }]
   }
 
-  const html = formatContent(content)
+  const html = formatContent(content, skipFormattingHealing)
   const pieces: ContentPiece[] = []
   let lastIdx = 0
 
@@ -1184,6 +1312,23 @@ function replaceHtmlPreservingImages(root: HTMLElement | ShadowRoot, html: strin
     if (!src) continue
     const preserved = stableImgs.get(src)
     if (preserved && newImg.parentNode) {
+      // Reuse the decoded image, but keep the current render's layout and metadata.
+      if (!preserved.isEqualNode(newImg)) {
+        const oldAttributes = preserved.attributes
+        for (let i = oldAttributes.length - 1; i >= 0; i--) {
+          const attribute = oldAttributes[i]
+          const value = newImg.getAttribute(attribute.name)
+          if (value === null) preserved.removeAttribute(attribute.name)
+          else if (attribute.value !== value) attribute.value = value
+        }
+        const newAttributes = newImg.attributes
+        if (oldAttributes.length !== newAttributes.length) {
+          for (let i = 0; i < newAttributes.length; i++) {
+            const { name, value } = newAttributes[i]
+            if (!preserved.hasAttribute(name)) preserved.setAttribute(name, value)
+          }
+        }
+      }
       newImg.replaceWith(preserved)
       stableImgs.delete(src)
     }
@@ -1336,24 +1481,104 @@ function getChatFindHighlightRoots(container: HTMLElement): ChatFindHighlightRoo
   return roots
 }
 
+function hasInlineHtmlCardStyleCount(html: string): boolean {
+  const inlineStyleRe = /\bstyle\s*=/gi
+  for (let count = 0; inlineStyleRe.exec(html); count++) {
+    if (count + 1 >= INLINE_HTML_CARD_STYLE_THRESHOLD) return true
+  }
+  return false
+}
+
+/**
+ * Keep the legacy visual breathing room for heavily inline-styled cards without
+ * moving the card into a shadow root. Counts are accumulated bottom-up and
+ * capped at the threshold, so both discovery and wrapping stay linear even for
+ * deeply nested or very long messages.
+ */
+function restoreInlineHtmlCardSpacing(root: HTMLElement, html: string): void {
+  root.classList.remove(styles.inlineHtmlCard)
+  root.removeAttribute(INLINE_HTML_CARD_ATTR)
+  if (!hasInlineHtmlCardStyleCount(html)) return
+
+  const elements = Array.from(root.querySelectorAll('*'))
+  const styleCounts = new Map<Element, number>()
+
+  for (let i = elements.length - 1; i >= 0; i--) {
+    const element = elements[i]
+    let count = element.hasAttribute('style') ? 1 : 0
+    for (const child of element.children) {
+      count += styleCounts.get(child) ?? 0
+      if (count >= INLINE_HTML_CARD_STYLE_THRESHOLD) break
+    }
+    styleCounts.set(element, Math.min(count, INLINE_HTML_CARD_STYLE_THRESHOLD))
+  }
+
+  const insideCard = new Map<Element, boolean>()
+  const cards: Element[] = []
+  for (const element of elements) {
+    const parent = element.parentElement
+    const parentInsideCard = parent !== null
+      && parent !== root
+      && (insideCard.get(parent) ?? false)
+    const isCard = !parentInsideCard
+      && INLINE_HTML_CARD_TAGS.has(element.localName)
+      && (styleCounts.get(element) ?? 0) >= INLINE_HTML_CARD_STYLE_THRESHOLD
+
+    insideCard.set(element, parentInsideCard || isCard)
+    if (isCard) cards.push(element)
+  }
+
+  if (
+    cards.length === 1
+    && cards[0].parentElement === root
+    && Array.from(root.childNodes).every((node) => (
+      node === cards[0]
+      || node.nodeType === Node.COMMENT_NODE
+      || (node.nodeType === Node.TEXT_NODE && !node.textContent?.trim())
+    ))
+  ) {
+    root.classList.add(styles.inlineHtmlCard)
+    root.setAttribute(INLINE_HTML_CARD_ATTR, '')
+    return
+  }
+
+  for (const card of cards) {
+    const parent = card.parentNode
+    if (!parent) continue
+    const shell = document.createElement('div')
+    shell.className = styles.inlineHtmlCard
+    shell.setAttribute(INLINE_HTML_CARD_ATTR, '')
+    parent.insertBefore(shell, card)
+    shell.appendChild(card)
+  }
+}
+
 /**
  * dangerouslySetInnerHTML wrapper that preserves IMG element identity by
  * src across innerHTML replacements, so images don't redo the cache lookup,
  * decode, paint cycle on every chat re-render.
  */
-export function ProseHtml({ html, className }: { html: string; className?: string }) {
+export function ProseHtml({ html, className, skipInlineCardWrapping = false }: { html: string; className?: string; skipInlineCardWrapping?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   const lastHtmlRef = useRef<string | null>(null)
+  const lastWrappingRef = useRef<boolean | null>(null)
 
   useLayoutEffect(() => {
     const el = ref.current
     if (!el) return
-    if (lastHtmlRef.current === html) return
+    if (lastHtmlRef.current === html && lastWrappingRef.current === skipInlineCardWrapping) return
 
     replaceHtmlPreservingImages(el, html)
+    if (skipInlineCardWrapping) {
+      el.classList.remove(styles.inlineHtmlCard)
+      el.removeAttribute(INLINE_HTML_CARD_ATTR)
+    } else {
+      restoreInlineHtmlCardSpacing(el, html)
+    }
     lastHtmlRef.current = html
+    lastWrappingRef.current = skipInlineCardWrapping
     notifyMessageContentLayout(el)
-  }, [html])
+  }, [html, skipInlineCardWrapping])
 
   return <div ref={ref} className={className} />
 }
@@ -1463,6 +1688,10 @@ export default function MessageContent({
   findQuery = '',
 }: MessageContentProps) {
   const { t } = useTranslation('chat')
+  const getFormattingSnapshot = useCallback(() => shouldSkipFormattingHealing(chatId), [chatId])
+  const skipFormattingHealing = useSyncExternalStore(subscribeDisplayFormatting, getFormattingSnapshot, getFormattingSnapshot)
+  const getWrappingSnapshot = useCallback(() => shouldSkipInlineCardWrapping(chatId), [chatId])
+  const skipInlineCardWrapping = useSyncExternalStore(subscribeDisplayFormatting, getWrappingSnapshot, getWrappingSnapshot)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
   const regexScripts = useStore((s) => s.regexScripts)
   const actionUsage = useStore((s) => {
@@ -2035,7 +2264,7 @@ export default function MessageContent({
           }
           // Otherwise skip — OOC content is hidden until rendered in the grouped box
         } else {
-          const pieces = formatContentPieces(block.content, isStreaming)
+          const pieces = formatContentPieces(block.content, isStreaming, skipFormattingHealing)
           for (let p = 0; p < pieces.length; p++) {
             const piece = pieces[p]
             elements.push(
@@ -2043,7 +2272,7 @@ export default function MessageContent({
                 ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} isStreaming={isStreaming} />
                 : piece.type === 'youtubeEmbed'
                   ? <TrustedYouTubeEmbed key={`${i}-youtube-${p}`} embed={piece.embed} />
-                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
+                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} skipInlineCardWrapping={skipInlineCardWrapping} />
             )
           }
         }
@@ -2058,7 +2287,7 @@ export default function MessageContent({
           )
           oocIndex++
         } else {
-          const pieces = formatContentPieces(block.content, isStreaming)
+          const pieces = formatContentPieces(block.content, isStreaming, skipFormattingHealing)
           for (let p = 0; p < pieces.length; p++) {
             const piece = pieces[p]
             elements.push(
@@ -2066,7 +2295,7 @@ export default function MessageContent({
                 ? <IsolatedHtml key={`${i}-island-${p}`} html={piece.content} isStreaming={isStreaming} />
                 : piece.type === 'youtubeEmbed'
                   ? <TrustedYouTubeEmbed key={`${i}-youtube-${p}`} embed={piece.embed} />
-                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} />
+                : <ProseHtml key={`${i}-${p}`} className={styles.prose} html={piece.content} skipInlineCardWrapping={skipInlineCardWrapping} />
             )
           }
         }
@@ -2074,7 +2303,7 @@ export default function MessageContent({
     }
 
     return elements
-  }, [blocks, oocEnabled, lumiaOOCStyle, isStreaming])
+  }, [blocks, oocEnabled, lumiaOOCStyle, isStreaming, skipFormattingHealing, skipInlineCardWrapping])
 
   useLayoutEffect(() => {
     measureLongMessageOverflow()

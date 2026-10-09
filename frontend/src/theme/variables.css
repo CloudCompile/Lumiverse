@@ -9,6 +9,8 @@
   --lumiverse-primary-015: rgba(147, 112, 219, 0.15);
   --lumiverse-primary-020: rgba(147, 112, 219, 0.2);
   --lumiverse-primary-050: rgba(147, 112, 219, 0.5);
+  /* Semantic accent alias used by component surfaces. */
+  --lumiverse-primary-soft: var(--lumiverse-primary-015);
   --lumiverse-primary-deep: rgb(26 20 39);
   --lumiverse-primary-deep-hover: rgb(38 29 57);
   --lumiverse-primary-deep-contrast: hsl(273, 30%, 95%);
@@ -48,16 +50,26 @@
   --lumiverse-bg-deep-080: rgba(20, 17, 28, 0.8);
   --lumiverse-scene-text-scrim: rgba(7, 9, 16, 0.46);
 
+  /* Semantic material ladder. These are public aliases consumed by newer
+     component CSS and kept in lockstep with the canonical theme engine. */
+  --lumiverse-surface: var(--lumiverse-bg);
+  --lumiverse-surface-raised: var(--lumiverse-bg-elevated);
+  --lumiverse-surface-hover: var(--lumiverse-bg-hover);
+  --lumiverse-surface-muted: var(--lumiverse-fill-subtle);
+
   /* Subtle purple-tinted borders */
   --lumiverse-border: rgba(147, 112, 219, 0.12);
   --lumiverse-border-hover: rgba(147, 112, 219, 0.25);
   --lumiverse-border-light: rgba(128, 128, 128, 0.12);
+  --lumiverse-border-subtle: var(--lumiverse-border-light);
 
   /* Text colors */
   --lumiverse-text: rgba(255, 255, 255, 0.9);
   --lumiverse-text-muted: rgba(255, 255, 255, 0.65);
   --lumiverse-text-dim: rgba(255, 255, 255, 0.4);
   --lumiverse-text-hint: rgba(255, 255, 255, 0.3);
+  --lumiverse-text-primary: var(--lumiverse-text);
+  --lumiverse-text-secondary: var(--lumiverse-text-muted);
 
   /* Border radii */
   --lumiverse-radius-sm: 5px;
@@ -91,6 +103,7 @@
   /* Fill colors */
   --lumiverse-fill-subtle: rgba(0, 0, 0, 0.1);
   --lumiverse-fill: rgba(0, 0, 0, 0.15);
+  --lumiverse-input-bg: var(--lumiverse-fill);
   --lumiverse-fill-hover: rgba(0, 0, 0, 0.2);
   --lumiverse-fill-medium: rgba(0, 0, 0, 0.25);
   --lumiverse-fill-strong: rgba(0, 0, 0, 0.3);
@@ -127,7 +140,9 @@
 
   /* Chat — glassmorphic tokens */
   --lcs-glass-bg: rgba(18, 16, 28, 0.55);
+  --lcs-glass-bg-hover: rgba(24, 21, 36, 0.65);
   --lcs-glass-border: rgba(255, 255, 255, 0.06);
+  --lcs-glass-border-hover: rgba(255, 255, 255, 0.1);
   --lcs-glass-blur: 8px;
   --lcs-glass-soft-blur: 6px;
   --lcs-glass-strong-blur: 12px;

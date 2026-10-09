@@ -16,9 +16,11 @@ function makeEventTarget() {
   }
 }
 
+let documentFocused = true
+
 const documentMock = {
   visibilityState: 'visible' as DocumentVisibilityState,
-  hasFocus: () => true,
+  hasFocus: () => documentFocused,
   ...makeEventTarget(),
 }
 
@@ -40,7 +42,7 @@ class MockWebSocket {
   sent: string[] = []
   closeCalls = 0
 
-  constructor(_url: string) {
+  constructor(readonly url: string) {
     MockWebSocket.instances.push(this)
   }
 
@@ -113,6 +115,45 @@ function makeClient() {
 }
 
 describe('WebSocketClient push presence', () => {
+  test('widget connections stay ineligible for execution ownership after reconnect', () => {
+    const client = new WebSocketClient('ws://localhost:3000/api/ws')
+    try {
+      client.connect({ executionOwner: false })
+      expect(new URL(MockWebSocket.instances.at(-1)!.url).searchParams.get('frontend_runtime')).toBe('widget')
+      client.disconnect()
+      client.connect()
+      expect(new URL(MockWebSocket.instances.at(-1)!.url).searchParams.get('frontend_runtime')).toBe('widget')
+    } finally { client.disconnect() }
+  })
+
+  test('reconnections retain the document identifier and existing URL parameters', async () => {
+    const { frontendSessionId } = await import('@/lib/frontend-session')
+    const client = new WebSocketClient('ws://localhost:3000/api/ws?ticket=test')
+    try {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        client.connect()
+        const url = new URL(MockWebSocket.instances.at(-1)!.url)
+        expect(url.searchParams.get('frontend_session')).toBe(frontendSessionId)
+        expect(url.searchParams.get('ticket')).toBe('test')
+        client.disconnect()
+      }
+    } finally { client.disconnect() }
+  })
+
+  test('forwards host revisions and mutation identifiers without changing event payloads', () => {
+    const client = new WebSocketClient('ws://localhost:3000/api/ws');
+    const seen: unknown[] = [];
+    client.on('MESSAGE_EDITED', (payload, metadata) => seen.push({ payload, metadata }));
+    try {
+      client.connect();
+      const socket = MockWebSocket.instances.at(-1)!;
+      socket.open();
+      const payload = { chatId: 'chat', message: { id: 'message', content: 'edited' } };
+      const metadata = { stateRevision: { epoch: 'host', sequence: 2 }, runtimeMutationId: 'mutation' };
+      socket.receive({ event: 'MESSAGE_EDITED', payload, ...metadata });
+      expect(seen).toEqual([{ payload, metadata }]);
+    } finally { client.disconnect(); }
+  });
   test('reports current presence and stream focus after opening and after authentication', () => {
     const client = new WebSocketClient('ws://localhost:3000/api/ws')
     try {
@@ -160,6 +201,135 @@ describe('WebSocketClient push presence', () => {
     } finally {
       client.disconnect()
       documentMock.visibilityState = 'visible'
+    }
+  })
+
+  test('reports a visible but non-frontmost browser window as inactive', () => {
+    const client = new WebSocketClient('ws://localhost:3000/api/ws') as any
+    try {
+      client.connect()
+      const socket = MockWebSocket.instances.at(-1)!
+      socket.open()
+      socket.sent = []
+
+      documentFocused = false
+      windowMock.dispatchEvent(new Event('blur'))
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'visibility',
+        visible: false,
+      })
+
+      documentFocused = true
+      windowMock.dispatchEvent(new Event('focus'))
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'visibility',
+        visible: true,
+      })
+    } finally {
+      client.disconnect()
+      documentFocused = true
+    }
+  })
+
+  test('reduces native hidden, minimized, and background states to inactive presence', () => {
+    const client = makeClient()
+    try {
+      const socket = client.ws as MockWebSocket
+      socket.sent = []
+      const states = [
+        { state: 'hidden', visible: false, minimized: false, focused: false },
+        { state: 'minimized', visible: true, minimized: true, focused: false },
+        { state: 'background', visible: true, minimized: false, focused: false },
+      ] as const
+
+      for (const presence of states) {
+        client.desktopPresence = { ...presence, active: false }
+        client.sendVisibility()
+      }
+
+      expect(socket.sent.map((frame) => JSON.parse(frame)).filter((frame) => frame.type === 'visibility'))
+        .toEqual(states.map((presence) => ({
+          type: 'visibility',
+          visible: false,
+          source: 'tauri',
+          state: presence.state,
+          windowVisible: presence.visible,
+          minimized: presence.minimized,
+          focused: presence.focused,
+        })))
+    } finally {
+      client.disconnect()
+    }
+  })
+
+  test('trusts active native presence when WebView2 page visibility is stale', () => {
+    const client = makeClient()
+    try {
+      const socket = client.ws as MockWebSocket
+      socket.sent = []
+      client.focusedChatId = 'chat-1'
+      client.lifecyclePaused = true
+      documentMock.visibilityState = 'hidden'
+
+      client.applyDesktopPresence({
+        state: 'foreground',
+        visible: true,
+        minimized: false,
+        focused: true,
+        active: true,
+      })
+
+      expect(client.lifecyclePaused).toBe(false)
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'visibility',
+        visible: true,
+        source: 'tauri',
+        state: 'foreground',
+        windowVisible: true,
+        minimized: false,
+        focused: true,
+      })
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'stream_focus',
+        chatId: 'chat-1',
+      })
+    } finally {
+      client.disconnect()
+      documentMock.visibilityState = 'visible'
+    }
+  })
+
+  test('trusts hidden native presence when WebView2 still reports visible', () => {
+    const client = makeClient()
+    try {
+      const socket = client.ws as MockWebSocket
+      socket.sent = []
+      client.focusedChatId = 'chat-1'
+
+      client.applyDesktopPresence({
+        state: 'hidden',
+        visible: false,
+        minimized: false,
+        focused: false,
+        active: false,
+      })
+
+      expect(client.lifecyclePaused).toBe(true)
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'visibility',
+        visible: false,
+        source: 'tauri',
+        state: 'hidden',
+        windowVisible: false,
+        minimized: false,
+        focused: false,
+      })
+      expect(socket.sent.map((frame) => JSON.parse(frame))).toContainEqual({
+        type: 'stream_focus',
+        chatId: null,
+      })
+    } finally {
+      client.disconnect()
     }
   })
 
@@ -469,4 +639,27 @@ describe('WebSocketClient Spindle console logging', () => {
       client.disconnect()
     }
   })
+})
+
+test('takeover closes the primary socket and cannot reconnect on foreground recovery', async () => {
+  const { activeTab } = await import('@/lib/active-tab')
+  const { wsClient } = await import('./client')
+  Object.assign(windowMock, { localStorage, document: documentMock })
+  const release = activeTab.claim('socket-account')
+  try {
+    wsClient.connect()
+    const socket = MockWebSocket.instances.at(-1)!
+    socket.open()
+    localStorage.setItem('lumiverse:active-tab:socket-account', 'replacement')
+    windowMock.dispatchEvent(new Event('focus'))
+    expect(activeTab.signal.aborted).toBe(true)
+    expect(socket.closeCalls).toBe(1)
+    const count = MockWebSocket.instances.length
+    wsClient.connect()
+    documentMock.dispatchEvent(new Event('visibilitychange'))
+    expect(MockWebSocket.instances).toHaveLength(count)
+    const sent = socket.sent.length
+    wsClient.send({ type: 'stale-write' })
+    expect(socket.sent).toHaveLength(sent)
+  } finally { release(); wsClient.disconnect() }
 })

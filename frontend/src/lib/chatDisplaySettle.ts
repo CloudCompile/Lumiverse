@@ -23,11 +23,11 @@ import {
 //     widget DOM inserts those handlers schedule. SimTracker (and similar
 //     interceptors) rewrite row height after the registry has gone quiet;
 //     revealing before those inserts finish still thrashes the list.
-// The reveal itself is deferred by two animation frames, giving React time to
-// commit the interceptor-triggered repaint without imposing an arbitrary
-// quiet-period delay. The caller bounds its wait with a hard cap so
-// pathological cases (a slow backend, an extension stuck mid-load) degrade to
-// today's behavior instead of blocking the reveal forever.
+// The caller first mounts the warm virtual range, requires a brief zero-work
+// window, then rechecks after two animation frames. That covers staged
+// preprocess -> regex and tag -> widget handoffs as well as React/layout
+// commits. A hard cap keeps a slow backend or stuck extension from blocking
+// the reveal forever.
 
 export const CHAT_REVEAL_SETTLE_CAP_MS = 5000
 

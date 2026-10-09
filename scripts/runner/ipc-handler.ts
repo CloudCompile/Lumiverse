@@ -20,6 +20,7 @@ import {
   assertBranchCanHardSync,
   evaluateDesktopShell,
   rebuildDesktopShell,
+  bunRuntimeCmd,
 } from "./git-ops.js";
 import { inspectDesktopToolchain } from "../desktop-toolchain.js";
 import { readEnvConfig, writeTrustAnyOrigin } from "./env-config.js";
@@ -142,9 +143,9 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
       if (!toolchain.ready) {
         const missing = toolchain.checks
           .filter((check) => check.status === "missing")
-          .map((check) => check.label)
-          .join(", ");
-        respond(id, false, undefined, `Missing desktop build prerequisites: ${missing}`);
+          .map((check) => `${check.label}: ${check.detail}`)
+          .join("; ");
+        respond(id, false, undefined, `Desktop build prerequisites not met: ${missing}. Run 'bun run desktop:doctor' for remedies.`);
         break;
       }
 
@@ -199,7 +200,7 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
         progress(id, "update", "Starting update...");
         await applyUpdate(
           () => stopServer(),
-          () => { startServer(isDev); return Promise.resolve(); },
+          () => startServer(isDev),
           (message) => progress(id, "update", message),
         );
         lastUpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
@@ -242,7 +243,7 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
         await switchBranch(
           target,
           () => stopServer(),
-          () => { startServer(isDev); return Promise.resolve(); },
+          () => startServer(isDev),
           (message) => progress(id, "branch-switch", message),
         );
       } catch (err) {
@@ -307,7 +308,7 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
     case "clear-cache": {
       try {
         progress(id, "clear-cache", "Clearing package cache...");
-        const result = await spawnAsync(["bun", "pm", "cache", "rm"], {
+        const result = await spawnAsync(bunRuntimeCmd(["pm", "cache", "rm"]), {
           cwd: PROJECT_ROOT,
           timeoutMs: TIMEOUT_BUN_CACHE_MS,
           ignoreStdout: true,
@@ -356,7 +357,7 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
         await runWithServerStopped(
           "Frontend rebuild",
           () => stopServer(),
-          () => { startServer(isDev); return Promise.resolve(); },
+          () => startServer(isDev),
           async () => {
             progress(id, "rebuild", "Installing frontend dependencies...");
             await ensureFrontendDependencies(frontendDir);
@@ -383,8 +384,13 @@ export async function handleIPCMessage(msg: any, sink?: ResponseSink): Promise<v
         respond(id, true, { state });
         break;
       }
-      startServer(isDev);
-      respond(id, true, { state: getServerState() });
+      try {
+        await startServer(isDev);
+        respond(id, true, { state: getServerState() });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        respond(id, false, undefined, message);
+      }
       break;
     }
 

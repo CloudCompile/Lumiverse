@@ -1,3 +1,4 @@
+import type { MouseEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Minus, Square, X } from 'lucide-react'
 import { getCurrentWindow } from '@tauri-apps/api/window'
@@ -9,6 +10,15 @@ export default function DesktopPwaTitlebar() {
   const context = useContextualTitle()
   const title = context || t('appName')
   const isTauriDesktop = '__TAURI_INTERNALS__' in window
+
+  const startDragging = (event: MouseEvent<HTMLDivElement>) => {
+    // Own the gesture explicitly instead of combining Tauri's injected drag
+    // attribute handler with React's double-click handler. The second press of
+    // a double-click is reserved for toggleMaximize below.
+    if (!isTauriDesktop || event.button !== 0 || event.detail !== 1) return
+    event.preventDefault()
+    void getCurrentWindow().startDragging().catch((error) => console.warn('[titlebar] drag failed:', error))
+  }
 
   // These controls are deliberately first-party rather than theme-supplied.
   // A theme can style the buttons, but cannot gain native-window authority.
@@ -34,7 +44,7 @@ export default function DesktopPwaTitlebar() {
       <div
         className={styles.dragRegion}
         data-part="drag-region"
-        data-tauri-drag-region={isTauriDesktop ? 'deep' : undefined}
+        onMouseDown={startDragging}
         onDoubleClick={toggleMaximize}
       >
         <div className={styles.brandMark} />

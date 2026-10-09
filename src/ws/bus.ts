@@ -1,4 +1,5 @@
 import type { ServerWebSocket } from "bun";
+import { advanceRuntimeStateRevision, runtimeMutationId } from '../spindle/runtime-state-revision';
 import {
   EventType,
   type EventMessage,
@@ -45,6 +46,8 @@ class EventBus {
   private clientToUser = new Map<ServerWebSocket<unknown>, string>();
   private sessionToClient = new Map<string, ServerWebSocket<unknown>>();
   private clientToSession = new Map<ServerWebSocket<unknown>, string>();
+  private desktopNotificationClient = new Map<ServerWebSocket<unknown>, { userId: string; destinationId: string }>();
+  private desktopNotificationClientsByUser = new Map<string, Map<string, ServerWebSocket<unknown>>>();
   private clientToFocusedChat = new Map<ServerWebSocket<unknown>, string>();
   private clientLastActivity = new Map<ServerWebSocket<unknown>, number>();
   private clientVisibility = new Map<ServerWebSocket<unknown>, boolean>();
@@ -126,10 +129,75 @@ class EventBus {
     this.startSweep();
   }
 
+  /** Register a credential-authenticated socket that can only receive native notifications. */
+  addDesktopNotificationClient(
+    ws: ServerWebSocket<unknown>,
+    userId: string,
+    destinationId: string,
+  ): void {
+    if ((ws as { readyState?: number }).readyState !== 1) return;
+
+    let destinations = this.desktopNotificationClientsByUser.get(userId);
+    if (!destinations) {
+      destinations = new Map();
+      this.desktopNotificationClientsByUser.set(userId, destinations);
+    }
+    const previous = destinations.get(destinationId);
+    if (previous && previous !== ws) {
+      this.removeClient(previous);
+      try { previous.close(1000, "Desktop notification destination reconnected"); } catch {}
+    }
+
+    destinations.set(destinationId, ws);
+    this.desktopNotificationClient.set(ws, { userId, destinationId });
+    this.clientLastActivity.set(ws, Date.now());
+    this.startSweep();
+  }
+
+  /** Deliver directly to connected desktop destinations without joining the user event topic. */
+  sendDesktopNotification(
+    userId: string,
+    destinationIds: readonly string[],
+    payload: unknown,
+  ): number {
+    const destinations = this.desktopNotificationClientsByUser.get(userId);
+    if (!destinations || destinationIds.length === 0) return 0;
+    const allowed = new Set(destinationIds);
+    const message = JSON.stringify({
+      event: "DESKTOP_NOTIFICATION",
+      payload,
+      timestamp: Date.now(),
+    });
+    let sent = 0;
+    for (const [destinationId, ws] of destinations) {
+      if (!allowed.has(destinationId)) continue;
+      if ((ws as { readyState?: number }).readyState !== 1) {
+        this.removeClient(ws);
+        continue;
+      }
+      try {
+        ws.send(message);
+        sent++;
+      } catch {
+        this.removeClient(ws);
+      }
+    }
+    return sent;
+  }
+
+  /** Terminate the live notification session for a rotated or revoked destination. */
+  disconnectDesktopNotificationDestination(userId: string, destinationId: string): void {
+    const ws = this.desktopNotificationClientsByUser.get(userId)?.get(destinationId);
+    if (!ws) return;
+    this.removeClient(ws);
+    try { ws.close(1008, "Desktop notification destination revoked"); } catch {}
+  }
+
   removeClient(ws: ServerWebSocket<unknown>): void {
     const userId = this.clientToUser.get(ws);
     const sessionId = this.clientToSession.get(ws);
     const focusedChatId = this.clientToFocusedChat.get(ws);
+    const desktopNotification = this.desktopNotificationClient.get(ws);
     if (userId) {
       try {
         ws.unsubscribe(getUserTopic(userId));
@@ -151,6 +219,17 @@ class EventBus {
         this.sessionToClient.delete(sessionId);
       }
       this.clientToSession.delete(ws);
+    }
+
+    if (desktopNotification) {
+      const destinations = this.desktopNotificationClientsByUser.get(desktopNotification.userId);
+      if (destinations?.get(desktopNotification.destinationId) === ws) {
+        destinations.delete(desktopNotification.destinationId);
+        if (destinations.size === 0) {
+          this.desktopNotificationClientsByUser.delete(desktopNotification.userId);
+        }
+      }
+      this.desktopNotificationClient.delete(ws);
     }
 
     // Multiplayer room cleanup (runs for peer sockets that have no userId too).
@@ -183,7 +262,11 @@ class EventBus {
 
   /** Refresh activity timestamp for a known socket. Called on any message. */
   touchClient(ws: ServerWebSocket<unknown>): void {
-    if (this.clientToUser.has(ws) || this.clientToRooms.has(ws)) {
+    if (
+      this.clientToUser.has(ws)
+      || this.clientToRooms.has(ws)
+      || this.desktopNotificationClient.has(ws)
+    ) {
       this.clientLastActivity.set(ws, Date.now());
     }
   }
@@ -350,6 +433,10 @@ class EventBus {
     const now = Date.now();
     let closed = 0;
     for (const [ws, lastActivity] of this.clientLastActivity) {
+      // Hidden browser/PWA sessions need a long lease because their JavaScript
+      // timers can be suspended. Desktop notification sockets now heartbeat
+      // from Tauri's native runtime and can use the normal, fast stale-client
+      // timeout even while every WebView is hidden.
       const timeoutMs = this.clientVisibility.get(ws) === false
         ? HIDDEN_CLIENT_TIMEOUT_MS
         : CLIENT_TIMEOUT_MS;
@@ -406,6 +493,8 @@ class EventBus {
       payload,
       timestamp: Date.now(),
       userId,
+      stateRevision: advanceRuntimeStateRevision(event, userId),
+      runtimeMutationId: runtimeMutationId(userId),
     };
 
     const json = JSON.stringify(message);

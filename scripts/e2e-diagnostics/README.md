@@ -24,6 +24,20 @@ bun run diagnose
 
 ## Scripts
 
+- `node check-spindle-touch-scroll.mjs`
+  Audits the real installed-iOS document guard and Spindle widget policy with synthetic touch events in Chromium, Firefox and WebKit, at desktop and notched-iPhone viewport sizes. Checks default guarding, opt-in, isolation from core and nested widgets, shadow content, reversal and root teardown. No server, credentials or user data. `PLAYWRIGHT_MODULE` can point to an existing Playwright installation. This tests cancellation decisions, not physical installed-PWA scrolling.
+
+- `node check-world-book-workspace.mjs`
+  Bundles the real native book modal, entry list and editor with controlled API/store boundaries. Covers same-instance maximize/restore, independent collapsed navigation, cross-folder/session tabs, keyboard tab switching, two-editor split/swap/close, mobile open-entry switching and Books views, keyboard-height layout, 0/1/44/50/137-entry books, exact tag filtering and vector failure indicators. Also checks activation method/status/chance transitions, vector recursion restrictions, keyboard focus, equal timing columns, Group Name/Weight proportions, equal UID/Automation dimensions, a read-only UID, compact organization rows and horizontal containment (including long untranslated labels). Checks desktop Books/Entries pointer and keyboard resizing, scaled collapse thresholds, focus restoration, pointer cancellation, Escape without closing the modal, before-paint mobile book-header hiding/restoration, and shared organization/detail backgrounds under light and dark theme variables. Runs desktop/mobile at UI scales 1 and 1.25 in Chromium, Firefox and WebKit without login or personal data. Also renders the actual inline compact entry list in the real sidebar scroll-panel styles at widths 320/440/560px and scales 1/1.25: expanded Injection/Activation field heights, wheel scrolling over the form, activation selection and disclosure draft retention. Set `SIDEBAR_ONLY=1` to run those 18 cases alone. Set `WORKSPACE_BROWSERS=chromium` for one engine; `PLAYWRIGHT_MODULE` can point to an existing Playwright installation. This checks core behavior; it does not emulate an installed Suite extension or a physical mobile keyboard.
+- `node check-world-book-search.mjs`
+  Exercises ranked search in the real native workspace and sidebar with controlled entries. Checks folder card layout, touch targets, visible keyboard focus and folder activation, plus an exact title beyond the first server page, relevance before result pagination, highlights, typo matching, Escape/focus, returning from the editor, empty results and clearing back to ordinary navigation. Runs desktop/mobile widths at UI scales 1 and 1.25 in Chromium, Firefox and WebKit. Set `SEARCH_BROWSERS=chromium` for one engine; `PLAYWRIGHT_MODULE` can point to an existing Playwright installation. No login or personal data.
+- `node check-entry-organization.mjs`
+  Exercises native folder/tag controls inside the real modal shell using controlled in-memory data. Covers mouse/keyboard, focus, Escape, close/reopen, additive tags, folder removal, desktop/mobile widths and UI scales in Chromium, Firefox and WebKit. No backend, login or personal lorebooks are used. Set `ENTRY_ORGANIZATION_BROWSERS=chromium` for one engine; `PLAYWRIGHT_MODULE` can point to an existing Playwright installation.
+- `node check-ui-scale.mjs`
+  Runs a local React 19 scaling regression suite in Chromium, Firefox, and WebKit,
+  with no server or login required. Install the frontend dependencies and run
+  `bun x playwright install chromium firefox webkit` here first. Set
+  `UI_SCALE_BROWSERS=chromium` to run one engine. See [UI scaling](../../developer-docs/docs/frontend-api/ui-scaling.md).
 - `bun run diagnose`
   Captures general chat scroll and virtualization stats on the busiest recent chat.
 - `bun run diagnose:spindle`

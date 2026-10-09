@@ -166,6 +166,11 @@ export default function ExpressionEditorTab({ characterId, chubSourcePath }: Pro
     saveConfig({ ...config, enabled: !config.enabled })
   }, [config, saveConfig])
 
+  const handleToggleAvatar = useCallback((useAsAvatar: boolean) => {
+    if (!config) return
+    saveConfig({ ...config, useAsAvatar })
+  }, [config, saveConfig])
+
   const handleDefaultChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       if (!config) return
@@ -290,7 +295,7 @@ export default function ExpressionEditorTab({ characterId, chubSourcePath }: Pro
   const handleConvertToGroups = useCallback(() => {
     expressionsApi.convertToGroups(characterId).then((grps) => {
       setGroups(grps)
-      setConfig({ enabled: false, defaultExpression: '', mappings: {} })
+      setConfig((previous) => ({ enabled: false, useAsAvatar: previous?.useAsAvatar ?? false, defaultExpression: '', mappings: {} }))
       setActiveGroup(Object.keys(grps)[0] || null)
     }).catch(() => {})
   }, [characterId])
@@ -804,6 +809,15 @@ export default function ExpressionEditorTab({ characterId, chubSourcePath }: Pro
           checked={config?.enabled ?? false}
           onChange={handleToggleEnabled}
           label={t('characterEditor.expressionEditor.enableDisplay')}
+        />
+      </div>
+      <div className={styles.enableRow}>
+        <Toggle.Checkbox
+          checked={config?.useAsAvatar ?? false}
+          onChange={handleToggleAvatar}
+          disabled={!config?.enabled}
+          label={t('characterEditor.expressionEditor.useAsAvatar')}
+          hint={t('characterEditor.expressionEditor.useAsAvatarHint')}
         />
       </div>
 

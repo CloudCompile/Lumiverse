@@ -11,7 +11,13 @@ interface WsTicket {
   expires: number;
 }
 
+export interface DesktopNotificationTicket {
+  userId: string;
+  destinationId: string;
+}
+
 const tickets = new Map<string, WsTicket>();
+const desktopNotificationTickets = new Map<string, DesktopNotificationTicket & { expires: number }>();
 
 const TICKET_TTL_MS = 30_000; // 30 seconds
 const SWEEP_INTERVAL_MS = 60_000;
@@ -30,6 +36,9 @@ function ensureSweepTimer(): void {
       if (now > entry.expires) {
         tickets.delete(key);
       }
+    }
+    for (const [key, entry] of desktopNotificationTickets) {
+      if (now > entry.expires) desktopNotificationTickets.delete(key);
     }
   }, SWEEP_INTERVAL_MS);
   // Don't keep the process alive on this timer alone.
@@ -56,6 +65,43 @@ export function consumeTicket(ticket: string): string | null {
   if (!entry) return null;
   if (Date.now() > entry.expires) return null;
   return entry.userId;
+}
+
+/** Issue a notification-only ticket backed by a durable desktop credential. */
+export function issueDesktopNotificationTicket(
+  userId: string,
+  destinationId: string,
+): string {
+  ensureSweepTimer();
+  const ticket = crypto.randomUUID();
+  desktopNotificationTickets.set(ticket, {
+    userId,
+    destinationId,
+    expires: Date.now() + TICKET_TTL_MS,
+  });
+  return ticket;
+}
+
+/** Consume a desktop ticket without granting access to the normal user socket. */
+export function consumeDesktopNotificationTicket(
+  ticket: string,
+): DesktopNotificationTicket | null {
+  const entry = desktopNotificationTickets.get(ticket);
+  desktopNotificationTickets.delete(ticket);
+  if (!entry || Date.now() > entry.expires) return null;
+  return { userId: entry.userId, destinationId: entry.destinationId };
+}
+
+/** Invalidate unconsumed tickets when a destination is rotated or revoked. */
+export function invalidateDesktopNotificationTickets(
+  userId: string,
+  destinationId: string,
+): void {
+  for (const [ticket, entry] of desktopNotificationTickets) {
+    if (entry.userId === userId && entry.destinationId === destinationId) {
+      desktopNotificationTickets.delete(ticket);
+    }
+  }
 }
 
 export function stopTicketSweep(): void {

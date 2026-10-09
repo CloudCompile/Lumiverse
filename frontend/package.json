@@ -1,7 +1,7 @@
 {
   "name": "lumiverse-frontend",
   "private": true,
-  "version": "1.2.0",
+  "version": "1.2.5",
   "type": "module",
   "scripts": {
     "test": "bun test --isolate",
@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@babel/parser": "^7.29.2",
+    "@better-auth/oauth-provider": "1.7.2",
     "@codemirror/autocomplete": "^6.20.1",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/lang-css": "^6.3.1",
@@ -43,7 +44,7 @@
     "i18next": "^26.2.0",
     "i18next-browser-languagedetector": "^8.2.1",
     "lucide-react": "^0.468.0",
-    "lumiverse-spindle-types": "0.6.31",
+    "lumiverse-spindle-types": "0.6.40",
     "marked": "^15.0.4",
     "motion": "^12.0.0",
     "react": "^19.2.6",
@@ -62,7 +63,7 @@
     "@typescript-eslint/parser": "^8.64.0",
     "@vitejs/plugin-react": "^6.0.3",
     "babel-plugin-react-compiler": "^1.0.0",
-    "bun-types": "^1.4.0",
+    "bun-types": "^1.4.2",
     "esbuild": "^0.27.0",
     "eslint": "^10.7.0",
     "eslint-plugin-react-compiler": "^19.1.0-rc.2",

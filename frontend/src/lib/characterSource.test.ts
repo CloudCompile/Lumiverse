@@ -65,10 +65,10 @@ describe('character source attribution', () => {
     ['lumi.spot/@archkr', 'lumihub', 'https://lumi.spot/@archkr'],
     [' https://LUMI.SPOT/characters/card-id?view=full#details ', 'lumihub', 'https://lumi.spot/characters/card-id?view=full#details'],
     ['https://www.lumi.spot/characters/card-id/', 'lumihub', 'https://www.lumi.spot/characters/card-id/'],
-    ['https://illarin.xyz/a/card-id/card-name', 'illarin', 'https://illarin.xyz/a/card-id/card-name'],
-    ['illarin.xyz/a/card-id/card-name', 'illarin', 'https://illarin.xyz/a/card-id/card-name'],
-    ['https://www.illarin.xyz/@creator', 'illarin', 'https://www.illarin.xyz/@creator'],
-    ['//illarin.xyz/a/card-id/card-name?version=2#details', 'illarin', 'https://illarin.xyz/a/card-id/card-name?version=2#details'],
+    ['https://illarin.com/a/card-id/card-name', 'illarin', 'https://illarin.com/a/card-id/card-name'],
+    ['illarin.com/a/card-id/card-name', 'illarin', 'https://illarin.com/a/card-id/card-name'],
+    ['https://www.illarin.com/@creator', 'illarin', 'https://www.illarin.com/@creator'],
+    ['//illarin.com/a/card-id/card-name?version=2#details', 'illarin', 'https://illarin.com/a/card-id/card-name?version=2#details'],
   ] as const)('preserves hub source %s through saving and reloading', (input, provider, url) => {
     const source = parseCharacterSourceInput(input)
     expect(source).toEqual({ provider, url })
@@ -95,12 +95,12 @@ describe('character source attribution', () => {
     '',
     'not-a-source',
     'https://lumi.spot/',
-    'https://illarin.xyz/',
+    'https://illarin.com/',
     'https://chub.ai/characters/Creator',
     'https://lumi.spot.evil.example/@archkr',
     'https://example.com/characters/card',
     'https://lumi.spot@evil.example/@archkr',
-    'https://someone:secret@illarin.xyz/a/card-id/card-name',
+    'https://someone:secret@illarin.com/a/card-id/card-name',
     'ftp://lumi.spot/@archkr',
     'javascript:alert(1)//card',
     'https://[invalid]/card',
@@ -134,8 +134,8 @@ describe('character source attribution', () => {
     expect(original.chub.full_path).toBe('old/card')
     expect(original._lumiverse_chub_slug).toBe('old/card')
 
-    const illarin = setCharacterSource(lumi, parseCharacterSourceInput('https://illarin.xyz/a/card-id/card-name'))
-    expect(readCharacterSourceUrl(illarin)).toBe('https://illarin.xyz/a/card-id/card-name')
+    const illarin = setCharacterSource(lumi, parseCharacterSourceInput('https://illarin.com/a/card-id/card-name'))
+    expect(readCharacterSourceUrl(illarin)).toBe('https://illarin.com/a/card-id/card-name')
 
     const chub = setCharacterSource(illarin, parseCharacterSourceInput('new/card'))
     expect(chub).toEqual({ unrelated: { keep: true }, chub: { description: 'keep', full_path: 'new/card' } })

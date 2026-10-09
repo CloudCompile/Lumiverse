@@ -6,6 +6,7 @@ import { Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy, LogIn, RefreshCw, 
 import { connectionsApi } from '@/api/connections'
 import { buildOpenRouterOAuthCallbackUrl, openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
 import { buildNanoGptOAuthCallbackUrl, nanoGptApi } from '@/api/nanogpt'
+import { startProviderOAuthPopup } from '@/lib/providerOAuthPopup'
 import {
   getReasoningBindingSummary,
   getReasoningBindingTitle,
@@ -75,6 +76,7 @@ export default function ConnectionItem({
 }: ConnectionItemProps) {
 
   const { t } = useTranslation('panels')
+  const oauthCleanupRef = useRef<(() => void) | null>(null)
   const [editing, setEditing] = useState(false)
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null)
@@ -187,59 +189,33 @@ export default function ConnectionItem({
     setOauthLoading(true)
     try {
       const callbackUrl = isNanoGptOAuth ? buildNanoGptOAuthCallbackUrl() : buildOpenRouterOAuthCallbackUrl()
-      const { auth_url, session_token } = isNanoGptOAuth
-        ? await nanoGptApi.initiateAuth(callbackUrl, { connectionId: profile.id })
-        : await openrouterApi.initiateAuth(callbackUrl, { connectionId: profile.id })
-
-      const popup = window.open(auth_url, isNanoGptOAuth ? 'nanogpt_auth' : 'openrouter_auth', 'width=600,height=700,scrollbars=yes')
-
-      let handled = false
-      const cleanup = () => {
-        if (handled) return
-        handled = true
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-        setOauthLoading(false)
+      const api = isNanoGptOAuth ? nanoGptApi : openrouterApi
+      const flow = startProviderOAuthPopup({
+        provider: isNanoGptOAuth ? 'nanogpt' : 'openrouter',
+        callbackUrl,
+        initiate: () => api.initiateAuth(callbackUrl, { connectionId: profile.id }),
+      })
+      oauthCleanupRef.current = flow.cancel
+      const authorization = await flow.result
+      if (!authorization) return
+      try {
+        await api.completeAuth(authorization.sessionToken, authorization.code)
+        const updated = await connectionsApi.get(profile.id)
+        onUpdate(updated)
+      } catch (err) {
+        console.error('[ConnectionItem] OAuth exchange failed:', err)
       }
-
-      // Landing page sends us the code via postMessage
-      const onMessage = async (event: MessageEvent) => {
-        const expectedType = isNanoGptOAuth ? 'nanogpt_oauth_code' : 'openrouter_oauth_code'
-        if (event.data?.type !== expectedType || !event.data.code) return
-        if (isNanoGptOAuth && event.data.state !== session_token) return
-        window.removeEventListener('message', onMessage)
-        clearInterval(checkClosed)
-
-        try {
-          if (isNanoGptOAuth) {
-            await nanoGptApi.completeAuth(session_token, event.data.code)
-          } else {
-            await openrouterApi.completeAuth(session_token, event.data.code)
-          }
-          const updated = await connectionsApi.get(profile.id)
-          onUpdate(updated)
-        } catch (err) {
-          console.error('[ConnectionItem] OAuth exchange failed:', err)
-        }
-        handled = true
-        setOauthLoading(false)
-      }
-      window.addEventListener('message', onMessage)
-
-      // If user closes popup without authorizing, stop the spinner
-      const checkClosed = setInterval(() => {
-        if (!popup || popup.closed) {
-          clearInterval(checkClosed)
-          setTimeout(cleanup, 1500)
-        }
-      }, 500)
-
-      setTimeout(cleanup, 5 * 60 * 1000)
     } catch (err) {
       console.error('[ConnectionItem] OAuth init failed:', err)
+    } finally {
+      oauthCleanupRef.current = null
       setOauthLoading(false)
     }
   }, [profile.id, profile.provider, onUpdate])
+
+  useEffect(() => () => {
+    oauthCleanupRef.current?.()
+  }, [])
 
   const boundReasoning = profile.metadata?.reasoningBindings?.settings
   const boundPromptBias = profile.metadata?.reasoningBindings?.promptBias

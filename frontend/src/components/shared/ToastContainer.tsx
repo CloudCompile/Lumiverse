@@ -110,6 +110,12 @@ function ToastItem({ toast, position }: { toast: Toast; position: ToastPosition 
 export default function ToastContainer() {
   const toasts = useStore((s) => s.toasts)
   const position = useStore((s) => s.toastPosition) as ToastPosition
+  const settingsLoaded = useStore((s) => s.settingsLoaded)
+
+  // `toastPosition` arrives with startup settings or the full settings load.
+  // Rendering earlier would paint toasts in the default corner and then animate
+  // them across the screen once the position hydrates.
+  if (!settingsLoaded) return null
 
   const positionClass = styles[position.replace('-', '')] || styles.bottomright
 

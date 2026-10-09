@@ -47,6 +47,17 @@ function legacyCaptureReplacements(
 }
 
 describe("capture-replacements regex operation", () => {
+  test("capture transforms retain native replacement fallback semantics", () => {
+    const input = "before abc after";
+    const pattern = /(?<word>abc)/g;
+    const template = "$10|$01|$00|$2|$<missing>|$&|$`|$'|$$";
+    const result = input.replace(pattern, (...args) => substituteRegexCaptures(
+      template, args[0], [args[1]], args[2], input, args[4],
+      { transformCapture: (value) => value, nativeReplacement: true },
+    ));
+    expect(result).toBe(input.replace(pattern, template));
+  });
+
   test("preserves raw-mode capture substitution semantics", () => {
     const pattern = "(?<word>[a-z]+)(?:-(?<suffix>[a-z]+))?";
     const input = "before alpha-beta and gamma after";

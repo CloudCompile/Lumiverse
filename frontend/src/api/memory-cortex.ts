@@ -50,8 +50,6 @@ export interface CortexConfig {
   sidecarTimeoutMs: number;
   sidecarReliability: {
     fallback: "heuristic" | "skip";
-    maxRetries: number;
-    retryDelayMs: number;
     arbitratesHeuristics: boolean;
     gradesExistingRecords: boolean;
   };
@@ -282,6 +280,13 @@ export interface CortexIngestionStatus {
   pendingJobs: number;
   error?: string;
   sidecarState?: "ok" | "unavailable" | "timeout" | "aborted" | null;
+  /** Historical diagnostic only; it does not mean ingestion is still active. */
+  lastError?: {
+    message: string;
+    sidecarState: "ok" | "unavailable" | "timeout" | "aborted" | null;
+    occurredAt: number;
+    chunkId: string | null;
+  } | null;
   timings?: CortexIngestionTimings | null;
 }
 

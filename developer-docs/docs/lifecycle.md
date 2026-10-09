@@ -32,3 +32,9 @@ By default, backend runtimes start in `process` mode. See [Runtime Modes](gettin
 ## Startup Order
 
 On Lumiverse boot, all enabled extensions are started after database migrations complete. Extensions should not depend on a specific load order.
+
+## Active browser tab
+
+Opening another primary tab for the same account and browser origin blocks the previous tab until it is reloaded. The blocked tab unmounts its application, aborts pending API requests, closes its sockets, and unloads frontend extensions. Retained extension contexts reject further calls. Already accepted server operations can still finish.
+
+Native floating widget windows remain independent. Other accounts, browser profiles, and devices do not share this ownership check. Browser storage must be available; ownership checks do not add polling or server requests.

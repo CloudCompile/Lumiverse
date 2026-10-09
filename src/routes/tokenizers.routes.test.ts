@@ -15,10 +15,13 @@ mock.module("../auth/middleware", () => ({
     return next();
   },
 }));
+const warmed: Array<[string, string | null]> = [];
+mock.module("../services/tokenizer-warmup.service", () => ({ warmAssemblyTokenizer: (model: string, chat: string | null) => warmed.push([model, chat]) }));
 
 const { tokenizersRoutes } = await import("./tokenizers.routes");
 
 const PUBLIC_ROUTES = [
+  "POST /warm",
   "POST /count",
   "POST /count-batch",
   "POST /patterns/test",
@@ -41,6 +44,7 @@ const OWNER_ROUTES = [
 ] as const;
 
 function initTokenizerTestDb(): void {
+  warmed.length = 0;
   closeDatabase();
   initDatabase(":memory:");
   getDb().run(`CREATE TABLE tokenizer_configs (
@@ -66,6 +70,10 @@ function initTokenizerTestDb(): void {
     value TEXT NOT NULL,
     user_id TEXT,
     updated_at INTEGER NOT NULL DEFAULT 0
+  )`);
+  getDb().run(`CREATE TABLE connection_profiles (
+    id TEXT PRIMARY KEY, user_id TEXT, name TEXT, model TEXT, provider TEXT,
+    metadata TEXT DEFAULT '{}', is_default INTEGER DEFAULT 0
   )`);
 }
 
@@ -106,6 +114,15 @@ beforeEach(initTokenizerTestDb);
 afterEach(() => closeDatabase());
 
 describe("H14 tokenizer route policy", () => {
+  test("warmup resolves only the caller's connection and returns without waiting for loading", async () => {
+    getDb().exec("INSERT INTO connection_profiles (id, user_id, model, provider) VALUES ('mine', 'user-1', 'kimi-k2.5', 'openai'), ('other', 'user-2', 'private-model', 'openai')");
+    const app = createTestApp();
+    expect((await request(app, "POST", "/warm", { connection_id: "other" })).status).toBe(404);
+    expect((await request(app, "POST", "/warm", { connection_id: 123 })).status).toBe(400);
+    expect((await request(app, "POST", "/warm", { connection_id: "mine", chat_id: "chat" })).status).toBe(202);
+    await Bun.sleep(0);
+    expect(warmed).toEqual([["kimi-k2.5", "chat"]]);
+  });
   test("registered routes are exactly the public and owner policy sets", () => {
     const registered = new Set(
       tokenizersRoutes.routes.map((route) => `${route.method} ${route.path}`),
@@ -114,7 +131,7 @@ describe("H14 tokenizer route policy", () => {
     expect(registered).toEqual(expected);
   });
 
-  test("non-owner sessions can use only the three public counting routes", async () => {
+  test("non-owner sessions can use the public tokenizer routes", async () => {
     const app = createTestApp();
 
     for (const route of OWNER_ROUTES) {

@@ -17,6 +17,12 @@ services:
       - TRUST_ANY_ORIGIN=true
       # - TRUSTED_ORIGINS=https://lumiverse.example.com
 
+      # Optional direct TLS. Bind-mount the files read-only below. For several
+      # certificates, set only LUMIVERSE_TLS_CONFIG_FILE to a mounted manifest.
+      # - LUMIVERSE_TLS_CERT_FILE=/run/lumiverse-tls/fullchain.pem
+      # - LUMIVERSE_TLS_KEY_FILE=/run/lumiverse-tls/privkey.pem
+      # - LUMIVERSE_TLS_CONFIG_FILE=/run/lumiverse-tls/certificates.json
+
       # LanceDB serializes writes between the server and its vectorization
       # subprocess. Leave this enabled unless temporarily working around a
       # stale lock in an older image.
@@ -48,6 +54,8 @@ services:
       # - LUMIVERSE_FORCE_NEW_MIGRATION=false  # set true to re-run after a completed migration
     volumes:
       - lumiverse-data:/app/data
+      # Direct TLS certificate/manifest directory
+      # - ./certs:/run/lumiverse-tls:ro
       # SillyTavern migration: bind your ST folder read-only
       # - /path/to/SillyTavern:/app/data/SillyTavern:ro
     # SMART needs explicit host-device access. Map only the drives you intend

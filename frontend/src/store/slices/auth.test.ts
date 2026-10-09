@@ -74,6 +74,27 @@ describe('auth request ordering', () => {
     expect(store.authError).toBeNull()
   })
 
+  test('keeps an established session when revalidation resolves with a server error', async () => {
+    const store = createStore()
+    Object.assign(store, {
+      user: { id: 'user-a', name: 'User A', role: 'user' },
+      session: { id: 'session-a', userId: 'user-a', token: 'token-a', expiresAt: new Date().toISOString() },
+      isAuthenticated: true,
+      isAuthLoading: false,
+    })
+    authClientMock.getSession = async () => ({
+      data: null,
+      error: { status: 503, statusText: 'Service Unavailable' },
+    })
+
+    await store.checkSession()
+
+    expect(store.isAuthenticated).toBe(true)
+    expect(store.user?.id).toBe('user-a')
+    expect(store.isAuthLoading).toBe(false)
+    expect(store.authError).toBeNull()
+  })
+
   test('clears an established session when the backend authoritatively rejects it', async () => {
     const store = createStore()
     Object.assign(store, {

@@ -110,7 +110,13 @@ type StoreState = {
   activeProfileId: string | null
   activeLoomPresetId: string | null
   loomRegistry: Record<string, { name: string }>
-  characters: Array<{ id: string; image_id?: string | null }>
+  characters: Array<{
+    id: string
+    name: string
+    avatar_path: string | null
+    image_id: string | null
+    extensions: Record<string, unknown>
+  }>
   extensions: Array<{ identifier: string; enabled: boolean; has_frontend: boolean }>
   landingRecentChats: null
   setLandingRecentChats: MockFn
@@ -240,8 +246,20 @@ mock.module('@/api/chats', () => ({
   messagesApi: { list: listMessages },
 }))
 mock.module('@/api/images', () => ({ imagesApi: { largeUrl: (id: string) => `/images/${id}` } }))
-mock.module('@/ws/client', () => ({ wsClient: { on: jest.fn(() => () => {}) } }))
-mock.module('@/ws/events', () => ({ EventType: { CHAT_DELETED: 'chat-deleted' } }))
+const wsHandlers = new Map<string, Set<(payload: any) => void>>()
+const wsOn = jest.fn((event: string, handler: (payload: any) => void) => {
+  const handlers = wsHandlers.get(event) ?? new Set<(payload: any) => void>()
+  handlers.add(handler)
+  wsHandlers.set(event, handlers)
+  return () => handlers.delete(handler)
+})
+mock.module('@/ws/client', () => ({ wsClient: { on: wsOn } }))
+mock.module('@/ws/events', () => ({
+  EventType: {
+    CHAT_DELETED: 'chat-deleted',
+    CHARACTER_EDITED: 'character-edited',
+  },
+}))
 mock.module('@/hooks/useScrollGate', () => ({ useScrollGate: jest.fn() }))
 mock.module('@/hooks/useCharacterTheme', () => ({ warmCharacterPalette: jest.fn() }))
 mock.module('@/hooks/useLongPress', () => ({ useLongPress: () => ({}) }))
@@ -254,8 +272,8 @@ mock.module('@/lib/uiScale', () => ({
   renderedPxToLayoutPx: (value: number) => value,
 }))
 mock.module('@/lib/avatarUrls', () => ({
-  getCharacterAvatarLargeUrlById: () => '/avatar.png',
-  getCharacterAvatarThumbUrlById: () => '/avatar-thumb.png',
+  getCharacterAvatarLargeUrlById: (_id: string, imageId?: string | null) => imageId ? `/avatar-${imageId}.png` : '/avatar.png',
+  getCharacterAvatarThumbUrlById: (_id: string, imageId?: string | null) => imageId ? `/avatar-${imageId}-thumb.png` : '/avatar-thumb.png',
 }))
 mock.module('@/lib/formatRelativeTime', () => ({ formatRelativeTime: () => 'just now' }))
 mock.module('@/lib/tagColors', () => ({ getTagColorVar: () => '128,128,128' }))
@@ -288,7 +306,7 @@ mock.module('@/components/shared/SortControl', () => ({
   ),
 }))
 mock.module('@/components/shared/LazyImage', () => ({
-  default: ({ src, alt, fallback, loading }: { src: string; alt: string; fallback?: ReactNode; loading?: 'eager' | 'lazy' }) => src ? <img src={src} alt={alt} loading={loading} /> : fallback ?? null,
+  default: ({ src, alt, fallback, loading, decoding }: { src: string; alt: string; fallback?: ReactNode; loading?: 'eager' | 'lazy'; decoding?: 'sync' | 'async' | 'auto' }) => src ? <img src={src} alt={alt} loading={loading} decoding={decoding} /> : fallback ?? null,
 }))
 mock.module('@/components/shared/FormComponents', () => ({
   Button: ({ children, onClick, disabled, title, className }: { children?: ReactNode; onClick?: () => void; disabled?: boolean; title?: string; className?: string }) => (
@@ -406,6 +424,7 @@ function recentChat(id: string, name: string) {
     latest_chat_name: 'Recent chat',
     character_id: id,
     character_name: name,
+    character_avatar_path: null,
     character_image_id: null,
     updated_at: 1,
     is_group: false,
@@ -528,6 +547,8 @@ afterEach(async () => {
     for (const { root } of roots) root.unmount()
   })
   document.body.replaceChildren()
+  document.documentElement.removeAttribute('data-tauri-desktop')
+  document.documentElement.removeAttribute('data-platform')
   domWindow.localStorage.clear()
   clearLandingPageSnapshot()
   TestObserverInstances.splice(0)
@@ -544,6 +565,8 @@ afterEach(async () => {
   branchChat.mockReset()
   listMessages.mockReset()
   navigate.mockReset()
+  wsHandlers.clear()
+  wsOn.mockClear()
   readDeviceLandingPageStartTab.mockReset()
   readDeviceLandingPageStartTab.mockReturnValue('characters')
   Object.defineProperty(domWindow, 'innerWidth', { configurable: true, value: 1024 })
@@ -551,6 +574,22 @@ afterEach(async () => {
 })
 
 describe('LandingPage character library', () => {
+  for (const layout of ['cards', 'compact'] as const) {
+    test(`keeps decorative avatars out of chat names and identifies delete targets in ${layout}`, async () => {
+      storeState = { ...createStoreState(false), landingPageLayoutMode: layout }
+      listRecentGrouped.mockResolvedValue(page([recentChat('character-1', 'Ava')]))
+      const host = await mountLanding()
+      await flush()
+      const chats = host.querySelector('[data-component="LandingPageChats"]')!
+      const image = chats.querySelector('img')!
+      expect(image.getAttribute('alt')).toBe('')
+      expect(image.closest('[aria-hidden="true"]') !== null).toBe(true)
+      const action = chats.querySelector<HTMLButtonElement>(layout === 'cards' ? '.deleteBtn' : '.listDeleteBtn')!
+      expect(action.getAttribute('aria-label')).toBe('Delete chat: Ava')
+      expect(chats.querySelector(layout === 'cards' ? '.cardBtn' : '.listBtn')?.querySelector('.deleteBtn, .listDeleteBtn')).toBeNull()
+    })
+  }
+
   test('opens chat history for forked one-member converted groups', async () => {
     storeState = createStoreState(false)
     listRecentGrouped.mockResolvedValue(page([convertedGroupChat('character-1', 'Ava')]))
@@ -669,6 +708,11 @@ describe('LandingPage character library', () => {
     listRecentGrouped.mockReturnValueOnce(refresh.promise)
 
     await click(buttonMatching(firstHost, /Ava/)!)
+    const leavingSurface = firstHost.querySelector<HTMLElement>('[data-entry-mode="fresh"]')
+    const leavingChats = firstHost.querySelector<HTMLElement>('[data-component="LandingPageChats"]')
+    expect(leavingSurface?.classList.contains('routeLeaving')).toBe(true)
+    expect(leavingSurface?.getAttribute('data-motion-animate')).toBe('{"opacity":0,"y":10,"scale":0.985}')
+    expect(leavingChats?.getAttribute('data-motion-animate')).toBe('visible')
     const storedSnapshot = JSON.parse(domWindow.sessionStorage.getItem('__lumiverse_landing_page_snapshot_v1') || '{}')
     expect(storedSnapshot.snapshot?.imageUrls).toEqual(['/avatar.png'])
 
@@ -680,7 +724,7 @@ describe('LandingPage character library', () => {
     const restoredHost = await mountLanding()
 
     expect(restoredHost.textContent).toContain('Ava')
-    expect(restoredHost.querySelector('img[alt="Ava"]')?.getAttribute('loading')).toBe('eager')
+    expect(restoredHost.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
     expect(restoredHost.querySelector('.cardEntry')).toBeNull()
     expect(restoredHost.querySelector('[data-entry-mode="chat-return"]')?.classList.contains('routeEntering')).toBe(true)
     expect(restoredHost.querySelector('[data-entry-mode="chat-return"]')?.getAttribute('data-motion-initial')).toBe('{"opacity":0,"y":10,"scale":0.985}')
@@ -689,6 +733,123 @@ describe('LandingPage character library', () => {
     expect(listRecentGrouped).toHaveBeenCalledTimes(2)
 
     await settleDeferred(refresh, page([recentChat('character-1', 'Ava')]))
+  })
+
+  test('keeps the inverse return animation and bounded synchronous images in macOS Tauri', async () => {
+    document.documentElement.setAttribute('data-tauri-desktop', '')
+    document.documentElement.setAttribute('data-platform', 'macos')
+    storeState = createStoreState(false)
+    const ava = recentChat('character-1', 'Ava')
+    writeLandingPageSnapshot({
+      userId: 'test-user-id',
+      items: [ava],
+      total: 1,
+      scrollTop: 0,
+      requestedTab: 'chats',
+      searchQuery: '',
+      sortField: 'recent',
+      sortDirection: 'desc',
+      pageSize: 12,
+      galleryWidth: 'compact',
+      mainWidth: 960,
+      chatViewportHeight: 700,
+      viewportWidth: domWindow.innerWidth,
+      viewportHeight: domWindow.innerHeight,
+      imageUrls: ['/avatar.png'],
+    })
+    listRecentGrouped.mockResolvedValue(page([ava]))
+
+    const host = await mountLanding()
+    const landing = host.querySelector('[data-entry-mode="chat-return"]')
+
+    expect(landing?.classList.contains('routeEntering')).toBe(true)
+    expect(landing?.getAttribute('data-motion-initial')).toBe('{"opacity":0,"y":10,"scale":0.985}')
+    expect(landing?.getAttribute('data-motion-animate')).toBe('{"opacity":1,"y":0,"scale":1}')
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('sync')
+  })
+
+  test('reconciles a restored chat card with character edits before the refresh resolves', async () => {
+    storeState = createStoreState(false)
+    storeState.characters = [{
+      id: 'character-1',
+      name: 'Bea',
+      avatar_path: 'bea.png',
+      image_id: 'bea-image',
+      extensions: {},
+    }]
+    writeLandingPageSnapshot({
+      userId: 'test-user-id',
+      items: [recentChat('character-1', 'Ava')],
+      total: 1,
+      scrollTop: 0,
+      requestedTab: 'chats',
+      searchQuery: '',
+      sortField: 'recent',
+      sortDirection: 'desc',
+      pageSize: 12,
+      galleryWidth: 'compact',
+      mainWidth: 960,
+      chatViewportHeight: 700,
+      viewportWidth: domWindow.innerWidth,
+      viewportHeight: domWindow.innerHeight,
+    })
+    const refresh = createDeferred<SummaryPage>()
+    listRecentGrouped.mockReturnValue(refresh.promise)
+
+    const host = await mountLanding()
+
+    expect(countExactText(host, 'Bea')).toBeGreaterThan(0)
+    expect(countExactText(host, 'Ava')).toBe(0)
+    expect(host.querySelector('.cardImage img')?.getAttribute('src')).toBe('/avatar-bea-image.png')
+
+    await settleDeferred(refresh, page([recentChat('character-1', 'Bea')]))
+  })
+
+  test('applies a late character edit immediately and then refreshes landing ordering', async () => {
+    storeState = createStoreState(false)
+    writeLandingPageSnapshot({
+      userId: 'test-user-id',
+      items: [recentChat('character-1', 'Ava')],
+      total: 1,
+      scrollTop: 0,
+      requestedTab: 'chats',
+      searchQuery: '',
+      sortField: 'recent',
+      sortDirection: 'desc',
+      pageSize: 12,
+      galleryWidth: 'compact',
+      mainWidth: 960,
+      chatViewportHeight: 700,
+      viewportWidth: domWindow.innerWidth,
+      viewportHeight: domWindow.innerHeight,
+    })
+    const refresh = createDeferred<SummaryPage>()
+    listRecentGrouped.mockReturnValue(refresh.promise)
+    const host = await mountLanding()
+
+    await act(async () => {
+      for (const handler of wsHandlers.get('character-edited') ?? []) {
+        handler({
+          id: 'character-1',
+          character: {
+            id: 'character-1',
+            name: 'Bea',
+            avatar_path: 'bea.png',
+            image_id: 'bea-image',
+            extensions: {},
+          },
+        })
+      }
+      await Promise.resolve()
+    })
+
+    expect(countExactText(host, 'Bea')).toBeGreaterThan(0)
+    expect(countExactText(host, 'Ava')).toBe(0)
+    expect(host.querySelector('.cardImage img')?.getAttribute('src')).toBe('/avatar-bea-image.png')
+    expect(listRecentGrouped).toHaveBeenCalledTimes(2)
+
+    await settleDeferred(refresh, page([recentChat('character-1', 'Bea')]))
   })
 
   test('recovers the landing snapshot after refreshing inside a chat route', async () => {
@@ -826,6 +987,34 @@ describe('LandingPage character library', () => {
     expect(host.querySelector('.cardEntry')).not.toBeNull()
   })
 
+  test('uses the normal fade and bounded synchronous images for a cold macOS Tauri return', async () => {
+    document.documentElement.setAttribute('data-tauri-desktop', '')
+    document.documentElement.setAttribute('data-platform', 'macos')
+    storeState = createStoreState(false)
+    listRecentGrouped.mockResolvedValue(page([recentChat('character-1', 'Ava')]))
+    markLandingPageChatReturn()
+
+    const host = await mountLanding()
+    await flush()
+
+    expect(host.querySelector('[data-entry-mode="cold-return"]')?.getAttribute('data-motion-initial')).toBe('{"opacity":0}')
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('sync')
+  })
+
+  test('eagerly requests bounded rows but keeps decoding asynchronous in non-macOS Tauri', async () => {
+    document.documentElement.setAttribute('data-tauri-desktop', '')
+    document.documentElement.setAttribute('data-platform', 'linux')
+    storeState = createStoreState(false)
+    listRecentGrouped.mockResolvedValue(page([recentChat('character-1', 'Ava')]))
+
+    const host = await mountLanding()
+    await flush()
+
+    expect(host.querySelector('.cardImage img')?.getAttribute('loading')).toBe('eager')
+    expect(host.querySelector('.cardImage img')?.getAttribute('decoding')).toBe('async')
+  })
+
   test('keeps the recent-chat gallery compact by default and can expand it', async () => {
     storeState = createStoreState(false)
     listRecentGrouped.mockResolvedValue(page([]))
@@ -938,6 +1127,33 @@ describe('LandingPage character library', () => {
     expect(host.querySelector('[data-component="LandingPageChatsPanel"]')?.hasAttribute('role')).toBe(false)
     expect(host.textContent).toContain('No recent chats')
     expect(listSummaries).not.toHaveBeenCalled()
+  })
+
+  test('retained Suite landing roots cannot replace native Chats after disable or uninstall', async () => {
+    storeState = createStoreState()
+    listRecentGrouped.mockResolvedValue(page([]))
+    const host = await mountLanding()
+    const characterRoot = appendReadySuiteRoot(host)
+    const chatsRoot = document.createElement('section')
+    chatsRoot.dataset.spindleExtId = 'lumiverse_suite'
+    chatsRoot.dataset.recentChatsReady = 'true'
+    host.querySelector('[data-spindle-mount="landing_chats"]')!.append(chatsRoot)
+    await flush()
+    expect(tab(host, 'Characters')).not.toBeUndefined()
+
+    for (const extensions of [[{ identifier: 'lumiverse_suite', enabled: false, has_frontend: true }], []]) {
+      await act(async () => {
+        storeState = { ...storeState, extensions }
+        notifyStore()
+      })
+      await flush()
+      expect(characterRoot.isConnected).toBe(true)
+      expect(chatsRoot.isConnected).toBe(true)
+      expect(charactersMount(host).hidden).toBe(true)
+      expect(host.querySelector<HTMLElement>('[data-spindle-mount="landing_chats"]')!.hidden).toBe(true)
+      expect(tab(host, 'Characters')).toBeUndefined()
+      expect(host.textContent).toContain('No recent chats')
+    }
   })
 
   test('re-adding the suite root activates once per ready transition and preserves Chats', async () => {

@@ -394,6 +394,15 @@ describe('isolated regex pipeline', () => {
     expect(spawned).toHaveLength(0)
   })
 
+  test('owned processing state reaches the final callback without transport', async () => {
+    const applyScripts = mock(async ({ processingState }: { processingState?: string }) => ({ content: processingState ?? 'missing' }))
+    registryState.owned = true
+    registryState.resolver = { applyScripts }
+    const result = await applyDisplayRegexTiered('body', [], { ...context, chatId: 'chat', processingState: '' })
+    expect(result.result).toBe('')
+    expect(applyScripts).toHaveBeenCalledTimes(1)
+  })
+
   test('owned chats retain their resolver bypass', async () => {
     const { spawned } = makeHarness()
     registryState.owned = true

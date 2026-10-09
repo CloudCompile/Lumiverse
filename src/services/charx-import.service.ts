@@ -152,6 +152,7 @@ export async function applyCharxModulesAndAssets(
       if (Object.keys(exprMappings).length > 0) {
         extensions.expressions = {
           enabled: lumiverseModules.expressions.enabled,
+          useAsAvatar: exprSvc.getExpressionConfig(userId, character.id)?.useAsAvatar ?? false,
           defaultExpression: lumiverseModules.expressions.defaultExpression,
           mappings: exprMappings,
         };
@@ -189,11 +190,15 @@ export async function applyCharxModulesAndAssets(
     // Alternate avatars
     const altAvatars: Array<{ id: string; image_id: string; label: string }> = [];
     if (Array.isArray(lumiverseModules.alternate_avatars)) {
-      for (const av of lumiverseModules.alternate_avatars) {
+      for (const [position, av] of lumiverseModules.alternate_avatars.entries()) {
         const assetFile = assetFiles.get(av.path);
         if (assetFile) {
           const img = await images.uploadImage(userId, assetFile);
-          altAvatars.push({ id: av.id || crypto.randomUUID(), image_id: img.id, label: av.label });
+          altAvatars.push({
+            id: cardSvc.stableCharxAlternateAvatarId(av.id, position),
+            image_id: img.id,
+            label: av.label,
+          });
           consumedPaths.add(av.path);
           assetImageMap.set(av.path, img.id);
         }

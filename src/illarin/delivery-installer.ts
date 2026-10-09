@@ -2,6 +2,7 @@
 
 import { strFromU8, unzipSync } from "fflate";
 import { fetchDeliveryArtifact } from "./api";
+import { installExtensionDelivery } from "./extensions";
 import type { IllarinDelivery } from "./types";
 import {
   installCharacter,
@@ -19,6 +20,7 @@ const MAX_PRESET_COVER_BYTES = 50 * 1024 * 1024;
 const MAX_THEME_BYTES = 200 * 1024 * 1024;
 const MAX_THEME_ENTRIES = 500;
 const MAX_THEME_EXPANDED_BYTES = 250 * 1024 * 1024;
+const MAX_EXTENSION_BYTES = 32 * 1024 * 1024;
 
 const PRESET_COVER_EXTENSIONS: Readonly<Record<string, string>> = {
   "image/apng": "apng",
@@ -31,7 +33,7 @@ const PRESET_COVER_EXTENSIONS: Readonly<Record<string, string>> = {
 };
 
 function exportUrl(delivery: IllarinDelivery): string {
-  const artifact = delivery.artifacts.find((item) => item.kind === "export");
+  const artifact = delivery.files.find((item) => item.type === "export");
   if (!artifact) throw new Error(`Illarin delivery ${delivery.id} has no export artifact`);
   return artifact.url;
 }
@@ -65,7 +67,7 @@ export async function persistIllarinPresetCover(
   delivery: IllarinDelivery,
   dependencies: PresetCoverDependencies = presetCoverDependencies,
 ): Promise<string | null> {
-  const cover = delivery.artifacts.find((artifact) => artifact.kind === "picture" && artifact.isCover === true);
+  const cover = delivery.files.find((artifact) => artifact.type === "picture" && artifact.isCover === true);
   if (!cover) return null;
 
   const response = await dependencies.fetchArtifact(cover.url, { maxBytes: MAX_PRESET_COVER_BYTES });
@@ -152,24 +154,52 @@ async function decodeThemeArtifact(delivery: IllarinDelivery): Promise<Record<st
 }
 
 function requireSuccess(result: { success: boolean; error?: string }, delivery: IllarinDelivery): void {
-  if (!result.success) throw new Error(result.error || `Illarin ${delivery.kind} installation failed`);
+  if (!result.success) throw new Error(result.error || `Illarin ${delivery.type} installation failed`);
 }
 
 export function characterInstallPayload(delivery: IllarinDelivery) {
   return {
     source: "illarin" as const,
-    characterId: delivery.assetId,
+    characterId: delivery.workId,
     characterName: delivery.name,
     importUrl: exportUrl(delivery),
     importEmbeddedWorldbook: true,
     ...(delivery.format === "charx"
       ? {}
-      : { galleryImageUrls: delivery.artifacts.filter((item) => item.kind === "picture").map((item) => item.url) }),
+      : { galleryImageUrls: delivery.files.filter((item) => item.type === "picture").map((item) => item.url) }),
+  };
+}
+
+/** Accept both portable Loom documents and LumiHub-style export envelopes. */
+export function illarinPresetInstallPayload(
+  delivery: IllarinDelivery,
+  document: Record<string, any>,
+  coverUrl: string | null,
+) {
+  const wrapped = Object.hasOwn(document, "preset");
+  const preset = wrapped ? document.preset : document;
+  if (!preset || typeof preset !== "object" || Array.isArray(preset) || !Array.isArray(preset.blocks)) {
+    throw new Error(`Illarin preset delivery ${delivery.id} has no Lumiverse prompt blocks`);
+  }
+  if (!Number.isSafeInteger(delivery.versionNumber) || delivery.versionNumber < 1) {
+    throw new Error(`Illarin preset delivery ${delivery.id} has an invalid version number`);
+  }
+  return {
+    source: "illarin" as const,
+    presetId: delivery.workId,
+    presetName: delivery.name,
+    presetVersion: typeof preset.presetVersion === "string" ? preset.presetVersion : null,
+    presetVersionNumber: delivery.versionNumber,
+    presetData: {
+      ...(wrapped ? document : { preset }),
+      // An absent sidecar must not erase a cover embedded in the export.
+      ...(coverUrl === null ? {} : { coverUrl, cover_url: coverUrl }),
+    },
   };
 }
 
 export async function installIllarinDelivery(userId: string, delivery: IllarinDelivery): Promise<void> {
-  switch (delivery.kind) {
+  switch (delivery.type) {
     case "character": {
       const result = await installCharacter(delivery.id, userId, characterInstallPayload(delivery));
       requireSuccess(result, delivery);
@@ -179,7 +209,7 @@ export async function installIllarinDelivery(userId: string, delivery: IllarinDe
       const data = await fetchJsonArtifact(delivery);
       const result = await installWorldbook(delivery.id, userId, {
         source: "illarin",
-        worldbookId: delivery.assetId,
+        worldbookId: delivery.workId,
         worldbookName: delivery.name,
         worldbookData: data as any,
       });
@@ -189,13 +219,7 @@ export async function installIllarinDelivery(userId: string, delivery: IllarinDe
     case "preset": {
       const preset = await fetchJsonArtifact(delivery);
       const coverUrl = await persistIllarinPresetCover(userId, delivery);
-      const result = await installPreset(delivery.id, userId, {
-        source: "illarin",
-        presetId: delivery.assetId,
-        presetName: delivery.name,
-        presetVersion: typeof preset.presetVersion === "string" ? preset.presetVersion : null,
-        presetData: { preset, coverUrl },
-      });
+      const result = await installPreset(delivery.id, userId, illarinPresetInstallPayload(delivery, preset, coverUrl));
       requireSuccess(result, delivery);
       return;
     }
@@ -203,11 +227,16 @@ export async function installIllarinDelivery(userId: string, delivery: IllarinDe
       const themeData = await decodeThemeArtifact(delivery);
       const result = await installTheme(delivery.id, userId, {
         source: "illarin",
-        themeId: delivery.assetId,
+        themeId: delivery.workId,
         themeName: delivery.name,
         themeData,
       });
       requireSuccess(result, delivery);
+      return;
+    }
+    case "extension": {
+      const response = await fetchDeliveryArtifact(exportUrl(delivery), { maxBytes: MAX_EXTENSION_BYTES });
+      await installExtensionDelivery(userId, delivery, new Uint8Array(await response.arrayBuffer()));
       return;
     }
     case "pack": {
@@ -221,6 +250,6 @@ export async function installIllarinDelivery(userId: string, delivery: IllarinDe
       return;
     }
     default:
-      throw new Error(`Illarin delivery kind "${delivery.kind}" is not supported`);
+      throw new Error(`Illarin send type "${delivery.type}" is not supported`);
   }
 }

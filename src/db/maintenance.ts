@@ -76,6 +76,7 @@ export interface DatabaseMaintenanceResult {
   optimized: boolean;
   analyzed: boolean;
   vacuumed: boolean;
+  staleBreakdownsDeleted: number;
   state: DatabaseMaintenanceState | null;
 }
 
@@ -166,6 +167,22 @@ export function ensureVacuumDiskHeadroom(stats: DatabaseStats): void {
   if (stats.vacuumHasEnoughFreeBytes === false) {
     throw new InsufficientDiskSpaceError(stats.filesystemFreeBytes, stats.vacuumEstimatedRequiredBytes);
   }
+}
+
+/** Remove true orphaned or mismatched prompt snapshots before rewriting the DB. */
+export function deleteStaleMessageBreakdowns(db: Database): number {
+  const result = db.query(
+    `DELETE FROM message_breakdowns
+     WHERE NOT EXISTS (
+       SELECT 1
+       FROM messages m
+       JOIN chats c ON c.id = m.chat_id
+       WHERE m.id = message_breakdowns.message_id
+         AND m.chat_id = message_breakdowns.chat_id
+         AND c.user_id = message_breakdowns.user_id
+     )`,
+  ).run();
+  return result.changes;
 }
 
 function getPragmaValue<T extends string | number>(db: Database, pragma: string): T {
@@ -549,6 +566,7 @@ export function runStartupDatabaseMaintenance(
     optimized: true,
     analyzed: false,
     vacuumed: false,
+    staleBreakdownsDeleted: 0,
     state,
   };
 }
@@ -637,6 +655,7 @@ export function runDatabaseMaintenance(
   const optimized = options.optimize !== false;
   const analyzed = options.analyze === true;
   const vacuumed = options.vacuum === true;
+  let staleBreakdownsDeleted = 0;
 
   let checkpoint: Record<string, number> | null = null;
   if (options.checkpointMode) {
@@ -652,6 +671,10 @@ export function runDatabaseMaintenance(
   try {
     if (vacuumed) {
       ensureVacuumDiskHeadroom(statsBefore);
+      staleBreakdownsDeleted = deleteStaleMessageBreakdowns(db);
+      if (staleBreakdownsDeleted > 0) {
+        console.warn(`[db] Removed ${staleBreakdownsDeleted} stale prompt breakdown(s) before VACUUM.`);
+      }
       db.run("VACUUM");
     }
     if (analyzed) {
@@ -687,6 +710,7 @@ export function runDatabaseMaintenance(
     optimized,
     analyzed,
     vacuumed,
+    staleBreakdownsDeleted,
     state,
   };
 }

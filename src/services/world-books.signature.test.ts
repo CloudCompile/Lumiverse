@@ -24,6 +24,7 @@ function initDb(): void {
   db.run(`CREATE TABLE world_book_entries (
     id TEXT PRIMARY KEY,
     world_book_id TEXT NOT NULL,
+    revision INTEGER NOT NULL DEFAULT 1,
     updated_at INTEGER NOT NULL DEFAULT 0
   )`);
 }
@@ -74,11 +75,14 @@ describe("world-books.service — ETag sources + row trim", () => {
     insertEntry({ id: "e1", world_book_id: "b1", updated_at: 10 });
     insertEntry({ id: "e2", world_book_id: "b1", updated_at: 50 });
     insertEntry({ id: "e3", world_book_id: "b2", updated_at: 999 });
-    expect(getWorldBookEntriesSignature("b1")).toEqual({ count: 2, maxUpdatedAt: 50 });
-    expect(getWorldBookEntriesSignature("missing")).toEqual({ count: 0, maxUpdatedAt: 0 });
+    expect(getWorldBookEntriesSignature("b1")).toEqual({ count: 2, maxUpdatedAt: 50, revisionSum: 2 });
+    expect(getWorldBookEntriesSignature("missing")).toEqual({ count: 0, maxUpdatedAt: 0, revisionSum: 0 });
 
     getDb().run("UPDATE world_book_entries SET updated_at = 80 WHERE id = 'e1'");
-    expect(getWorldBookEntriesSignature("b1")).toEqual({ count: 2, maxUpdatedAt: 80 });
+    expect(getWorldBookEntriesSignature("b1")).toEqual({ count: 2, maxUpdatedAt: 80, revisionSum: 2 });
+
+    getDb().run("UPDATE world_book_entries SET revision = revision + 1 WHERE id = 'e1'");
+    expect(getWorldBookEntriesSignature("b1")).toEqual({ count: 2, maxUpdatedAt: 80, revisionSum: 3 });
   });
 
   test("reuses the attached character-sourced lorebook before creating a duplicate import", () => {

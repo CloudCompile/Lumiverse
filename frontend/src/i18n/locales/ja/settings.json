@@ -122,6 +122,7 @@
     "saving": "保存..."
   },
   "display": {
+    "zoom": { "title": "ズーム", "desktopPinchZoom": "デスクトップでピンチズーム" },
     "longMessages": {
       "title": "長いメッセージ",
       "helper": "長いメッセージを、展開するまで読みやすい高さに制限します。",
@@ -453,9 +454,12 @@
     "messagesPerPage": "ページごとのメッセージ数",
     "customValue": "カスタム値",
     "inputTitle": "入力",
-    "enterToSend": "Enter キーを押して送信してください",
+    "enterToSendDesktop": "デスクトップで Enter キーを押して送信",
+    "enterToSendMobile": "モバイルで Enter キーを押して送信",
     "saveDraft": "下書き入力を保存",
     "saveDraftHint": "未送信のメッセージが自動的に保存されるため、ページの更新やチャットの切り替え後も保持されます",
+    "defaultImpersonationMode": "デフォルトのなりすましモード",
+    "defaultImpersonationModeHint": "独自のなりすましモードを設定していないチャットとグループチャットで使用されます。",
     "portraitSide": "ポートレート パネル側",
     "none": "なし",
     "regenTitle": "再生フィードバック",
@@ -618,7 +622,7 @@
     "unlinking": "リンク解除...",
     "unlink": "LumiHub からのリンクを解除",
     "instanceName": "インスタンス名",
-    "urlPlaceholder": "https://lumi.spot",
+    "urlPlaceholder": "https://hub.example.com",
     "instancePlaceholder": "私のルミバース",
     "instanceHint": "LumiHub 上でこのインスタンスを識別するためのラベル (例: 「ホーム PC」、「ラップトップ」)",
     "waitingApproval": "承認待ち...",

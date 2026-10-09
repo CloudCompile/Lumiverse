@@ -96,6 +96,23 @@ export interface BuildSummarizationPromptOptions {
 }
 
 /**
+ * Select the summary window while retaining a trailing buffer of recent
+ * messages. The buffered tail is intentionally omitted so its active swipe or
+ * edit can settle before a later summary incorporates it.
+ */
+export function selectSummarizationMessages<T>(
+  messages: readonly T[],
+  messageContext: number,
+  messageLag = 0,
+): T[] {
+  const context = Number.isFinite(messageContext) ? Math.max(1, Math.floor(messageContext)) : 1;
+  const lag = Number.isFinite(messageLag) ? Math.max(0, Math.floor(messageLag)) : 0;
+  const eligibleEnd = Math.max(0, messages.length - lag);
+  const eligibleStart = Math.max(0, eligibleEnd - context);
+  return messages.slice(eligibleStart, eligibleEnd);
+}
+
+/**
  * Build a summarization prompt from a batch of messages, with optional
  * previous summary. This is the shared backend implementation used by
  * both the existing summarize endpoint and the rebuild endpoint.

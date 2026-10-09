@@ -1,5 +1,10 @@
 import { expect, test } from "bun:test";
-import { FRAME_PREFIX, drainCommandBuffer, encodeFrame } from "./headless-bridge.js";
+import {
+  FRAME_PREFIX,
+  LOG_SESSION_FRAME_TYPE,
+  drainCommandBuffer,
+  encodeFrame,
+} from "./headless-bridge.js";
 import { handleIPCMessage } from "./ipc-handler.js";
 
 test("encodeFrame produces a single 0x1E-prefixed newline-terminated line", () => {
@@ -11,6 +16,21 @@ test("encodeFrame produces a single 0x1E-prefixed newline-terminated line", () =
     type: "state",
     id: "state",
     payload: { state: "running" },
+  });
+});
+
+test("server log sessions use an authenticated native-only protocol frame", () => {
+  const session = { id: "session-id", startedAt: "2026-09-17T22:17:30.123Z" };
+  const frame = encodeFrame({
+    type: LOG_SESSION_FRAME_TYPE,
+    id: session.id,
+    payload: { ...session, token: "native-secret" },
+  });
+
+  expect(JSON.parse(frame.slice(1))).toEqual({
+    type: "lumiverse-log-session-v1",
+    id: "session-id",
+    payload: { ...session, token: "native-secret" },
   });
 });
 

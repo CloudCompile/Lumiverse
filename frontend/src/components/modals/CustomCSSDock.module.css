@@ -1,7 +1,7 @@
 .panel {
   position: fixed;
   z-index: 9980;
-  top: 0;
+  top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
   bottom: 0;
   display: flex;
   min-width: 0;
@@ -19,12 +19,6 @@
 .right {
   right: 0;
   border-left: 1px solid var(--lumiverse-border);
-}
-
-@media (display-mode: window-controls-overlay) {
-  .panel {
-    top: var(--app-interactive-safe-top, env(safe-area-inset-top, 0px));
-  }
 }
 
 .content {

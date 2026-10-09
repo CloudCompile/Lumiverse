@@ -77,6 +77,8 @@ export interface InstallPresetPayload {
   presetName: string;
   /** Latest published version label (also present at presetData.preset.presetVersion). */
   presetVersion?: string | null;
+  /** Illarin's published release identity, independent of the preset's display label. */
+  presetVersionNumber?: number;
   /** Uploader username, for the manifest creator field. */
   presetCreator?: string | null;
   /** Canonical `creator/name` manifest slug computed by the hub, echoed back in the manifest. */

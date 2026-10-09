@@ -1,4 +1,6 @@
 import { cloneEnv, evaluate, initMacros, registry, type MacroEnv } from "../macros";
+import { withJsonBlocksProtected } from "../macros/json-blocks";
+import { captureMessageLiterals, shieldMessageLiterals, withMessageLiteralExtra } from "../macros/message-literals";
 import type { Message } from "../types/message";
 import { healFormattingArtifacts } from "../utils/format-healing";
 import * as chatsSvc from "./chats.service";
@@ -23,12 +25,14 @@ export async function resolveRenderedChatMessages(
   input: ResolveRenderedChatMessagesInput,
 ): Promise<{
   resolvedById: Map<string, string>;
+  literalBracesById: Map<string, number[]>;
   globalVariables?: Record<string, string>;
   chatVariables?: Record<string, string>;
 }> {
   const targetIds = [...new Set(input.messageIds.filter(Boolean))];
   const resolvedById = new Map<string, string>();
-  if (!input.macroEnvSeed || targetIds.length === 0) return { resolvedById };
+  const literalBracesById = new Map<string, number[]>();
+  if (!input.macroEnvSeed || input.macroEnvSeed.extra.preserveMessageSource || targetIds.length === 0) return { resolvedById, literalBracesById };
 
   const targetSet = new Set(targetIds);
   let lastTargetIdx = -1;
@@ -38,7 +42,7 @@ export async function resolveRenderedChatMessages(
     lastTargetIdx = i;
     if (HAS_MACRO_RE.test(input.messages[i].content)) shouldReplay = true;
   }
-  if (lastTargetIdx < 0 || !shouldReplay) return { resolvedById };
+  if (lastTargetIdx < 0 || !shouldReplay) return { resolvedById, literalBracesById };
 
   initMacros();
   const env = cloneEnv(input.macroEnvSeed);
@@ -46,16 +50,19 @@ export async function resolveRenderedChatMessages(
   for (let i = 0; i <= lastTargetIdx; i++) {
     const message = input.messages[i];
     if (message.extra?.hidden === true) continue;
-    const resolved = HAS_MACRO_RE.test(message.content)
-      ? healFormattingArtifacts((await evaluate(message.content, env, registry)).text)
-      : message.content;
+    const source = shieldMessageLiterals(message.content, message);
+    const rendered = HAS_MACRO_RE.test(message.content)
+      ? await resolveMessageMacroContent(source, env)
+      : captureMessageLiterals(source);
     if (targetSet.has(message.id)) {
-      resolvedById.set(message.id, resolved);
+      resolvedById.set(message.id, rendered.content);
+      literalBracesById.set(message.id, rendered.literalBraces);
     }
   }
 
   return {
     resolvedById,
+    literalBracesById,
     globalVariables: Object.fromEntries(env.variables.global),
     chatVariables: Object.fromEntries(env.variables.chat),
   };
@@ -64,10 +71,25 @@ export async function resolveRenderedChatMessages(
 export async function resolveRenderedMessageContent(
   content: string,
   env: MacroEnv,
+  deferLiteralBraceRestore = false,
 ): Promise<string> {
-  if (!HAS_MACRO_RE.test(content)) return content;
+  const rendered = await resolveMessageMacroContent(content, env);
+  return deferLiteralBraceRestore ? rendered.template : rendered.content;
+}
+
+/** Keep literal positions until the caller has persisted the message's provenance. */
+export async function resolveMessageMacroContent(content: string, env: MacroEnv) {
+  if (env.extra.preserveMessageSource) return { content, template: content, literalBraces: [] as number[] };
+  const template = await resolveMessageMacroTemplate(content, env);
+  return { ...captureMessageLiterals(template), template };
+}
+
+async function resolveMessageMacroTemplate(content: string, env: MacroEnv): Promise<string> {
+  if (env.extra.preserveMessageSource || !HAS_MACRO_RE.test(content)) return content;
   initMacros();
-  return healFormattingArtifacts((await evaluate(content, env, registry)).text);
+  return withJsonBlocksProtected(content, env, async (protectedContent) =>
+    healFormattingArtifacts((await evaluate(protectedContent, env, registry, { deferLiteralBraceRestore: true })).text),
+  );
 }
 
 export function buildPersistedMacroVariables(
@@ -105,6 +127,7 @@ export async function reconcileChatMessageMacros(
 
   const {
     resolvedById,
+    literalBracesById,
     globalVariables,
     chatVariables,
   } = await resolveRenderedChatMessages({
@@ -115,8 +138,12 @@ export async function reconcileChatMessageMacros(
 
   for (const [messageId, resolved] of resolvedById) {
     const existing = chatsSvc.getMessage(input.userId, messageId);
-    if (!existing || existing.content === resolved) continue;
-    chatsSvc.updateMessage(input.userId, messageId, { content: resolved });
+    if (!existing) continue;
+    const extra = withMessageLiteralExtra(existing.extra, {
+      content: resolved, literalBraces: literalBracesById.get(messageId) ?? [],
+    });
+    if (existing.content === resolved && JSON.stringify(extra) === JSON.stringify(existing.extra)) continue;
+    chatsSvc.updateMessage(input.userId, messageId, { content: resolved, extra });
   }
 
   if (input.persistVariables !== false && globalVariables && chatVariables) {

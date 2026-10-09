@@ -102,6 +102,16 @@ select option:checked {
   }
 }
 
+/* Efficiency mode avoids allocating backdrop-filter compositing surfaces.
+   It is intentionally stronger than the visual glass toggle because some
+   focused controls use local blur independently of the theme glass layer. */
+html[data-rendering-mode='efficiency'] *,
+html[data-rendering-mode='efficiency'] *::before,
+html[data-rendering-mode='efficiency'] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 /* Focus styles — subtle ring for interactive elements only */
 :focus-visible {
   outline: 1.5px solid var(--lumiverse-primary-050);
@@ -172,8 +182,7 @@ select:focus-visible,
   }
 
   body {
-    width: var(--app-viewport-width, 100vw);
-    height: 100%;
+    /* reset.css owns the scale-compensated body dimensions. */
     overflow: hidden;
     overscroll-behavior: none;
     overscroll-behavior-x: none;
@@ -181,7 +190,6 @@ select:focus-visible,
        in some Chromium PWA renderers (particularly Android WebAPK). */
     -webkit-transform: translateZ(0);
     transform: translateZ(0);
-    /* Prevent all touch-based viewport manipulation in PWA shell */
     touch-action: pan-x pan-y;
   }
 
@@ -201,9 +209,5 @@ html[data-ios-pwa] {
      actual device screen size in CSS pixels, immune to all viewport quirks. */
   height: var(--ios-screen-height, 100%);
   --ios-viewport-offset: env(safe-area-inset-top, 0px);
-  --app-shell-height: 100%;
-}
-
-html[data-pwa]:not([data-ios-pwa]) {
-  --app-shell-height: var(--app-viewport-height, 100dvh);
+  --app-shell-height: var(--ios-screen-height, 100dvh);
 }

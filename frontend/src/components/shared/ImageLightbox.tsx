@@ -9,6 +9,13 @@ import ConfirmationModal from '@/components/shared/ConfirmationModal'
 import { useLongPress } from '@/hooks/useLongPress'
 import { copyImageToClipboard } from '@/lib/clipboard'
 import { downloadImageFromUrl } from '@/lib/downloads'
+import {
+  constrainImageLightboxZoom,
+  pinchImageLightboxZoom,
+  INITIAL_IMAGE_LIGHTBOX_ZOOM,
+  type ImageLightboxPoint,
+  type ImageLightboxZoom,
+} from '@/lib/imageLightboxZoom'
 import { toast } from '@/lib/toast'
 import styles from './ImageLightbox.module.css'
 
@@ -47,6 +54,16 @@ export default function ImageLightbox({
   const [menuPos, setMenuPos] = useState<ContextMenuPos | null>(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [imageZoom, setImageZoom] = useState(INITIAL_IMAGE_LIGHTBOX_ZOOM)
+  const [isMousePanning, setIsMousePanning] = useState(false)
+  const zoomRef = useRef(INITIAL_IMAGE_LIGHTBOX_ZOOM)
+  const imageRef = useRef<HTMLImageElement>(null)
+  const backdropRef = useRef<HTMLDivElement>(null)
+  const pinchStartRef = useRef<{ distance: number; point: ImageLightboxPoint; zoom: ImageLightboxZoom } | null>(null)
+  const panPointRef = useRef<ImageLightboxPoint | null>(null)
+  const mousePanRef = useRef<{ pointerId: number; point: ImageLightboxPoint } | null>(null)
+  const pointerPointRef = useRef<ImageLightboxPoint | null>(null)
+  const gestureStartRef = useRef<{ point: ImageLightboxPoint; zoom: ImageLightboxZoom } | null>(null)
 
   // Mirror the overlay states into refs so the document-level Escape and
   // backdrop handlers can tell when an inner layer (menu / confirm dialog)
@@ -67,6 +84,21 @@ export default function ImageLightbox({
       setDeleting(false)
     }
   }, [src, fallbackSrc])
+
+  useEffect(() => {
+    const pan = mousePanRef.current
+    if (pan && imageRef.current?.hasPointerCapture(pan.pointerId)) {
+      imageRef.current.releasePointerCapture(pan.pointerId)
+    }
+    zoomRef.current = INITIAL_IMAGE_LIGHTBOX_ZOOM
+    setImageZoom(INITIAL_IMAGE_LIGHTBOX_ZOOM)
+    pinchStartRef.current = null
+    panPointRef.current = null
+    mousePanRef.current = null
+    pointerPointRef.current = null
+    gestureStartRef.current = null
+    setIsMousePanning(false)
+  }, [currentSrc])
 
   useEffect(() => {
     if (!src) return
@@ -109,6 +141,199 @@ export default function ImageLightbox({
   }, [currentSrc, fallbackSrc])
 
   const longPress = useLongPress({ onLongPress: (pos) => setMenuPos(pos) })
+
+  const updateImageZoom = useCallback((zoom: ImageLightboxZoom) => {
+    zoomRef.current = zoom
+    setImageZoom(zoom)
+  }, [])
+
+  const getZoomGeometry = useCallback(() => {
+    const image = imageRef.current
+    const backdrop = backdropRef.current
+    if (!image || !backdrop) return null
+    const rect = backdrop.getBoundingClientRect()
+    const uiScale = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--lumiverse-ui-scale')) || 1
+    return {
+      uiScale,
+      bounds: {
+        imageWidth: image.offsetWidth,
+        imageHeight: image.offsetHeight,
+        viewportWidth: backdrop.clientWidth,
+        viewportHeight: backdrop.clientHeight,
+      },
+      point: (clientX: number, clientY: number) => ({
+        x: (clientX - rect.left - rect.width / 2) / uiScale,
+        y: (clientY - rect.top - rect.height / 2) / uiScale,
+      }),
+    }
+  }, [])
+
+  useEffect(() => {
+    const image = imageRef.current
+    if (!src || !image || hasError) return
+
+    const handleWheel = (event: WheelEvent) => {
+      if (!event.deltaY) return
+      const geometry = getZoomGeometry()
+      if (!geometry) return
+      event.preventDefault()
+      if (gestureStartRef.current) return
+      const sensitivity = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 0.04
+        : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? 0.2
+          : event.ctrlKey ? 0.01 : 0.002
+      const point = geometry.point(event.clientX, event.clientY)
+      updateImageZoom(pinchImageLightboxZoom(
+        zoomRef.current, 1, Math.exp(-event.deltaY * sensitivity), point, point, geometry.bounds,
+      ))
+    }
+
+    const handleGestureStart = (event: Event) => {
+      if (pinchStartRef.current) return
+      const geometry = getZoomGeometry()
+      if (!geometry) return
+      const rect = image.getBoundingClientRect()
+      const pointer = pointerPointRef.current
+      gestureStartRef.current = {
+        point: geometry.point(pointer?.x ?? rect.left + rect.width / 2, pointer?.y ?? rect.top + rect.height / 2),
+        zoom: zoomRef.current,
+      }
+      event.preventDefault()
+    }
+
+    const handleGestureChange = (event: Event) => {
+      const start = gestureStartRef.current
+      const scale = (event as Event & { scale?: number }).scale
+      const geometry = getZoomGeometry()
+      if (!start || pinchStartRef.current || !scale || !Number.isFinite(scale) || !geometry) return
+      event.preventDefault()
+      updateImageZoom(pinchImageLightboxZoom(start.zoom, 1, scale, start.point, start.point, geometry.bounds))
+    }
+
+    const handleGestureEnd = () => { gestureStartRef.current = null }
+
+    image.addEventListener('wheel', handleWheel, { passive: false })
+    image.addEventListener('gesturestart', handleGestureStart, { passive: false })
+    image.addEventListener('gesturechange', handleGestureChange, { passive: false })
+    image.addEventListener('gestureend', handleGestureEnd)
+    return () => {
+      image.removeEventListener('wheel', handleWheel)
+      image.removeEventListener('gesturestart', handleGestureStart)
+      image.removeEventListener('gesturechange', handleGestureChange)
+      image.removeEventListener('gestureend', handleGestureEnd)
+    }
+  }, [src, currentSrc, hasError, getZoomGeometry, updateImageZoom])
+
+  const stopMousePan = (event: React.PointerEvent<HTMLImageElement>) => {
+    if (mousePanRef.current?.pointerId !== event.pointerId) return
+    mousePanRef.current = null
+    setIsMousePanning(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  const handleImagePointerDown = (event: React.PointerEvent<HTMLImageElement>) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0 || zoomRef.current.scale <= 1) return
+    mousePanRef.current = { pointerId: event.pointerId, point: { x: event.clientX, y: event.clientY } }
+    event.currentTarget.setPointerCapture(event.pointerId)
+    setIsMousePanning(true)
+  }
+
+  const handleImagePointerMove = (event: React.PointerEvent<HTMLImageElement>) => {
+    if (event.pointerType === 'mouse') pointerPointRef.current = { x: event.clientX, y: event.clientY }
+    const pan = mousePanRef.current
+    if (!pan || pan.pointerId !== event.pointerId) return
+    if (!(event.buttons & 1) || zoomRef.current.scale <= 1) {
+      stopMousePan(event)
+      return
+    }
+    const geometry = getZoomGeometry()
+    if (!geometry) return
+    mousePanRef.current = { pointerId: pan.pointerId, point: { x: event.clientX, y: event.clientY } }
+    updateImageZoom(constrainImageLightboxZoom({
+      ...zoomRef.current,
+      x: zoomRef.current.x + (event.clientX - pan.point.x) / geometry.uiScale,
+      y: zoomRef.current.y + (event.clientY - pan.point.y) / geometry.uiScale,
+    }, geometry.bounds))
+  }
+
+  const startPinch = (touches: React.TouchList) => {
+    const geometry = getZoomGeometry()
+    if (!geometry) return
+    gestureStartRef.current = null
+    pinchStartRef.current = {
+      distance: Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY),
+      point: geometry.point(
+        (touches[0].clientX + touches[1].clientX) / 2,
+        (touches[0].clientY + touches[1].clientY) / 2,
+      ),
+      zoom: zoomRef.current,
+    }
+    panPointRef.current = null
+  }
+
+  const handleImageTouchStart = (event: React.TouchEvent<HTMLImageElement>) => {
+    if (event.touches.length > 1) {
+      longPress.onTouchCancel()
+      startPinch(event.touches)
+      return
+    }
+    longPress.onTouchStart(event)
+    if (zoomRef.current.scale > 1) {
+      panPointRef.current = { x: event.touches[0].clientX, y: event.touches[0].clientY }
+    }
+  }
+
+  const handleImageTouchMove = (event: React.TouchEvent<HTMLImageElement>) => {
+    if (event.touches.length > 1) {
+      longPress.onTouchCancel()
+      if (!pinchStartRef.current) startPinch(event.touches)
+      const start = pinchStartRef.current
+      const geometry = getZoomGeometry()
+      if (!start || !geometry) return
+      const distance = Math.hypot(
+        event.touches[0].clientX - event.touches[1].clientX,
+        event.touches[0].clientY - event.touches[1].clientY,
+      )
+      const point = geometry.point(
+        (event.touches[0].clientX + event.touches[1].clientX) / 2,
+        (event.touches[0].clientY + event.touches[1].clientY) / 2,
+      )
+      updateImageZoom(pinchImageLightboxZoom(start.zoom, start.distance, distance, start.point, point, geometry.bounds))
+      return
+    }
+
+    longPress.onTouchMove(event)
+    if (event.touches.length !== 1 || zoomRef.current.scale <= 1) return
+    const touch = event.touches[0]
+    const previous = panPointRef.current
+    panPointRef.current = { x: touch.clientX, y: touch.clientY }
+    const geometry = getZoomGeometry()
+    if (!previous || !geometry) return
+    updateImageZoom(constrainImageLightboxZoom({
+      ...zoomRef.current,
+      x: zoomRef.current.x + (touch.clientX - previous.x) / geometry.uiScale,
+      y: zoomRef.current.y + (touch.clientY - previous.y) / geometry.uiScale,
+    }, geometry.bounds))
+  }
+
+  const handleImageTouchEnd = (event: React.TouchEvent<HTMLImageElement>) => {
+    longPress.onTouchEnd(event)
+    if (event.touches.length > 1) {
+      startPinch(event.touches)
+      return
+    }
+    pinchStartRef.current = null
+    panPointRef.current = event.touches.length === 1
+      ? { x: event.touches[0].clientX, y: event.touches[0].clientY }
+      : null
+  }
+
+  const handleImageTouchCancel = () => {
+    longPress.onTouchCancel()
+    pinchStartRef.current = null
+    panPointRef.current = null
+  }
 
   const handleCopy = useCallback(async () => {
     setMenuPos(null)
@@ -168,6 +393,8 @@ export default function ImageLightbox({
       <AnimatePresence>
         {src && (
           <motion.div
+            ref={backdropRef}
+            data-viewport-zoom-exempt=""
             className={styles.backdrop}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -188,18 +415,32 @@ export default function ImageLightbox({
               <div className={styles.error}>{t('loadFailed')}</div>
             ) : (
               <img
+                ref={imageRef}
                 src={currentSrc || ''}
                 alt=""
                 className={styles.image}
-                style={{ opacity: isLoading ? 0 : 1 }}
+                style={{
+                  opacity: isLoading ? 0 : 1,
+                  transform: `translate3d(${imageZoom.x}px, ${imageZoom.y}px, 0) scale(${imageZoom.scale})`,
+                  cursor: isMousePanning ? 'grabbing' : imageZoom.scale > 1 ? 'grab' : undefined,
+                }}
                 draggable={false}
                 onLoad={handleLoad}
                 onError={handleError}
                 onContextMenu={longPress.onContextMenu}
-                onTouchStart={longPress.onTouchStart}
-                onTouchMove={longPress.onTouchMove}
-                onTouchEnd={longPress.onTouchEnd}
-                onTouchCancel={longPress.onTouchCancel}
+                onPointerEnter={(event) => {
+                  if (event.pointerType === 'mouse') pointerPointRef.current = { x: event.clientX, y: event.clientY }
+                }}
+                onPointerLeave={() => { pointerPointRef.current = null }}
+                onPointerDown={handleImagePointerDown}
+                onPointerMove={handleImagePointerMove}
+                onPointerUp={stopMousePan}
+                onPointerCancel={stopMousePan}
+                onLostPointerCapture={stopMousePan}
+                onTouchStart={handleImageTouchStart}
+                onTouchMove={handleImageTouchMove}
+                onTouchEnd={handleImageTouchEnd}
+                onTouchCancel={handleImageTouchCancel}
               />
             )}
           </motion.div>

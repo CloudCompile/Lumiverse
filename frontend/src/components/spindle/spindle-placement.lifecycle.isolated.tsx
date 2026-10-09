@@ -28,6 +28,7 @@ const originalGlobals = new Map<string, unknown>([
   ['Element', globalObject.Element],
   ['HTMLElement', globalObject.HTMLElement],
   ['Node', globalObject.Node],
+  ['CustomEvent', globalObject.CustomEvent],
   ['MutationObserver', globalObject.MutationObserver],
   ['requestAnimationFrame', globalObject.requestAnimationFrame],
   ['cancelAnimationFrame', globalObject.cancelAnimationFrame],
@@ -49,6 +50,7 @@ Object.assign(globalThis, {
   Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
   Node: domWindow.Node,
+  CustomEvent: domWindow.CustomEvent,
   MutationObserver: domWindow.MutationObserver,
   requestAnimationFrame,
   cancelAnimationFrame,
@@ -242,6 +244,93 @@ afterAll(async () => {
   for (const [key, value] of originalGlobals) {
     if (value === undefined) delete globalObject[key]
     else globalObject[key] = value
+  }
+})
+
+test('floating widget leaves child presses untouched until drag intent', () => {
+  const entry = consumers('clickable').find((consumer) => consumer.name === 'float widget')!
+  unregisterRoots.push(registerLiveRoot(extensionId, entry.root, entry.permission, generation))
+  const button = document.createElement('button')
+  button.textContent = 'Extension action'
+  entry.root.append(button)
+  renderConsumers([entry])
+  runQueuedPaint()
+
+  const previousComputedStyle = globalObject.getComputedStyle
+  globalObject.getComputedStyle = domWindow.getComputedStyle.bind(domWindow)
+  const surface = document.querySelector<HTMLElement>('[data-consumer="float widget"] > div')!
+  // JSDOM has no pointer capture implementation. Real retargeting is checked
+  // in the browser; here verify default behavior and the drag-end contract.
+  surface.setPointerCapture = () => {}
+  surface.hasPointerCapture = () => false
+  let commits = 0
+  const onCommit = () => { commits++ }
+  window.addEventListener('spindle:float-drag-end', onCommit)
+  try {
+    const press = new domWindow.PointerEvent('pointerdown', {
+      bubbles: true, cancelable: true, pointerId: 1, button: 0, clientX: 100, clientY: 100,
+    })
+    flushSync(() => button.dispatchEvent(press))
+    expect(press.defaultPrevented).toBe(false)
+    flushSync(() => window.dispatchEvent(new domWindow.PointerEvent('pointermove', {
+      pointerId: 1, clientX: 102, clientY: 101,
+    })))
+    flushSync(() => window.dispatchEvent(new domWindow.PointerEvent('pointerup', {
+      pointerId: 1, clientX: 102, clientY: 101,
+    })))
+    runQueuedPaint()
+    expect(commits).toBe(0)
+  } finally {
+    window.removeEventListener('spindle:float-drag-end', onCommit)
+    if (previousComputedStyle === undefined) delete globalObject.getComputedStyle
+    else globalObject.getComputedStyle = previousComputedStyle
+  }
+})
+
+test('floating widget recovers if a keyboard transition swallows the previous touch release', () => {
+  const entry = consumers('keyboard-drag').find((consumer) => consumer.name === 'float widget')!
+  const widget = entry.props.widget as FloatWidgetState
+  unregisterRoots.push(registerLiveRoot(extensionId, entry.root, entry.permission, generation))
+  renderConsumers([entry])
+  runQueuedPaint()
+
+  const surface = document.querySelector<HTMLElement>('[data-consumer="float widget"] > div')!
+  const captured = new Set<number>()
+  surface.setPointerCapture = (pointerId) => { captured.add(pointerId) }
+  surface.hasPointerCapture = (pointerId) => captured.has(pointerId)
+  surface.releasePointerCapture = (pointerId) => { captured.delete(pointerId) }
+  const commits: Array<{ widgetId: string; x: number; y: number }> = []
+  const onCommit = (event: Event) => commits.push((event as CustomEvent).detail)
+  window.addEventListener('spindle:float-drag-end', onCommit)
+
+  try {
+    flushSync(() => surface.dispatchEvent(new domWindow.PointerEvent('pointerdown', {
+      bubbles: true, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: 100, clientY: 100,
+    })))
+    flushSync(() => window.dispatchEvent(new domWindow.PointerEvent('pointermove', {
+      pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: 120, clientY: 100,
+    })))
+    expect(captured.has(1)).toBe(true)
+
+    flushSync(() => surface.dispatchEvent(new domWindow.PointerEvent('pointerdown', {
+      bubbles: true, pointerId: 3, pointerType: 'touch', isPrimary: false, button: 0, clientX: 100, clientY: 100,
+    })))
+    expect(captured.has(1)).toBe(true)
+
+    flushSync(() => surface.dispatchEvent(new domWindow.PointerEvent('pointerdown', {
+      bubbles: true, pointerId: 2, pointerType: 'touch', isPrimary: true, button: 0, clientX: 100, clientY: 100,
+    })))
+    flushSync(() => window.dispatchEvent(new domWindow.PointerEvent('pointermove', {
+      pointerId: 2, pointerType: 'touch', isPrimary: true, clientX: 130, clientY: 100,
+    })))
+    flushSync(() => window.dispatchEvent(new domWindow.PointerEvent('pointerup', {
+      pointerId: 2, pointerType: 'touch', isPrimary: true, clientX: 130, clientY: 100,
+    })))
+
+    expect(captured.size).toBe(0)
+    expect(commits).toEqual([{ widgetId: widget.id, x: 70, y: 20 }])
+  } finally {
+    window.removeEventListener('spindle:float-drag-end', onCommit)
   }
 })
 

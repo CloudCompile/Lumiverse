@@ -97,6 +97,7 @@ function sanitizeSealedBlocks(blocks: unknown[], lumihubMeta: Record<string, unk
       manifestKeys.add(block.key.trim());
     }
   }
+  const isLegacyIllarinInstall = lumihubMeta?._lumiverse_install_source === "illarin";
 
   return blocks.map((raw) => {
     if (!isRecord(raw)) return raw;
@@ -105,14 +106,29 @@ function sanitizeSealedBlocks(blocks: unknown[], lumihubMeta: Record<string, unk
       ? block.sealedKey.trim()
       : null;
     const placeholderKey = exactSealedPlaceholder(block.content);
-    const key = sealedKey && (block.sealedSource === "lumihub" || manifestKeys.has(sealedKey))
+    const inferredIllarinSource = isLegacyIllarinInstall && block.sealed === true;
+    const key = sealedKey && (
+      isProtectedSealedSource(block.sealedSource)
+      || manifestKeys.has(sealedKey)
+      || inferredIllarinSource
+    )
       ? sealedKey
       : placeholderKey && manifestKeys.has(placeholderKey)
         ? placeholderKey
         : null;
     if (!key) return raw;
-    return { ...raw, content: `{{presetBlock::${key}}}`, sealed: true, sealedKey: key };
+    return {
+      ...raw,
+      content: `{{presetBlock::${key}}}`,
+      sealed: true,
+      sealedKey: key,
+      ...(inferredIllarinSource ? { sealedSource: "illarin" } : {}),
+    };
   });
+}
+
+function isProtectedSealedSource(source: unknown): boolean {
+  return source === "lumihub" || source === "illarin";
 }
 
 /** Build the same portable Loom shape as the single-preset browser export. */
@@ -239,4 +255,3 @@ export function buildPresetBulkExportStream(
     },
   });
 }
-

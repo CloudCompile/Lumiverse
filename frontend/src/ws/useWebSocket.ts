@@ -79,6 +79,7 @@ import type { RoomStateView } from '@/types/multiplayer'
 import type { CouncilToolResult } from 'lumiverse-spindle-types'
 import type { ActivatedWorldInfoEntry, WorldInfoStats } from '@/types/api'
 import { playNotificationPing } from '@/lib/notificationAudio'
+import { subscribeDesktopDiscordPresenceRefresh } from '@/lib/desktop-discord-presence'
 import {
   extensionUpdateFingerprint,
   pruneAnnouncedExtensionUpdates,
@@ -323,7 +324,13 @@ function fetchLatestMessages(chatId: string) {
   return messagesApi.list(chatId, { limit: pageSize, tail: true })
 }
 
-// Deferred generation metrics (tokenCount / TTFT / TPS / model / provider) are
+function isCurrentGeneration(chatId: string, epoch: number) {
+  const state = useStore.getState()
+  return state.activeChatId === chatId && !state.streamingNavigationPaused
+    && state.getGenerationEpoch() === epoch
+}
+
+// Deferred generation metrics (tokenCount / TTFT / TPS / model / provider / preset) are
 // persisted *after* GENERATION_ENDED and pushed via GENERATION_METRICS_READY,
 // which races that event's reconciliation re-fetch (the fetch can read the row
 // before the metrics land). Buffer the last few keyed by message id so the
@@ -462,6 +469,7 @@ export function useWebSocket() {
     let cancelled = false
 
     const syncOperatorStatus = async () => {
+      if (document.visibilityState !== 'visible') return
       try {
         const status = await operatorApi.getStatus()
         if (cancelled) return
@@ -523,6 +531,7 @@ export function useWebSocket() {
     }
 
     async function syncExtensionUpdates() {
+      if (document.visibilityState !== 'visible') return
       try {
         const snapshot = await spindleApi.getUpdates()
         if (cancelled) return
@@ -605,6 +614,7 @@ export function useWebSocket() {
     wsClient.connect()
 
     const unsubs = [
+      subscribeDesktopDiscordPresenceRefresh(wsClient),
       // Connection lifecycle — drives the full-screen "Server connection lost"
       // overlay. Each disconnect resets all three signals; reconnect flips them
       // back to true (socket open → CONNECTED with role → pong received).
@@ -697,14 +707,15 @@ export function useWebSocket() {
         if (payload.chatId === state.activeChatId && !state.streamingNavigationPaused) {
           if (payload.message?.id) invalidateDisplayRegexCacheForMessage(payload.message.id)
 
-          // During a continue, the backend updates the target message with combined
-          // content right before GENERATION_ENDED. Skip the update while streaming
-          // to avoid a brief content duplication frame — reconciliation after
-          // GENERATION_ENDED will pick up the final state.
+          // A continue buffer appends to saved text until the terminal event.
+          // Adopt later edits atomically with buffer cleanup to avoid duplicating it.
           if (state.isStreaming && state.streamingGenerationType === 'continue') {
             const msgs = state.messages
             const lastAssistant = msgs.length > 0 ? msgs[msgs.length - 1] : null
             if (lastAssistant && !lastAssistant.is_user && lastAssistant.id === payload.message.id) {
+              if (state.activeGenerationId && state.hasGenerationEnded(state.activeGenerationId)) {
+                state.endStreaming(payload.message)
+              }
               return
             }
           }
@@ -900,10 +911,12 @@ export function useWebSocket() {
         if (payload.chatId === state.activeChatId && !state.streamingNavigationPaused) {
           // Guard: ignore events from stale generations that were replaced by a newer one
           if (state.activeGenerationId && payload.generationId && payload.generationId !== state.activeGenerationId) return
+          if (state.isStreaming && !state.activeGenerationId && payload.generationId && state.hasGenerationEnded(payload.generationId)) return
+          const generationEpoch = state.getGenerationEpoch()
           // Mark this generation as ended BEFORE calling endStreaming/setStreamingError,
           // so a late startStreaming() call (from pending HTTP response) won't resurrect it
           if (payload.generationId) {
-            state.markGenerationEnded(payload.generationId)
+            state.markGenerationEnded(payload.generationId, !payload.error)
           }
 
           if (payload.error) {
@@ -942,9 +955,10 @@ export function useWebSocket() {
             const mpPeerErr = !!sErr.mpRoomId && !sErr.mpIsHost && sErr.mpChatId === payload.chatId
             if (payload.chatId && !mpPeerErr) {
               fetchLatestMessages(payload.chatId).then(async (res) => {
+                if (!isCurrentGeneration(payload.chatId, generationEpoch)) return
                 const messages = await deleteEmptyGeneratedSwipe(emptySwipeTarget, res.data)
                 const s = store.getState()
-                if (s.activeChatId === payload.chatId) {
+                if (isCurrentGeneration(payload.chatId, generationEpoch)) {
                   s.reconcileMessagesTail({ ...res, data: messages })
                 }
               }).catch(() => { /* ignore */ })
@@ -1055,7 +1069,7 @@ export function useWebSocket() {
             // message delivery and cause a perceived UI stall.
             fetchLatestMessages(payload.chatId).then((res) => {
               const s = store.getState()
-              if (s.activeChatId === payload.chatId) {
+              if (isCurrentGeneration(payload.chatId, generationEpoch)) {
                 const messages = completedMessageId && completedReasoning
                   ? res.data.map((message) => message.id === completedMessageId
                       ? withReasoningSnapshot(
@@ -1088,6 +1102,7 @@ export function useWebSocket() {
                 s.endStreaming()
               }
             }).catch(() => {
+              if (!isCurrentGeneration(payload.chatId, generationEpoch)) return
               patchMessageReasoningSnapshot(
                 completedMessageId,
                 completedReasoning,
@@ -1099,6 +1114,7 @@ export function useWebSocket() {
                 store.getState().removeMessage(optimisticMessageId)
               }
             }).finally(() => {
+              if (!isCurrentGeneration(payload.chatId, generationEpoch)) return
               const latest = store.getState()
               // Drain the @mention queue — kick off the next mentioned member's
               // turn. Skips if the active chat no longer matches, the queue is
@@ -1223,7 +1239,7 @@ export function useWebSocket() {
         }
       }),
 
-      // Deferred metrics (tokenCount / TTFT / TPS / model / provider) arrive after
+      // Deferred metrics (tokenCount / TTFT / TPS / model / provider / preset) arrive after
       // GENERATION_ENDED — and may land before or after its reconciliation
       // re-fetch. Apply live, and buffer so the reconciliation can re-apply if its
       // setMessages won the race and wiped this patch (see GENERATION_ENDED).
@@ -1251,7 +1267,7 @@ export function useWebSocket() {
 
       wsClient.on(EventType.GENERATION_STOPPED, (payload: { generationId?: string; chatId?: string }) => {
         const state = store.getState()
-        if (state.streamingNavigationPaused && payload.chatId === state.activeChatId) {
+        if ((payload.chatId && payload.chatId !== state.activeChatId) || state.streamingNavigationPaused) {
           if (payload.generationId) state.updateChatHead(payload.generationId, { status: 'stopped' })
           if (state.mpChatId === payload.chatId) syncMultiplayerChatHeadFromStore()
           return
@@ -1259,13 +1275,15 @@ export function useWebSocket() {
         // Guard: only stop streaming if this event matches the active generation
         // (a newer generation may have already replaced it)
         if (state.activeGenerationId && payload.generationId && payload.generationId !== state.activeGenerationId) return
+        if (state.isStreaming && !state.activeGenerationId && payload.generationId && state.hasGenerationEnded(payload.generationId)) return
+        const generationEpoch = state.getGenerationEpoch()
         // User stop also cancels any pending @mention chain for this chat
         if (state.mentionQueue && payload.chatId && state.mentionQueue.chatId === payload.chatId) {
           state.setMentionQueue(null)
         }
         // Mark as ended to prevent zombie resurrection from late HTTP responses
         if (payload.generationId) {
-          state.markGenerationEnded(payload.generationId)
+          state.markGenerationEnded(payload.generationId, false)
         }
         // Reset council executing state in case stop fired during council tools
         if (state.councilExecuting) {
@@ -1288,16 +1306,15 @@ export function useWebSocket() {
           state.stopStreaming()
         } else if (chatId) {
           fetchLatestMessages(chatId).then(async (res) => {
+            if (!isCurrentGeneration(chatId, generationEpoch)) return
             const messages = await deleteEmptyGeneratedSwipe(emptySwipeTarget, res.data)
             const s = store.getState()
-            if (s.activeChatId === chatId) {
+            if (isCurrentGeneration(chatId, generationEpoch)) {
               s.stopStreaming()
               s.reconcileMessagesTail({ ...res, data: messages })
-            } else {
-              s.stopStreaming()
             }
           }).catch(() => {
-            store.getState().stopStreaming()
+            if (isCurrentGeneration(chatId, generationEpoch)) store.getState().stopStreaming()
           })
         } else {
           state.stopStreaming()
@@ -1529,6 +1546,7 @@ export function useWebSocket() {
           payload.operation,
           payload.name ?? null
         )
+        if (payload.operation === 'installed') syncExtensions(true)
         if (payload.operation === 'disabled' && payload.extensionId) {
           const state = useStore.getState()
           state.setExtensionUpdates(
@@ -1854,6 +1872,16 @@ export function useWebSocket() {
           if (state.isGroupChat && payload.characterId) {
             state.setGroupExpression(payload.characterId, payload.label, payload.imageId)
           }
+        }
+      }),
+      wsClient.on(EventType.MULTI_CHARACTER_EXPRESSIONS_CHANGED, (payload: {
+        chatId: string
+        characterId: string
+        expressions: Record<string, { label: string; imageId: string }>
+      }) => {
+        const state = store.getState()
+        if (payload.chatId === state.activeChatId && payload.characterId === state.activeCharacterId) {
+          state.setMultiCharacterExpressions(payload.expressions)
         }
       }),
       // LumiHub remote install notifications

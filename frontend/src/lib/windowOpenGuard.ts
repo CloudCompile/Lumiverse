@@ -1,4 +1,4 @@
-import { isSafeBrowserNavigationTarget } from './navigationSafety'
+import { isSafeWindowOpenTarget } from './navigationSafety'
 
 let installed = false
 
@@ -14,7 +14,10 @@ export function installWindowOpenGuard(): void {
     }
 
     const rawUrl = typeof url === 'string' ? url : url.toString()
-    if (!isSafeBrowserNavigationTarget(rawUrl)) {
+    // SSO pre-opens an inert window during the user gesture, then assigns the
+    // provider URL after the backend returns it. `about:blank` is the browser's
+    // standard placeholder for that flow and cannot itself execute content.
+    if (!isSafeWindowOpenTarget(rawUrl)) {
       console.warn('[navigation] Blocked unsafe window.open target:', rawUrl)
       return null
     }

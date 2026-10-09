@@ -7,6 +7,7 @@ import { WorldInfoMatcher, makeScanState } from "./world-info-matcher.service";
 
 function entry(partial: Partial<WorldBookEntry>): WorldBookEntry {
   return {
+    folder: "", tags: [],
     id: "entry-1",
     world_book_id: "book-1",
     uid: "uid-1",
@@ -242,5 +243,49 @@ describe("world-info admission provenance", () => {
         end: 11,
       },
     ]);
+  });
+
+  test("ignores keywords inside scan-exclusion markup and keeps exact offsets", () => {
+    const offscene = entry({ id: "offscene", uid: "offscene", key: ["Zebulon"] });
+    const dragon = entry({ id: "dragon", uid: "dragon", key: ["dragon"] });
+    const later = '<div class="tracker" wi-exclude>🐉 Off-scene: Zebulon</div>\nA dragon lands.';
+    const start = later.indexOf("dragon");
+    const result = activateWorldInfo({
+      entries: [offscene, dragon],
+      messages: [
+        message("message-1", 1, "Rain falls. <wi-exclude>A dragon sleeps"),
+        message("message-2", 2, later),
+      ],
+      chatTurn: 1,
+      wiState: {},
+    });
+
+    expect(result.activatedEntries.map((item) => item.id)).toEqual(["dragon"]);
+    expect(result.activationProvenanceById.has("offscene")).toBe(false);
+    expect(result.activationProvenanceById.get("dragon")).toEqual({
+      origin: "keyword",
+      activationPass: 0,
+      matchedPrimaryKeys: ["dragon"],
+      matchedSecondaryKeys: [],
+      exactMatch: {
+        configuredPattern: "dragon",
+        source: { kind: "message", messageId: "message-2", messageOffset: 2, start, end: start + 6 },
+      },
+    });
+  });
+
+  test("does not scan messages that are entirely excluded", () => {
+    const anything = entry({ id: "anything", uid: "anything", key: [".{10,}"], use_regex: true });
+    const result = activateWorldInfo({
+      entries: [anything],
+      messages: [
+        message("message-1", 1, "<wi-exclude>Off-scene: Zebulon, Mordecai</wi-exclude>"),
+        message("message-2", 2, "!--WI_EXCLUDE_START--!\nTracker: Mira\n!--WI_EXCLUDE_END--!\n"),
+      ],
+      chatTurn: 1,
+      wiState: {},
+    });
+
+    expect(result.activatedEntries).toEqual([]);
   });
 });

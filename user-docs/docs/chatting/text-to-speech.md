@@ -18,7 +18,7 @@ Lumiverse can speak assistant replies aloud using a configurable text-to-speech 
 6. Optionally adjust provider-specific parameters (stability, style, output format, …).
 7. Save, then click **Test** to confirm the connection.
 
-Once a connection exists, open **Settings → Voice & Speech**, turn on **Enable text-to-speech**, and select your connection from the dropdown.
+Once a connection exists, open **Settings → Voice & Speech** and turn on **Enable text-to-speech**. Playback uses the TTS connection marked as default unless you select another connection from the dropdown. Narration and speech use that connection's saved voice unless you set a narrator, character, or chat voice override.
 
 ---
 
@@ -35,6 +35,15 @@ The built-in providers are listed below. Enabled [Spindle extensions](../extensi
 - **Parameters:** `speed` (0.25 – 4.0) and `instructions` (style guidance, e.g. _"Speak warmly with a slight British accent"_ — only honored by `gpt-4o-mini-tts`).
 - **Streaming:** Supported. Lumiverse buffers the stream and plays it as a single clip.
 - **Output formats:** MP3, Opus, AAC, FLAC, WAV, PCM (default: MP3).
+
+### OpenRouter TTS
+
+- **API key:** Required — your OpenRouter API key.
+- **Default URL:** `https://openrouter.ai/api/v1`.
+- **Models:** Fetched live using OpenRouter's speech-output filter.
+- **Voices:** Model-specific; choose a listed voice or enter the model's voice ID.
+- **Output formats:** Gemini models automatically request PCM, even when MP3 is configured. Lumiverse wraps the PCM as WAV for browser playback. Other models default to MP3 and also support PCM.
+- **Streaming:** Supported. PCM responses are buffered and receive one WAV header before playback.
 
 ### ElevenLabs
 
@@ -88,6 +97,16 @@ The built-in providers are listed below. Enabled [Spindle extensions](../extensi
 
 !!! tip "Kokoro is OpenAI-compatible"
     Kokoro inherits Lumiverse's OpenAI-compatible TTS plumbing, so any other OpenAI-compatible TTS server you have running can be reached by creating a Kokoro connection and pointing the API URL at it.
+
+### OpenVox TTS (self-hosted)
+
+- **API key:** Not required — OpenVox runs locally.
+- **Default URL:** `http://127.0.0.1:8000/v1`.
+- **Models:** Fetched from OpenVox with `GET /models`.
+- **Voices:** Fetched after a model is selected from `GET /models/{model}/voices`.
+- **Language:** Defaults to English (`en`) for synthesis.
+- **Output format:** WAV.
+- **Streaming:** Lumiverse currently uses OpenVox's buffered speech response.
 
 ---
 
@@ -152,7 +171,7 @@ The segments tagged _Skip_ are dropped before the request hits the provider, whi
 
 | Problem | What to try |
 |---------|-------------|
-| **Test button is disabled** | Pick a TTS connection in **Voice & Speech** first. |
+| **Test button is disabled** | Mark a TTS connection as default or pick one in **Voice & Speech**. |
 | **"TTS error 401" on test** | API key is missing or invalid for that provider's connection. |
 | **Auto-play fires but no sound** | Volume slider is at 0%, the OS is muted, or the browser has tab audio blocked. |
 | **Kokoro returns 5xx** | The local server is unreachable — confirm the API URL and that the container is running. |

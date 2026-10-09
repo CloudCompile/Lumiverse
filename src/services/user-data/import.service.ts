@@ -8,6 +8,7 @@
 // The import runs as a background job; the HTTP route returns a jobId and
 // progress flows over the WebSocket EventBus.
 
+import { createHash } from "node:crypto";
 import { createInflateRaw, inflateRawSync } from "node:zlib";
 import {
   decryptSecret,
@@ -1266,6 +1267,219 @@ async function inflateEntry(
   }
 }
 
+export interface SelectedZipExtractionResult {
+  selectedEntries: number;
+  decompressedBytes: number;
+}
+
+export interface SelectedZipExtractionOptions {
+  archivePath: string;
+  destinationDir: string;
+  /** Return a relative output path for entries to extract, or null to skip. */
+  selectEntry(name: string): string | null;
+  /** Validate state accumulated by selectEntry before extraction starts. */
+  validateSelection?(): void;
+  /** Legacy CL bundles can repeat a shared gallery path. Every copy must be byte-identical. */
+  allowIdenticalDuplicate?(name: string): boolean;
+  maxDecompressedBytes?: number;
+  signal?: AbortSignal;
+}
+
+interface SelectedZipEntry {
+  relativePath: string;
+  outputPath: string;
+  isDirectory: boolean;
+}
+
+function resolveSelectedZipOutputPath(baseDir: string, relativePath: string): string {
+  if (
+    !relativePath ||
+    relativePath.length > 4096 ||
+    /[\x00-\x1f]/.test(relativePath) ||
+    relativePath.includes("\\") ||
+    /^([a-zA-Z]:|\/)/.test(relativePath)
+  ) {
+    throw new ArchiveValidationError("not_zip", `unsafe selected ZIP path: ${relativePath}`);
+  }
+
+  const pathWithoutTrailingSlash = relativePath.endsWith("/")
+    ? relativePath.slice(0, -1)
+    : relativePath;
+  const segments = pathWithoutTrailingSlash.split("/");
+  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
+    throw new ArchiveValidationError("not_zip", `unsafe selected ZIP path: ${relativePath}`);
+  }
+
+  const base = resolve(baseDir);
+  const output = resolve(base, pathWithoutTrailingSlash);
+  if (output !== base && !output.startsWith(base + sep)) {
+    throw new ArchiveValidationError("not_zip", `selected ZIP path escapes destination: ${relativePath}`);
+  }
+  return output;
+}
+
+/**
+ * Extract an allowlisted subset of a ZIP with bounded memory and expansion.
+ *
+ * The central directory is validated first, selected output names are checked
+ * before any file is created, and every extracted file is verified against its
+ * declared size and CRC32. This is shared by imports that need ZIP64 support
+ * without materializing a multi-gigabyte archive in memory.
+ */
+export async function extractSelectedZipEntries(
+  options: SelectedZipExtractionOptions,
+): Promise<SelectedZipExtractionResult> {
+  const maxDecompressedBytes = options.maxDecompressedBytes ?? MAX_DECOMPRESSED_BYTES;
+  if (!Number.isSafeInteger(maxDecompressedBytes) || maxDecompressedBytes <= 0) {
+    throw new Error("maxDecompressedBytes must be a positive safe integer");
+  }
+
+  ensureDir(options.destinationDir);
+  const archive = Bun.file(options.archivePath);
+  const { size: archiveSize, cdOffset, cdSize, totalEntries } = await locateCentralDirectory(archive);
+  const selectedByName = new Map<string, SelectedZipEntry>();
+  const selectedTargets = new Set<string>();
+  let declaredBytes = 0;
+
+  for await (const entry of scanCentralDirectory(archive, cdOffset, cdSize, totalEntries)) {
+    const relativePath = options.selectEntry(entry.name);
+    if (relativePath === null) continue;
+    const previous = selectedByName.get(entry.name);
+    if (previous && !options.allowIdenticalDuplicate?.(entry.name)) {
+      throw new ArchiveValidationError("not_zip", `ZIP contains a duplicate entry: ${entry.name}`);
+    }
+
+    const outputPath = resolveSelectedZipOutputPath(options.destinationDir, relativePath);
+    if (previous && previous.outputPath !== outputPath) {
+      throw new ArchiveValidationError("not_zip", `duplicate ZIP entry has a different output path: ${entry.name}`);
+    }
+    if (!previous && selectedTargets.has(outputPath)) {
+      throw new ArchiveValidationError("not_zip", `ZIP entries resolve to the same output path: ${relativePath}`);
+    }
+    const isDirectory = relativePath.endsWith("/");
+    if (isDirectory && entry.uncompressedSize !== 0) {
+      throw new ArchiveValidationError("not_zip", `ZIP directory entry contains data: ${entry.name}`);
+    }
+    if ((entry.flags & 0x1) !== 0) {
+      throw new ArchiveValidationError("not_zip", `encrypted ZIP entries are not supported (${entry.name})`);
+    }
+    if (!isDirectory && entry.compression !== 0 && entry.compression !== 8) {
+      throw new ArchiveValidationError(
+        "not_zip",
+        `unsupported ZIP compression method ${entry.compression} (${entry.name})`,
+      );
+    }
+    if (entry.uncompressedSize > maxDecompressedBytes - declaredBytes) {
+      throw new ArchiveValidationError(
+        "size",
+        `selected ZIP data exceeds decompressed size cap (${maxDecompressedBytes} bytes)`,
+      );
+    }
+
+    declaredBytes += entry.uncompressedSize;
+    selectedTargets.add(outputPath);
+    selectedByName.set(entry.name, { relativePath, outputPath, isDirectory });
+  }
+
+  options.validateSelection?.();
+
+  if (selectedByName.size === 0) {
+    return { selectedEntries: 0, decompressedBytes: 0 };
+  }
+  assertExtractionDiskCapacity(options.destinationDir, declaredBytes, 0);
+
+  const signal = options.signal ?? new AbortController().signal;
+  const archiveFd = openSync(options.archivePath, "r");
+  let decompressedBytes = 0;
+  let extractedEntries = 0;
+  const extractedHashes = new Map<string, string>();
+  try {
+    for await (const centralEntry of scanCentralDirectory(archive, cdOffset, cdSize, totalEntries)) {
+      const selected = selectedByName.get(centralEntry.name);
+      if (!selected) continue;
+      if (signal.aborted) throw signal.reason ?? new Error("ZIP extraction cancelled");
+
+      if (selected.isDirectory) {
+        ensureDir(selected.outputPath);
+        extractedEntries++;
+        continue;
+      }
+
+      ensureDir(dirname(selected.outputPath));
+      const dataStart = getLocalDataOffset(archiveFd, archiveSize, centralEntry);
+      const previousHash = extractedHashes.get(centralEntry.name);
+      const outputFd = previousHash === undefined ? openSync(selected.outputPath, "wx") : null;
+      const contentHash = createHash("sha256");
+      let entryBytes = 0;
+      let crcState = 0xffffffff;
+      let complete = false;
+      try {
+        const onChunk = (chunk: Uint8Array) => {
+          if (decompressedBytes + chunk.byteLength > maxDecompressedBytes) {
+            throw new ArchiveValidationError(
+              "size",
+              `selected ZIP data exceeds decompressed size cap (${maxDecompressedBytes} bytes)`,
+            );
+          }
+          if (outputFd !== null) writeAllSync(outputFd, chunk);
+          contentHash.update(chunk);
+          crcState = updateCrc32(crcState, chunk);
+          entryBytes += chunk.byteLength;
+          decompressedBytes += chunk.byteLength;
+        };
+        if (centralEntry.compression === 0) {
+          await copyStoredEntry(
+            archiveFd,
+            dataStart,
+            centralEntry.compressedSize,
+            onChunk,
+            signal,
+          );
+        } else {
+          await inflateEntry(
+            options.archivePath,
+            dataStart,
+            centralEntry.compressedSize,
+            onChunk,
+            signal,
+          );
+        }
+
+        if (entryBytes !== centralEntry.uncompressedSize) {
+          throw new ArchiveValidationError(
+            "not_zip",
+            `entry size disagrees with central directory (${centralEntry.name})`,
+          );
+        }
+        if (finishCrc32(crcState) !== centralEntry.crc32) {
+          throw new ArchiveValidationError(
+            "not_zip",
+            `entry CRC32 disagrees with central directory (${centralEntry.name})`,
+          );
+        }
+        const hash = contentHash.digest("hex");
+        if (previousHash !== undefined && previousHash !== hash) {
+          throw new ArchiveValidationError("not_zip", `duplicate ZIP entry contains different data: ${centralEntry.name}`);
+        }
+        extractedHashes.set(centralEntry.name, hash);
+        complete = true;
+        extractedEntries++;
+      } finally {
+        if (outputFd !== null) closeSync(outputFd);
+        if (!complete && outputFd !== null) {
+          try { unlinkSync(selected.outputPath); } catch { /* ignore partial output cleanup */ }
+        }
+      }
+
+      if ((extractedEntries & 15) === 0) await yieldAndCheck(signal);
+    }
+  } finally {
+    closeSync(archiveFd);
+  }
+
+  return { selectedEntries: extractedEntries, decompressedBytes };
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1: extract archive into staging
 // ---------------------------------------------------------------------------
@@ -1885,6 +2099,39 @@ async function applyTable(
   return { imported, skipped };
 }
 
+function backfillImportedChatChunkMessageRanges(userId: string): void {
+  getDb().run(
+    `UPDATE chat_chunks
+     SET message_range_start = (
+           SELECT MIN(m.index_in_chat)
+           FROM json_each(
+             CASE WHEN json_valid(chat_chunks.message_ids)
+               THEN chat_chunks.message_ids
+               ELSE '[]'
+             END
+           ) AS chunk_message
+           JOIN messages AS m
+             ON m.id = chunk_message.value
+            AND m.chat_id = chat_chunks.chat_id
+         ),
+         message_range_end = (
+           SELECT MAX(m.index_in_chat)
+           FROM json_each(
+             CASE WHEN json_valid(chat_chunks.message_ids)
+               THEN chat_chunks.message_ids
+               ELSE '[]'
+             END
+           ) AS chunk_message
+           JOIN messages AS m
+             ON m.id = chunk_message.value
+            AND m.chat_id = chat_chunks.chat_id
+         )
+     WHERE chat_id IN (SELECT id FROM chats WHERE user_id = ?)
+       AND (message_range_start IS NULL OR message_range_end IS NULL)`,
+    [userId],
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3: apply binary files
 // ---------------------------------------------------------------------------
@@ -2373,6 +2620,13 @@ async function runImportJob(job: ImportJob): Promise<void> {
       if (IMPORT_ORDER.includes(table)) continue;
       if (EXCLUDED_TABLES.has(table)) continue;
       await applyTable(ctx, table, entry.stagingPath);
+    }
+
+    // Older archives predate positional chunk ranges. Migrations have already
+    // run by import time, so repair restored rows explicitly before any vector
+    // or Cortex consumers can observe them.
+    if (tableEntries.has("chat_chunks")) {
+      backfillImportedChatChunkMessageRanges(ctx.userId);
     }
 
     // Phase 2c: binary files.

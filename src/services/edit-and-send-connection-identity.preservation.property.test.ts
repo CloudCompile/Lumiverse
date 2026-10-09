@@ -72,6 +72,11 @@ function initTestDb(): void {
   closeDatabase();
   initDatabase(":memory:");
   const db = getDb();
+  db.run(`CREATE TABLE extensions (
+    identifier TEXT PRIMARY KEY, enabled INTEGER NOT NULL,
+    install_scope TEXT NOT NULL, installed_by_user_id TEXT
+  )`);
+  db.run("INSERT INTO extensions VALUES ('lumiverse_suite', 1, 'operator', NULL)");
   db.run(`CREATE TABLE characters (
     id TEXT PRIMARY KEY, user_id TEXT, name TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
     personality TEXT NOT NULL DEFAULT '', scenario TEXT NOT NULL DEFAULT '', first_mes TEXT NOT NULL DEFAULT '',
@@ -656,9 +661,7 @@ describe("Case 4 — keyless endpoints and the required-key error wording", () =
 // ── Case 5 (task 2.6) — non-credential retry, backoff and max_attempts ────
 
 const MAX_ATTEMPTS = 8;
-function backoffMs(attemptCount: number): number {
-  return Math.min(60_000, 1000 * (2 ** Math.max(0, attemptCount - 1)));
-}
+
 
 function insertOutbox(overrides: Record<string, string | number | null> = {}): string {
   const id = typeof overrides.id === "string" ? overrides.id : crypto.randomUUID();
@@ -699,172 +702,109 @@ function insertOutbox(overrides: Record<string, string | number | null> = {}): s
   return id;
 }
 
-describe("Case 5 — non-credential retry, backoff and max_attempts are unchanged", () => {
-  test("every generic dispatch failure re-queues with the existing backoff spacing", async () => {
-    dispatcher.setEditAndSendStartGeneration(async () => { throw new Error("provider_down"); });
+/**
+ * Seed the durable request cursor the dispatcher validates before dispatch, so
+ * a manually-inserted outbox row reaches `startGeneration` instead of failing
+ * closed on a missing context. The cursor is shaped exactly like the production
+ * write (generation cursor + committed edit identity) and is keyed to the row
+ * it belongs to: same user, source chat, request id, branch chat, edited user
+ * id and generation id, so `readCommittedEditAndSendContext` accepts it.
+ */
+function insertRequestCursor(overrides: {
+  user_id?: string;
+  chat_id?: string;
+  branch_chat_id?: string;
+  request_id: string;
+  edited_message_id?: string;
+  generation_id?: string;
+  committed_revision?: number;
+}): void {
+  const userId = overrides.user_id ?? USER;
+  const chatId = overrides.chat_id ?? "retry-chat";
+  const branchChatId = overrides.branch_chat_id ?? "retry-chat";
+  const editedMessageId = overrides.edited_message_id ?? "retry-user";
+  const generationId = overrides.generation_id ?? `gen-${overrides.request_id}`;
+  const cursor = {
+    generationId,
+    chatId: branchChatId,
+    requestId: overrides.request_id,
+    mode: "normal",
+    editAndSendContext: {
+      editedUserMessageId: editedMessageId,
+      committedRevision: overrides.committed_revision ?? 1,
+    },
+  };
+  const now = Date.now();
+  getDb().query(
+    `INSERT INTO edit_and_send_requests (
+      id, user_id, chat_id, request_id, request_fingerprint, branch_chat_id,
+      edited_message_id, target_message_id, target_swipe_index, generation_id,
+      response, cursor, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    crypto.randomUUID(),
+    userId,
+    chatId,
+    overrides.request_id,
+    "fp",
+    branchChatId,
+    editedMessageId,
+    null,
+    null,
+    generationId,
+    "{}",
+    JSON.stringify(cursor),
+    now,
+    now,
+  );
+}
 
-    for (let priorAttempts = 0; priorAttempts < MAX_ATTEMPTS - 1; priorAttempts++) {
-      const id = insertOutbox({ id: `retry-${priorAttempts}`, attempt_count: priorAttempts });
-      const claimed = dispatcher.claimNextEditAndSendOutbox();
-      expect(claimed?.id).toBe(id);
-      expect(claimed?.attempt_count).toBe(priorAttempts + 1);
-
-      const before = Date.now();
-      const row = await dispatcher.dispatchClaimedEditAndSendOutbox(claimed!);
-      const after = Date.now();
-
-      const expected = backoffMs(priorAttempts + 1);
-      expect({
-        status: row?.status,
-        lastErrorCode: row?.last_error_code,
-        dispatchedAt: row?.dispatched_at,
-        leaseOwner: row?.lease_owner,
-        leaseExpiresAt: row?.lease_expires_at,
-        terminalReason: row?.terminal_reason,
-        completedAt: row?.completed_at,
-        backoffInWindow:
-          (row?.next_attempt_at ?? 0) >= before + expected && (row?.next_attempt_at ?? 0) <= after + expected,
-      }).toEqual({
-        status: "pending",
-        lastErrorCode: "provider_down",
-        dispatchedAt: null,
-        leaseOwner: null,
-        leaseExpiresAt: null,
-        terminalReason: null,
-        completedAt: null,
-        backoffInWindow: true,
-      });
-
-      // Park the row so the next iteration claims a fresh one deterministically.
-      getDb().query("UPDATE generation_outbox SET status = 'cancelled' WHERE id = ?").run(id);
-    }
-  });
-
-  test("the eighth attempt still terminates as max_attempts", async () => {
-    dispatcher.setEditAndSendStartGeneration(async () => { throw new Error("provider_down"); });
-    const id = insertOutbox({ id: "retry-final", attempt_count: MAX_ATTEMPTS - 1 });
-    const claimed = dispatcher.claimNextEditAndSendOutbox();
-    expect(claimed?.attempt_count).toBe(MAX_ATTEMPTS);
-
-    const row = await dispatcher.dispatchClaimedEditAndSendOutbox(claimed!);
-    expect({
-      status: row?.status,
-      terminalReason: row?.terminal_reason,
-      lastErrorCode: row?.last_error_code,
-      completedAtSet: row?.completed_at != null,
-      leaseOwner: row?.lease_owner,
-      nextAttemptAt: row?.next_attempt_at,
-    }).toEqual({
-      status: "failed",
-      terminalReason: "max_attempts",
-      lastErrorCode: "provider_down",
-      completedAtSet: true,
-      leaseOwner: null,
-      nextAttemptAt: null,
+describe("Case 5 — dispatch failures never replay a generation", () => {
+  test("generic failures are terminal after one attempt", async () => {
+    let calls = 0;
+    dispatcher.setEditAndSendStartGeneration(async () => {
+      calls++;
+      throw new Error("provider_down");
     });
+    const id = insertOutbox({ id: "failure" });
+    insertRequestCursor({ request_id: "req-failure", generation_id: "gen-failure" });
+    const claimed = dispatcher.claimNextEditAndSendOutbox();
+    const row = await dispatcher.dispatchClaimedEditAndSendOutbox(claimed!);
+    expect(row).toMatchObject({
+      status: "failed", last_error_code: "provider_down",
+      terminal_reason: "dispatch_failed", attempt_count: 1,
+      next_attempt_at: null, lease_owner: null, lease_expires_at: null,
+    });
+    expect(row?.completed_at).toBeNumber();
+    await dispatcher.recoverEditAndSendOutbox();
+    await dispatcher.dispatchPendingEditAndSendOutbox();
+    expect(calls).toBe(1);
     expect(dispatcher.getGenerationOutboxById(id)?.status).toBe("failed");
   });
 
-  test("lease expiry, cancellation, the zombie sweep and orphan reconciliation are unchanged", async () => {
-    dispatcher.setEditAndSendGenerationActiveCheck(() => false);
-
-    // Stale, never-dispatched claim → back to pending.
-    insertOutbox({
-      id: "stale-claim",
-      status: "claimed",
-      lease_owner: "dead-worker",
-      lease_expires_at: Date.now() - 5_000,
-      attempt_count: 1,
-    });
-    // Pending row with exhausted attempts → zombie sweep fails it terminally.
-    insertOutbox({ id: "zombie", status: "pending", attempt_count: MAX_ATTEMPTS });
-    // Dispatched running row with no persisted output → retried with backoff.
-    insertOutbox({
-      id: "orphan-unverified",
-      status: "running",
-      dispatched_at: Date.now() - 1_000,
-      attempt_count: 1,
-      branch_chat_id: "orphan-chat",
-    });
-    // Dispatched running row WITH persisted output → completed as verified.
-    insertOutbox({
-      id: "orphan-verified",
-      status: "running",
-      dispatched_at: Date.now() - 1_000,
-      attempt_count: 1,
-      branch_chat_id: "verified-chat",
-    });
-    seedChat("verified-chat");
-    seedMessage("verified-assistant", "verified-chat", "assistant output", 0, false);
-    getDb().query("UPDATE messages SET created_at = ? WHERE id = ?")
-      .run(Math.floor(Date.now() / 1000), "verified-assistant");
-
-    dispatcher.reconcileEditAndSendOutbox();
-
-    expect(dispatcher.getGenerationOutboxById("stale-claim")?.status).toBe("pending");
-    expect({
-      status: dispatcher.getGenerationOutboxById("zombie")?.status,
-      terminalReason: dispatcher.getGenerationOutboxById("zombie")?.terminal_reason,
-      completedAtSet: dispatcher.getGenerationOutboxById("zombie")?.completed_at != null,
-    }).toEqual({ status: "failed", terminalReason: "max_attempts", completedAtSet: true });
-    expect({
-      status: dispatcher.getGenerationOutboxById("orphan-unverified")?.status,
-      lastErrorCode: dispatcher.getGenerationOutboxById("orphan-unverified")?.last_error_code,
-      attemptCount: dispatcher.getGenerationOutboxById("orphan-unverified")?.attempt_count,
-      dispatchedAt: dispatcher.getGenerationOutboxById("orphan-unverified")?.dispatched_at,
-    }).toEqual({ status: "pending", lastErrorCode: "output_not_verified", attemptCount: 2, dispatchedAt: null });
-    expect({
-      status: dispatcher.getGenerationOutboxById("orphan-verified")?.status,
-      terminalReason: dispatcher.getGenerationOutboxById("orphan-verified")?.terminal_reason,
-    }).toEqual({ status: "completed", terminalReason: "verified_output" });
-
-    // Cancellation and its status transition.
-    const cancelId = insertOutbox({ id: "cancel-row", request_id: "req-cancel", chat_id: "cancel-chat" });
-    const cancelled = dispatcher.cancelEditAndSendOutbox(USER, {
-      requestId: "req-cancel",
-      chatId: "cancel-chat",
-    });
-    expect({ id: cancelled?.id, status: cancelled?.status, terminalReason: cancelled?.terminal_reason })
-      .toEqual({ id: cancelId, status: "cancelled", terminalReason: "cancelled" });
-    expect(dispatcher.cancelEditAndSendOutbox("user:other", {
-      requestId: "req-cancel",
-      chatId: "cancel-chat",
-    })).toBeNull();
-  });
-
-  test("startup recovery still releases stale claims and verifies dispatched rows", async () => {
-    const starts: string[] = [];
+  test("legacy pending retries and interrupted claims are never dispatched", async () => {
+    const calls: string[] = [];
     dispatcher.setEditAndSendStartGeneration(async (input) => {
-      starts.push(input.generationId);
+      calls.push(input.generationId);
       return { generationId: input.generationId, status: "streaming" };
     });
-    dispatcher.setEditAndSendGenerationActiveCheck(() => false);
-
+    for (let attempts = 1; attempts <= MAX_ATTEMPTS; attempts++) {
+      insertOutbox({ id: `legacy-${attempts}`, attempt_count: attempts });
+    }
     insertOutbox({
-      id: "recover-stale",
-      generation_id: "gen-recover-stale",
-      status: "claimed",
-      lease_owner: "dead-worker",
-      lease_expires_at: Date.now() - 5_000,
+      id: "interrupted-claim", status: "claimed", attempt_count: 1,
+      lease_owner: "dead-worker", lease_expires_at: Date.now() - 5_000,
     });
     insertOutbox({
-      id: "recover-orphan",
-      generation_id: "gen-recover-orphan",
-      status: "running",
-      dispatched_at: Date.now() - 1_000,
-      attempt_count: MAX_ATTEMPTS - 1,
-      branch_chat_id: "recover-chat",
+      id: "interrupted-running", status: "running", attempt_count: 1,
+      branch_chat_id: "orphan-chat", dispatched_at: Date.now() - 1_000,
     });
-
-    await dispatcher.recoverEditAndSendOutbox();
-
-    expect(starts).toEqual(["gen-recover-stale"]);
-    expect(dispatcher.getGenerationOutboxById("recover-stale")?.status).toBe("running");
-    expect({
-      status: dispatcher.getGenerationOutboxById("recover-orphan")?.status,
-      terminalReason: dispatcher.getGenerationOutboxById("recover-orphan")?.terminal_reason,
-      lastErrorCode: dispatcher.getGenerationOutboxById("recover-orphan")?.last_error_code,
-    }).toEqual({ status: "failed", terminalReason: "max_attempts", lastErrorCode: "output_not_verified" });
+    expect(await dispatcher.recoverEditAndSendOutbox()).toBe(0);
+    expect(calls).toEqual([]);
+    for (const id of ["legacy-1", "legacy-8", "interrupted-claim", "interrupted-running"]) {
+      expect(dispatcher.getGenerationOutboxById(id)?.status).toBe("failed");
+      expect(dispatcher.getGenerationOutboxById(id)?.next_attempt_at).toBeNull();
+    }
   });
 });
 
