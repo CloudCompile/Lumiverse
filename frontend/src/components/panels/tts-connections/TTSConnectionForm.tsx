@@ -49,6 +49,13 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
   const providerOptions = providers.map((p) => ({ value: p.id, label: p.name }))
   const selectedProvider = providers.find((p) => p.id === provider)
   const capabilities = selectedProvider?.capabilities
+  const supportsGeminiSpeechStyle = (isGoogle || provider === 'openrouter_tts')
+    && /(?:^|\/)gemini-3\.8-flash(?:-lite)?-tts(?:$|[-:])/i.test(model.trim())
+  const geminiSpeechStyle = typeof defaultParameters.speech_style === 'string'
+    ? defaultParameters.speech_style
+    : typeof defaultParameters.instructions === 'string'
+      ? defaultParameters.instructions
+      : capabilities?.parameters?.speech_style?.default || ''
   const isQwen = isQwenTtsProvider(provider)
   const isOpenVox = provider === 'openvox_tts'
   const qwenLanguage = typeof defaultParameters.language === 'string'
@@ -318,9 +325,11 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
         ? qwenDefaults
         : isGoogle
           ? (Object.keys(googleDefaults).length > 0 ? googleDefaults : undefined)
-          : isOpenVox && Object.keys(openVoxDefaults).length > 0
-            ? openVoxDefaults
-            : undefined,
+          : provider === 'openrouter_tts' && Object.keys(defaultParameters).length > 0
+            ? defaultParameters
+            : isOpenVox && Object.keys(openVoxDefaults).length > 0
+              ? openVoxDefaults
+              : undefined,
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     })
   }, [name, provider, apiKey, apiUrl, model, voice, isDefault, isQwen, isGoogle, isOpenVox, defaultParameters, onSave, isVertex, vertexRegion, saFileName, profile?.metadata])
@@ -430,6 +439,17 @@ export default function TTSConnectionForm({ providers, profile, onSave, onCancel
           emptyMessage={t('ttsConnectionForm.noVoices')}
         />
       </FormField>
+
+      {supportsGeminiSpeechStyle && (
+        <FormField label={t('ttsConnectionForm.geminiSpeechStyle')} hint={t('ttsConnectionForm.geminiSpeechStyleHint')}>
+          <TextArea
+            value={geminiSpeechStyle}
+            onChange={(speech_style) => setDefaultParameters((previous) => ({ ...previous, speech_style }))}
+            aria-label={t('ttsConnectionForm.geminiSpeechStyle')}
+            rows={2}
+          />
+        </FormField>
+      )}
 
       {isGoogle && (
         <FormField label="">

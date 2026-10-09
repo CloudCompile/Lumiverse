@@ -244,6 +244,44 @@ test.each(['google_tts', 'google_vertex_tts'])('shows gender and tone for %s voi
   expect(saved[0].voice).toBe('Algieba')
 })
 
+test.each([
+  { provider: 'google_tts', model: 'gemini-3.8-flash-tts', style: 'soft, conversational' },
+  { provider: 'google_tts', model: 'gemini-3.8-flash-tts', style: '' },
+  { provider: 'google_vertex_tts', model: 'gemini-3.8-flash-lite-tts', style: 'soft, conversational' },
+  { provider: 'google_vertex_tts', model: 'gemini-3.8-flash-lite-tts', style: '' },
+  { provider: 'openrouter_tts', model: 'google/gemini-3.8-flash-tts', style: 'soft, conversational' },
+  { provider: 'openrouter_tts', model: 'google/gemini-3.8-flash-tts', style: '' },
+])('saves edited or explicitly blank Gemini speech style (%j)', async ({ provider, model, style }) => {
+  saved = []
+  const defaultStyle = 'casual, relaxed conversation'
+  const styledProvider: TtsProviderInfo = {
+    ...providers[1], id: provider,
+    capabilities: { ...providers[1].capabilities, parameters: {
+      speech_style: { type: 'string', default: defaultStyle, description: 'Delivery style' },
+    } },
+  }
+  await render(<Form
+    providers={[...providers.filter((candidate) => candidate.id !== provider), styledProvider]}
+    profile={ttsProfile({ provider, model })}
+    onSave={(input) => saved.push(input)}
+    onCancel={() => {}}
+  />)
+  const field = container.querySelector<HTMLTextAreaElement>('textarea[aria-label="ttsConnectionForm.geminiSpeechStyle"]')!
+  expect(field).toBeTruthy()
+  expect(field.value).toBe(defaultStyle)
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLTextAreaElement.prototype, 'value')!.set!.call(field, style)
+    field.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  })
+  act(() => Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('save'))!.click())
+  expect(saved[0].default_parameters?.speech_style).toBe(style)
+})
+
+test('hides speech style for older Gemini models', async () => {
+  await render(<Form providers={providers} profile={ttsProfile()} onSave={() => {}} onCancel={() => {}} />)
+  expect(container.querySelector('textarea[aria-label="ttsConnectionForm.geminiSpeechStyle"]')).toBeNull()
+})
+
 test('allows disabling streaming for Google Vertex TTS', async () => {
   saved = []
   await render(

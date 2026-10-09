@@ -604,6 +604,8 @@
     "voicePlaceholder": "alloy or voice_...",
     "qwenVoicePlaceholder": "speaker:Ryan or prompt:...",
     "noVoices": "No voices found. Enter one manually.",
+    "geminiSpeechStyle": "Speech style",
+    "geminiSpeechStyleHint": "Keep delivery guidance brief. Defaults to relaxed conversation; clear it to use the voice's usual delivery.",
     "qwenLanguage": "Language",
     "qwenLanguageHint": "Keep Auto unless the server consistently misidentifies the target language.",
     "qwenLanguageAuto": "Auto",
