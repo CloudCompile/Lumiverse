@@ -7,7 +7,9 @@ import {
   useSyncExternalStore,
   type CSSProperties,
 } from 'react'
-import { Loader2, Play, Pause, Trash2, Volume2, VolumeX } from 'lucide-react'
+import { Download, Loader2, Play, Pause, Trash2, Volume2, VolumeX } from 'lucide-react'
+import { triggerBlobDownload } from '@/lib/downloads'
+import { toast } from '@/lib/toast'
 import {
   consumeFreshMarker,
   isRegenerating,
@@ -25,7 +27,7 @@ import clsx from 'clsx'
 interface MessageAudioPlayerProps {
   /** URL of the audio file. Bound directly to <audio src>. */
   src: string
-  /** Optional label rendered as a tooltip on the player root. */
+  /** Original filename, used for the player tooltip and audio download. */
   title?: string
   /** Tagged onto the root so chat-bubble layout can flip alignment. */
   isUser?: boolean
@@ -92,6 +94,7 @@ export default function MessageAudioPlayer({
   const [volumeOpen, setVolumeOpen] = useState(false)
   const [volume, setVolume] = useState(1)
   const [muted, setMuted] = useState(false)
+  const [downloading, setDownloading] = useState(false)
 
   // Mount-time consumption of the fresh-attachment marker. We use a lazy
   // initializer so the consume() side effect only fires once across React's
@@ -259,6 +262,20 @@ export default function MessageAudioPlayer({
   }, [volumeOpen])
 
   // ── Actions ─────────────────────────────────────────────────────────────
+  const downloadAudio = useCallback(async () => {
+    if (downloading || regenerating || exiting) return
+    setDownloading(true)
+    try {
+      const response = await fetch(src, { credentials: 'include' })
+      if (!response.ok) throw new Error(`Audio download failed: ${response.status}`)
+      triggerBlobDownload(await response.blob(), title || 'audio')
+    } catch {
+      toast.error('Could not download saved audio')
+    } finally {
+      setDownloading(false)
+    }
+  }, [src, title, downloading, regenerating, exiting])
+
   const togglePlay = useCallback(() => {
     // Engine owns playback (autoplay-policy fallback or pipeline fallback)
     // → the button acts as Stop for it.
@@ -468,6 +485,18 @@ export default function MessageAudioPlayer({
               </div>
             )}
           </div>
+
+          <button
+            type="button"
+            className={styles.downloadBtn}
+            onClick={downloadAudio}
+            aria-label="Download saved audio"
+            title={downloading ? 'Downloading saved audio…' : 'Download saved audio'}
+            aria-busy={downloading || undefined}
+            disabled={downloading || regenerating || exiting}
+          >
+            {downloading ? <Loader2 size={12} className={styles.regenSpinner} /> : <Download size={12} />}
+          </button>
 
           {onDelete && (
             <button
