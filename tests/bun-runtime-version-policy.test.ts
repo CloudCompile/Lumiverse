@@ -85,6 +85,69 @@ describe("Bun runtime version policy", () => {
     expect(canTrustCurrentBunRuntime("1.4.2", "1.4.2", "win32")).toBe(false);
   });
 
+  test("keeps launcher utility scripts behind the Termux-aware Bun wrapper", async () => {
+    const launcher = await read("start.sh");
+
+    const resetStart = launcher.indexOf("run_reset_password() {");
+    const resetEnd = launcher.indexOf("\nrun_migrate_st()", resetStart);
+    const resetFunction = launcher.slice(resetStart, resetEnd);
+
+    const migrateStart = launcher.indexOf("run_migrate_st() {");
+    const migrateEnd = launcher.indexOf("\nrun_edit_env()", migrateStart);
+    const migrateFunction = launcher.slice(migrateStart, migrateEnd);
+
+    const desktopCaseStart = launcher.indexOf("  install-desktop)");
+    const desktopCaseEnd = launcher.indexOf("\n    ;;", desktopCaseStart);
+    const desktopCase = launcher.slice(desktopCaseStart, desktopCaseEnd);
+
+    expect(resetStart).toBeGreaterThanOrEqual(0);
+    expect(resetEnd).toBeGreaterThan(resetStart);
+    expect(migrateStart).toBeGreaterThanOrEqual(0);
+    expect(migrateEnd).toBeGreaterThan(migrateStart);
+    expect(desktopCaseStart).toBeGreaterThanOrEqual(0);
+    expect(desktopCaseEnd).toBeGreaterThan(desktopCaseStart);
+
+    expect(resetFunction).toContain("_bun run scripts/reset-password.ts");
+    expect(resetFunction).not.toContain("_bun run reset-password");
+    expect(migrateFunction).toContain("_bun run scripts/migrate-sillytavern.ts");
+    expect(migrateFunction).not.toContain("_bun run migrate:st");
+    expect(desktopCase).toContain("_bun run scripts/install-desktop.ts");
+    expect(desktopCase).not.toContain("_bun run desktop:install");
+  });
+
+  test("routes utility script arguments through grun without invoking a package alias", async () => {
+    const launcher = await read("start.sh");
+    const section = (start: string, end: string) => {
+      const from = launcher.indexOf(start);
+      const to = launcher.indexOf(end, from);
+      expect(from).toBeGreaterThanOrEqual(0);
+      expect(to).toBeGreaterThan(from);
+      return launcher.slice(from, to);
+    };
+    // Exercise the real wrapper and utility bodies without installing packages,
+    // opening personal data, or requiring an Android/glibc executable.
+    const shell = [
+      "set -euo pipefail",
+      "IS_TERMUX=true; TERMUX_BUN_METHOD=grun; TERMUX_BUN_PATH=/mock/raw-bun; BACKEND_DIR=.",
+      "install_deps() { :; }; info() { :; }",
+      "bun() { echo 'raw Bun must not run' >&2; return 99; }",
+      "grun() { printf '%s\\n' \"$*\"; }",
+      section("_bun() {", "\n# Like _bun"),
+      section("run_reset_password() {", "\nrun_edit_env()"),
+      "run_reset_password",
+      "run_migrate_st",
+      section("  install-desktop)", "\n    ;;").replace("  install-desktop)", ""),
+    ].join("\n");
+    const result = Bun.spawnSync(["bash", "-c", shell], { cwd: root });
+    expect(result.stderr.toString()).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.toString().trim().split(/\r?\n/)).toEqual([
+      "/mock/raw-bun run scripts/reset-password.ts",
+      "/mock/raw-bun run scripts/migrate-sillytavern.ts",
+      "/mock/raw-bun run scripts/install-desktop.ts",
+    ]);
+  });
+
   test("updates native Termux Bun and rebuilds its wrapper only when the version changes", async () => {
     const launcher = await read("start.sh");
     const upgradeStart = launcher.indexOf("upgrade_bun_channel() {");
