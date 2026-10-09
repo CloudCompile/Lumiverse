@@ -126,6 +126,13 @@ bun run reset-password
 
 ---
 
+## Installation and Mobile Issues
+
+- **Termux runtime, setup, or build failures:** see [Termux Troubleshooting](termux-troubleshooting.md) for recovery, the Ubuntu fallback, and reinstalling with a backup.
+- **Remote access or installed PWA problems:** see [Remote Access with Tailscale](../getting-started/tailscale.md#troubleshooting).
+
+---
+
 ## Getting Help
 
 If you're stuck:

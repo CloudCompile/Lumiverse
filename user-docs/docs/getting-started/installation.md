@@ -21,6 +21,8 @@ Lumiverse runs on your own machine. It needs **Bun** (a fast JavaScript runtime)
 
 ## Install & Run
 
+For a step-by-step walkthrough, see [Desktop Installation](desktop-installation.md) or [Android / Termux](android-installation.md).
+
 ### 1. Clone the repository
 
 ```bash
@@ -72,6 +74,8 @@ After the shell opens, continue with the normal startup command below.
     The script auto-detects Termux and installs required packages (`glibc-repo`, `glibc-runner`, `proot`). It uses a three-tier execution strategy to find the best way to run Bun on your device, then validates the exact `proot`-wrapped path it will later use for `bun install`. If Bun is older than 1.4.2, startup uses the `bun-termux` manager to atomically update both the Bun runtime and its wrapper before continuing.
 
     If `grun bun --version` works but the native Termux install path is still broken, `start.sh` now attempts a `bun-termux` rebuild before it lets first-run setup continue.
+
+    For persistent runtime or build errors, see [Termux Troubleshooting](../reference/termux-troubleshooting.md), including the Ubuntu fallback.
 
 === "Docker"
 
@@ -339,7 +343,9 @@ The Docker setup uses a named volume (`lumiverse-data`) mounted at `/app/data`. 
 
 ## Configuration
 
-Lumiverse uses a `.env` file for runtime configuration (created by the setup wizard). Common options:
+For a step-by-step remote-access and mobile PWA setup, see [Remote Access with Tailscale](tailscale.md).
+
+Lumiverse uses a `.env` file for runtime configuration (created by the setup wizard). See [Environment Variables (.env)](../reference/environment-variables.md) for editing instructions, defaults, and additional settings. Common options:
 
 | Variable | Default | Description |
 |----------|---------|-------------|

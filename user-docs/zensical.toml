@@ -19,6 +19,9 @@ nav = [
   { "Home" = "index.md" },
   { "Getting Started" = [
     { "Installation" = "getting-started/installation.md" },
+    { "Desktop Installation Walkthrough" = "getting-started/desktop-installation.md" },
+    { "Android / Termux Walkthrough" = "getting-started/android-installation.md" },
+    { "Remote Access with Tailscale" = "getting-started/tailscale.md" },
     { "Desktop Tray Companion" = "getting-started/desktop-tray.md" },
     { "First Steps" = "getting-started/first-steps.md" },
     { "Interface Overview" = "getting-started/interface-overview.md" },
@@ -134,6 +137,8 @@ nav = [
   { "Reference" = [
     { "Keyboard Shortcuts" = "reference/keyboard-shortcuts.md" },
     { "Troubleshooting" = "reference/troubleshooting.md" },
+    { "Termux Troubleshooting" = "reference/termux-troubleshooting.md" },
+    { "Environment Variables (.env)" = "reference/environment-variables.md" },
     { "Glossary" = "reference/glossary.md" },
   ] },
 ]
