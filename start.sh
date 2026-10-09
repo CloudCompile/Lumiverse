@@ -731,13 +731,13 @@ run_setup() {
 run_reset_password() {
   install_deps "$BACKEND_DIR" "backend"
   info "Launching password reset..."
-  (cd "$BACKEND_DIR" && _bun run reset-password)
+  (cd "$BACKEND_DIR" && _bun run scripts/reset-password.ts)
 }
 
 run_migrate_st() {
   install_deps "$BACKEND_DIR" "backend"
   info "Launching SillyTavern migration helper..."
-  (cd "$BACKEND_DIR" && _bun run migrate:st)
+  (cd "$BACKEND_DIR" && _bun run scripts/migrate-sillytavern.ts)
 }
 
 run_edit_env() {
@@ -1085,6 +1085,6 @@ case "$MODE" in
     kill_pkgs
     ;;
   install-desktop)
-    (cd "$BACKEND_DIR" && _bun run desktop:install)
+    (cd "$BACKEND_DIR" && _bun run scripts/install-desktop.ts)
     ;;
 esac
