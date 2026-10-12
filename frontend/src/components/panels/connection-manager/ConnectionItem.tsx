@@ -6,7 +6,13 @@ import { Trash2, Edit3, Zap, Check, Star, BrainCircuit, Copy, LogIn, RefreshCw, 
 import { connectionsApi } from '@/api/connections'
 import { buildOpenRouterOAuthCallbackUrl, openrouterApi, type OpenRouterCreditsInfo } from '@/api/openrouter'
 import { buildNanoGptOAuthCallbackUrl, nanoGptApi, type NanoGptAccountUsage } from '@/api/nanogpt'
+import { pollinationsApi, type PollinationsAccountUsage } from '@/api/pollinations'
 import { startProviderOAuthPopup } from '@/lib/providerOAuthPopup'
+import {
+  closeAuthorizationPopup,
+  navigateAuthorizationPopup,
+  reserveAuthorizationPopup,
+} from '@/lib/authorizationPopup'
 import {
   getReasoningBindingSummary,
   getReasoningBindingTitle,
@@ -87,14 +93,20 @@ export default function ConnectionItem({
   const [nanoGptError, setNanoGptError] = useState<string | null>(null)
   const nanoGptUsage = nanoGptAccount?.subscription
   const [nanoGptUsageLoading, setNanoGptUsageLoading] = useState(false)
+  const [pollinationsAccount, setPollinationsAccount] = useState<PollinationsAccountUsage | null>(null)
+  const [pollinationsError, setPollinationsError] = useState<string | null>(null)
+  const [pollinationsUsageLoading, setPollinationsUsageLoading] = useState(false)
+  const pollinationsAbortRef = useRef<AbortController | null>(null)
   const [menuPos, setMenuPos] = useState<ContextMenuPos | null>(null)
 
   const isOpenRouter = profile.provider === 'openrouter'
   const isNanoGpt = profile.provider === 'nanogpt'
+  const isPollinations = profile.provider === 'pollinations'
   const isRoulette = profile.provider === MODEL_ROULETTE_PROVIDER
   const rouletteCount = isRoulette ? getRouletteConnectionCount(profile) : 0
   const showCredits = isOpenRouter && isActive && profile.has_api_key && !editing
   const showNanoGptUsage = isNanoGpt && isActive && profile.has_api_key && !editing
+  const showPollinationsUsage = isPollinations && isActive && profile.has_api_key && !editing
   const unknownReset = t('connectionItem.unknown')
 
   // Fetch credits when this is the active OpenRouter connection.
@@ -149,6 +161,28 @@ export default function ConnectionItem({
       .catch((err) => setNanoGptError(err.body?.error || err.message || t('connectionItem.nanoGptUsageUnavailable')))
       .finally(() => setNanoGptUsageLoading(false))
   }, [showNanoGptUsage, profile.id, t])
+
+  useEffect(() => {
+    if (!showPollinationsUsage) return
+    let cancelled = false
+    setPollinationsError(null)
+    setPollinationsUsageLoading(true)
+    pollinationsApi.account(profile.id)
+      .then((account) => { if (!cancelled) setPollinationsAccount(account) })
+      .catch((err) => { if (!cancelled) setPollinationsError(err.body?.error || err.message || t('connectionItem.pollinationsUsageUnavailable')) })
+      .finally(() => { if (!cancelled) setPollinationsUsageLoading(false) })
+    return () => { cancelled = true }
+  }, [showPollinationsUsage, profile.id, profile.updated_at, t])
+
+  const refreshPollinationsUsage = useCallback(() => {
+    if (!showPollinationsUsage) return
+    setPollinationsError(null)
+    setPollinationsUsageLoading(true)
+    pollinationsApi.account(profile.id)
+      .then(setPollinationsAccount)
+      .catch((err) => setPollinationsError(err.body?.error || err.message || t('connectionItem.pollinationsUsageUnavailable')))
+      .finally(() => setPollinationsUsageLoading(false))
+  }, [showPollinationsUsage, profile.id, t])
 
   // Auto-dismiss test result after 5s
   useEffect(() => {
@@ -209,8 +243,54 @@ export default function ConnectionItem({
     }
   }, [profile.id, profile.provider, onUpdate])
 
+  // Pollinations uses the OAuth device flow: the verification window is opened
+  // in a popup while this tab polls for the user-authorized key.
+  const handlePollinationsLogin = useCallback(async () => {
+    setOauthLoading(true)
+    setPollinationsError(null)
+    const popup = reserveAuthorizationPopup({
+      name: 'pollinations_device_auth',
+      features: 'popup=yes,width=600,height=700,scrollbars=yes,resizable=yes',
+    })
+    const controller = new AbortController()
+    pollinationsAbortRef.current = controller
+    let completed = false
+    try {
+      const device = await pollinationsApi.startDeviceAuth({ permissions: 'usage' })
+      if (controller.signal.aborted) return
+      const verifyUrl = device.verification_uri_complete || device.verification_uri
+      const navigation = navigateAuthorizationPopup(popup, verifyUrl, { preserveOpener: false })
+      if (navigation.status !== 'popup') {
+        setPollinationsError(t('connectionItem.pollinationsPopupBlocked', { url: verifyUrl, code: device.user_code }))
+        return
+      }
+      const deadline = Date.now() + Math.max(60_000, (device.expires_in || 1800) * 1000)
+      const intervalMs = Math.max(2_000, (device.interval || 5) * 1000)
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        if (controller.signal.aborted) break
+        const result = await pollinationsApi.pollDeviceAuth(device.device_code, { connectionId: profile.id })
+        if (result.status === 'complete') {
+          completed = true
+          const updated = await connectionsApi.get(profile.id)
+          onUpdate(updated)
+          break
+        }
+      }
+      if (!completed && !controller.signal.aborted) setPollinationsError(t('connectionItem.pollinationsExpired'))
+    } catch (err: any) {
+      if (!controller.signal.aborted) {
+        setPollinationsError(err.body?.error || err.message || t('connectionItem.connectionFailed'))
+      }
+    } finally {
+      closeAuthorizationPopup(popup)
+      if (pollinationsAbortRef.current === controller) pollinationsAbortRef.current = null
+      setOauthLoading(false)
+    }
+  }, [profile.id, onUpdate, t])
+
   useEffect(() => () => {
-    oauthCleanupRef.current?.()
+    pollinationsAbortRef.current?.abort()
   }, [])
 
   const boundReasoning = profile.metadata?.reasoningBindings?.settings
@@ -252,6 +332,14 @@ export default function ConnectionItem({
     nanoGptAnimatedRef.current = true
   } else if (!nanoGptShown && nanoGptAnimatedRef.current) {
     nanoGptAnimatedRef.current = false
+  }
+
+  const pollinationsShown = showPollinationsUsage && (pollinationsAccount || pollinationsError || pollinationsUsageLoading)
+  const pollinationsAnimatedRef = useRef(false)
+  if (pollinationsShown && !pollinationsAnimatedRef.current) {
+    pollinationsAnimatedRef.current = true
+  } else if (!pollinationsShown && pollinationsAnimatedRef.current) {
+    pollinationsAnimatedRef.current = false
   }
 
 
@@ -318,13 +406,13 @@ export default function ConnectionItem({
               {isActive && <Check size={14} className={styles.activeCheck} />}
             </button>
             <div className={styles.itemActions}>
-              {(isOpenRouter || isNanoGpt) && (
+              {(isOpenRouter || isNanoGpt || isPollinations) && (
                 <Button
                   size="icon-sm" variant="ghost"
-                  onClick={handleOAuthLogin}
+                  onClick={isPollinations ? handlePollinationsLogin : handleOAuthLogin}
                   title={profile.has_api_key
-                    ? (isNanoGpt ? t('connectionItem.reauthorizeNanoGpt') : t('connectionItem.reauthorizeOpenRouter'))
-                    : (isNanoGpt ? t('connectionItem.signInNanoGpt') : t('connectionItem.signInOpenRouter'))}
+                    ? (isPollinations ? t('connectionItem.reauthorizePollinations') : isNanoGpt ? t('connectionItem.reauthorizeNanoGpt') : t('connectionItem.reauthorizeOpenRouter'))
+                    : (isPollinations ? t('connectionItem.signInPollinations') : isNanoGpt ? t('connectionItem.signInNanoGpt') : t('connectionItem.signInOpenRouter'))}
                   disabled={oauthLoading}
                   icon={oauthLoading ? <Spinner size={13} /> : <LogIn size={13} />}
                 />
@@ -361,6 +449,12 @@ export default function ConnectionItem({
             <button type="button" className={styles.oauthBanner} onClick={handleOAuthLogin} disabled={oauthLoading}>
               {oauthLoading ? <Spinner size={12} /> : <LogIn size={12} />}
               <span>{t('connectionItem.signInNanoGptHint')}</span>
+            </button>
+          )}
+          {isPollinations && !profile.has_api_key && !editing && (
+            <button type="button" className={styles.oauthBanner} onClick={handlePollinationsLogin} disabled={oauthLoading}>
+              {oauthLoading ? <Spinner size={12} /> : <LogIn size={12} />}
+              <span>{t('connectionItem.signInPollinationsHint')}</span>
             </button>
           )}
           {testResult && (
@@ -448,6 +542,36 @@ export default function ConnectionItem({
                   </div>
                 </div>
               ) : null}
+            </div>
+          )}
+          {isPollinations && profile.has_api_key && (
+            <div className={clsx(!pollinationsShown && styles.creditsHidden)}>
+              <div className={clsx(styles.creditsBar, styles.nanoGptUsageBar, pollinationsShown && !pollinationsAnimatedRef.current && styles.creditsBarAnimateIn)} title={t('connectionItem.pollinationsScope')}>
+                <div className={styles.creditCell}>
+                  <span className={styles.creditLabel}>{t('connectionItem.pollinationsBalance')}</span>
+                  <span className={styles.creditValue} title={pollinationsAccount?.errors.balance}>
+                    {pollinationsAccount?.balance
+                      ? `${formatCompactCount(pollinationsAccount.balance.balance)} pollen`
+                      : unknownReset}
+                  </span>
+                </div>
+                <div className={styles.creditCell}>
+                  <span className={styles.creditLabel}>{t('connectionItem.today')}</span>
+                  <span className={styles.creditValue} title={pollinationsAccount?.errors.usage}>
+                    {pollinationsAccount?.usage ? `$${pollinationsAccount.usage.today_cost_usd.toFixed(4)}` : unknownReset}
+                  </span>
+                </div>
+                <div className={styles.creditCell}>
+                  <span className={styles.creditLabel}>{t('connectionItem.thisMonth')}</span>
+                  <span className={styles.creditValue} title={pollinationsAccount?.errors.usage}>
+                    {pollinationsAccount?.usage ? `$${pollinationsAccount.usage.month_cost_usd.toFixed(4)}` : unknownReset}
+                  </span>
+                </div>
+                <button type="button" className={styles.creditsRefresh} onClick={refreshPollinationsUsage} disabled={pollinationsUsageLoading} aria-label={t('connectionItem.refreshPollinationsUsage')}>
+                  {pollinationsUsageLoading ? <Spinner size={10} /> : <RefreshCw size={10} />}
+                </button>
+              </div>
+              {pollinationsError && <div className={clsx(styles.testMessage, styles.testMessageFail)} role="alert">{pollinationsError}</div>}
             </div>
           )}
         </>

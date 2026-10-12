@@ -368,9 +368,20 @@
     "monthly": "每月",
     "comfyWorkflow": "ComfyUI 工作流",
     "loadComfyWorkflowFailed": "加載 ComfyUI 工作流失敗",
-    "dragToReorder": "拖曳以重新排序"
+    "dragToReorder": "拖曳以重新排序",
+    "pollinationsBalance": "Pollen 餘額",
+    "pollinationsScope": "此連線 Pollinations 金鑰的帳戶餘額與用量（UTC 日/月）。",
+    "pollinationsUsageUnavailable": "Pollinations 帳戶用量無法取得",
+    "refreshPollinationsUsage": "重新整理 Pollinations 餘額與用量",
+    "signInPollinations": "使用 Pollinations 登入",
+    "signInPollinationsHint": "使用 Pollinations 登入以取得 BYOP 金鑰",
+    "reauthorizePollinations": "使用 Pollinations 重新授權",
+    "pollinationsPopupBlocked": "請允許彈出視窗以完成 Pollinations 登入。若仍被封鎖，請開啟 {{url}} 並輸入代碼 {{code}}。",
+    "pollinationsExpired": "Pollinations 登入要求尚未核准即已過期，請重試。"
   },
   "connectionForm": {
+    "pollinationsPopupBlocked": "請允許彈出視窗以完成 Pollinations 登入。若仍被封鎖，請開啟 {{url}} 並輸入代碼 {{code}}。",
+    "pollinationsExpired": "Pollinations 登入要求尚未核准即已過期，請重試。",
     "pollinationsSaved": "已登錄 Pollinations，API Key 已自動保存。",
     "pollinationsAutoSaveFailed": "Pollinations 登錄成功，但自動保存失敗。請點擊保存手動持久化。",
     "pollinationsCaptured": "已登錄 Pollinations，已獲取 API Key。點擊創建以保存此連接。",

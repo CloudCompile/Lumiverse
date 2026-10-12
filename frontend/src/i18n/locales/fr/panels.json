@@ -368,9 +368,20 @@
     "monthly": "Mensuel",
     "comfyWorkflow": "Flux de travail ComfyUI",
     "loadComfyWorkflowFailed": "Échec du chargement du flux de travail ComfyUI",
-    "dragToReorder": "Réorganiser par glisser-déposer"
+    "dragToReorder": "Réorganiser par glisser-déposer",
+    "pollinationsBalance": "Solde de pollen",
+    "pollinationsScope": "Solde et utilisation du compte pour la clé Pollinations de cette connexion (jours et mois UTC).",
+    "pollinationsUsageUnavailable": "L'utilisation du compte Pollinations est indisponible",
+    "refreshPollinationsUsage": "Actualiser le solde et l'utilisation Pollinations",
+    "signInPollinations": "Se connecter avec Pollinations",
+    "signInPollinationsHint": "Connectez-vous avec Pollinations pour obtenir une clé BYOP",
+    "reauthorizePollinations": "Réautoriser avec Pollinations",
+    "pollinationsPopupBlocked": "Autorisez les pop-ups pour terminer la connexion Pollinations. Si elle reste bloquée, ouvrez {{url}} et saisissez le code {{code}}.",
+    "pollinationsExpired": "La demande de connexion Pollinations a expiré avant d'être approuvée. Réessayez."
   },
   "connectionForm": {
+    "pollinationsPopupBlocked": "Autorisez les pop-ups pour terminer la connexion Pollinations. Si elle reste bloquée, ouvrez {{url}} et saisissez le code {{code}}.",
+    "pollinationsExpired": "La demande de connexion Pollinations a expiré avant d'être approuvée. Réessayez.",
     "pollinationsSaved": "Connecté avec Pollinations. Clé API enregistrée automatiquement.",
     "pollinationsAutoSaveFailed": "La connexion à Pollinations a réussi, mais l'enregistrement automatique a échoué. Cliquez sur Enregistrer pour conserver manuellement.",
     "pollinationsCaptured": "Connecté avec Pollinations. Clé API capturée. Cliquez sur Créer pour enregistrer cette connexion.",

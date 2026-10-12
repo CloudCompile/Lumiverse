@@ -488,7 +488,16 @@
     "comfyWorkflow": "ComfyUI workflow",
     "loadComfyWorkflowFailed": "Failed to load ComfyUI workflow",
     "modelRouletteMeta": "Model Roulette / {{count}} profiles",
-    "dragToReorder": "Drag to reorder"
+    "dragToReorder": "Drag to reorder",
+    "pollinationsBalance": "Pollen balance",
+    "pollinationsScope": "Account balance and usage for this connection's Pollinations key (UTC days and months).",
+    "pollinationsUsageUnavailable": "Pollinations account usage is unavailable",
+    "refreshPollinationsUsage": "Refresh Pollinations balance and usage",
+    "signInPollinations": "Sign in with Pollinations",
+    "signInPollinationsHint": "Sign in with Pollinations to get a BYOP key",
+    "reauthorizePollinations": "Re-authorize with Pollinations",
+    "pollinationsPopupBlocked": "Allow popups to finish Pollinations sign-in. If it stayed blocked, open {{url}} and enter code {{code}}.",
+    "pollinationsExpired": "The Pollinations sign-in request expired before it was approved. Try again."
   },
   "nanoGptSettings": {
     "title": "NanoGPT provider routing",
@@ -602,7 +611,9 @@
     "oneHour": "1 hour",
     "cancel": "Cancel",
     "save": "Save",
-    "create": "Create"
+    "create": "Create",
+    "pollinationsPopupBlocked": "Allow popups to finish Pollinations sign-in. If it stayed blocked, open {{url}} and enter code {{code}}.",
+    "pollinationsExpired": "The Pollinations sign-in request expired before it was approved. Try again."
   },
   "sttConnectionManager": {
     "loading": "Loading STT connections...",

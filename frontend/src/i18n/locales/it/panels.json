@@ -368,9 +368,20 @@
     "monthly": "Mensile",
     "comfyWorkflow": "Flusso di lavoro ComfyUI",
     "loadComfyWorkflowFailed": "Errore nel caricamento del flusso di lavoro ComfyUI",
-    "dragToReorder": "Trascina per riordinare"
+    "dragToReorder": "Trascina per riordinare",
+    "pollinationsBalance": "Saldo pollen",
+    "pollinationsScope": "Saldo e utilizzo dell'account per la chiave Pollinations di questa connessione (giorni e mesi UTC).",
+    "pollinationsUsageUnavailable": "L'utilizzo dell'account Pollinations non è disponibile",
+    "refreshPollinationsUsage": "Aggiorna saldo e utilizzo Pollinations",
+    "signInPollinations": "Accedi con Pollinations",
+    "signInPollinationsHint": "Accedi con Pollinations per ottenere una chiave BYOP",
+    "reauthorizePollinations": "Riautorizza con Pollinations",
+    "pollinationsPopupBlocked": "Consenti i popup per completare l'accesso con Pollinations. Se rimane bloccato, apri {{url}} e inserisci il codice {{code}}.",
+    "pollinationsExpired": "La richiesta di accesso a Pollinations è scaduta prima dell'approvazione. Riprova."
   },
   "connectionForm": {
+    "pollinationsPopupBlocked": "Consenti i popup per completare l'accesso con Pollinations. Se rimane bloccato, apri {{url}} e inserisci il codice {{code}}.",
+    "pollinationsExpired": "La richiesta di accesso a Pollinations è scaduta prima dell'approvazione. Riprova.",
     "pollinationsSaved": "Accesso con Pollinations effettuato. Chiave API salvata automaticamente.",
     "pollinationsAutoSaveFailed": "L'accesso a Pollinations è riuscito, ma il salvataggio automatico è fallito. Clicca Salva per persistere manualmente.",
     "pollinationsCaptured": "Accesso con Pollinations effettuato. Chiave API catturata. Clicca Crea per salvare questa connessione.",

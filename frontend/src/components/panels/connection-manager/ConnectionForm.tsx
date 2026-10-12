@@ -5,8 +5,14 @@ import { Toggle } from '@/components/shared/Toggle'
 import { useTranslation } from 'react-i18next'
 import { connectionsApi } from '@/api/connections'
 import { buildNanoGptOAuthCallbackUrl, nanoGptApi, type NanoGptConnectionSettings } from '@/api/nanogpt'
+import { pollinationsApi } from '@/api/pollinations'
 import { buildNanoGptSettingsMetadata } from '@/lib/nanogpt-routing'
 import { startProviderOAuthPopup } from '@/lib/providerOAuthPopup'
+import {
+  closeAuthorizationPopup,
+  navigateAuthorizationPopup,
+  reserveAuthorizationPopup,
+} from '@/lib/authorizationPopup'
 import { useStore } from '@/store'
 import {
   areReasoningSettingsEqual,
@@ -130,6 +136,7 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
   const [modelsLoading, setModelsLoading] = useState(false)
   const [byopLoading, setByopLoading] = useState(false)
   const [byopStatus, setByopStatus] = useState<string | null>(null)
+  const pollinationsAbortRef = useRef<AbortController | null>(null)
   const [nanoGptOauthLoading, setNanoGptOauthLoading] = useState(false)
   const [nanoGptOauthStatus, setNanoGptOauthStatus] = useState<string | null>(null)
   const [rouletteConnectionIds, setRouletteConnectionIds] = useState<string[]>(() => parseRouletteConnectionIds(profile))
@@ -220,87 +227,30 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
   }, [profile?.id, fetchModels])
 
   useEffect(() => {
-    const pendingRaw = sessionStorage.getItem('pollinations_byop_pending')
-    if (!pendingRaw) return
-
-    const hash = window.location.hash
-    const hashParams = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
-    const hasReturnedKey = !!hashParams.get('api_key') || !!sessionStorage.getItem('pollinations_byop_returned_api_key')
-    if (!hasReturnedKey) return
-
-    try {
-      const pending = JSON.parse(pendingRaw) as { provider?: string }
-      if (pending.provider === 'pollinations' && provider !== 'pollinations') {
-        setProvider('pollinations')
-      }
-    } catch {
-      // ignore malformed pending state
-    }
-  }, [provider])
-
-  useEffect(() => {
     if (!isPollinations) return
-
-    const pendingRaw = sessionStorage.getItem('pollinations_byop_pending')
-    if (!pendingRaw) return
-
-    const hash = window.location.hash
-    const params = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
-    const returnedApiKey = params.get('api_key') || sessionStorage.getItem('pollinations_byop_returned_api_key')
-    if (!returnedApiKey) return
-
+    const returnedKey = sessionStorage.getItem('pollinations_byop_returned_api_key')
+    if (!returnedKey) return
+    // Only honor a leftover key from the legacy fragment flow when this form is
+    // actually editing the connection it was minted for.
+    const activeConnectionId = profile?.id || null
     let pendingConnectionId: string | null = null
     let pendingTarget: string | null = null
-    if (pendingRaw) {
-      try {
-        const parsed = JSON.parse(pendingRaw) as { connectionId?: string | null; target?: string | null }
-        pendingConnectionId = parsed.connectionId || null
-        pendingTarget = parsed.target || null
-      } catch {
-        pendingConnectionId = null
-        pendingTarget = null
-      }
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem('pollinations_byop_pending') || '') as { connectionId?: string | null; target?: string | null }
+      pendingConnectionId = parsed.connectionId || null
+      pendingTarget = parsed.target || null
+    } catch {
+      pendingConnectionId = null
+      pendingTarget = null
     }
-
     if (pendingTarget && pendingTarget !== 'connections') return
+    if (pendingConnectionId && activeConnectionId && pendingConnectionId !== activeConnectionId) return
 
-    const activeConnectionId = profile?.id || null
-    if (pendingConnectionId && activeConnectionId && pendingConnectionId !== activeConnectionId) {
-      return
-    }
-
-    const clearRedirectArtifacts = () => {
-      window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`)
-      sessionStorage.removeItem('pollinations_byop_pending')
-      sessionStorage.removeItem('pollinations_byop_returned_api_key')
-    }
-
-    let cancelled = false
-    const applyReturnedKey = async () => {
-      setApiKey(returnedApiKey)
-
-      if (activeConnectionId) {
-        try {
-          await connectionsApi.update(activeConnectionId, { api_key: returnedApiKey })
-          if (!cancelled) {
-            setByopStatus(t('connectionForm.pollinationsSaved'))
-          }
-        } catch {
-          if (!cancelled) {
-            setByopStatus(t('connectionForm.pollinationsAutoSaveFailed'))
-          }
-        }
-      } else if (!cancelled) {
-        setByopStatus(t('connectionForm.pollinationsCaptured'))
-      }
-
-      clearRedirectArtifacts()
-    }
-
-    void applyReturnedKey()
-    return () => {
-      cancelled = true
-    }
+    setApiKey(returnedKey)
+    setByopStatus(t('connectionForm.pollinationsCaptured'))
+    sessionStorage.removeItem('pollinations_byop_pending')
+    sessionStorage.removeItem('pollinations_byop_returned_api_key')
+    window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.search}`)
   }, [isPollinations, profile?.id, t])
 
   const showResponsesApiToggle = provider === 'openai'
@@ -329,27 +279,67 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
   }, [profile, profile?.id, promptBias, reasoningSettings])
 
   const handlePollinationsSignIn = useCallback(async () => {
+    if (!profile?.id && !name.trim()) return
     setByopStatus(null)
     setByopLoading(true)
+    // Reserve the verification window during the click so the browser keeps the
+    // user gesture; the popup is navigated once the device code comes back.
+    const popup = reserveAuthorizationPopup({
+      name: 'pollinations_device_auth',
+      features: 'popup=yes,width=600,height=700,scrollbars=yes,resizable=yes',
+    })
+    const controller = new AbortController()
+    pollinationsAbortRef.current = controller
+    let completed = false
     try {
-      const redirect_url = `${window.location.origin}${window.location.pathname}${window.location.search}`
-      const result = await connectionsApi.pollinationsAuthUrl({
-        redirect_url,
+      const device = await pollinationsApi.startDeviceAuth({
         models: model.trim() || undefined,
+        budget: undefined,
+        expiry: undefined,
+        permissions: 'usage',
       })
+      if (controller.signal.aborted) return
 
-      sessionStorage.setItem(
-        'pollinations_byop_pending',
-        JSON.stringify({ connectionId: profile?.id || null, provider: 'pollinations', target: 'connections' })
-      )
+      const verifyUrl = device.verification_uri_complete || device.verification_uri
+      const navigation = navigateAuthorizationPopup(popup, verifyUrl, { preserveOpener: false })
+      if (navigation.status !== 'popup') {
+        setByopStatus(t('connectionForm.pollinationsPopupBlocked', { url: verifyUrl, code: device.user_code }))
+        setByopLoading(false)
+        return
+      }
 
-      window.location.href = result.auth_url
+      const deadline = Date.now() + Math.max(60_000, (device.expires_in || 1800) * 1000)
+      const intervalMs = Math.max(2_000, (device.interval || 5) * 1000)
+      while (!controller.signal.aborted && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, intervalMs))
+        if (controller.signal.aborted) break
+        const result = await pollinationsApi.pollDeviceAuth(device.device_code, profile?.id
+          ? { connectionId: profile.id }
+          : { connectionName: name.trim() })
+        if (result.status === 'complete') {
+          completed = true
+          if (result.created) onOAuthCreated?.(result.profile)
+          else setByopStatus(t('connectionForm.pollinationsSaved'))
+          break
+        }
+      }
+      if (!completed && !controller.signal.aborted) {
+        setByopStatus(t('connectionForm.pollinationsExpired'))
+      }
     } catch (err: any) {
-      const msg = String(err?.message || t('connectionForm.pollinationsStartFailed'))
-      setByopStatus(msg)
+      if (!controller.signal.aborted) {
+        setByopStatus(String(err?.body?.error || err?.message || t('connectionForm.pollinationsStartFailed')))
+      }
+    } finally {
+      closeAuthorizationPopup(popup)
+      if (pollinationsAbortRef.current === controller) pollinationsAbortRef.current = null
       setByopLoading(false)
     }
-  }, [model, profile?.id, t])
+  }, [model, name, onOAuthCreated, profile?.id, t])
+
+  useEffect(() => () => {
+    pollinationsAbortRef.current?.abort()
+  }, [])
 
   const handleNanoGptSignIn = useCallback(async () => {
     if (!profile?.id && !name.trim()) return
@@ -612,7 +602,7 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
                   variant="secondary"
                   size="sm"
                   onClick={handlePollinationsSignIn}
-                  disabled={byopLoading}
+                  disabled={byopLoading || (!profile?.id && !name.trim())}
                 >
                   {byopLoading ? t('connectionForm.redirecting') : t('connectionForm.signInWithPollinations')}
                 </Button>

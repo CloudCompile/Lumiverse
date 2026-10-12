@@ -368,9 +368,20 @@
     "monthly": "月次",
     "comfyWorkflow": "ComfyUI ワークフロー",
     "loadComfyWorkflowFailed": "ComfyUI ワークフローの読み込みに失敗しました",
-    "dragToReorder": "ドラッグして並べ替え"
+    "dragToReorder": "ドラッグして並べ替え",
+    "pollinationsBalance": "Pollen 残高",
+    "pollinationsScope": "この接続の Pollinations キーのアカウント残高と使用量（UTC の日/月）。",
+    "pollinationsUsageUnavailable": "Pollinations のアカウント使用量を取得できません",
+    "refreshPollinationsUsage": "Pollinations の残高と使用量を更新",
+    "signInPollinations": "Pollinations でサインイン",
+    "signInPollinationsHint": "Pollinations でサインインして BYOP キーを取得",
+    "reauthorizePollinations": "Pollinations で再認証",
+    "pollinationsPopupBlocked": "Pollinations のサインインを完了するにはポップアップを許可してください。ブロックされた場合は {{url}} を開き、コード {{code}} を入力してください。",
+    "pollinationsExpired": "Pollinations のサインイン要求が承認前に期限切れになりました。もう一度お試しください。"
   },
   "connectionForm": {
+    "pollinationsPopupBlocked": "Pollinations のサインインを完了するにはポップアップを許可してください。ブロックされた場合は {{url}} を開き、コード {{code}} を入力してください。",
+    "pollinationsExpired": "Pollinations のサインイン要求が承認前に期限切れになりました。もう一度お試しください。",
     "pollinationsSaved": "Pollinations でサインインしました。 API キーは自動的に保存されました。",
     "pollinationsAutoSaveFailed": "Pollinations のサインインは成功しましたが、自動保存は失敗しました。 [保存] をクリックして手動で保存します。",
     "pollinationsCaptured": "Pollination でサインインしました。 API キーが取得されました。 [作成] をクリックしてこの接続を保存します。",
