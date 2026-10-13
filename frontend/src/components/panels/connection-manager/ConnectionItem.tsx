@@ -290,6 +290,7 @@ export default function ConnectionItem({
   }, [profile.id, onUpdate, t])
 
   useEffect(() => () => {
+    oauthCleanupRef.current?.()
     pollinationsAbortRef.current?.abort()
   }, [])
 
