@@ -219,6 +219,22 @@ function validateProductivitySurfacePayload(surfaceId: string, props: HostSurfac
 
 const HOST_SURFACE_ROWS: readonly HostSurfaceRow[] = Object.freeze([
   {
+    id: 'message_preview',
+    schema: {
+      chatId: { kind: 'string', required: true, max: 128 },
+      messageId: { kind: 'string', required: true, max: 128 },
+      swipeIndex: { kind: 'number', min: 0, max: Number.MAX_SAFE_INTEGER, int: true },
+      start: { kind: 'number', min: 0, max: Number.MAX_SAFE_INTEGER, int: true },
+      end: { kind: 'number', min: 0, max: Number.MAX_SAFE_INTEGER, int: true },
+    },
+    propsSchema: '{ chatId: string, messageId: string, swipeIndex?: number, start?: number, end?: number }',
+    validate(props) {
+      if (!props.chatId || !props.messageId || (typeof props.start === 'number' && typeof props.end === 'number' && props.end < props.start)) {
+        throw new Error('HOST_SURFACE_PROPS_INVALID:message_preview: invalid identity or range')
+      }
+    },
+  },
+  {
     id: 'provider_icon',
     schema: {
       provider: { kind: 'string', required: true, max: 64, pattern: IDENTIFIER_PATTERN },

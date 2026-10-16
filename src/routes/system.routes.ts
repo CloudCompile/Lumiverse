@@ -61,6 +61,7 @@ app.get("/info", async (c) => {
     backend: {
       version: await getBackendVersion(),
       runtime: `Bun ${Bun.version}`,
+      distribution: process.env.LUMIVERSE_BUNDLE_ID ? "bundled" : "source",
     },
     git: privileged ? getGitInfo() : { branch: "", commit: "" },
   });

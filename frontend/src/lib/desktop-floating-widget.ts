@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { invoke } from '@tauri-apps/api/core'
 import type { FloatWidgetState } from '@/store/slices/spindle-placement'
 import type { ExtensionInfo } from 'lumiverse-spindle-types'
@@ -38,7 +39,7 @@ export function desktopWidgetMinSize(chromeless: boolean): { width: number; heig
 }
 
 function readTarget(): DesktopFloatingWidgetTarget | null {
-  if (!('__TAURI_INTERNALS__' in window)) return null
+  if (!hasTauriDesktopBridge()) return null
 
   const params = new URLSearchParams(window.location.search)
   const extensionId = params.get('desktopWidgetExtension')
@@ -113,7 +114,7 @@ export function buildDesktopFloatingWidgetCatalog(
 /** Publish only serializable widget metadata; the desktop host creates the
  * window and the new WebView loads the extension itself in widget mode. */
 export function publishDesktopFloatingWidgetCatalog(entries: DesktopFloatingWidgetCatalogEntry[]): Promise<void> {
-  if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) {
+  if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) {
     return Promise.resolve()
   }
   return invoke('set_desktop_widget_catalog', { widgets: entries })
@@ -132,7 +133,7 @@ export function resizeDesktopFloatingWidget(
   height: number,
   chromeless: boolean,
 ): Promise<void> {
-  if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return Promise.resolve()
+  if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return Promise.resolve()
   const minSize = desktopWidgetMinSize(chromeless)
   return invoke('resize_extension_widget', {
     widgetId,

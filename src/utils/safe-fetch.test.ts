@@ -1,5 +1,137 @@
-import { describe, expect, test } from "bun:test";
-import { SSRFError, safeFetch, validateHost } from "./safe-fetch";
+import { afterEach, describe, expect, test } from "bun:test";
+import { JavaScriptDownloadError, SSRFError, safeFetch, validateHost } from "./safe-fetch";
+
+describe("safeFetch JavaScript download policy", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => { globalThis.fetch = originalFetch; });
+
+  test("rejects script URL paths before issuing a request", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response("{}");
+    }) as unknown as typeof fetch;
+
+    for (const path of [
+      "/bundle.js", "/bundle.MJS?v=1", "/bundle.cjs", "/bundle.es",
+      "/bundle%2Ejs", "/bundle.%6As", "/bundle.js;version=1", "/bundle.js/", "/bundle%ff%2Ejs",
+    ]) {
+      await expect(safeFetch(`http://93.184.216.34${path}`, { blockJavaScript: true }))
+        .rejects.toBeInstanceOf(JavaScriptDownloadError);
+    }
+    expect(calls).toBe(0);
+  });
+
+  test("rejects JavaScript MIME types and cancels the response body", async () => {
+    for (const contentType of [
+      "text/javascript", "Application/JavaScript; charset=utf-8",
+      "application/ecmascript", "text/ecmascript", "application/x-javascript",
+      "application/x-ecmascript", "text/x-javascript", "text/x-ecmascript",
+      "text/javascript1.0", "text/javascript1.5", "text/jscript", "text/livescript",
+    ]) {
+      let cancelled = false;
+      let signal: AbortSignal | null | undefined;
+      globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        signal = init?.signal;
+        return new Response(new ReadableStream<Uint8Array>({
+          cancel() { cancelled = true; },
+        }), { headers: { "content-type": contentType } });
+      }) as typeof fetch;
+
+      await expect(safeFetch("http://93.184.216.34/download", { blockJavaScript: true }))
+        .rejects.toBeInstanceOf(JavaScriptDownloadError);
+      expect(cancelled).toBe(true);
+      expect(signal?.aborted).toBe(true);
+    }
+  });
+
+  test("rejects JavaScript download filenames even when served as ordinary data", async () => {
+    for (const disposition of [
+      'attachment; filename="bundle.js"',
+      "attachment; filename=bundle.cjs",
+      "attachment; filename*=UTF-8''bundle%2Emjs",
+      "attachment; filename*=ISO-8859-1''bundle%EE%2Ejs",
+      "attachment; filename=card.json; filename*=UTF-8'en'bundle%2EJS",
+      'attachment; filename="nested;bundle.js"',
+    ]) {
+      globalThis.fetch = (async () => new Response("export default 1", {
+        headers: { "content-type": "application/octet-stream", "content-disposition": disposition },
+      })) as unknown as typeof fetch;
+      await expect(safeFetch("http://93.184.216.34/download", { blockJavaScript: true }))
+        .rejects.toBeInstanceOf(JavaScriptDownloadError);
+    }
+  });
+
+  test("rejects redirects to scripts before requesting the script target", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Response(null, { status: 302, headers: { location: "/bundle.mjs?version=1" } });
+    }) as unknown as typeof fetch;
+
+    await expect(safeFetch("http://93.184.216.34/redirect", { blockJavaScript: true }))
+      .rejects.toBeInstanceOf(JavaScriptDownloadError);
+    expect(calls).toEqual(["http://93.184.216.34/redirect"]);
+  });
+
+  test("checks the MIME type after an extensionless redirect", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return calls.length === 1
+        ? new Response(null, { status: 307, headers: { location: "/download" } })
+        : new Response("export default 1", { headers: { "content-type": "text/javascript" } });
+    }) as typeof fetch;
+
+    await expect(safeFetch("http://93.184.216.34/redirect", { blockJavaScript: true }))
+      .rejects.toBeInstanceOf(JavaScriptDownloadError);
+    expect(calls).toEqual(["http://93.184.216.34/redirect", "http://93.184.216.34/download"]);
+  });
+
+  test("checks redirect response headers before following Location", async () => {
+    let calls = 0;
+    globalThis.fetch = (async () => {
+      calls += 1;
+      return new Response(null, {
+        status: 302, headers: { location: "/data.json", "content-type": "application/javascript" },
+      });
+    }) as unknown as typeof fetch;
+    await expect(safeFetch("http://93.184.216.34/redirect", { blockJavaScript: true }))
+      .rejects.toBeInstanceOf(JavaScriptDownloadError);
+    expect(calls).toBe(1);
+  });
+
+  test("allows JSON, ordinary text, and media with the policy enabled", async () => {
+    for (const [path, contentType, body] of [
+      ["/data.json", "application/json", '{"description":"JavaScript: export default 1"}'],
+      ["/readme.txt", "text/plain", "An ordinary document"],
+      ["/schema.js.map", "application/json", '{"version":3}'],
+      ["/image.png", "image/png", "media bytes"],
+    ]) {
+      globalThis.fetch = (async () => new Response(body, { headers: {
+        "content-type": contentType, "content-disposition": 'attachment; filename="data.json"',
+      } })) as unknown as typeof fetch;
+      const response = await safeFetch(`http://93.184.216.34${path}`, { blockJavaScript: true });
+      expect(await response.text()).toBe(body);
+    }
+  });
+
+  test("does not claim to detect scripts disguised as plain text", async () => {
+    globalThis.fetch = (async () => new Response("export default 1", {
+      headers: { "content-type": "text/plain" },
+    })) as unknown as typeof fetch;
+    const response = await safeFetch("http://93.184.216.34/data", { blockJavaScript: true });
+    expect(await response.text()).toBe("export default 1");
+  });
+
+  test("keeps the content policy opt-in for other host consumers", async () => {
+    globalThis.fetch = (async () => new Response("export default 1", {
+      headers: { "content-type": "text/javascript" },
+    })) as unknown as typeof fetch;
+    const response = await safeFetch("http://93.184.216.34/bundle.js");
+    expect(await response.text()).toBe("export default 1");
+  });
+});
 
 describe("validateHost loopback allowance", () => {
   test("allows loopback IP literals when explicitly enabled", async () => {

@@ -154,6 +154,7 @@ async function migrateOwnerPassword(credentialsPath: string): Promise<boolean> {
  *  - OWNER_PASSWORD  → stored hashed in data/owner.credentials
  */
 function cleanupLegacyEnvSecrets(): void {
+  if (process.env.LUMIVERSE_BUNDLE_ID) return;
   const envPath = resolve(process.cwd(), ".env");
   const identityPath = join(env.dataDir, "lumiverse.identity");
 

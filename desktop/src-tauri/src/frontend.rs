@@ -133,7 +133,7 @@ fn configure_webview_runtime<'a, R: tauri::Runtime, M: tauri::Manager<R>>(
 ) -> WebviewWindowBuilder<'a, R, M> {
     #[cfg(target_os = "windows")]
     let builder = builder.additional_browser_args(WINDOWS_WEBVIEW_BROWSER_ARGS);
-    builder
+    crate::profile::configure_webview(builder)
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1490,9 +1490,9 @@ pub fn show_frontend_url_settings(app: AppHandle) -> Result<(), String> {
         WebviewUrl::App("custom-url.html".into()),
     ))
     .title("Instance Connection")
-    .inner_size(560.0, 480.0)
-    .min_inner_size(560.0, 480.0)
-    .max_inner_size(560.0, 480.0)
+    .inner_size(620.0, 680.0)
+    .min_inner_size(620.0, 680.0)
+    .max_inner_size(620.0, 680.0)
     .resizable(false)
     .center()
     .build()

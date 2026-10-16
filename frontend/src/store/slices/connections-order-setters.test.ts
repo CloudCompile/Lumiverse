@@ -23,6 +23,7 @@ mock.module('./settings', () => ({
     reasoningEffort: 'auto', keepInHistory: 0, thinkingDisplay: 'auto',
   },
   clearDirtyKey: () => {},
+  flushSettingsNow: async () => {},
   hasPendingSetting: () => false,
   persistKey: (key: string, value: unknown) => { persistedSettings.push([key, value]) },
   persistPendingImageGenerationPatch: () => {},

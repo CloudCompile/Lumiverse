@@ -1,4 +1,5 @@
 import { activeTab } from '@/lib/active-tab'
+import { CLIENT_HOST_CAPABILITIES, createFrontendClientAPI, type SpindleClientAPI } from './client-api'
 import { downloadExtensionFile } from './file-downloads'
 import type {
   SpindleManifest,
@@ -150,6 +151,7 @@ import {
 import { frontendAuthorityRowFor } from './frontend-authority-map'
 import { createHostSurfaceAPI, type HostSurfaceAPI } from './host-surfaces'
 import './character-host-surface-renderers'
+import './message-preview-host-surface'
 import './world-book-host-surface-renderers'
 import './productivity-host-surface-renderers'
 import {
@@ -336,6 +338,7 @@ type FrontendExtensionHost = {
 type FrontendExtensionContextBase = Omit<SpindleFrontendContext, 'ui' | 'messages' | 'dom'> & {
   readonly frontendSessionId: string
   host: FrontendExtensionHost
+  readonly client: SpindleClientAPI
   theme: SpindleThemeAuthoringAPI
   dom: FrontendExtensionDOM
   ready(): void
@@ -1419,6 +1422,7 @@ async function doLoadFrontendExtension(
       descriptorVersion: 1 as const,
       lumiverseVersion: LUMIVERSE_VERSION,
       capabilities: Object.freeze({ ...SPINDLE_HOST_CAPABILITIES, ...THEME_AUTHORING_HOST_CAPABILITIES, ...SPINDLE_STT_HOST_CAPABILITIES, ...SPINDLE_SYSTEM_AUDIO_HOST_CAPABILITIES,
+        ...CLIENT_HOST_CAPABILITIES,
         'frontend-session-origin-v1': 1,
       }),
       extensionInstallationId: extensionId,
@@ -1460,6 +1464,7 @@ async function doLoadFrontendExtension(
 
     const baseContext: FrontendExtensionContextBase = {
       host,
+      client: createFrontendClientAPI(assertFrontendActive),
       theme: createNativeThemeAuthoringAPI(
         assertFrontendActive,
         (member) => assertCanonicalPermission('app_manipulation', member),

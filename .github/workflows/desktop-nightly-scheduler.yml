@@ -1,0 +1,28 @@
+name: Schedule Nightly Bundled Desktop Release
+
+# GitHub evaluates cron only on the default branch. Keep this scheduler on
+# main and merge it back into staging; the actual release runs on staging.
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+concurrency:
+  group: desktop-nightly-scheduler
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Queue bundled nightly from staging
+    runs-on: ubuntu-22.04
+    steps:
+      # Build Desktop already exists on main, so GitHub can discover its
+      # workflow_dispatch entry point while loading its implementation from staging.
+      - name: Dispatch bundled release workflow on staging
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh workflow run desktop-build.yml --ref staging --field bundled_nightly=true

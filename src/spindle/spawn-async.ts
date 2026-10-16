@@ -27,6 +27,8 @@ export interface SpawnAsyncResult {
   stderr: string;
   /** True if the process was aborted due to timeoutMs. */
   timedOut: boolean;
+  /** Present when the OS terminated the child with a signal. */
+  signalCode?: string;
 }
 
 export interface SpawnAsyncOptions {
@@ -147,6 +149,7 @@ export async function spawnAsync(
       stdout: stdoutText,
       stderr: stderrText,
       timedOut: false,
+      ...(proc.signalCode ? { signalCode: proc.signalCode } : {}),
     };
   } catch (err: any) {
     const timedOut = didTimeOut();

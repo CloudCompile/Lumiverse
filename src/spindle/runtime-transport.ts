@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 
 import { env } from "../env";
 import { bunCmd } from "../utils/bun-cmd";
+import { encodeSubprocessMessage, readSubprocessMessages } from "../utils/subprocess-messages";
 
 export type RuntimeTransportMode = "worker" | "process" | "sandbox";
 
@@ -20,6 +21,7 @@ export interface CreateRuntimeTransportOptions {
   repoPath: string;
   storagePath: string;
   mode?: RuntimeTransportMode;
+  processTransport?: "ipc" | "stdio";
   onMessage: (message: unknown) => void;
   onError: (message: string) => void;
   onExit: (exitCode: number | null, signalCode: number | null, error?: Error | undefined) => void;
@@ -128,6 +130,7 @@ function buildRestrictedEnv(): Record<string, string | undefined> {
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
+    "LUMIVERSE_BUNDLE_READY_TOKEN",
     // SSH agent socket (could be used for key exfil)
     "SSH_AUTH_SOCK",
     "SSH_AGENT_LAUNCHER",
@@ -146,7 +149,10 @@ function createSubprocessTransport(
   opts: CreateRuntimeTransportOptions,
   mode: Extract<RuntimeTransportMode, "process" | "sandbox">
 ): RuntimeTransport {
-  const runtimeCmd = bunCmd(opts.runtimePath, "--spindle-subprocess");
+  // Bun's Windows IPC can lose messages when a subprocess exits immediately.
+  // Match the database runner's pipe transport on Windows.
+  const pipes = (opts.processTransport ?? (process.platform === "win32" ? "stdio" : "ipc")) === "stdio";
+  const runtimeCmd = bunCmd(opts.runtimePath, "--spindle-subprocess", ...(pipes ? ["--spindle-stdio"] : []));
   const sandboxExecPath = "/usr/bin/sandbox-exec";
   const sandboxAvailable =
     mode === "sandbox" && process.platform === "darwin" && existsSync(sandboxExecPath);
@@ -161,27 +167,35 @@ function createSubprocessTransport(
       ]
     : runtimeCmd;
 
-  const proc = Bun.spawn({
+  let outputDrained: Promise<void> = Promise.resolve();
+  const launch = {
     cmd,
     env: buildRestrictedEnv(),
-    stdin: "ignore",
-    stdout: "inherit",
-    stderr: "inherit",
-    serialization: "advanced",
-    ipc(message) {
-      opts.onMessage(message);
+    stderr: "inherit" as const,
+    onExit(_subprocess: ReturnType<typeof Bun.spawn>, exitCode: number | null, signalCode: number | null, error?: Error) {
+      if (pipes) void outputDrained.then(() => opts.onExit(exitCode, signalCode, error));
+      else opts.onExit(exitCode, signalCode, error);
     },
-    onExit(subprocess, exitCode, signalCode, error) {
-      void subprocess;
-      opts.onExit(exitCode, signalCode, error);
-    },
-  });
+  };
+  const proc = pipes
+    ? Bun.spawn({ ...launch, stdin: "pipe", stdout: "pipe" })
+    : Bun.spawn({ ...launch, stdin: "ignore", stdout: "inherit", serialization: "advanced", ipc: opts.onMessage });
+  if (pipes) {
+    outputDrained = readSubprocessMessages(proc.stdout as ReadableStream<Uint8Array>, opts.onMessage).catch((error) => {
+      opts.onError(`Extension transport failed: ${String(error)}`);
+      proc.kill();
+    });
+  }
 
   return {
     mode: effectiveMode,
     pid: proc.pid,
     postMessage(message: unknown): void {
-      proc.send(message);
+      if (pipes) {
+        const input = proc.stdin as Bun.FileSink;
+        input.write(encodeSubprocessMessage(message));
+        void Promise.resolve(input.flush()).catch((error) => opts.onError(`Extension transport failed: ${String(error)}`));
+      } else proc.send(message);
     },
     terminate(force = false): void {
       proc.kill(force ? "SIGKILL" : "SIGTERM");

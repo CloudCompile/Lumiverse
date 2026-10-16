@@ -254,6 +254,23 @@ export default function LoginPage() {
               </div>
             </motion.div>
 
+            <details className={styles.passwordRecovery}>
+              <summary className={styles.passwordRecoveryToggle}>{t('forgotPassword')}</summary>
+              <div className={styles.passwordRecoveryInstructions}>
+                <p>{t('passwordRecovery.ownerOnly')}</p>
+                <ol>
+                  <li>{t('passwordRecovery.openTerminal')}</li>
+                  <li>
+                    {t('passwordRecovery.runCommand')}
+                    <pre className={styles.passwordRecoveryCommand}><code>bun run reset-password</code></pre>
+                  </li>
+                  <li>{t('passwordRecovery.newPassword')}</li>
+                  <li>{t('passwordRecovery.signIn')}</li>
+                </ol>
+                <p>{t('passwordRecovery.otherAccounts')}</p>
+              </div>
+            </details>
+
             {visibleError && (
               <motion.div
                 className={styles.error}

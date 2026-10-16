@@ -24,6 +24,12 @@ bun run diagnose
 
 ## Scripts
 
+- `node check-message-preview.mjs`
+  Exercises the real native message-preview surface, display hooks, resolver registry and regex pipeline with controlled store/HTTP boundaries. Covers owned resolvers and backend display regex, exact source ranges, swipe changes, disabled regex actions, HTML-island disclosures, navigation, source removal and remount. Runs desktop and notched-iPhone-sized layouts in Chromium and WebKit without a live server, credentials or personal data. `PREVIEW_BROWSERS` selects engines; `PLAYWRIGHT_MODULE` can point to an existing installation. Pass `--serve` for a human-review fixture. This does not emulate a physical installed PWA or substitute for the required human live-environment audit.
+
+- `node check-drawer-width.mjs`
+  Exercises the real sidebar width settings controls in the settings layout with controlled persisted state. Checks Default/Custom selection, clearing drag overrides, pointer and keyboard slider input, range boundaries, close/reopen and reload persistence, and containment below the canonical safe-top area. Runs desktop and notched-iPhone-sized viewports at UI scales 1 and 1.25 in Chromium, Firefox and WebKit. No server or personal settings are used. Set `DRAWER_WIDTH_BROWSERS=chromium` for one engine; `PLAYWRIGHT_MODULE` can point to an existing Playwright installation. This checks the settings surface; it does not run the full drawer or emulate a physical installed PWA.
+
 - `node check-spindle-touch-scroll.mjs`
   Audits the real installed-iOS document guard and Spindle widget policy with synthetic touch events in Chromium, Firefox and WebKit, at desktop and notched-iPhone viewport sizes. Checks default guarding, opt-in, isolation from core and nested widgets, shadow content, reversal and root teardown. No server, credentials or user data. `PLAYWRIGHT_MODULE` can point to an existing Playwright installation. This tests cancellation decisions, not physical installed-PWA scrolling.
 
@@ -52,6 +58,13 @@ bun run diagnose
   with no server or login required. Install the frontend dependencies and run
   `bun x playwright install chromium firefox webkit` here first. Set
   `UI_SCALE_BROWSERS=chromium` to run one engine. See [UI scaling](../../developer-docs/docs/frontend-api/ui-scaling.md).
+- `node check-expanded-editor-caret.mjs`
+  Checks the real expanded editor with font scales 0.85–2, combined UI scaling,
+  desktop/mobile widths, highlighted/plain text, and inline/modal layouts in
+  Chromium, Firefox and WebKit. Verifies matching wrapping widths, native caret
+  placement and typing after scrolling, including live scale and content changes.
+  No server or login required. Set `EDITOR_BROWSERS=webkit` or pass
+  `--browsers=webkit` to focus on the macOS desktop engine.
 - `bun run diagnose`
   Captures general chat scroll and virtualization stats on the busiest recent chat.
 - `bun run diagnose:spindle`

@@ -6,6 +6,7 @@ import { EventType } from "../ws/events";
 import * as connectionsSvc from "./connections.service";
 import * as chatsSvc from "./chats.service";
 import * as presetsSvc from "./presets.service";
+import * as presetProfilesSvc from "./preset-profiles.service";
 import * as settingsSvc from "./settings.service";
 import * as personasSvc from "./personas.service";
 import {
@@ -115,7 +116,8 @@ import {
   yieldToEventLoop,
 } from "../llm/stream-utils";
 import { getMcpClientManager } from "./mcp-client-manager";
-import { parseMcpToolName } from "./council/mcp-tools";
+import { getMcpInlineTools, parseMcpToolName } from "./council/mcp-tools";
+import { toProviderToolName } from "../llm/tool-name";
 import {
   buildCouncilMemberContext,
   getCouncilToolExecution,
@@ -648,23 +650,12 @@ function enrichUnauthenticatedConnectionError(
   );
 }
 
-function parseInlineToolCallName(
-  name: string,
-): { memberIdPrefix: string; qualifiedName: string } | null {
-  const splitIdx = name.indexOf("_");
-  if (splitIdx <= 0 || splitIdx >= name.length - 1) return null;
-  return {
-    memberIdPrefix: name.slice(0, splitIdx),
-    qualifiedName: name.slice(splitIdx + 1),
-  };
-}
-
 async function executeInlineCouncilToolCalls(
   userId: string,
   toolCalls: ToolCallResult[],
   timeoutMs: number,
   toolsByName: Map<string, RuntimeCouncilToolDefinition>,
-  membersByPrefix: Map<string, CouncilMember> | undefined,
+  membersByToolName: Map<string, CouncilMember> | undefined,
   contextMessages: LlmMessage[],
   allowDirectWebSearch = false,
 ): Promise<InlineCouncilToolResult[]> {
@@ -672,35 +663,12 @@ async function executeInlineCouncilToolCalls(
   let directWebSearchExecuted = false;
 
   for (const toolCall of toolCalls) {
-    // Try Council-prefixed tool name first (memberIdPrefix_toolName)
-    const parsedName = parseInlineToolCallName(toolCall.name);
-    let tool: RuntimeCouncilToolDefinition | undefined;
-    let member: CouncilMember | undefined;
-    let resolvedQualifiedName = toolCall.name;
-    let isCouncilQualifiedCall = false;
-
-    if (parsedName) {
-      const { memberIdPrefix, qualifiedName } = parsedName;
-      const candidateTool = toolsByName.get(qualifiedName);
-      const candidateMember = membersByPrefix?.get(memberIdPrefix);
-      // A direct tool may itself contain an underscore (web_search). Treat it
-      // as Council-qualified only when both the member prefix and tool match.
-      if (candidateTool && candidateMember) {
-        tool = candidateTool;
-        member = candidateMember;
-        resolvedQualifiedName = qualifiedName;
-        isCouncilQualifiedCall = true;
-      }
-    }
-
-    // Fall back to direct lookup — extension inline tools use the sanitized
-    // name directly (extensionId__toolName) without a member prefix.
-    if (!tool) {
-      tool = toolsByName.get(toolCall.name);
-      resolvedQualifiedName = toolCall.name;
-    }
-
+    // Resolve the exact advertised alias; sanitization is not reversible.
+    const tool = toolsByName.get(toolCall.name);
     if (!tool) continue;
+    const member = membersByToolName?.get(toolCall.name);
+    const resolvedQualifiedName = tool.name;
+    const isCouncilQualifiedCall = !!member;
     const isDirectWebSearch =
       !isCouncilQualifiedCall &&
       toolCall.name === INLINE_WEB_SEARCH_TOOL_NAME &&
@@ -1051,6 +1019,7 @@ async function runPromptPipeline(opts: {
   councilToolResults?: any[];
   councilNamedResults?: Record<string, string>;
   councilHistoricalDeliberationBlock?: string;
+  mcpTools?: ToolDefinition[];
   precomputedVectorEntries?: VectorActivatedEntry[];
   regenFeedback?: string;
   regenFeedbackPosition?: "system" | "user";
@@ -1141,6 +1110,8 @@ async function runPromptPipeline(opts: {
       councilToolResults: opts.councilToolResults,
       councilNamedResults: opts.councilNamedResults,
       councilHistoricalDeliberationBlock: opts.councilHistoricalDeliberationBlock,
+      // Snapshot the main process's connections before sending to a worker.
+      mcpTools: opts.mcpTools ?? getMcpInlineTools(opts.userId).map((tool) => tool.definition),
       precomputedVectorEntries: opts.precomputedVectorEntries,
       regenFeedback: opts.regenFeedback,
       regenFeedbackPosition: opts.regenFeedbackPosition,
@@ -2061,9 +2032,33 @@ export async function startGeneration(
         let inlineToolDefsByName:
           | Map<string, RuntimeCouncilToolDefinition>
           | undefined;
-        let inlineMembersByPrefix: Map<string, CouncilMember> | undefined;
+        let inlineMembersByToolName: Map<string, CouncilMember> | undefined;
         let inlineWebSearchEnabled = false;
         let precomputedVectorEntries: VectorActivatedEntry[] | undefined;
+
+        // Use the same preset selection as prompt assembly so profile bindings
+        // cannot make native tools disagree with their prompt description.
+        const requestedPresetId = input.preset_id || connection.preset_id || null;
+        const inlinePresetId = isNoPresetChatMetadata(chat?.metadata)
+          ? null
+          : input.force_preset_id && input.preset_id
+            ? input.preset_id
+            : presetProfilesSvc.resolveProfile(
+                input.userId,
+                requestedPresetId,
+                input.chat_id,
+                targetCharId ?? null,
+                {
+                  isGroup: chat?.metadata?.group === true,
+                  connectionId: connection.id,
+                  personaId: resolvedPersona?.id ?? null,
+                },
+              ).preset_id;
+        const inlinePreset = inlinePresetId
+          ? await presetsSvc.getPresetAsync(input.userId, inlinePresetId)
+          : null;
+        const inlineFunctionCallingEnabled =
+          inlinePreset?.prompts?.completionSettings?.enableFunctionCalling !== false;
 
         // Council is active when enabled with members. Tools run if any member has tools assigned.
         const councilActive =
@@ -2078,15 +2073,10 @@ export async function startGeneration(
             // Inline mode requires enableFunctionCalling in the preset's completion
             // settings — the tools are registered as native function calls with the
             // primary LLM. Sidecar mode has no such requirement.
-            const presetId = input.preset_id || connection.preset_id;
-            const preset = presetId
-              ? (await presetsSvc.getPresetAsync(input.userId, presetId))
-              : null;
-            const completionSettings = preset?.prompts?.completionSettings;
-            if (completionSettings?.enableFunctionCalling === false) {
+            if (!inlineFunctionCallingEnabled) {
               console.warn(
                 "[council] Inline tools skipped: enableFunctionCalling is disabled in preset '%s'",
-                preset?.name,
+                inlinePreset?.name,
               );
             } else {
               const availableTools = await getAvailableTools(input.userId);
@@ -2098,9 +2088,8 @@ export async function startGeneration(
                 string,
                 RuntimeCouncilToolDefinition
               >();
-              inlineMembersByPrefix = new Map<string, CouncilMember>();
+              inlineMembersByToolName = new Map<string, CouncilMember>();
               for (const member of activeMembers) {
-                inlineMembersByPrefix.set(member.id.slice(0, 8), member);
                 for (const toolName of member.tools) {
                   const toolDef = availableTools.find(
                     (t) => t.name === toolName,
@@ -2117,9 +2106,11 @@ export async function startGeneration(
                   );
                   if (!argsSchema) continue;
 
-                  inlineToolDefsByName.set(toolDef.name, toolDef);
+                  const alias = toProviderToolName(`${member.id.slice(0, 8)}_${toolDef.name}`);
+                  inlineToolDefsByName.set(alias, toolDef);
+                  inlineMembersByToolName.set(alias, member);
                   inlineTools.push({
-                    name: `${member.id.slice(0, 8)}_${toolDef.name}`,
+                    name: alias,
                     description: `[${member.itemName}${member.role ? ` - ${member.role}` : ""}] ${toolDef.description}`,
                     parameters: argsSchema,
                     strict: toolDef.strict ?? true,
@@ -2130,7 +2121,7 @@ export async function startGeneration(
               if (inlineTools.length === 0) {
                 inlineTools = undefined;
                 inlineToolDefsByName = undefined;
-                inlineMembersByPrefix = undefined;
+                inlineMembersByToolName = undefined;
               }
             }
           } else {
@@ -2493,12 +2484,7 @@ export async function startGeneration(
             ? toolRegistry.getInlineAvailableTools()
             : [];
         if (extensionInlineTools.length > 0) {
-          const presetId = input.preset_id || connection.preset_id;
-          const preset = presetId
-            ? (await presetsSvc.getPresetAsync(input.userId, presetId))
-            : null;
-          const completionSettings = preset?.prompts?.completionSettings;
-          if (completionSettings?.enableFunctionCalling !== false) {
+          if (inlineFunctionCallingEnabled) {
             if (!inlineTools) inlineTools = [];
             if (!inlineToolDefsByName)
               inlineToolDefsByName = new Map<
@@ -2536,21 +2522,29 @@ export async function startGeneration(
           }
         }
 
+        // Connected MCP tools are callable even when no Council is configured.
+        if (genType !== "impersonate" && inlineFunctionCallingEnabled) {
+          const mcpTools = getMcpInlineTools(input.userId);
+          if (mcpTools.length > 0) {
+            inlineTools ??= [];
+            inlineToolDefsByName ??= new Map<string, RuntimeCouncilToolDefinition>();
+            for (const { definition, runtimeDefinition } of mcpTools) {
+              inlineTools.push(definition);
+              inlineToolDefsByName.set(definition.name, runtimeDefinition);
+            }
+          }
+        }
+
         // ── Built-in Inline Web Search (independent of Council) ──────────
         // This is intentionally separate from the preset's Google-native
         // grounding option. It uses the user's configured web-search
         // provider and is only offered when both web search and function
         // calling are explicitly available.
         if (genType !== "impersonate") {
-          const presetId = input.preset_id || connection.preset_id;
-          const preset = presetId
-            ? (await presetsSvc.getPresetAsync(input.userId, presetId))
-            : null;
-          const completionSettings = preset?.prompts?.completionSettings;
           const webSearchSettings = await getWebSearchSettings(input.userId);
           const configured = webSearchSettings.enabled && !!webSearchSettings.apiUrl &&
             (webSearchSettings.provider === "searxng" || webSearchSettings.hasApiKey);
-          if (configured && webSearchSettings.inlineToolEnabled && completionSettings?.enableFunctionCalling !== false) {
+          if (configured && webSearchSettings.inlineToolEnabled && inlineFunctionCallingEnabled) {
             if (!inlineTools) inlineTools = [];
             if (!inlineToolDefsByName) {
               inlineToolDefsByName = new Map<string, RuntimeCouncilToolDefinition>();
@@ -2728,6 +2722,9 @@ export async function startGeneration(
             targetCharacterId: pipelineTargetCharId,
             councilToolResults,
             councilNamedResults,
+            mcpTools: inlineTools?.filter((tool) =>
+              inlineToolDefsByName?.get(tool.name)?.execution === "mcp",
+            ) ?? [],
             councilHistoricalDeliberationBlock:
               councilResult?.historicalDeliberationBlock,
             precomputedVectorEntries,
@@ -2895,7 +2892,7 @@ export async function startGeneration(
           abortController.signal,
           inlineTools,
           inlineToolDefsByName,
-          inlineMembersByPrefix,
+          inlineMembersByToolName,
           inlineWebSearchEnabled,
           councilSettings.toolsSettings.timeoutMs,
           pipeline.assistantPrefill,
@@ -3180,7 +3177,7 @@ async function runGeneration(
   signal: AbortSignal,
   tools?: ToolDefinition[],
   inlineToolDefsByName?: Map<string, RuntimeCouncilToolDefinition>,
-  inlineMembersByPrefix?: Map<string, CouncilMember>,
+  inlineMembersByToolName?: Map<string, CouncilMember>,
   inlineWebSearchEnabled = false,
   inlineToolTimeoutMs?: number,
   assistantPrefill?: string,
@@ -3837,7 +3834,7 @@ async function runGeneration(
               pendingToolCalls,
               inlineMcpTimeoutMs,
               inlineToolDefsByName,
-              inlineMembersByPrefix,
+              inlineMembersByToolName,
               inlineContextMessages,
               inlineWebSearchEnabled && !inlineWebSearchUsed,
             )

@@ -56,6 +56,7 @@ export interface DatabaseExecutionFailure {
 }
 export type DatabaseHostMessage =
   | { type: "execute"; requestId: string; operation: DatabaseOperation }
+  | { type: "start-background" }
   | { type: "shutdown" };
 export type DatabaseChildMessage =
   | { type: "ready" }

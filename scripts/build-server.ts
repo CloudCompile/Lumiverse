@@ -1,0 +1,134 @@
+#!/usr/bin/env bun
+import { createHash } from "node:crypto";
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import type { ServerBundleManifest } from "../src/runtime/bundle";
+import { stageIntelLanceDb } from "./lancedb-macos-native";
+
+const ROOT = resolve(import.meta.dir, "..");
+
+async function run(cmd: string[], cwd: string): Promise<void> {
+  const process = Bun.spawn(cmd, { cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
+  if (await process.exited !== 0) throw new Error(`Build step failed: ${cmd.join(" ")}`);
+}
+
+function git(...args: string[]): string {
+  const child = Bun.spawnSync(["git", ...args], { cwd: ROOT, stdout: "pipe", stderr: "ignore" });
+  return child.exitCode === 0 ? child.stdout.toString().trim() : "unknown";
+}
+
+/** Resolve symlinks into regular archive entries, including Windows native libraries. */
+export function collectBundleFiles(root: string): { files: Record<string, Uint8Array>; executableFiles: string[] } {
+  root = realpathSync(root);
+  const files: Record<string, Uint8Array> = Object.create(null);
+  const executableFiles: string[] = [];
+  const visit = (directory: string, ancestors: Set<string>) => {
+    const canonical = realpathSync(directory);
+    if (ancestors.has(canonical)) throw new Error(`Cyclic directory in server payload: ${directory}`);
+    const next = new Set(ancestors).add(canonical);
+    for (const entry of readdirSync(directory).sort()) {
+      const path = join(directory, entry);
+      const actual = realpathSync(path);
+      if (actual !== root && !actual.startsWith(root + sep)) throw new Error(`Server payload links outside its staging directory: ${path}`);
+      const stat = statSync(path);
+      if (stat.isDirectory()) visit(path, next);
+      else if (stat.isFile()) {
+        const name = relative(root, path).split(sep).join("/");
+        // Bun 1.4.2 archives file-backed Blob entries as empty files. Materialize
+        // bytes before creating the archive; native binaries must survive exactly.
+        files[name] = readFileSync(path);
+        if (stat.mode & 0o111) executableFiles.push(name);
+      } else throw new Error(`Unsupported file in server payload: ${path}`);
+    }
+  };
+  visit(root, new Set());
+  return { files, executableFiles };
+}
+
+export async function writeBundleArchive(path: string, files: Record<string, Uint8Array>): Promise<void> {
+  // Bun.write(Archive) writes an uncompressed tar on 1.4.2 even when compress
+  // was requested. bytes() honors compression and is covered by a round-trip test.
+  await Bun.write(path, await new Bun.Archive(files, { compress: "gzip", level: 6 }).bytes());
+}
+
+async function build(): Promise<void> {
+  const args = process.argv.slice(2);
+  let outfile: string | undefined;
+  let skipFrontend = false;
+  let offline = false;
+  let intelLanceDbDirectory = join(ROOT, "dist/native/lancedb-darwin-x64");
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--outfile" && args[i + 1]) outfile = resolve(args[++i]!);
+    else if (args[i] === "--skip-frontend-build") skipFrontend = true;
+    else if (args[i] === "--offline") offline = true;
+    else if (args[i] === "--lancedb-native-dir" && args[i + 1]) intelLanceDbDirectory = resolve(args[++i]!);
+    else throw new Error(`Unknown build option: ${args[i]}`);
+  }
+  if (!["darwin", "linux", "win32"].includes(process.platform) || !["x64", "arm64"].includes(process.arch)) throw new Error("Unsupported bundled server platform.");
+  if (process.platform === "darwin" && process.arch === "x64" && !existsSync(join(intelLanceDbDirectory, "manifest.json"))) {
+    throw new Error("Build the version-matched Intel LanceDB addon first: bun run build:lancedb:macos");
+  }
+  const pkg = await Bun.file(join(ROOT, "package.json")).json();
+  if (Bun.version !== pkg.packageManager.replace("bun@", "")) throw new Error(`Build with ${pkg.packageManager} for a reproducible runtime.`);
+  if (!skipFrontend) await run([process.execPath, "run", "build"], join(ROOT, "frontend"));
+  for (const name of ["index.html", "sw.js"]) if (!existsSync(join(ROOT, "frontend", "dist", name))) throw new Error(`Build the frontend first: missing frontend/dist/${name}`);
+  mkdirSync(join(ROOT, ".tmp"), { recursive: true });
+  const staging = mkdtempSync(join(ROOT, ".tmp", "server-build-"));
+  const app = join(staging, "app");
+  mkdirSync(app);
+  const output = outfile || join(ROOT, "dist", "server", `lumiverse-server-${process.platform}-${process.arch}${process.platform === "win32" ? ".exe" : ""}`);
+  try {
+    for (const name of ["package.json", "bun.lock", "tsconfig.json", "LICENSE.md"]) copyFileSync(join(ROOT, name), join(app, name));
+    mkdirSync(join(app, "runtime"));
+    copyFileSync(process.execPath, join(app, "runtime", process.platform === "win32" ? "bun.exe" : "bun"));
+    await run([process.execPath, "install", "--production", "--frozen-lockfile", "--ignore-scripts", "--backend=copyfile", ...(offline ? ["--offline"] : [])], app);
+    if (process.platform === "darwin" && process.arch === "x64") stageIntelLanceDb(app, intelLanceDbDirectory);
+    // ffmpeg-static uses an install script. Copy an already installed matching
+    // binary when possible; otherwise fetch it at build time, never at launch.
+    const ffmpegName = process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
+    const ffmpegDir = join(app, "node_modules", "ffmpeg-static");
+    const ffmpegPath = join(ffmpegDir, ffmpegName);
+    if (existsSync(ffmpegDir) && !(process.platform === "win32" && process.arch === "arm64")) {
+      const installed = join(ROOT, "node_modules", "ffmpeg-static");
+      const installedPackage = await Bun.file(join(installed, "package.json")).json().catch(() => null);
+      const stagedPackage = await Bun.file(join(ffmpegDir, "package.json")).json();
+      if (installedPackage?.version === stagedPackage.version && existsSync(join(installed, ffmpegName))) {
+        for (const name of readdirSync(installed).filter((name) => name === ffmpegName || name.startsWith(ffmpegName + "."))) copyFileSync(join(installed, name), join(ffmpegDir, name));
+      } else {
+        if (offline) throw new Error("The offline build needs an installed ffmpeg-static binary. Install it or build without --offline.");
+        await run([process.execPath, "install.js"], ffmpegDir);
+      }
+    }
+    cpSync(join(ROOT, "src"), join(app, "src"), { recursive: true, filter: (path) => !/\.(test|spec)\.[cm]?[jt]sx?$/.test(path) && !["test-fixtures", "__tests__"].includes(path.split(sep).at(-1)!) });
+    mkdirSync(join(app, "scripts"));
+    for (const name of ["reset-password.ts", "input.ts", "ui.ts"]) copyFileSync(join(ROOT, "scripts", name), join(app, "scripts", name));
+    cpSync(join(ROOT, "frontend", "dist"), join(app, "frontend", "dist"), { recursive: true });
+    copyFileSync(join(ROOT, "frontend", "package.json"), join(app, "frontend", "package.json"));
+    cpSync(join(ROOT, "user-docs", "docs"), join(app, "user-docs", "docs"), { recursive: true });
+    const { files, executableFiles } = collectBundleFiles(realpathSync(app));
+    const requiredFiles = ["src/index.ts", "src/db/baseline.sql", "src/db/execution-subprocess.ts", "frontend/dist/index.html", "src/runtime/bundled-check.ts", "package.json", `runtime/${process.platform === "win32" ? "bun.exe" : "bun"}`,
+      ...Object.keys(files).filter((path) => /\.(node|dylib|dll|so(?:\.\d+)*)$/.test(path))];
+    console.log(`[bundle] Archiving ${Object.keys(files).length} files for ${process.platform}-${process.arch}...`);
+    const archivePath = join(staging, "payload.tar.gz");
+    await writeBundleArchive(archivePath, files);
+    const payloadSha256 = createHash("sha256").update(await Bun.file(archivePath).bytes()).digest("hex");
+    const manifest: ServerBundleManifest = {
+      format: 1, version: pkg.version, bunVersion: Bun.version, platform: process.platform, arch: process.arch,
+      branch: git("rev-parse", "--abbrev-ref", "HEAD"), commit: git("rev-parse", "--short", "HEAD"),
+      payloadSha256, executableFiles, requiredFiles, ffmpeg: existsSync(ffmpegPath),
+    };
+    await Bun.write(join(staging, "manifest.json"), JSON.stringify(manifest));
+    const entry = join(staging, "launcher.ts");
+    await Bun.write(entry, `import archive from "./payload.tar.gz" with { type: "file" };\nimport manifest from "./manifest.json";\nimport { runBundledServer } from ${JSON.stringify(join(ROOT, "src/runtime/bundled-launcher.ts"))};\ntry { await runBundledServer(archive, manifest as any); } catch (error) { console.error("[bundle]", error instanceof Error ? error.message : error); process.exitCode = 1; }\n`);
+    mkdirSync(dirname(output), { recursive: true });
+    const result = await Bun.build({ entrypoints: [entry], minify: true, sourcemap: "linked",
+      compile: { outfile: output, autoloadDotenv: false, autoloadBunfig: false } });
+    if (!result.success) throw new AggregateError(result.logs, "Server executable compilation failed");
+    const sha256 = createHash("sha256").update(await Bun.file(output).bytes()).digest("hex");
+    await Bun.write(output + ".json", JSON.stringify({ ...manifest, executableFiles: undefined, requiredFiles: undefined, sha256 }, null, 2) + "\n");
+    await Bun.write(output + ".sha256", `${sha256}  ${output.split(sep).at(-1)}\n`);
+    console.log(`[bundle] Built ${output} (${(Bun.file(output).size / 1024 ** 2).toFixed(1)} MiB). Run it with --check to verify the extracted runtime.`);
+  } finally { rmSync(staging, { recursive: true, force: true }); }
+}
+
+if (import.meta.main) await build();

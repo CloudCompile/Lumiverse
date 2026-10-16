@@ -6,6 +6,7 @@ import { getDb } from "../db/connection";
 import { env } from "../env";
 import { provisionUserDirectories } from "./provision";
 import { seedDefaultPreset } from "./default-preset";
+import { requestCookiePolicy } from "./request-cookies";
 import { getAllowedHosts, getAllowedOrigins } from "../services/trusted-hosts.service";
 import { listEnabledSsoAuthConfigs } from "../services/sso-providers.service";
 import {
@@ -83,6 +84,7 @@ export const auth = betterAuth({
   },
   basePath: "/api/auth",
   secret: env.authSecret,
+  hooks: { before: requestCookiePolicy },
   // Dynamic form so that hosts added via the Operator panel (Host-header
   // allowlist) are also accepted by BetterAuth's origin check. A static array
   // would freeze the env-only baseline at module init, which is why newly

@@ -293,6 +293,43 @@ function cloneDenseStringArray(value: unknown): string[] | undefined {
   }
 }
 
+function cloneDenseNumberPair(value: unknown): [number, number] | undefined {
+  try {
+    if (!Array.isArray(value)) return undefined
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+    if (
+      !lengthDescriptor
+      || !Object.hasOwn(lengthDescriptor, 'value')
+      || lengthDescriptor.value !== 2
+    ) return undefined
+    const ownKeys = Reflect.ownKeys(value)
+    if (ownKeys.length !== 3) return undefined
+    for (const key of ownKeys) {
+      if (key === 'length' || key === '0' || key === '1') continue
+      return undefined
+    }
+    const first = Object.getOwnPropertyDescriptor(value, '0')
+    const second = Object.getOwnPropertyDescriptor(value, '1')
+    if (
+      !first
+      || !first.enumerable
+      || !Object.hasOwn(first, 'value')
+      || typeof first.value !== 'number'
+      || !Number.isFinite(first.value)
+      || Object.is(first.value, -0)
+      || !second
+      || !second.enumerable
+      || !Object.hasOwn(second, 'value')
+      || typeof second.value !== 'number'
+      || !Number.isFinite(second.value)
+      || Object.is(second.value, -0)
+    ) return undefined
+    return [first.value, second.value]
+  } catch {
+    return undefined
+  }
+}
+
 function clonePublicPromptVariableValues(
   value: unknown,
 ): SpindlePresetEditorExtensionState['promptVariableValues'] {
@@ -345,7 +382,12 @@ function clonePublicPromptVariableValues(
           clonedValue = valueDescriptor.value
         } else {
           const clonedArray = cloneDenseStringArray(valueDescriptor.value)
-          if (clonedArray !== undefined) clonedValue = clonedArray
+          if (clonedArray !== undefined) {
+            clonedValue = clonedArray
+          } else {
+            const clonedPair = cloneDenseNumberPair(valueDescriptor.value)
+            if (clonedPair !== undefined) clonedValue = clonedPair
+          }
         }
         if (clonedValue === undefined) continue
         Object.defineProperty(bucketOutput, name, {

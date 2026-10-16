@@ -81,6 +81,16 @@ const MockRangeSlider = (props: MockRangeSliderProps) => {
   rangeSliderProps = props
   return null
 }
+type MockDualRangeSliderProps = {
+  value: [number, number]
+  onCommit?: (value: [number, number]) => unknown
+  onDragValue?: (value: [number, number] | null) => unknown
+}
+let dualRangeSliderProps: MockDualRangeSliderProps | null = null
+const MockDualRangeSlider = (props: MockDualRangeSliderProps) => {
+  dualRangeSliderProps = props
+  return null
+}
 type MockSearchableSelectProps = {
   multi?: boolean
   value: string | string[]
@@ -151,7 +161,12 @@ mock.module('@/components/shared/FormComponents', () => ({ TextInput: MockTextIn
 mock.module('@/components/shared/FormComponents.module.css', () => ({ default: {} }))
 mock.module('@/components/shared/NumericInput', () => ({ default: MockNumericInput }))
 mock.module('@/components/shared/NumberStepper', () => ({ default: MockNumberStepper }))
-mock.module('@/components/shared/RangeSlider', () => ({ RangeSlider: MockRangeSlider, LabeledRangeSlider: MockRangeSlider }))
+mock.module('@/components/shared/RangeSlider', () => ({
+  RangeSlider: MockRangeSlider,
+  LabeledRangeSlider: MockRangeSlider,
+  DualRangeSlider: MockDualRangeSlider,
+  LabeledDualRangeSlider: MockDualRangeSlider,
+}))
 mock.module('@/components/shared/Toggle', () => ({ Toggle: { Checkbox: MockCheckbox, Switch: MockSwitch } }))
 mock.module('@/components/shared/Badge', () => ({ Badge: NullComponent }))
 mock.module('@/components/shared/Spinner', () => ({ Spinner: NullComponent }))
@@ -1130,6 +1145,28 @@ describe('public component bridge lifecycle and ownership', () => {
     flushSync(() => handle.update({ disabled: true }))
     expect(rangeSliderProps?.value).toBe(60)
     expect(handle.getValue()).toBe(60)
+    handle.destroy()
+  })
+
+  test('commits callback-free dual-range edits through the handle and detaches tuple snapshots', () => {
+    const root = ownedRoot('bridge-callback-free-dual-range', 'callback-free-dual-range-target')
+    const handle = createComponentsHelper(
+      'bridge-callback-free-dual-range',
+      'bridge-callback-free-dual-range',
+      async () => ({ categories: [] }),
+      generation,
+    ).mountDualRangeSlider(root, { value: [20, 80], min: 0, max: 100, step: 5 })
+
+    expect(dualRangeSliderProps?.value).toEqual([20, 80])
+    flushSync(() => dualRangeSliderProps?.onCommit?.([35, 65]))
+    const read = handle.getValue()
+    expect(read).toEqual([35, 65])
+    read[0] = 99
+    expect(handle.getValue()).toEqual([35, 65])
+
+    flushSync(() => handle.update({ min: 40, max: 60 }))
+    expect(dualRangeSliderProps?.value).toEqual([40, 60])
+    expect(handle.getValue()).toEqual([40, 60])
     handle.destroy()
   })
 

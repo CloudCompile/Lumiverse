@@ -1,4 +1,5 @@
 import { isTermuxLikeEnvironment } from "../utils/termux";
+import { isAbsolute } from "node:path";
 
 let resolvedFfmpegBinary: string | null | undefined;
 let inflightResolution: Promise<string | null> | null = null;
@@ -7,6 +8,7 @@ interface ResolveFfmpegDeps {
   isTermuxLike?: () => boolean;
   canExecuteBinary?: (binary: string) => Promise<boolean>;
   loadStaticBinaryPath?: () => Promise<string | null>;
+  bundledBinaryPath?: string | null;
 }
 
 async function canExecuteBinary(binary: string): Promise<boolean> {
@@ -35,6 +37,8 @@ async function resolveFfmpegBinaryUncached(deps: ResolveFfmpegDeps): Promise<str
   const termux = deps.isTermuxLike?.() ?? isTermuxLikeEnvironment();
   const probe = deps.canExecuteBinary ?? canExecuteBinary;
   const loadStatic = deps.loadStaticBinaryPath ?? loadStaticBinaryPath;
+  const bundled = deps.bundledBinaryPath === undefined ? process.env.LUMIVERSE_FFMPEG_PATH?.trim() : deps.bundledBinaryPath;
+  if (bundled) return isAbsolute(bundled) && await probe(bundled) ? bundled : null;
 
   if (await probe("ffmpeg")) return "ffmpeg";
   if (termux) return null;
@@ -45,7 +49,7 @@ async function resolveFfmpegBinaryUncached(deps: ResolveFfmpegDeps): Promise<str
 }
 
 export async function resolveFfmpegBinary(deps?: ResolveFfmpegDeps): Promise<string | null> {
-  if (deps?.isTermuxLike || deps?.canExecuteBinary || deps?.loadStaticBinaryPath) {
+  if (deps?.isTermuxLike || deps?.canExecuteBinary || deps?.loadStaticBinaryPath || deps?.bundledBinaryPath !== undefined) {
     return resolveFfmpegBinaryUncached(deps);
   }
   if (resolvedFfmpegBinary !== undefined) return resolvedFfmpegBinary;

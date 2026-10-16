@@ -1036,6 +1036,7 @@ function isPromptVariableDef(value: unknown): value is PromptVariableDef {
     case "textarea":
     case "number":
     case "slider":
+    case "range":
     case "switch":
       return true;
     case "select":
@@ -1064,6 +1065,17 @@ function adaptPromptVariableSelection(
       const max = "max" in updatedDef && typeof updatedDef.max === "number" ? updatedDef.max : undefined;
       return Math.min(max ?? Infinity, Math.max(min ?? -Infinity, value));
     }
+    case "range": {
+      if (updatedDef.type !== "range" || !Array.isArray(value) || value.length !== 2) return undefined;
+      const start = Number(value[0]);
+      const end = Number(value[1]);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return undefined;
+      const clampedStart = Math.min(updatedDef.max, Math.max(updatedDef.min, start));
+      const clampedEnd = Math.min(updatedDef.max, Math.max(updatedDef.min, end));
+      return clampedStart <= clampedEnd
+        ? [clampedStart, clampedEnd]
+        : [clampedEnd, clampedStart];
+    }
     case "switch":
       return value === 0 || value === 1 ? value : undefined;
     case "select": {
@@ -1081,7 +1093,7 @@ function adaptPromptVariableSelection(
   }
 }
 
-function promptVariableFamily(type: PromptVariableDef["type"]): "text" | "number" | "switch" | "select" | "multiselect" {
+function promptVariableFamily(type: PromptVariableDef["type"]): "text" | "number" | "range" | "switch" | "select" | "multiselect" {
   if (type === "text" || type === "textarea") return "text";
   if (type === "number" || type === "slider") return "number";
   return type;

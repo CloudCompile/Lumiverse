@@ -17,8 +17,10 @@ Please also review the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 Clone the repo from GitHub. Do **not** use a general-release source archive as
 the server checkout; those archives are not the supported update path. The
-separately tagged `desktop-v*` releases contain prebuilt desktop installers,
-but the desktop companion still needs this checkout to run the local server.
+separately tagged `desktop-v*` releases contain self-contained desktop installers
+with the local server included. They also support remote instances and existing
+checkouts. See the [bundled desktop update guide](developer-docs/docs/getting-started/desktop-updates.md)
+for stable and nightly release channels.
 
 ```bash
 git clone https://github.com/prolix-oc/Lumiverse.git
@@ -46,7 +48,14 @@ git pull --ff-only
 
 ## Quick Start
 
-All commands below assume you have already cloned the repo and are working from the branch you want to run.
+**Experimental bundled desktop:** stable and nightly releases include Bun, the
+server, and the frontend. First launch offers a built-in server, an existing
+checkout, or a remote instance. Built-in setup uses a three-step wizard in a
+native Tauri window. The standalone server can also be built locally. See the
+[bundled server guide](developer-docs/docs/getting-started/bundled-server.md)
+for downloads, supported architectures, and testing instructions.
+
+The source commands below assume you have already cloned the repo and are working from the branch you want to run.
 
 ### One-line launch (macOS/Linux)
 
@@ -251,7 +260,9 @@ If you start Lumiverse with `--no-runner`, `-NoRunner`, `bun run start`, or `bun
 with Lumiverse's integrated browser as its primary interface and a macOS menu
 bar / Windows system tray / Linux StatusNotifier icon for controls. It starts
 and stops a local server, shows serving stats, opens the same address in your
-default browser on request, and applies updates through the runner. See
+default browser on request, and updates bundled installations through signed
+stable/nightly desktop releases. Existing checkouts retain the runner's Git
+updates. See
 [desktop/README.md](desktop/README.md) for prebuilt Linux AppImage help and
 development instructions. Prebuilt installers are attached to `desktop-v*`
 releases. To build the companion from this checkout instead, use

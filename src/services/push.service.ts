@@ -9,6 +9,7 @@ import { validateHost, SSRFError } from "../utils/safe-fetch";
 import { clampErrorMessage } from "../utils/provider-errors";
 import { normalizePushNotificationPayload } from "../utils/notification-text";
 import { getSetting } from "./settings.service";
+import { getAPNsInfo, sendAPNsNotification } from "./apns.service";
 import type {
   PushSubscriptionRecord,
   DesktopNotificationDestinationRecord,
@@ -18,6 +19,8 @@ import type {
   DesktopNotificationEnrollment,
   PushPayload,
   PushNotificationPreferences,
+  IOSPushDestinationRecord,
+  CreateIOSPushDestinationInput,
 } from "../types/push";
 
 interface GenerationEndedPushPayload {
@@ -74,8 +77,48 @@ export function listDesktopDestinations(userId: string): DesktopNotificationDest
 }
 
 export function listNotificationDestinations(userId: string): NotificationDestinationRecord[] {
-  return [...listDesktopDestinations(userId), ...listSubscriptions(userId)]
+  return [...listIOSDestinations(userId), ...listDesktopDestinations(userId), ...listSubscriptions(userId)]
     .sort((a, b) => b.created_at - a.created_at);
+}
+
+export function listIOSDestinations(userId: string): IOSPushDestinationRecord[] {
+  return (getDb().query(`SELECT id, user_id, device_id, bundle_id, environment, label, user_agent, created_at, updated_at
+    FROM ios_push_destinations WHERE user_id = ? ORDER BY created_at DESC`).all(userId) as
+    Array<Omit<IOSPushDestinationRecord, "type">>).map(row => ({ ...row, type: "ios_apns" }));
+}
+
+export function createIOSDestination(userId: string, input: CreateIOSPushDestinationInput): IOSPushDestinationRecord {
+  if (!input || typeof input.deviceId !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(input.deviceId)
+    || typeof input.deviceToken !== "string" || !/^[a-fA-F0-9]{32,512}$/.test(input.deviceToken) || input.deviceToken.length % 2 !== 0
+    || !["development", "production"].includes(input.environment)) throw new Error("Invalid iOS push destination");
+  const info = getAPNsInfo();
+  if (!info.configured) throw new Error(info.reason!);
+  if (input.bundleId !== info.bundleId) throw new Error("The app bundle ID does not match this server's APNs configuration");
+  let origin: URL;
+  try { origin = new URL(input.serverOrigin); } catch { throw new Error("Invalid iOS server origin"); }
+  if (!["https:", "http:"].includes(origin.protocol) || origin.origin !== input.serverOrigin || origin.origin.length > 512 || origin.username || origin.password)
+    throw new Error("Invalid iOS server origin");
+  const token = input.deviceToken.toLowerCase(), registeredAt = Date.now(), now = Math.floor(registeredAt / 1000);
+  return getDb().transaction(() => {
+    // A token identifies one installation. Account switching transfers it rather than
+    // leaving the previous account's messages on this phone.
+    getDb().query(`DELETE FROM ios_push_destinations WHERE device_token = ? AND bundle_id = ? AND environment = ?
+      AND (user_id != ? OR device_id != ?)`).run(token, input.bundleId, input.environment, userId, input.deviceId);
+    const existing = getDb().query(`SELECT id FROM ios_push_destinations
+      WHERE user_id = ? AND device_id = ? AND bundle_id = ? AND environment = ?`)
+      .get(userId, input.deviceId, input.bundleId, input.environment) as { id: string } | null;
+    const id = existing?.id || crypto.randomUUID();
+    getDb().query(`INSERT INTO ios_push_destinations
+      (id, user_id, device_id, device_token, bundle_id, environment, server_origin, label, user_agent, created_at, updated_at, registered_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, device_id, bundle_id, environment) DO UPDATE SET
+        device_token = excluded.device_token, server_origin = excluded.server_origin, label = excluded.label,
+        user_agent = excluded.user_agent, updated_at = excluded.updated_at, registered_at = excluded.registered_at`)
+      .run(id, userId, input.deviceId, token, input.bundleId, input.environment, origin.origin,
+        typeof input.label === "string" ? input.label.trim().slice(0, 100) || "Lumiverse iOS" : "Lumiverse iOS",
+        typeof input.userAgent === "string" ? input.userAgent.slice(0, 500) : "", now, now, registeredAt);
+    return listIOSDestinations(userId).find(row => row.id === id)!;
+  })();
 }
 
 function hashDesktopCredential(credential: string): string {
@@ -216,6 +259,7 @@ export function deleteSubscription(userId: string, id: string): boolean {
 
 export function deleteNotificationDestination(userId: string, id: string): boolean {
   if (deleteSubscription(userId, id)) return true;
+  if (getDb().query("DELETE FROM ios_push_destinations WHERE id = ? AND user_id = ?").run(id, userId).changes > 0) return true;
   const deleted = getDb().query(`
     DELETE FROM desktop_notification_destinations WHERE id = ? AND user_id = ?
   `).run(id, userId).changes > 0;
@@ -241,7 +285,9 @@ export async function sendPushToUser(
   const desktopDestinations = listDesktopDestinations(userId).filter(
     (destination) => !options.destinationId || destination.id === options.destinationId,
   );
-  if (subs.length === 0 && desktopDestinations.length === 0) return 0;
+  const iosDestinations = (getDb().query("SELECT * FROM ios_push_destinations WHERE user_id = ?").all(userId) as
+    Array<IOSPushDestinationRecord & { device_token: string; server_origin: string }>).filter(row => !options.destinationId || row.id === options.destinationId);
+  if (subs.length === 0 && desktopDestinations.length === 0 && iosDestinations.length === 0) return 0;
   const normalizedNotification = normalizePushNotificationPayload(notification);
 
   let sent = 0;
@@ -253,7 +299,19 @@ export async function sendPushToUser(
     );
   }
 
-  if (subs.length === 0) return sent;
+  const iosDelivery = Promise.allSettled(iosDestinations.map(async destination => {
+    try {
+      if (!options.bypassPresence && eventBus.isUserVisible(userId)) return;
+      const result = await sendAPNsNotification(destination, normalizedNotification);
+      if (result.sent) sent++;
+      else if (result.invalidatedAt !== undefined) {
+        // A response for an older token must not delete a freshly rotated enrollment.
+        getDb().query(`DELETE FROM ios_push_destinations WHERE id = ? AND device_token = ? AND registered_at <= ?`)
+          .run(destination.id, destination.device_token, result.invalidatedAt);
+      }
+    } catch { console.warn(`[apns] Delivery failed for destination ${destination.id}`); }
+  }));
+  if (subs.length === 0) { await iosDelivery; return sent; }
   const privateJWK = getVapidPrivateJWK();
 
   const results = await Promise.allSettled(
@@ -330,6 +388,7 @@ export async function sendPushToUser(
     })
   );
 
+  await iosDelivery;
   return sent;
 }
 

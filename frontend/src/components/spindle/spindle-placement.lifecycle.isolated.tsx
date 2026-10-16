@@ -287,6 +287,62 @@ test('floating widget leaves child presses untouched until drag intent', () => {
   }
 })
 
+test('floating widget coalesces input, preserves scaled release coordinates, and cancels pending paint on unmount', () => {
+  const entry = consumers('frame-drag').find((consumer) => consumer.name === 'float widget')!
+  unregisterRoots.push(registerLiveRoot(extensionId, entry.root, entry.permission, generation))
+  renderConsumers([entry])
+  runQueuedPaint()
+
+  const surface = document.querySelector<HTMLElement>('[data-consumer="float widget"] > div')!
+  const captured = new Set<number>()
+  surface.setPointerCapture = id => { captured.add(id) }
+  surface.hasPointerCapture = id => captured.has(id)
+  surface.releasePointerCapture = id => { captured.delete(id) }
+  const previousComputedStyle = globalObject.getComputedStyle
+  globalObject.getComputedStyle = domWindow.getComputedStyle.bind(domWindow)
+  document.documentElement.style.setProperty('--lumiverse-ui-scale', '1.25')
+  const commits: Array<{ widgetId: string; x: number; y: number }> = []
+  const onCommit = (event: Event) => commits.push((event as CustomEvent).detail)
+  window.addEventListener('spindle:float-drag-end', onCommit)
+  const pointer = (type: string, x: number, y: number) => flushSync(() => {
+    const target = type === 'pointerdown' ? surface : window
+    target.dispatchEvent(new domWindow.PointerEvent(type, {
+      bubbles: true, pointerId: 1, pointerType: 'touch', isPrimary: true, button: 0, clientX: x, clientY: y,
+    }))
+  })
+  try {
+    pointer('pointerdown', 100, 100)
+    for (let move = 1; move <= 20; move++) pointer('pointermove', 100 + move * 3, 100 + move * 2)
+    expect(surface.style.transform).toBe('translate3d(20px, 20px, 0)')
+    expect(frames.size).toBe(1)
+    expect(commits).toEqual([])
+    runQueuedPaint()
+    expect(surface.style.transform).toBe('translate3d(68px, 52px, 0)')
+    pointer('pointermove', 170, 140)
+    pointer('pointerup', 175, 145)
+    expect(surface.style.transform).toBe('translate3d(80px, 56px, 0)')
+    expect(commits).toEqual([{ widgetId: (entry.props.widget as FloatWidgetState).id, x: 80, y: 56 }])
+    expect(frames.size).toBe(0)
+    expect(captured.size).toBe(0)
+
+    pointer('pointerdown', 100, 100)
+    pointer('pointermove', 120, 120)
+    expect(frames.size).toBe(1)
+    for (const reactRoot of mountedRoots) flushSync(() => reactRoot.unmount())
+    mountedRoots.clear()
+    expect(frames.size).toBe(0)
+    expect(captured.size).toBe(0)
+    pointer('pointermove', 140, 140)
+    expect(frames.size).toBe(0)
+    expect(commits).toHaveLength(1)
+  } finally {
+    window.removeEventListener('spindle:float-drag-end', onCommit)
+    document.documentElement.style.removeProperty('--lumiverse-ui-scale')
+    if (previousComputedStyle === undefined) delete globalObject.getComputedStyle
+    else globalObject.getComputedStyle = previousComputedStyle
+  }
+})
+
 test('floating widget recovers if a keyboard transition swallows the previous touch release', () => {
   const entry = consumers('keyboard-drag').find((consumer) => consumer.name === 'float widget')!
   const widget = entry.props.widget as FloatWidgetState

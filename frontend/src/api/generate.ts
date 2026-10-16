@@ -16,6 +16,7 @@ export interface GenerateRequest {
   persona_id?: string
   persona_addon_states?: Record<string, boolean>
   preset_id?: string
+  /** Explicit override: bypass profile preset selection, block states, and variable values. */
   force_preset_id?: boolean
   message_id?: string
   continue_from?: string

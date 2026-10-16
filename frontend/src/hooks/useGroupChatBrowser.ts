@@ -3,6 +3,7 @@ import { chatsApi } from '@/api/chats'
 import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 import type { GroupedRecentChat } from '@/types/api'
 import type { CharacterSortField, CharacterSortDirection } from '@/types/store'
 
@@ -74,10 +75,12 @@ export function useGroupChatBrowser() {
     const offCreated = wsClient.on(EventType.CHAT_CREATED, refresh)
     const offDeleted = wsClient.on(EventType.CHAT_DELETED, refresh)
     const offUpdated = wsClient.on(EventType.CHAT_UPDATED, refresh)
+    const offImport = subscribeImportedDataRefresh(refresh)
     return () => {
       offCreated()
       offDeleted()
       offUpdated()
+      offImport()
     }
   }, [])
 

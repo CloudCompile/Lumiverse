@@ -174,6 +174,59 @@ afterEach(async () => {
 })
 
 describe('MessageContent inline HTML rendering', () => {
+  test('read-only previews resolve owned display but never deliver tags or activate regex actions', async () => {
+    const { registerTagInterceptor } = await import('@/lib/spindle/message-interceptors')
+    const { REGEX_ACTION_EVENT } = await import('@/lib/regex/actionBus')
+    let delivered = 0
+    let activations = 0
+    const recordAction = () => { activations += 1 }
+    window.addEventListener(REGEX_ACTION_EVENT, recordAction)
+    const disposeTag = registerTagInterceptor('preview-tag-test', 'Preview test', { tagName: 'preview-test' }, () => { delivered += 1 })
+    const payload = { id: 'continue', scriptId: 'preview-rule', instanceId: 'preview-instance', type: 'send', multi_select: false, cost: 1, limit: 0, content: 'Continue', title: '', subtitle: '' }
+    const html = `<div><style>h2{color:purple}</style><h2>Resolved preview</h2><button data-lumiverse-regex-action="${encodeURIComponent(JSON.stringify(payload))}">Continue</button></div>`
+    const source = '<preview-test>source</preview-test>'
+    const bodies: string[] = []
+    const previous = useStore.getState()
+    useStore.setState({
+      activeChatId: 'preview-chat', activeChatDisplayOwner: 'preview-owner',
+      messages: [{ id: 'preview-message', content: source, is_user: false, swipe_id: 0, swipes: [source] }] as any,
+      regexScripts: [{ id: 'preview-rule', name: 'Preview rule', disabled: false, scope: 'global', target: ['display'], placement: ['ai_output'], find_regex: 'source', replace_string: '', flags: 'g', substitute_macros: 'none', trim_strings: [], min_depth: null, max_depth: null, actions: [payload] }] as any,
+    })
+    const disposeResolver = registerDisplayResolver('preview-owner', {
+      ready: () => true,
+      resolveBody: async ({ content }) => { bodies.push(content); return { content: 'processed', processingState: 'preview' } },
+      resolveTemplates: async () => ({ resolved: {} }),
+      applyScripts: async () => ({ content: html }),
+    })
+    try {
+      await act(async () => { root?.render(<MessageContent content={source} isUser={false} userName="Reader" chatId="preview-chat" messageId="preview-message" readOnly />) })
+      for (let attempt = 0; attempt < 40 && !host.querySelector('[data-lumiverse-html-island]')?.shadowRoot?.querySelector('h2'); attempt += 1) {
+        await act(async () => { await new Promise(resolve => setTimeout(resolve, 10)) })
+      }
+      const island = host.querySelector('[data-lumiverse-html-island]')?.shadowRoot
+      expect(bodies).toContain(source)
+      expect(island?.querySelector('h2')?.textContent).toBe('Resolved preview')
+      const action = island?.querySelector<HTMLButtonElement>('button')
+      expect(action?.getAttribute('aria-disabled')).toBe('true')
+      action?.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true, composed: true }))
+      action?.dispatchEvent(new domWindow.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, composed: true }))
+      expect(activations).toBe(0)
+      expect(delivered).toBe(0)
+      setRenderedBodyHeight(1800)
+      await flushLayout()
+      expect(host.querySelector('[data-long-message-toggle]')).toBeNull()
+      expect(useStore.getState().expandedLongMessageKeys).toEqual([])
+    } finally {
+      await act(async () => {
+        root?.unmount()
+        root = null
+        disposeResolver()
+        disposeTag()
+        window.removeEventListener(REGEX_ACTION_EVENT, recordAction)
+        useStore.setState({ activeChatId: previous.activeChatId, activeChatDisplayOwner: previous.activeChatDisplayOwner, messages: previous.messages, regexScripts: previous.regexScripts })
+      })
+    }
+  })
   test('formatting exemption follows the registered owner and is removed on disposal', async () => {
     const resolver = { skipFormattingHealing: true, ready: () => true,
       resolveBody: async () => null, resolveTemplates: async () => null, applyScripts: async () => null }

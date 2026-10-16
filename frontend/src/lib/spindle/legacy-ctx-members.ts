@@ -17,7 +17,7 @@ export const NO_AUTHORITY_CTX_MEMBERS = [
   'ctx.ui.getBuiltInTabTitle', 'ctx.ui.getTabLocation', 'ctx.ui.showContextMenu',
   'ctx.ui.showModal', 'ctx.ui.showConfirm',
   'ctx.components.mountTextInput', 'ctx.components.mountTextArea', 'ctx.components.mountNumericInput',
-  'ctx.components.mountNumberStepper', 'ctx.components.mountRangeSlider', 'ctx.components.mountCheckbox',
+  'ctx.components.mountNumberStepper', 'ctx.components.mountRangeSlider', 'ctx.components.mountDualRangeSlider', 'ctx.components.mountCheckbox',
   'ctx.components.mountSwitch', 'ctx.components.mountSelect', 'ctx.components.mountMultiSelect',
   'ctx.components.mountModelCombobox', 'ctx.components.mountFolderDropdown', 'ctx.components.mountBadge',
   'ctx.components.mountSpinner', 'ctx.components.mountCollapsibleSection', 'ctx.components.mountPagination',

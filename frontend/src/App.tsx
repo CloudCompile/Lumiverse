@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { lazy, Suspense, useEffect, useMemo, useRef } from 'react'
 import { Outlet } from 'react-router'
 import { listen } from '@tauri-apps/api/event'
@@ -10,6 +11,7 @@ import { installDesktopViewportZoom } from '@/lib/desktopViewportZoom'
 import { useCharacterTheme } from '@/hooks/useCharacterTheme'
 import { useCustomCSSApplicator } from '@/hooks/useCustomCSSApplicator'
 import { useAppInit } from '@/hooks/useAppInit'
+import { useIOSPushSync } from '@/hooks/useIOSPushSync'
 import { useDocumentTitle } from '@/hooks/useDocumentTitle'
 import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import AuthGuard from '@/components/auth/AuthGuard'
@@ -80,6 +82,7 @@ function Application() {
   useCharacterTheme()
   useCustomCSSApplicator()
   useAppInit()
+  useIOSPushSync(useStore(s => s.isAuthenticated ? s.user?.id ?? null : null))
   useDocumentTitle()
   useBadging()
   useTTSAutoPlay()
@@ -90,7 +93,7 @@ function Application() {
   useEffect(() => installNotificationAudioPrimer(), [])
 
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return
     const feedback = createDesktopDownloadFeedback(
       {
         title: t('toast.desktopDownloadTitle'),
@@ -147,7 +150,7 @@ function Application() {
   // The desktop client can hear the device's output; extensions reach it only through `ctx.systemAudio`, which is
   // permission-gated, prompted and indicated. Browsers and floating widget windows register nothing.
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return
     let uninstall: (() => void) | undefined
     let disposed = false
     void installTauriSystemAudioSource().then((stop) => {
@@ -164,7 +167,7 @@ function Application() {
   // primary placement registry current means a later extension setSize call
   // grows from the user's actual widget size instead of the launch default.
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return
     let unlisten: (() => void) | undefined
     void listen<DesktopFloatingWidgetCatalogEntry>('desktop-widget-size', ({ payload }) => {
       useStore.getState().updateFloatWidget(payload.id, {
@@ -178,7 +181,7 @@ function Application() {
   // The native tray owns opening and returning pop-outs. Its lifecycle event
   // determines whether this page renders the extension widget's root.
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return
     let unlisten: (() => void) | undefined
     void listen<DesktopFloatingWidgetPopoutState>('desktop-widget-popout-state', ({ payload }) => {
       if (!payload || typeof payload.id !== 'string' || typeof payload.poppedOut !== 'boolean') return
@@ -200,7 +203,7 @@ function Application() {
   // child window can resize immediately instead of waiting for the normal
   // catalog synchronization effect below.
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window) || isDesktopFloatingWidgetWindow()) return
+    if (!hasTauriDesktopBridge() || isDesktopFloatingWidgetWindow()) return
     const handleSizeRequest = (event: Event) => {
       const detail = (event as CustomEvent<{ widgetId?: unknown; width?: unknown; height?: unknown }>).detail
       if (

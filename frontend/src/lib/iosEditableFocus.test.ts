@@ -19,6 +19,7 @@ let stop: () => void
 let field: HTMLTextAreaElement
 let calls: (FocusOptions | undefined)[]
 beforeEach(() => {
+  document.documentElement.removeAttribute('data-tauri-mobile')
   document.documentElement.setAttribute('data-ios-pwa', '')
   viewport.scale = 1
   field = document.createElement('textarea')
@@ -38,6 +39,14 @@ function mouse(type: string, target: HTMLElement = field, options: MouseEventIni
 }
 
 describe('iOS editable focus scroll prevention', () => {
+  test('prevents focus scrolling in the native iOS client without a PWA marker', () => {
+    document.documentElement.removeAttribute('data-ios-pwa')
+    document.documentElement.setAttribute('data-tauri-mobile', 'ios')
+    mouse('mousedown')
+    expect(document.activeElement).toBe(field)
+    expect(calls).toEqual([{ preventScroll: true }])
+  })
+
   test('focuses before the native mousedown default and leaves caret placement available', () => {
     field.setSelectionRange(5, 12, 'backward')
     const down = mouse('mousedown')

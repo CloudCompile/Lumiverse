@@ -89,6 +89,7 @@ import {
 } from "../spindle/source-message-metadata";
 import * as chatsSvc from "./chats.service";
 import { stripReasoningTags, buildMacroEnvForChat } from "./chats.service";
+import { getMcpInlineTools } from "./council/mcp-tools";
 import {
   contentHasMacroHints,
   resolveAndSanitizeForVectorization,
@@ -2775,6 +2776,10 @@ export async function assemblePrompt(
 
   // Populate Lumia / Loom / Council / OOC / Sovereign Hand context for macros
   populateLumiaLoomContext(macroEnv, ctx.userId, chat, ctx, settingsMap);
+  macroEnv.extra.mcpTools = ctx.generationType !== "impersonate" &&
+    completionSettings.enableFunctionCalling !== false
+      ? ctx.mcpTools ?? getMcpInlineTools(ctx.userId).map((tool) => tool.definition)
+      : [];
   const macroEnvSeed = cloneEnv(macroEnv);
   profiler.addPhase("macro-setup", performance.now() - phaseStartedAt);
 

@@ -3,7 +3,7 @@ import type { ActiveProfileSwitchReason, AppStore, ConnectionsSlice } from '@/ty
 import type { ConnectionProfile } from '@/types/api'
 import { settingsApi } from '@/api/settings'
 import { areReasoningSettingsEqual, normalizeReasoningSettingsForProvider } from '@/lib/reasoning-binding'
-import { REASONING_DEFAULTS, clearDirtyKey, persistKey } from './settings'
+import { REASONING_DEFAULTS, clearDirtyKey, flushSettingsNow, persistKey } from './settings'
 import { normalizeConnectionsOrder, reorderProfiles } from './connections-order-merge'
 
 const PERSISTED_ACTIVE_PROFILE_REASONS: ReadonlySet<ActiveProfileSwitchReason> = new Set([
@@ -39,37 +39,34 @@ export const createConnectionsSlice: StateCreator<AppStore, [], [], ConnectionsS
       ? state.profiles.find((p) => p.id === id)
       : null
 
-    set({ activeProfileId: id })
+    const newBindings = newProfile?.metadata?.reasoningBindings?.settings
+    const oldBindings = oldProfile?.metadata?.reasoningBindings?.settings
+    // Legacy accounts have no separate preference yet. Capture their current
+    // unbound settings before a binding or provider normalization replaces them.
+    // Reconciliation has already hydrated the incoming connection's settings,
+    // so it cannot capture the outgoing connection's preference.
+    const captureUnbound = !oldBindings && !state.unboundReasoningSettings
+      && reason === 'user_selection'
+      && !!newProfile
+    const unboundReasoningSettings = captureUnbound
+      ? { ...state.reasoningSettings }
+      : state.unboundReasoningSettings
+    const preferredSettings = unboundReasoningSettings ?? (oldBindings ? REASONING_DEFAULTS : state.reasoningSettings)
+    const nextReasoningSettings = newProfile
+      ? normalizeReasoningSettingsForProvider(
+        newBindings ?? preferredSettings,
+        newProfile?.provider,
+        newProfile?.model,
+      )
+      : { ...preferredSettings }
+    const reasoningChanged = !areReasoningSettingsEqual(nextReasoningSettings, state.reasoningSettings)
+
+    set({ activeProfileId: id, reasoningSettings: nextReasoningSettings, unboundReasoningSettings })
     if (shouldPersistActiveProfileId(reason)) {
       settingsApi.put('activeProfileId', id).catch(() => {})
     }
-
-    // Apply or restore reasoning settings based on profile bindings
-    const newBindings = newProfile?.metadata?.reasoningBindings?.settings
-    const oldBindings = oldProfile?.metadata?.reasoningBindings?.settings
-
-    if (newBindings) {
-      // Switching TO a bound profile: apply its reasoning settings
-      const normalizedBindings = normalizeReasoningSettingsForProvider(newBindings, newProfile?.provider, newProfile?.model)
-      set({ reasoningSettings: normalizedBindings } as any)
-      settingsApi.put('reasoningSettings', normalizedBindings).catch(() => {})
-      clearDirtyKey('reasoningSettings')
-    } else if (oldBindings) {
-      // Switching FROM a bound profile TO an unbound one: restore defaults
-      set({ reasoningSettings: { ...REASONING_DEFAULTS } } as any)
-      settingsApi.put('reasoningSettings', { ...REASONING_DEFAULTS }).catch(() => {})
-      clearDirtyKey('reasoningSettings')
-    } else if (newProfile) {
-      // Switching between unbound profiles: keep the current settings, but map
-      // provider-specific effort tiers onto the new provider's supported scale.
-      const normalizedCurrent = normalizeReasoningSettingsForProvider(state.reasoningSettings, newProfile.provider, newProfile.model)
-      if (!areReasoningSettingsEqual(normalizedCurrent, state.reasoningSettings)) {
-        set({ reasoningSettings: normalizedCurrent } as any)
-        settingsApi.put('reasoningSettings', normalizedCurrent).catch(() => {})
-        clearDirtyKey('reasoningSettings')
-      }
-    }
-
+    if (captureUnbound) persistKey('unboundReasoningSettings', unboundReasoningSettings, 'state-sync')
+    if (reasoningChanged) persistKey('reasoningSettings', nextReasoningSettings, 'state-sync')
     // Apply or restore promptBias ("Start Reply With") when bound on the profile
     const newBoundPromptBias = newProfile?.metadata?.reasoningBindings?.promptBias
     const oldBoundPromptBias = oldProfile?.metadata?.reasoningBindings?.promptBias
@@ -81,6 +78,11 @@ export const createConnectionsSlice: StateCreator<AppStore, [], [], ConnectionsS
       set({ promptBias: '' } as any)
       settingsApi.put('promptBias', '').catch(() => {})
       clearDirtyKey('promptBias')
+    }
+    if (captureUnbound || reasoningChanged) {
+      // Use the serialized settings queue so a pending edit cannot overwrite
+      // the newly selected binding, and persist both settings together.
+      void flushSettingsNow().catch(() => {})
     }
   },
 

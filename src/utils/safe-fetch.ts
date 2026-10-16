@@ -37,6 +37,58 @@ export class SSRFError extends Error {
   }
 }
 
+export class JavaScriptDownloadError extends Error {
+  constructor(reason: string) {
+    super(`JavaScript downloads are blocked: ${reason}`);
+    this.name = "JavaScriptDownloadError";
+  }
+}
+
+// Current and historical JavaScript/ECMAScript media types from RFC 9239.
+const JAVASCRIPT_CONTENT_TYPES = new Set([
+  "text/javascript",
+  "application/javascript",
+  "application/ecmascript",
+  "application/x-ecmascript",
+  "application/x-javascript",
+  "text/ecmascript",
+  "text/javascript1.0",
+  "text/javascript1.1",
+  "text/javascript1.2",
+  "text/javascript1.3",
+  "text/javascript1.4",
+  "text/javascript1.5",
+  "text/jscript",
+  "text/livescript",
+  "text/x-ecmascript",
+  "text/x-javascript",
+]);
+
+function isJavaScriptFilename(value: string): boolean {
+  // Only ASCII suffixes matter here. Decode percent-encoded bytes without
+  // letting an unrelated invalid UTF-8 sequence hide an encoded extension.
+  const decoded = value.replace(/%([0-9a-f]{2})/gi, (_, hex: string) =>
+    String.fromCharCode(Number.parseInt(hex, 16)));
+  return /\.(?:js|mjs|cjs|es)(?:[;/\\]|$)/i.test(decoded.trim());
+}
+
+function assertNonJavaScriptResponse(response: Response): void {
+  const contentType = (response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+  if (JAVASCRIPT_CONTENT_TYPES.has(contentType)) {
+    throw new JavaScriptDownloadError(`response Content-Type is ${contentType}`);
+  }
+
+  const disposition = response.headers.get("content-disposition") || "";
+  const filenames = /(?:^|;)\s*filename(\*)?\s*=\s*(?:"((?:\\.|[^"\\])*)"|([^;]*))/gi;
+  for (const match of disposition.matchAll(filenames)) {
+    let filename = (match[2] ?? match[3]).trim().replace(/\\(.)/g, "$1");
+    if (match[1]) filename = filename.replace(/^[^']*'[^']*'/, "");
+    if (isJavaScriptFilename(filename)) {
+      throw new JavaScriptDownloadError("response download filename identifies JavaScript");
+    }
+  }
+}
+
 /**
  * Pin Bun's fetch DNS cache to the IPs we just validated. Without this,
  * validateHost() and the subsequent fetch() perform two independent DNS
@@ -357,6 +409,11 @@ export interface SafeFetchOptions {
   allowPrivate?: boolean;
   /** Restrict the initial URL and every redirect hop to these exact origins. */
   allowedOrigins?: readonly string[];
+  /**
+   * Reject JavaScript URL paths, MIME types, and download filenames on every hop.
+   * This filters identifiable scripts; it cannot identify code disguised as data.
+   */
+  blockJavaScript?: boolean;
 }
 
 export async function safeFetch(
@@ -387,6 +444,9 @@ export async function safeFetch(
     }
     if (allowedOrigins && !allowedOrigins.has(parsed.origin.toLowerCase())) {
       throw new SSRFError(`URL origin is not allowed: ${parsed.origin.toLowerCase()}`);
+    }
+    if (options?.blockJavaScript && isJavaScriptFilename(parsed.pathname)) {
+      throw new JavaScriptDownloadError("URL path identifies a JavaScript file");
     }
 
     await validateHost(parsed.hostname, {
@@ -430,6 +490,17 @@ export async function safeFetch(
         throw new SSRFError(`Request timed out after ${timeoutMs}ms`);
       }
       throw err;
+    }
+
+    if (options?.blockJavaScript) {
+      try {
+        assertNonJavaScriptResponse(response);
+      } catch (error) {
+        clearTimeout(timer);
+        controller.abort();
+        void response.body?.cancel().catch(() => {});
+        throw error;
+      }
     }
 
     // Handle redirects manually so we can re-validate each hop

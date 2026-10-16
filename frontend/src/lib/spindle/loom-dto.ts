@@ -538,6 +538,14 @@ function assertStringArray(value: unknown, label: string): string[] {
   return entries as string[]
 }
 
+function assertNumberPair(value: unknown, label: string): [number, number] {
+  const entries = assertArray(value, label)
+  if (entries.length !== 2) throw new Error(`Invalid Loom ${label}`)
+  const start = assertFiniteNumber(entries[0], `${label}[0]`)
+  const end = assertFiniteNumber(entries[1], `${label}[1]`)
+  return [start, end]
+}
+
 function validateVariableOption(value: unknown, label: string): void {
   const option = asRecord(value, label)
   assertExactKeys(option, VARIABLE_OPTION_KEYS, label)
@@ -569,7 +577,7 @@ function validateVariableDefinition(
       allowed.max = true
       allowed.step = true
     }
-  } else if (type === 'slider') {
+  } else if (type === 'slider' || type === 'range') {
     allowed.min = true
     allowed.max = true
     allowed.step = true
@@ -604,6 +612,18 @@ function validateVariableDefinition(
     if (min !== undefined && max !== undefined && min > max) throw new Error(`Invalid Loom ${label} range`)
     if (type === 'slider' && (min === undefined || max === undefined)) throw new Error(`Invalid Loom ${label} range`)
     if ((min !== undefined && defaultValue < min) || (max !== undefined && defaultValue > max)) {
+      throw new Error(`Invalid Loom ${label}.defaultValue`)
+    }
+    if (variable.step !== undefined) {
+      const step = assertFiniteNumber(variable.step, `${label}.step`)
+      if (step <= 0) throw new Error(`Invalid Loom ${label}.step`)
+    }
+  } else if (type === 'range') {
+    const min = assertFiniteNumber(variable.min, `${label}.min`)
+    const max = assertFiniteNumber(variable.max, `${label}.max`)
+    if (min > max) throw new Error(`Invalid Loom ${label} range`)
+    const defaultValue = assertNumberPair(variable.defaultValue, `${label}.defaultValue`)
+    if (defaultValue[0] > defaultValue[1] || defaultValue[0] < min || defaultValue[1] > max) {
       throw new Error(`Invalid Loom ${label}.defaultValue`)
     }
     if (variable.step !== undefined) {
@@ -653,6 +673,11 @@ function validatePromptVariableValue(value: unknown, variable: PromptVariableDef
     const numericValue = assertFiniteNumber(value, label)
     if (variable.min !== undefined && numericValue < variable.min) throw new Error(`Invalid Loom ${label}`)
     if (variable.max !== undefined && numericValue > variable.max) throw new Error(`Invalid Loom ${label}`)
+  } else if (variable.type === 'range') {
+    const [start, end] = assertNumberPair(value, label)
+    if (start > end || start < variable.min || end > variable.max) {
+      throw new Error(`Invalid Loom ${label}`)
+    }
   } else if (variable.type === 'switch') {
     if (value !== 0 && value !== 1) throw new Error(`Invalid Loom ${label}`)
   } else {

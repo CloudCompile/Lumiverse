@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { FileUp } from 'lucide-react'
@@ -32,7 +33,7 @@ export default function WindowFileDropHost() {
   }, [])
 
   useEffect(() => {
-    if (!('__TAURI_INTERNALS__' in window)) return
+    if (!hasTauriDesktopBridge()) return
     let dragDepth = 0
     let disposed = false
 

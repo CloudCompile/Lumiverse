@@ -36,6 +36,7 @@ Frontend UI can follow two supported rendering paths:
 
 | Category | Permission | Description |
 |----------|-----------|-------------|
+| [Client Detection](client-info.md) | Free | Identify browser tabs, PWAs, desktop apps, and iOS/Android apps, with native bridge discovery |
 | [DOM Helper](dom-helper.md) | Free | Inject sanitized HTML/CSS in the host DOM, target specific chat messages with virtualizer-safe replay, and create host-managed sandbox frames |
 | [UI Event Helpers](ui-events-helper.md) | Free | Keyboard/Drawer/Settings state and DOM Action delegation |
 | [HTML Islands](html-islands.md) | Free | Auto-isolation of styled HTML in messages, and how to opt out |
@@ -46,6 +47,7 @@ Frontend UI can follow two supported rendering paths:
 | [Frontend Process Lifecycle](processes.md) | Free | Register backend-spawned frontend process handlers |
 | [Message Tags](message-tags.md) | Free | Intercept custom XML tags in chat messages |
 | [Display Resolver](display-resolver.md) | Free | Resolve message display (macros, format, regex) in the browser for chats your extension owns |
+| [Message Previews](message-preview.md) | Free | Render an active-chat swipe or source range through the native display pipeline in a preview-only host surface |
 | [File Uploads](file-uploads.md) | Free | Open file picker and read selected files |
 | [Theme Authoring](theme-authoring.md) | Varies | Work with native theme assets, safe `.lumitheme` drafts, the component/variable catalog, and native Theme Editor navigation |
 | [Speech-to-text](speech-to-text.md) | `media` (discovery is free) | Record or transcribe audio through the host speech stack, including bundled on-device Whistle |

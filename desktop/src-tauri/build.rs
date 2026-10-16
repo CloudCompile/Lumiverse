@@ -54,6 +54,17 @@ fn stamp_build_revision() {
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=LUMIVERSE_UPDATER_PUBLIC_KEY");
+    println!(
+        "cargo:rustc-env=LUMIVERSE_UPDATER_PUBLIC_KEY={}",
+        std::env::var("LUMIVERSE_UPDATER_PUBLIC_KEY")
+            .unwrap_or_default()
+            .trim()
+    );
+    println!(
+        "cargo:rustc-env=LUMIVERSE_DESKTOP_TARGET={}",
+        std::env::var("TARGET").unwrap()
+    );
     stamp_build_revision();
     println!("cargo:rerun-if-changed=src/capture/macos.m");
     println!("cargo:rerun-if-changed=src/system_audio/coreaudio.m");
@@ -106,6 +117,22 @@ fn main() {
             "desktop_capture_connect",
             "desktop_capture_disconnect",
             "desktop_capture_status",
+            "bundled_server_available",
+            "bundled_server_start",
+            "bundled_server_stop",
+            "bundled_server_status",
+            "bundled_server_alive",
+            "bundled_setup_defaults",
+            "bundled_setup_save",
+            "bundled_setup_status",
+            "bundled_setup_complete",
+            "bundled_setup_pick_folder",
+            "desktop_profile_info",
+            "open_lumiverse_data_folder",
+            "desktop_update_info",
+            "desktop_update_check",
+            "desktop_update_download",
+            "desktop_update_install",
         ]),
     ))
     .expect("failed to build desktop permissions")

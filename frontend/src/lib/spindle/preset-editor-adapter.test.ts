@@ -848,6 +848,43 @@ describe('preset editor draft adapter', () => {
     expect(current.promptVariables).toEqual(originalValues)
   })
 
+  test('reconciles valid range prompt variable pairs and prunes out-of-bounds ranges', () => {
+    const current = createNewLoomPreset('Range variable source')
+    const block = current.blocks[0]!
+    block.variables = [{
+      id: 'window-id',
+      name: 'window',
+      label: 'Window',
+      type: 'range',
+      defaultValue: [10, 40],
+      min: 0,
+      max: 100,
+      step: 5,
+    }]
+    current.promptVariables = {
+      [block.id]: { window: [20, 80] },
+    }
+
+    const draft = toPresetEditorDraft(current)
+    const retained = applyPresetEditorDraft(current, draft)
+    expect(retained.promptVariables).toEqual({
+      [block.id]: { window: [20, 80] },
+    })
+
+    draft.blocks[0]!.variables = [{
+      id: 'window-id',
+      name: 'window',
+      label: 'Window',
+      type: 'range',
+      defaultValue: [10, 40],
+      min: 0,
+      max: 50,
+      step: 5,
+    }]
+    const pruned = applyPresetEditorDraft(current, draft)
+    expect(pruned.promptVariables?.[block.id]?.window).toBeUndefined()
+  })
+
   test('accepts large imported presets that exceed the legacy 512-block / 64KB-string limits', () => {
     const current = createNewLoomPreset('Large import source')
     const largeContent = 'x'.repeat(150 * 1024)

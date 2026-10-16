@@ -10,6 +10,7 @@ import { scheduleSpindleDomTask } from '@/lib/spindle/browser-scheduler'
 import { getUiScale, layoutViewportSize, toLayoutDelta } from '@/lib/uiScale'
 import {
   FLOAT_WIDGET_VIEWPORT_PADDING,
+  floatWidgetTransform,
   resolveFloatWidgetSize,
   resolveFloatWidgetStyle,
 } from './spindle-float-widget-layout'
@@ -29,6 +30,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
   const suppressDragClick = useRef(false)
   const contentHostRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState({ x: widget.x, y: widget.y })
+  const positionRef = useRef(pos)
   const [contextMenu, setContextMenu] = useState<ContextMenuPos | null>(null)
   const [viewport, setViewport] = useState(() => layoutViewportSize())
 
@@ -54,10 +56,13 @@ export default function SpindleFloatWidget({ widget }: Props) {
 
   useEffect(() => {
     const pad = FLOAT_WIDGET_VIEWPORT_PADDING
-    setPos({
+    dragCleanup.current?.()
+    const next = {
       x: Math.max(pad, Math.min(widget.x, viewport.width - size.width - pad)),
       y: Math.max(pad, Math.min(widget.y, viewport.height - size.height - pad)),
-    })
+    }
+    positionRef.current = next
+    setPos(next)
   }, [size.height, size.width, viewport.height, viewport.width, widget.x, widget.y])
 
   useEffect(() => {
@@ -107,11 +112,13 @@ export default function SpindleFloatWidget({ widget }: Props) {
 
   const handlePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (isFullscreen || e.defaultPrevented || e.button !== 0 || (e.pointerType === 'touch' && !e.isPrimary)) return
+    const interrupted = dragCleanup.current !== null
     dragCleanup.current?.()
     suppressDragClick.current = false
     // Editing/navigation gestures belong to the extension. Buttons and custom
     // click targets can still be dragged, but an ordinary press stays untouched.
     const surface = e.currentTarget
+    if (interrupted) surface.style.transform = floatWidgetTransform(positionRef.current)
     for (const target of e.nativeEvent.composedPath()) {
       if (target === surface) break
       if (target instanceof Element && target.matches(
@@ -121,15 +128,25 @@ export default function SpindleFloatWidget({ widget }: Props) {
     const pointerId = e.pointerId
     const startX = e.clientX, startY = e.clientY
     const scale = getUiScale()
+    const start = positionRef.current
     let moved = false
-    let position = pos
+    let position = start
+    let frame = 0
+
+    const paint = () => {
+      frame = 0
+      surface.style.transform = floatWidgetTransform(position)
+    }
 
     const cleanup = () => {
+      if (frame) window.cancelAnimationFrame(frame)
+      frame = 0
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', finish)
       window.removeEventListener('pointercancel', finish)
       window.removeEventListener('blur', onBlur)
       surface.removeEventListener('lostpointercapture', onLostCapture)
+      delete surface.dataset.dragging
       dragCleanup.current = null
       if (surface.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId)
     }
@@ -141,11 +158,15 @@ export default function SpindleFloatWidget({ widget }: Props) {
         if (Math.hypot(dx, dy) < 4) return
         moved = true
         suppressDragClick.current = true
+        surface.dataset.dragging = ''
         surface.setPointerCapture(pointerId)
       }
       const delta = toLayoutDelta(dx, dy, scale)
-      position = clampPos(pos.x + delta.x, pos.y + delta.y)
-      setPos(position)
+      position = clampPos(start.x + delta.x, start.y + delta.y)
+      positionRef.current = position
+      // Keep React, extension content, and document layout out of the drag's
+      // frame loop. Multiple input events contribute only their latest point.
+      if (!frame) frame = window.requestAnimationFrame(paint)
     }
     const finish = (event?: PointerEvent) => {
       if (event && event.pointerId !== pointerId) return
@@ -153,9 +174,11 @@ export default function SpindleFloatWidget({ widget }: Props) {
       if (!moved) return
       if (event?.type === 'pointerup') {
         const delta = toLayoutDelta(event.clientX - startX, event.clientY - startY, scale)
-        position = clampPos(pos.x + delta.x, pos.y + delta.y)
+        position = clampPos(start.x + delta.x, start.y + delta.y)
       }
       const snapped = snapToEdge(position.x, position.y)
+      positionRef.current = snapped
+      surface.style.transform = floatWidgetTransform(snapped)
       setPos(snapped)
       updateFloatWidget(widget.id, snapped)
       window.dispatchEvent(new CustomEvent('spindle:float-drag-end', {
@@ -173,7 +196,7 @@ export default function SpindleFloatWidget({ widget }: Props) {
     window.addEventListener('pointercancel', finish)
     window.addEventListener('blur', onBlur)
     surface.addEventListener('lostpointercapture', onLostCapture)
-  }, [pos, isFullscreen, clampPos, snapToEdge, updateFloatWidget, widget.id])
+  }, [isFullscreen, clampPos, snapToEdge, updateFloatWidget, widget.id])
 
   const handleClickCapture = useCallback((e: React.MouseEvent) => {
     if (!suppressDragClick.current || e.detail === 0) return
@@ -217,7 +240,8 @@ export default function SpindleFloatWidget({ widget }: Props) {
           width: resetWidth,
           height: resetHeight,
         }
-        setPos({ x: reset.x, y: reset.y })
+        positionRef.current = { x: reset.x, y: reset.y }
+        setPos(positionRef.current)
         updateFloatWidget(widget.id, reset)
         setContextMenu(null)
       },

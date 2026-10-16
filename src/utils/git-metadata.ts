@@ -27,6 +27,11 @@ function runGit(projectRoot: string, ...args: string[]): string {
 }
 
 export function getGitMetadata(forceRefresh = false): GitMetadata {
+  if (process.env.LUMIVERSE_BUNDLE_ID) return {
+    branch: process.env.LUMIVERSE_BUNDLE_BRANCH || "bundled",
+    commit: process.env.LUMIVERSE_BUNDLE_COMMIT || "unknown",
+    inWorkTree: false,
+  };
   const now = Date.now();
   if (!forceRefresh && cachedGitMetadata && cachedGitMetadata.expiresAt > now) {
     return cachedGitMetadata.value;

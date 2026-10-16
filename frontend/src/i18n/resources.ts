@@ -16,6 +16,7 @@ const languageGlobs = {
   fr: import.meta.glob('./locales/fr/*.json') as Record<string, LocaleJsonLoader>,
   it: import.meta.glob('./locales/it/*.json') as Record<string, LocaleJsonLoader>,
   de: import.meta.glob('./locales/de/*.json') as Record<string, LocaleJsonLoader>,
+  ko: import.meta.glob('./locales/ko/*.json') as Record<string, LocaleJsonLoader>,
 }
 
 export type UiLanguage = keyof typeof languageGlobs

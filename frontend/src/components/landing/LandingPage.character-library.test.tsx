@@ -4,6 +4,7 @@ import { act, forwardRef, useMemo, useRef, useSyncExternalStore, type ReactNode 
 import type { Root, createRoot as CreateRoot } from 'react-dom/client'
 import { createInstance } from 'i18next'
 import { I18nextProvider, initReactI18next } from 'react-i18next'
+import { publishImportedDataRefresh } from '@/lib/import-data-events'
 import landing from '../../i18n/locales/en/landing.json'
 import panels from '../../i18n/locales/en/panels.json'
 import common from '../../i18n/locales/en/shared.json'
@@ -589,6 +590,17 @@ afterEach(async () => {
 })
 
 describe('LandingPage character library', () => {
+  test('shows imported recent chats on the mounted landing page without reopening it', async () => {
+    storeState = createStoreState(false)
+    listRecentGrouped.mockResolvedValueOnce(page([]))
+      .mockResolvedValue(page([recentChat('restored-character', 'Imported character')]))
+    const host = await mountLanding()
+    await flush()
+    expect(host.textContent).not.toContain('Imported character')
+    await act(async () => { publishImportedDataRefresh() })
+    await flush()
+    expect(host.textContent).toContain('Imported character')
+  })
   for (const layout of ['cards', 'compact'] as const) {
     test(`keeps decorative avatars out of chat names and identifies delete targets in ${layout}`, async () => {
       storeState = { ...createStoreState(false), landingPageLayoutMode: layout }

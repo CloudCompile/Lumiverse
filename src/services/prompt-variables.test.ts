@@ -185,6 +185,38 @@ describe("coercePromptVariable — multiselect", () => {
   });
 });
 
+describe("coercePromptVariable — range", () => {
+  const def: PromptVariableDef = {
+    id: "v-range",
+    name: "window",
+    label: "Window",
+    type: "range",
+    defaultValue: [10, 40],
+    min: 0,
+    max: 100,
+    step: 5,
+  };
+
+  test("renders the configured numeric pair and extracts endpoints with existing macros", async () => {
+    const resolved = coercePromptVariable(def, [15, 85]);
+    expect(resolved.rendered).toBe("15, 85");
+    expect(resolved.selectedIds).toEqual([]);
+
+    const env = makeEnv({ promptVariables: { window: resolved.rendered } });
+    expect(await ev("{{var::window}}", env)).toBe("15, 85");
+    expect(await ev("{{first::{{var::window}}}}", env)).toBe("15");
+    expect(await ev("{{last::{{var::window}}}}", env)).toBe("85");
+    expect(await ev("{{split::{{var::window}}::,::0}}", env)).toBe("15");
+    expect(await ev("{{split::{{var::window}}::,::1}}", env)).toBe("85");
+  });
+
+  test("clamps and orders endpoints or falls back to defaultValue when invalid", () => {
+    expect(coercePromptVariable(def, [90, -10]).rendered).toBe("0, 90");
+    expect(coercePromptVariable(def, undefined).rendered).toBe("10, 40");
+    expect(coercePromptVariable(def, "invalid").rendered).toBe("10, 40");
+  });
+});
+
 describe("resolvePromptBlockPlacements", () => {
   const selector: PromptVariableDef = {
     id: "placement-target",

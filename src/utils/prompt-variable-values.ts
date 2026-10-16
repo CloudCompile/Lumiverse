@@ -30,6 +30,11 @@ export function coercePromptVariable(
       const v = Number.isFinite(n) ? n : fallback;
       return { rendered: clampNumber(v, def.min, def.max), selectedIds: [] };
     }
+    case "range": {
+      const fallback = normalizeRange(def.defaultValue, [def.min, def.max], def.min, def.max);
+      const resolved = normalizeRange(raw, fallback, def.min, def.max);
+      return { rendered: `${resolved[0]}, ${resolved[1]}`, selectedIds: [] };
+    }
     case "select": {
       const options = def.options ?? [];
       const validIds = new Set(options.map((o) => o.id));
@@ -84,6 +89,23 @@ export function coercePromptVariable(
       };
     }
   }
+}
+
+function normalizeRange(
+  value: unknown,
+  fallback: [number, number],
+  min: number,
+  max: number,
+): [number, number] {
+  if (!Array.isArray(value) || value.length !== 2) return fallback;
+  const start = Number(value[0]);
+  const end = Number(value[1]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return fallback;
+  const clampedStart = clampNumber(start, min, max);
+  const clampedEnd = clampNumber(end, min, max);
+  return clampedStart <= clampedEnd
+    ? [clampedStart, clampedEnd]
+    : [clampedEnd, clampedStart];
 }
 
 function clampNumber(value: number, min: number | undefined, max: number | undefined): number {

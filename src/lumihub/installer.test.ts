@@ -433,6 +433,7 @@ describe("LumiHub preset installer metadata", () => {
           variables: [
             { id: "var-text", name: "instruction", label: "Instruction", type: "text", defaultValue: "Default" },
             { id: "var-number", name: "creativity", label: "Creativity", type: "number", defaultValue: 2, min: 0, max: 10 },
+            { id: "var-range", name: "window", label: "Window", type: "range", defaultValue: [10, 50], min: 0, max: 100 },
             {
               id: "var-select",
               name: "style",
@@ -474,6 +475,7 @@ describe("LumiHub preset installer metadata", () => {
           "block-1": {
             instruction: "User instruction",
             creativity: 8,
+            window: [20, 80],
             style: "warm-old",
             guides: ["concise-old", "polite-old"],
             legacyToggle: 1,
@@ -510,6 +512,7 @@ describe("LumiHub preset installer metadata", () => {
           variables: [
             { id: "var-text", name: "directive", label: "Directive", type: "textarea", defaultValue: "New default" },
             { id: "var-number", name: "creativity", label: "Creativity", type: "slider", defaultValue: 2, min: 0, max: 5 },
+            { id: "var-range", name: "window", label: "Window", type: "range", defaultValue: [5, 30], min: 0, max: 60 },
             {
               id: "var-select",
               name: "style",
@@ -550,6 +553,7 @@ describe("LumiHub preset installer metadata", () => {
         "block-1": {
           directive: "Publisher instruction",
           creativity: 2,
+          window: [5, 30],
           style: "warm-new",
           guides: [],
           mode: "publisher-mode",
@@ -581,6 +585,7 @@ describe("LumiHub preset installer metadata", () => {
       "block-1": {
         directive: "User instruction",
         creativity: 5,
+        window: [20, 60],
         style: "warm-new",
         guides: ["concise-new"],
         mode: "publisher-mode",

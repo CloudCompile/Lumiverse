@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
@@ -27,7 +28,7 @@ function isDesktopPresence(value: unknown): value is DesktopPresence {
 }
 
 export function isTauriDesktopPresenceAvailable(): boolean {
-  return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
+  return hasTauriDesktopBridge()
 }
 
 export function getDesktopPresence(): DesktopPresence | null {

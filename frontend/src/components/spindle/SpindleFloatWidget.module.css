@@ -18,6 +18,10 @@
   box-shadow: var(--lumiverse-shadow-xl);
 }
 
+.widget[data-dragging] {
+  will-change: transform;
+}
+
 .widget.chromeless {
   background: transparent;
   border: none;

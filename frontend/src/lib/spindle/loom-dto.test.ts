@@ -149,6 +149,21 @@ describe('validateLoomValue', () => {
       options: [{ id: 'one', label: 'One', value: 'one' }],
     }
     expect(() => validateLoomValue(withVariable(select, 'two'))).toThrow('promptVariableValues.one.choice')
+
+    const interval: PromptVariableDefDTO = {
+      id: 'window',
+      name: 'window',
+      label: 'Window',
+      type: 'range',
+      defaultValue: [10, 40],
+      min: 0,
+      max: 100,
+      step: 5,
+    }
+    expect(() => validateLoomValue(withVariable(interval, [20, 60]))).not.toThrow()
+    expect(() => validateLoomValue(withVariable({ ...interval, defaultValue: [60, 20] }, [20, 60]))).toThrow('defaultValue')
+    expect(() => validateLoomValue(withVariable(interval, [70, 30]))).toThrow('promptVariableValues.one.window')
+    expect(() => validateLoomValue(withVariable(interval, [-5, 30]))).toThrow('promptVariableValues.one.window')
   })
   test('accepts values just below each collection and string limit', () => {
     const blocks = Array.from(

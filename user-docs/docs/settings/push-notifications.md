@@ -27,6 +27,13 @@ Each device must be subscribed individually. You can manage all your registered 
 
 Lumiverse Desktop registers as a native destination. Its device identity and revocable enrollment credential are stored in the operating system's per-app configuration directory, so rebuilding or updating the desktop bundle does not require you to sign in again just to keep receiving notifications. The credential is pinned to that server's origin and identity; removing the destination in Settings revokes it.
 
+The iOS app uses Apple's native push service (APNs), so it does not require
+browser Push API support. It needs an IPA signed with the Push Notifications
+capability and a server configured with the matching Apple provider key. Free
+Personal Team signing cannot enable APNs; the iOS notification settings show
+missing app or server configuration. Once configured, notifications can arrive
+while the app is backgrounded or closed.
+
 ---
 
 ## Notification Events

@@ -3,6 +3,8 @@ import { Buffer } from "node:buffer";
 import { eventBus } from "./bus";
 import { EventType } from "./events";
 import { auth } from "../auth";
+import { approvedAuthRequest } from "../auth/request-origin";
+import { isConnectionFromExplicitTrustedProxy } from "../utils/client-ip";
 import { consumeDesktopNotificationTicket, consumeTicket } from "./tickets";
 import { getWorkerHost } from "../spindle/lifecycle";
 import { readFrontendSessionId, registerFrontendSession, frontendPresenceKey } from '../spindle/frontend-session';
@@ -141,8 +143,11 @@ export const wsHandler = upgradeWebSocket((c) => {
           sessionId = `ticket-${crypto.randomUUID()}`;
         } else {
           // Auth path 2: cookie-based session (original path)
+          const request = approvedAuthRequest(c.req.raw, isConnectionFromExplicitTrustedProxy(c));
           const session = await auth.api.getSession({
-            headers: c.req.raw.headers,
+            request,
+            headers: request.headers,
+            asResponse: false,
           });
 
           if (!session) {

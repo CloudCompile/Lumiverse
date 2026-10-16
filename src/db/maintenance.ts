@@ -330,9 +330,11 @@ const mmapDisabledConnections = new WeakSet<Database>();
 
 export function applyBaseDatabasePragmas(db: Database, options: DatabasePragmaOptions = {}): void {
   if (options.allowMmap === false) mmapDisabledConnections.add(db);
-  // WAL setup can itself need a lock. Install the busy handler first. Short
-  // waits protect legacy synchronous callers; the executor retries off-thread.
-  db.run(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 100}`);
+  // WAL setup can itself need a lock. Install the busy handler first. Legacy
+  // synchronous callers need time for a competing process to commit; they have
+  // no async retry loop. The supervised subprocess explicitly uses short waits
+  // and retries rolled-back writes without blocking the server's event loop.
+  db.run(`PRAGMA busy_timeout = ${options.busyTimeoutMs ?? 5000}`);
   db.run("PRAGMA journal_mode = WAL");
   db.run("PRAGMA foreign_keys = ON");
   db.run("PRAGMA synchronous = NORMAL");

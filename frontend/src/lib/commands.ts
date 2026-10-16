@@ -13,7 +13,6 @@ import { charactersApi } from '@/api/characters'
 import { DRAWER_TABS, registryToCommands } from '@/lib/drawer-tab-registry'
 import { getVisibleSettingsTabs, settingsRegistryToCommands } from '@/lib/settings-tab-registry'
 import { copyTextToClipboard } from '@/lib/clipboard'
-import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import { preloadChatNavigationSnapshot } from '@/lib/chatNavigationSnapshot'
 
 export type CommandScope = 'global' | 'chat' | 'chat-idle' | 'landing' | 'character'
@@ -47,7 +46,7 @@ export const COMMANDS: Command[] = [
     group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
+      const { activeChatId, activeProfileId, activePersonaId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
       if (!activeChatId) return
       beginStreaming()
       try {
@@ -57,7 +56,6 @@ export const COMMANDS: Command[] = [
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
           preset_id: presetId,
-          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
           generation_type: 'regenerate',
         })
         startStreaming(res.generationId)
@@ -77,7 +75,7 @@ export const COMMANDS: Command[] = [
     group: 'actions',
     scope: 'chat-idle',
     run: async () => {
-      const { activeChatId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
+      const { activeChatId, activeProfileId, activePersonaId, getActivePresetForGeneration, beginStreaming, startStreaming, setStreamingError, addToast } = useStore.getState()
       if (!activeChatId) return
       beginStreaming()
       try {
@@ -87,7 +85,6 @@ export const COMMANDS: Command[] = [
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
           preset_id: presetId,
-          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
         })
 
         startStreaming(res.generationId)
@@ -314,7 +311,6 @@ export const COMMANDS: Command[] = [
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
           preset_id: presetId,
-          force_preset_id: shouldForceLoomRuntimePreset(presetId, activeChatId, activeCharacterId, activeProfileId),
           target_character_id: activeGroupCharacterId ?? activeCharacterId ?? undefined,
         })
 

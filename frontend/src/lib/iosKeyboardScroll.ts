@@ -39,11 +39,11 @@ export function createComposerTouchFocusHandlers() {
   }
 }
 
-/** Own the first focus so WebKit does not pan the PWA to reveal the composer. */
+/** Own the first focus so WebKit does not pan a standalone client to reveal the composer. */
 export function focusComposerOnTouchEnd(event: ComposerTouchEnd): void {
   const target = event.currentTarget
   const document = target.ownerDocument
-  if (!document.documentElement.hasAttribute('data-ios-pwa')) return
+  if (!document.documentElement.matches('[data-ios-pwa], [data-tauri-mobile="ios"]')) return
   if (event.defaultPrevented || !event.cancelable) return
   if (event.touches.length !== 0 || event.changedTouches.length !== 1) return
   // Once focused, native touches own caret placement, selection and paste.

@@ -21,6 +21,8 @@ import type {
   SpindleRangeSliderOptions,
   SpindleRangeSliderHandle,
   SpindleRangeSliderFormat,
+  SpindleDualRangeSliderOptions,
+  SpindleDualRangeSliderHandle,
   SpindleCheckboxOptions,
   SpindleCheckboxHandle,
   SpindleSwitchOptions,
@@ -51,7 +53,8 @@ import { TextInput, TextArea } from '@/components/shared/FormComponents'
 import formStyles from '@/components/shared/FormComponents.module.css'
 import NumericInput from '@/components/shared/NumericInput'
 import NumberStepper from '@/components/shared/NumberStepper'
-import { RangeSlider, LabeledRangeSlider } from '@/components/shared/RangeSlider'
+import { RangeSlider, LabeledRangeSlider, DualRangeSlider, LabeledDualRangeSlider } from '@/components/shared/RangeSlider'
+import { snapNumericRange } from '@/components/shared/rangeSliderMath'
 import { Toggle } from '@/components/shared/Toggle'
 import { Badge } from '@/components/shared/Badge'
 import { Spinner } from '@/components/shared/Spinner'
@@ -1067,6 +1070,96 @@ function RangeSliderBridge({ initial, bridge }: { initial: SpindleRangeSliderOpt
   return <RangeSlider {...sharedProps} />
 }
 
+function normalizeDualRangeBridgeValue(
+  value: readonly [number, number] | undefined,
+  options: { min: number; max: number; step?: number; integer?: boolean },
+): [number, number] {
+  const candidate: readonly [number, number] =
+    Array.isArray(value) && value.length === 2 && Number.isFinite(value[0]) && Number.isFinite(value[1])
+      ? [value[0], value[1]]
+      : [options.min, options.max]
+  return snapNumericRange(candidate, options)
+}
+
+function DualRangeSliderBridge({
+  initial,
+  bridge,
+}: {
+  initial: SpindleDualRangeSliderOptions
+  bridge: BridgeAPI<SpindleDualRangeSliderOptions, [number, number]>
+}) {
+  const [props, setProps] = useState(initial)
+  const [value, setValue] = useState<[number, number]>(() =>
+    normalizeDualRangeBridgeValue(initial.value, {
+      min: initial.min,
+      max: initial.max,
+      step: initial.step,
+      integer: initial.integer,
+    }),
+  )
+  const commitValue = useBridgeBinding(bridge, props, setProps, value, setValue, 'value')
+  useLayoutEffect(() => {
+    bridge.update = (patch) => {
+      setProps((prev) => {
+        const nextProps = { ...prev, ...patch }
+        if (
+          patch.value !== undefined
+          || patch.min !== undefined
+          || patch.max !== undefined
+          || patch.step !== undefined
+          || patch.integer !== undefined
+        ) {
+          const source = patch.value !== undefined ? patch.value : bridge.getValue()
+          const committed = commitValue(
+            normalizeDualRangeBridgeValue(source, {
+              min: nextProps.min,
+              max: nextProps.max,
+              step: nextProps.step,
+              integer: nextProps.integer,
+            }),
+          )
+          return { ...nextProps, value: committed }
+        }
+        return nextProps
+      })
+    }
+  }, [bridge, commitValue])
+
+  const handleCommit = (next: [number, number]) => {
+    const committed = commitValue([next[0], next[1]])
+    props.onCommit?.([committed[0], committed[1]])
+  }
+
+  const sharedProps = {
+    min: props.min,
+    max: props.max,
+    step: props.step,
+    integer: props.integer,
+    value,
+    disabled: props.disabled,
+    className: props.className,
+    startLabel: props.startLabel,
+    endLabel: props.endLabel,
+    onCommit: handleCommit,
+    onDragValue: (next: [number, number] | null) => props.onDragValue?.(next ? [next[0], next[1]] : null),
+  }
+
+  if (props.label !== undefined) {
+    const formatEndpoint = buildRangeSliderFormatter(props.format, props.step ?? 1, props.integer ?? false)
+    const formatValue = ([start, end]: [number, number]) => `${formatEndpoint(start)} – ${formatEndpoint(end)}`
+    return (
+      <LabeledDualRangeSlider
+        label={props.label}
+        hint={props.hint}
+        formatValue={formatValue}
+        {...sharedProps}
+      />
+    )
+  }
+
+  return <DualRangeSlider {...sharedProps} />
+}
+
 function CheckboxBridge({ initial, bridge }: { initial: SpindleCheckboxOptions; bridge: BridgeAPI<SpindleCheckboxOptions, boolean> }) {
   const [props, setProps] = useState(initial)
   const [checked, setChecked] = useState<boolean>(initial.checked ?? false)
@@ -1772,6 +1865,17 @@ export function createComponentsHelper(
     ))
     return buildHandle(extensionId, id, el, result, componentPermissionForTarget(extensionId, el, generation)) as SpindleRangeSliderHandle
   }
+  function mountDualRangeSlider(
+    target: SpindleComponentTarget,
+    options: SpindleDualRangeSliderOptions,
+  ): SpindleDualRangeSliderHandle {
+    const el = resolveTarget(extensionId, target, generation)
+    const id = nextId(extensionId, 'dual-range-slider')
+    const result = mountBridge<SpindleDualRangeSliderOptions, [number, number]>(el, (b) => (
+      <DualRangeSliderBridge initial={options} bridge={b} />
+    ))
+    return buildHandle(extensionId, id, el, result, componentPermissionForTarget(extensionId, el, generation)) as SpindleDualRangeSliderHandle
+  }
   function mountCheckbox(target: SpindleComponentTarget, options?: SpindleCheckboxOptions): SpindleCheckboxHandle {
     const el = resolveTarget(extensionId, target, generation)
     const id = nextId(extensionId, 'checkbox')
@@ -1902,6 +2006,7 @@ export function createComponentsHelper(
     mountNumericInput,
     mountNumberStepper,
     mountRangeSlider,
+    mountDualRangeSlider,
     mountCheckbox,
     mountSwitch,
     mountSelect,

@@ -100,7 +100,6 @@ import { PromptStashModal } from './PromptStashModal'
 import { Button } from '@/components/shared/FormComponents'
 import { toast } from '@/lib/toast'
 import { useLongPress } from '@/hooks/useLongPress'
-import { markLoomRuntimeProfileContext } from '@/lib/loom/runtimeProfile'
 import { importPresetFiles } from '@/lib/loom/preset-import-batch'
 import { subscribeWindowFileImport } from '@/lib/window-file-import'
 import SpindlePresetEditorTabContent from '@/components/spindle/SpindlePresetEditorTabContent'
@@ -2404,6 +2403,8 @@ function LoomBuilderNative({
   // Profile block states are a runtime overlay. They must never be written
   // into the shared preset merely because the active chat/persona/connection
   // changed; doing so lets an unrelated preset save capture the wrong scope.
+  // This projection is for the editor; generation resolves the profile on the
+  // backend so its block states and prompt variables stay in the same scope.
   const lastProfileApplicationRef = useRef<string | null>(null)
   activePresetRef.current = activePreset
 
@@ -2435,17 +2436,10 @@ function LoomBuilderNative({
     if (suppressNextProfileApplyRef.current === contextKey) {
       suppressNextProfileApplyRef.current = null
       lastProfileApplicationRef.current = applicationKey
-      markLoomRuntimeProfileContext(activeId, activeChatId, activeCharacterId, activeProfileId)
       return
     }
     lastProfileApplicationRef.current = applicationKey
     applyRuntimeBlockProfile(activeId, binding?.block_states ?? null, binding?.prompt_variables)
-    markLoomRuntimeProfileContext(
-      binding ? activeId : null,
-      activeChatId,
-      activeCharacterId,
-      activeProfileId,
-    )
   }, [
     isResolved,
     resolvedPresetId,

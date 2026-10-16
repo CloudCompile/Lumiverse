@@ -17,10 +17,11 @@ describe('Spindle float widget layout', () => {
     expect(FULLSCREEN_FLOAT_WIDGET_STYLE.height).not.toContain('window.innerHeight')
   })
 
-  test('preserves pixel positioning for regular draggable widgets', () => {
+  test('positions regular widgets in layout pixels using a compositor transform', () => {
     expect(resolveFloatWidgetStyle(false, { x: 24, y: 96 }, { width: 320, height: 148 })).toEqual({
-      left: 24,
-      top: 96,
+      left: 0,
+      top: 0,
+      transform: 'translate3d(24px, 96px, 0)',
       width: 320,
       height: 148,
     })

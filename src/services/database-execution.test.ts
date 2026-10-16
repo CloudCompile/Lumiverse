@@ -92,7 +92,10 @@ describe("file-backed service execution", () => {
     db.exec("CREATE TRIGGER reject_gallery_alias BEFORE UPDATE OF extensions ON characters BEGIN SELECT RAISE(ABORT, 'alias failed'); END");
     const emit = spyOn(eventBus, 'emit');
     try {
-      await expect(gallery.removeFromGalleryAsync('user', 'character-user', item.id)).rejects.toThrow('alias failed');
+      // Await IPC before asserting; Bun's .rejects native wait can stall Windows.
+      const error = await gallery.removeFromGalleryAsync('user', 'character-user', item.id).catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({ message: expect.stringContaining('alias failed'), code: 'SQLITE_CONSTRAINT_TRIGGER', outcome: 'rolled-back' });
       expect(await gallery.getGalleryRemovalStatusAsync('user', 'character-user', item.id)).toMatchObject({ deleted: false });
       expect((await characters.getCharacterAsync('user', 'character-user'))?.extensions.risu_asset_map[item.reference]).toBe(imageId);
       expect(emit.mock.calls.filter(([type]) => type === EventType.CHARACTER_GALLERY_ITEM_REMOVED)).toHaveLength(0);

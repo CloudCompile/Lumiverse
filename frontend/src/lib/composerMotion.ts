@@ -1,3 +1,16 @@
+import { renderedPxToLayoutPx } from './uiScale'
+
+/** Reserve the resting composer; its expanding controls overlay the chat. */
+export function measureComposerHeight(composer: HTMLElement, popover: HTMLElement | null): number {
+  if (!popover) return composer.offsetHeight
+  // Subtract the currently visible grid slot, including during closing. Use
+  // fractional bounds so independent offsetHeight rounding cannot make the
+  // reserved space oscillate by a pixel during the transition.
+  return Math.max(0, renderedPxToLayoutPx(
+    composer.getBoundingClientRect().height - popover.getBoundingClientRect().height,
+  ))
+}
+
 /** Measure keyboard clearance throughout the composer's CSS movement. */
 export function observeComposerMotion(element: HTMLElement, measure: () => void): () => void {
   const view = element.ownerDocument.defaultView!

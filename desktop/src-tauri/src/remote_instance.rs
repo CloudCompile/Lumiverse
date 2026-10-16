@@ -42,12 +42,20 @@ impl Default for RemoteInstanceState {
         Self {
             sessions: Mutex::new(HashMap::new()),
             operations: Mutex::new(HashMap::new()),
-            credentials: Arc::new(KeyringCredentialStore),
+            credentials: Arc::new(KeyringCredentialStore {
+                service: KEYRING_SERVICE.to_owned(),
+            }),
         }
     }
 }
 
 impl RemoteInstanceState {
+    pub(crate) fn for_identifier(identifier: &str) -> Self {
+        Self {
+            credentials: Arc::new(KeyringCredentialStore::for_identifier(identifier)),
+            ..Self::default()
+        }
+    }
     async fn lock_origin(&self, origin: &str) -> OwnedMutexGuard<()> {
         let operation = self
             .operations
@@ -264,23 +272,31 @@ trait RefreshCredentialStore: Send + Sync {
     fn delete(&self, origin: &str) -> Result<(), String>;
 }
 
-struct KeyringCredentialStore;
+struct KeyringCredentialStore {
+    service: String,
+}
 
 impl KeyringCredentialStore {
-    fn entry(origin: &str) -> Result<Entry, String> {
-        Entry::new(KEYRING_SERVICE, &keyring_account(origin)).map_err(|error| error.to_string())
+    fn for_identifier(identifier: &str) -> Self {
+        Self {
+            service: format!("{identifier}.oauth"),
+        }
+    }
+
+    fn entry(&self, origin: &str) -> Result<Entry, String> {
+        Entry::new(&self.service, &keyring_account(origin)).map_err(|error| error.to_string())
     }
 }
 
 impl RefreshCredentialStore for KeyringCredentialStore {
     fn save(&self, origin: &str, token: &str) -> Result<(), String> {
-        Self::entry(origin)?
+        self.entry(origin)?
             .set_password(token)
             .map_err(|error| error.to_string())
     }
 
     fn load(&self, origin: &str) -> Result<Option<String>, String> {
-        match Self::entry(origin)?.get_password() {
+        match self.entry(origin)?.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::Error::NoEntry) => Ok(None),
             Err(error) => Err(error.to_string()),
@@ -288,7 +304,7 @@ impl RefreshCredentialStore for KeyringCredentialStore {
     }
 
     fn delete(&self, origin: &str) -> Result<(), String> {
-        match Self::entry(origin)?.delete_credential() {
+        match self.entry(origin)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error.to_string()),
         }

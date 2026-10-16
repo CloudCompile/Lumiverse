@@ -33,7 +33,7 @@ import { askSecret, closeInput } from "./input";
 
 async function main() {
   const projectRoot = resolve(import.meta.dir, "..");
-  const dataDir = join(projectRoot, "data");
+  const dataDir = resolve(process.env.DATA_DIR || join(projectRoot, "data"));
   const identityPath = join(dataDir, "lumiverse.identity");
   const credentialsPath = join(dataDir, "owner.credentials");
   const dbPath = join(dataDir, "lumiverse.db");

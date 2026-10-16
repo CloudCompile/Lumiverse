@@ -19,6 +19,7 @@ let textarea: HTMLTextAreaElement
 let focusCalls: FocusOptions[]
 let uninstall: (() => void) | undefined
 beforeEach(() => {
+  dom.window.document.documentElement.removeAttribute('data-tauri-mobile')
   dom.window.document.documentElement.setAttribute('data-ios-pwa', '')
   textarea = dom.window.document.createElement('textarea')
   textarea.value = 'A draft with a selection'
@@ -50,7 +51,7 @@ function touchEnd({ touches = 0, changedTouches = 1, cancelable = true, prevente
   return event
 }
 
-describe('iOS PWA composer touch focus', () => {
+describe('standalone iOS composer touch focus', () => {
   test('focuses synchronously with scroll prevention before the native touch default', () => {
     textarea.setSelectionRange(2, 7)
     const event = touchEnd()
@@ -67,6 +68,14 @@ describe('iOS PWA composer touch focus', () => {
     expect(touchEnd().defaultPrevented).toBe(false)
     expect(focusCalls).toEqual([])
     expect([textarea.selectionStart, textarea.selectionEnd]).toEqual([3, 8])
+  })
+
+  test('prevents focus scrolling in the native iOS client without a PWA marker', () => {
+    dom.window.document.documentElement.removeAttribute('data-ios-pwa')
+    dom.window.document.documentElement.setAttribute('data-tauri-mobile', 'ios')
+    expect(touchEnd().defaultPrevented).toBe(true)
+    expect(dom.window.document.activeElement).toBe(textarea)
+    expect(focusCalls).toEqual([{ preventScroll: true }])
   })
 
   test('leaves browser tabs and other platforms on their native focus path', () => {

@@ -59,6 +59,21 @@ Keep `.env` private when it contains secrets. Preserve it alongside your data ba
 
 ## Network and authentication
 
+### Native iOS push
+
+These optional values configure Lumiverse as the provider for Apple's APNs
+service. They require an enrolled Apple Developer Program team and a push-capable
+iOS app signature. Keep the private key on the server and restart after changes.
+
+| Variable | Default when unset | What it changes |
+|----------|--------------------|-----------------|
+| `APNS_TEAM_ID` | Unset | The 10-character Apple team ID that owns the app and APNs key. |
+| `APNS_KEY_ID` | Unset | The 10-character identifier of the APNs authentication key. |
+| `APNS_PRIVATE_KEY_PATH` | Unset | Path to the private `.p8` signing key. All three signing values are required to enable delivery. |
+| `APNS_BUNDLE_ID` | `chat.lumiverse.ios` | App bundle identifier authorized by that key. |
+
+### Server access
+
 Prefer **Settings → Operator → Trusted Hostnames** for a specific public address. For a complete HTTPS phone-access example, see [Remote Access with Tailscale](../getting-started/tailscale.md).
 
 | Variable | Default when unset | What it changes |

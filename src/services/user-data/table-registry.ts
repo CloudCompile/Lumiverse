@@ -389,6 +389,7 @@ export const EXCLUDED_TABLES = new Set<string>([
   // Device-specific
   "push_subscriptions",
   "desktop_notification_destinations",
+  "ios_push_destinations",
   // System / built-in
   "_migrations",
   "tokenizer_configs",

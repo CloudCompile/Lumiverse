@@ -52,6 +52,8 @@ export interface PromptVariableOption {
   value: string;
 }
 
+export type PromptVariableRange = [number, number];
+
 export type PromptVariableDef =
   | {
       id: string;
@@ -96,6 +98,17 @@ export type PromptVariableDef =
       id: string;
       name: string;
       label: string;
+      type: 'range';
+      defaultValue: PromptVariableRange;
+      min: number;
+      max: number;
+      step?: number;
+      description?: string;
+    }
+  | {
+      id: string;
+      name: string;
+      label: string;
       type: 'select';
       /** Stored selection: an option id. */
       defaultValue: string;
@@ -125,7 +138,7 @@ export type PromptVariableDef =
     };
 
 export type PromptVariableType = PromptVariableDef['type'];
-export type PromptVariableValue = string | number | string[];
+export type PromptVariableValue = string | number | string[] | PromptVariableRange;
 export type PromptVariableValues = Record<string /* blockId */, Record<string /* varName */, PromptVariableValue>>;
 
 /** A complete insertion configuration that can be selected by a prompt variable. */

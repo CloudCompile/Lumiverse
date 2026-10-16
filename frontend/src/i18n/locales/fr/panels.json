@@ -2093,7 +2093,8 @@
       "text": "Texte",
       "textarea": "Zone de texte",
       "number": "Nombre",
-      "slider": "Curseur"
+      "slider": "Curseur",
+      "range": "Curseur de plage"
     },
     "dragToReorder": "Faites glisser {{name}} (position {{position}}) pour réorganiser",
     "variableFallback": "Variable {{position}}",
@@ -2116,6 +2117,8 @@
     "defaultTextareaPlaceholder": "Corps du texte par défaut…",
     "defaultTextPlaceholder": "Neutre, chaleureux, clinique…",
     "defaultPreviewAria": "Aperçu de la valeur par défaut",
+    "rangeStart": "Début de la plage",
+    "rangeEnd": "Fin de la plage",
     "min": "Min.",
     "max": "Max.",
     "step": "Étape",

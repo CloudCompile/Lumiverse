@@ -74,6 +74,8 @@ export class ElevenLabsTtsProvider implements TtsProvider {
     voiceListStyle: "dynamic",
     modelListStyle: "static",
     staticModels: [
+      { id: "eleven_v4", label: "Eleven v4" },
+      { id: "eleven_v4_turbo", label: "Eleven v4 Turbo (Real-time)" },
       { id: "eleven_v3", label: "Eleven v3 (Most Expressive)" },
       { id: "eleven_multilingual_v2", label: "Eleven Multilingual v2" },
       { id: "eleven_flash_v2_5", label: "Eleven Flash v2.5 (Low Latency)" },

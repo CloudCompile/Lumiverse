@@ -19,6 +19,14 @@ const absentImage = "c0123456-1234-4234-8234-123456789abc";
 let db: Database;
 let directory: string | undefined;
 
+function openFileDatabase(path: string): Database {
+  const target = new Database(path);
+  // Match runtime journaling. DELETE/FULL makes every fixture DDL statement
+  // sync a rollback journal, which is particularly expensive on Windows CI.
+  target.run("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA mmap_size = 0");
+  return target;
+}
+
 function seed(target: Database): void {
   target.run("PRAGMA foreign_keys = ON; PRAGMA mmap_size = 0");
   for (const user of ["user", "other"]) {
@@ -280,13 +288,17 @@ describe("durable image reference index", () => {
     db.close(true);
     directory = mkdtempSync(join(tmpdir(), "lumiverse-image-index-"));
     const path = join(directory, "db.sqlite");
-    db = new Database(path); db.run(oldBaseline); seed(db);
-    for (let i = 0; i < 20; i++) message(`message-${String(i).padStart(3, "0")}`, image);
-    db.run(migration);
+    db = openFileDatabase(path);
+    // Schema and seed data are fixture setup, not hundreds of separate commits.
+    db.transaction(() => {
+      db.run(oldBaseline); seed(db);
+      for (let i = 0; i < 20; i++) message(`message-${String(i).padStart(3, "0")}`, image);
+      db.run(migration);
+    })();
     for (let i = 0; i < 3; i++) populateImageReferenceIndex(db, 2, Infinity);
     expect(db.query("SELECT last_id FROM image_reference_index_state WHERE source_type = 'messages'").get()).toEqual({ last_id: "message-001" });
-    db.close(true); db = new Database(path); db.run("PRAGMA foreign_keys = ON; VACUUM");
-    const writer = new Database(path);
+    db.close(true); db = openFileDatabase(path); db.run("VACUUM");
+    const writer = openFileDatabase(path);
     try { writer.query("UPDATE messages SET content = ? WHERE id = 'message-000'").run(otherImage); }
     finally { writer.close(true); }
     finishIndex();
@@ -320,16 +332,17 @@ describe("durable image reference index", () => {
     expect(deserialize(encodeDatabaseMessage(resultMessage).subarray(4))).toEqual(resultMessage);
   });
 
-  for (const transport of (process.platform === "win32" ? ["stdio"] : ["stdio", "ipc"]) as Array<"stdio" | "ipc">) {
+  for (const transport of (process.platform === "win32" ? ["ipc"] : ["stdio", "ipc"]) as Array<"stdio" | "ipc">) {
     test(`subprocess backfills and observes another connection's writes over ${transport}`, async () => {
       db.close(true);
       directory = mkdtempSync(join(tmpdir(), "lumiverse-image-index-worker-"));
       const path = join(directory, "db.sqlite");
-      db = new Database(path); db.run(oldBaseline); seed(db); message("old", image); db.run(migration);
+      db = openFileDatabase(path);
+      db.transaction(() => { db.run(oldBaseline); seed(db); message("old", image); db.run(migration); })();
       const executor = new DatabaseExecutor(path, { transport });
       try {
         await executor.execute({ kind: "checkpoint" });
-        const deadline = Date.now() + 5000;
+        const deadline = Date.now() + 2000;
         while ((db.query("SELECT COUNT(*) AS count FROM image_reference_index_state WHERE completed = 0").get() as { count: number }).count > 0 && Date.now() < deadline) await Bun.sleep(10);
         expect(db.query("SELECT COUNT(*) AS count FROM image_reference_index_state WHERE completed = 0").get()).toEqual({ count: 0 });
         expect(await executor.execute<string[]>({ kind: "image-references", userId: "user", ids: [image, absentImage] })).toEqual([image]);

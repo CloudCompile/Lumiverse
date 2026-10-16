@@ -2,6 +2,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 
+#[test]
+fn profiles_keep_existing_credentials_and_isolate_test_credentials() {
+    let production = KeyringCredentialStore::for_identifier("chat.lumiverse.tray");
+    let debug = KeyringCredentialStore::for_identifier("chat.lumiverse.tray.debug");
+    let named = KeyringCredentialStore::for_identifier("chat.lumiverse.tray.debug.profile.setup-test-1");
+    assert_eq!(production.service, KEYRING_SERVICE);
+    assert_ne!(debug.service, production.service);
+    assert_ne!(named.service, debug.service);
+    assert_ne!(named.service, production.service);
+}
+
 #[derive(Default)]
 struct TestCredentials {
     token: Mutex<Option<String>>,

@@ -798,6 +798,8 @@ export interface SettingsSlice {
   sovereignHand: SovereignHandSettings
   contextFilters: ContextFilters
   reasoningSettings: ReasoningSettings
+  /** Preferred settings for connections without a reasoning binding, before provider normalization. */
+  unboundReasoningSettings: ReasoningSettings | null
   promptBias: string
   globalWorldBooks: string[]
   worldInfoSettings: import('./api').WorldInfoSettings

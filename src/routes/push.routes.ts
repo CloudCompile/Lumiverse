@@ -3,8 +3,24 @@ import { getVapidPublicKey } from "../crypto/vapid";
 import * as pushSvc from "../services/push.service";
 import type { CreatePushSubscriptionInput } from "../types/push";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
+import { getAPNsInfo } from "../services/apns.service";
 
 const app = new Hono();
+
+app.get("/ios/info", (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(getAPNsInfo());
+});
+
+app.post("/ios", async (c) => {
+  c.header("Cache-Control", "no-store");
+  if (!getAPNsInfo().configured) return c.json({ error: getAPNsInfo().reason }, 503);
+  try {
+    return c.json(pushSvc.createIOSDestination(c.get("userId"), await c.req.json()), 201);
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : "Invalid iOS push destination" }, 400);
+  }
+});
 
 app.get("/vapid-public-key", (c) => {
   return c.json({ publicKey: getVapidPublicKey() });

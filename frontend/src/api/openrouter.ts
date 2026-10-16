@@ -118,4 +118,9 @@ export const openrouterApi = {
   providers(connectionId: string) {
     return get<{ providers: OpenRouterProviderEntry[] }>(`/openrouter/providers/${connectionId}`)
   },
+
+  /** Get exact provider endpoint tags, including Flex tiers, for the selected model. */
+  endpoints(connectionId: string, model: string) {
+    return get<{ endpoints: OpenRouterProviderEntry[] }>(`/openrouter/endpoints/${connectionId}`, { model })
+  },
 }

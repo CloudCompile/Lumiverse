@@ -1,7 +1,7 @@
 import { get, post, del } from './client'
 
 export interface PushSubscriptionRecord {
-  type: 'web_push' | 'tauri_desktop'
+  type: 'web_push' | 'tauri_desktop' | 'ios_apns'
   id: string
   user_id: string
   endpoint?: string
@@ -9,6 +9,8 @@ export interface PushSubscriptionRecord {
   user_agent: string
   label: string
   platform?: string
+  bundle_id?: string
+  environment?: 'development' | 'production'
   created_at: number
   updated_at: number
   last_seen_at?: number | null
@@ -27,6 +29,13 @@ export interface PushTestResult {
 }
 
 export const pushApi = {
+  getIOSInfo() {
+    return get<{ configured: boolean; bundleId: string; reason: string | null }>('/push/ios/info')
+  },
+  subscribeIOS(input: { deviceId: string; deviceToken: string; bundleId: string; environment: 'development' | 'production' }) {
+    return post<PushSubscriptionRecord>('/push/ios', { ...input, serverOrigin: window.location.origin,
+      label: 'Lumiverse iOS', userAgent: navigator.userAgent })
+  },
   getVapidPublicKey() {
     return get<{ publicKey: string }>('/push/vapid-public-key')
   },

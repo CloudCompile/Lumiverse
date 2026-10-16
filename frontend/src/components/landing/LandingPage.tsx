@@ -28,6 +28,7 @@ import { charactersApi } from '@/api/characters'
 import { imagesApi } from '@/api/images'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 import { getCharacterAvatarLargeUrlById, getCharacterAvatarThumbUrlById } from '@/lib/avatarUrls'
 import { formatRelativeTime } from '@/lib/formatRelativeTime'
 import { useStore } from '@/store'
@@ -1517,6 +1518,8 @@ function LandingPageNative() {
       fetchChats()
     })
   }, [fetchChats])
+
+  useEffect(() => subscribeImportedDataRefresh(() => { void fetchChats() }), [fetchChats])
 
   useEffect(() => {
     return wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string; character?: Character }) => {

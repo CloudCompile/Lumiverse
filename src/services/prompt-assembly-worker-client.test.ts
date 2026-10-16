@@ -47,6 +47,16 @@ afterAll(() => {
 });
 
 describe("assembly tokenizer warmup", () => {
+  test("carries the main process MCP inventory into the assembly worker", async () => {
+    const mcpTools = [{ name: "mcp_lookup", description: "Find references", parameters: {} }];
+    const generation = client.assemblePromptInWorker({ ...ctx("a"), mcpTools });
+    const worker = FakeWorker.all[0];
+    const request = worker.requests[0];
+    expect(request).toMatchObject({ type: "assemble", ctx: { mcpTools } });
+    worker.respond(request, ["a"]);
+    await generation;
+  });
+
   test("generation can join a warming worker and warmup completion does not settle its job", async () => {
     client.warmPromptAssemblyTokenizer("b", "chat");
     const worker = FakeWorker.all[0];

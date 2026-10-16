@@ -46,6 +46,7 @@ import { registerMultiplayerMacros } from "./definitions/multiplayer";
 import { registerIterationMacros } from "./definitions/iteration";
 import { registerListMacros } from "./definitions/lists";
 import { registerWebSearchMacros } from "./definitions/web-search";
+import { registerMcpMacros } from "./definitions/mcp";
 
 let initialized = false;
 
@@ -83,4 +84,5 @@ export function initMacros(): void {
   registerIterationMacros();
   registerListMacros();
   registerWebSearchMacros();
+  registerMcpMacros();
 }

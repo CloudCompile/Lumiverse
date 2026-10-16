@@ -7,7 +7,7 @@ Send OS-level push notifications to users' devices. Browser Web Push destination
 
 Notifications are automatically **suppressed** on the server when any of the user's connected sessions reports the app as visible. Presence is refreshed after each WebSocket connection and authentication, including PWA resume. User-triggered, per-destination test notifications bypass this suppression so they can be verified from the open Settings page.
 
-Registered destinations may be browser Web Push subscriptions or Lumiverse Desktop native destinations. The desktop companion's Rust host maintains the notification-only socket and heartbeat independently of its WebViews, then presents the payload through the operating system; it never joins the user's general event channel.
+Registered destinations may be browser Web Push subscriptions, Lumiverse Desktop native destinations, or native iOS APNs destinations. The desktop companion's Rust host maintains the notification-only socket and heartbeat independently of its WebViews, then presents the payload through the operating system; it never joins the user's general event channel. iOS receives alert notifications directly through APNs while backgrounded or closed. Its backend provider credentials and signing setup are documented in the [iOS client guide](../getting-started/ios-client.md#native-push-notifications).
 
 Once a push has been sent, the service worker displays it even if the app returns to the foreground before delivery. [WebKit requires every received push to display a notification](https://webkit.org/blog/12945/meet-web-push/); silently discarding it can revoke the subscription.
 
@@ -64,7 +64,7 @@ Check if push notifications are available for a user.
 
 **Returns:** `Promise<{ available: boolean; subscriptionCount: number }>`
 
-- `available`: `true` if the user has at least one registered browser or desktop notification destination
+- `available`: `true` if the user has at least one registered browser, desktop, or iOS notification destination
 - `subscriptionCount`: number of registered devices
 
 ## Attribution

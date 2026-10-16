@@ -1,5 +1,7 @@
 import { sttApi } from '@/api/stt'
 import { WhistleSTTEngine } from './whistle/WhistleSTTEngine'
+import { hasIOSNativeBridge } from './ios-native'
+import { IOSSpeechEngine } from './ios-speech'
 
 export interface STTEngineStatus {
   phase: 'loading' | 'listening' | 'processing'
@@ -144,6 +146,7 @@ function createAudioVisualizer(stream: MediaStream, cb: ((frame: STTAudioFrame) 
  */
 export function createSTTEngine(config: STTConfig): STTEngine {
   if (config.provider === 'webspeech') {
+    if (hasIOSNativeBridge()) return new IOSSpeechEngine(config)
     return new WebSpeechEngine(config)
   }
   if (config.provider === 'whistle') return new WhistleSTTEngine(config)
@@ -158,7 +161,7 @@ const SpeechRecognitionClass =
     : null
 
 export function isWebSpeechAvailable(): boolean {
-  return SpeechRecognitionClass != null
+  return hasIOSNativeBridge() || SpeechRecognitionClass != null
 }
 
 export function getSupportedSTTAudioFormat(): STTAudioFormat | null {

@@ -12,6 +12,7 @@ const LANGUAGES = [
   { code: 'fr', labelKey: 'language.fr' },
   { code: 'it', labelKey: 'language.it' },
   { code: 'de', labelKey: 'language.de' },
+  { code: 'ko', labelKey: 'language.ko' },
 ] as const
 
 interface LanguageSwitcherProps {
@@ -26,6 +27,7 @@ function resolveUiLanguage(resolved?: string): string {
   if (resolved.startsWith('fr')) return 'fr'
   if (resolved.startsWith('it')) return 'it'
   if (resolved.startsWith('de')) return 'de'
+  if (resolved.startsWith('ko')) return 'ko'
   return 'en'
 }
 

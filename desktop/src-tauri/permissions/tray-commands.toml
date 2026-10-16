@@ -12,6 +12,7 @@ commands.allow = [
   "desktop_shell_sha",
   "take_desktop_update_resume",
   "desktop_startup_ready",
+  "desktop_profile_info",
   "quit_app",
   "alert",
   "confirm",
@@ -26,6 +27,16 @@ commands.allow = [
   "show_extension_widget",
   "return_extension_widget_from_tray"
 ]
+
+[[permission]]
+identifier = "desktop-release-updates"
+description = "Allows only the hidden local tray host to check, download, and install a signed desktop release."
+commands.allow = ["desktop_update_info", "desktop_update_check", "desktop_update_download", "desktop_update_install"]
+
+[[permission]]
+identifier = "local-data-folder"
+description = "Allows only the hidden local tray host to open the selected local server's data folder."
+commands.allow = ["open_lumiverse_data_folder"]
 
 [[permission]]
 identifier = "desktop-notification-registration"

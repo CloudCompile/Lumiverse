@@ -161,7 +161,12 @@ mock.module('@/components/shared/FormComponents', () => ({
 mock.module('@/components/shared/FormComponents.module.css', () => ({ default: {} }))
 mock.module('@/components/shared/ExpandedTextEditor', () => ({ default: NullComponent, ExpandableTextarea: NullComponent }))
 mock.module('@/components/shared/ModalShell', () => ({ ModalShell: NullComponent }))
-mock.module('@/components/shared/RangeSlider', () => ({ RangeSlider: NullComponent, LabeledRangeSlider: NullComponent }))
+mock.module('@/components/shared/RangeSlider', () => ({
+  RangeSlider: NullComponent,
+  LabeledRangeSlider: NullComponent,
+  DualRangeSlider: NullComponent,
+  LabeledDualRangeSlider: NullComponent,
+}))
 mock.module('@/components/shared/PromptVariablesModal', () => ({ PromptVariablesModal: NullComponent }))
 mock.module('./PromptVariablesEditor', () => ({ VariablesEditor: NullComponent }))
 mock.module('@/components/shared/ConfirmationModal', () => ({ default: NullComponent }))

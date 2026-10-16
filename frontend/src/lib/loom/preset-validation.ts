@@ -84,7 +84,7 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
         for (const key of ['min', 'max', 'step', 'rows'] as const) {
           check(variable[key] === undefined || (typeof variable[key] === 'number' && Number.isFinite(variable[key])), `variable.${key}`)
         }
-        check(['text', 'textarea', 'number', 'slider', 'select', 'switch', 'multiselect'].includes(variable.type), 'variable.type')
+        check(['text', 'textarea', 'number', 'slider', 'range', 'select', 'switch', 'multiselect'].includes(variable.type), 'variable.type')
         if (variable.type === 'select' || variable.type === 'multiselect') {
           check(Array.isArray(variable.options), 'variable.options')
           for (const option of variable.options) {
@@ -97,7 +97,11 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
         check(
           variable.type === 'multiselect'
             ? strings(variable.defaultValue)
-            : typeof variable.defaultValue === (['number', 'slider', 'switch'].includes(variable.type) ? 'number' : 'string'),
+            : variable.type === 'range'
+              ? Array.isArray(variable.defaultValue)
+                && variable.defaultValue.length === 2
+                && variable.defaultValue.every((entry: unknown) => typeof entry === 'number' && Number.isFinite(entry))
+              : typeof variable.defaultValue === (['number', 'slider', 'switch'].includes(variable.type) ? 'number' : 'string'),
           'variable.defaultValue',
         )
       }
@@ -120,7 +124,15 @@ export function assertRenderableLoomPreset(preset: LoomPreset): void {
   for (const bucket of Object.values(preset.promptVariables)) {
     check(record(bucket), 'promptVariables.block')
     for (const value of Object.values(bucket)) {
-      check(typeof value === 'string' || typeof value === 'number' || strings(value), 'promptVariables.value')
+      check(
+        typeof value === 'string'
+          || typeof value === 'number'
+          || strings(value)
+          || (Array.isArray(value)
+            && value.length === 2
+            && value.every((entry) => typeof entry === 'number' && Number.isFinite(entry))),
+        'promptVariables.value',
+      )
     }
   }
   // Loading must satisfy the same projection used by Loom's React effects.

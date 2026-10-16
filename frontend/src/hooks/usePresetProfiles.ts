@@ -12,6 +12,7 @@ import {
 import type { PromptBlock, PromptVariableValues } from '@/lib/loom/types'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 
 /**
  * Captures the current block enabled/disabled states as a map of block ID → boolean.
@@ -117,6 +118,9 @@ export function usePresetProfiles(
   // announces a profile change. Fetch tokens below discard any response that
   // was already in flight when this revision changed.
   useEffect(() => wsClient.on(EventType.PRESET_PROFILE_CHANGED, () => {
+    setProfileRevision((revision) => revision + 1)
+  }), [])
+  useEffect(() => subscribeImportedDataRefresh(() => {
     setProfileRevision((revision) => revision + 1)
   }), [])
   useEffect(() => subscribePresetProfilePromptVariableChanges(() => {

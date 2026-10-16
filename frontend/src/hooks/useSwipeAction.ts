@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 import { messagesApi } from '@/api/chats'
 import { generateApi, type GenerateRequest } from '@/api/generate'
 import { useStore } from '@/store'
-import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import i18n from '@/i18n'
 import type { Message } from '@/types/api'
 
@@ -37,7 +36,6 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
   const setStreamingError = useStore((s) => s.setStreamingError)
   const activeProfileId = useStore((s) => s.activeProfileId)
   const activePersonaId = useStore((s) => s.activePersonaId)
-  const activeCharacterId = useStore((s) => s.activeCharacterId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
   const regenFeedback = useStore((s) => s.regenFeedback)
   const openModal = useStore((s) => s.openModal)
@@ -74,7 +72,6 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: presetId,
-        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
       }
       if (feedback) {
         genOpts.regen_feedback = feedback
@@ -96,7 +93,6 @@ export default function useSwipeAction(message: Message, chatId: string): SwipeA
     message.id,
     activeProfileId,
     activePersonaId,
-    activeCharacterId,
     getActivePresetForGeneration,
     regenFeedback.position,
     regenFeedback.format,
@@ -159,7 +155,7 @@ export async function executeSwipe(message: Message, chatId: string, direction: 
   if (direction === 'right' && atLast && isLastAssistant) {
     // Spawning a new swipe is the only swipe action blocked mid-generation.
     if (state.isStreaming) return
-    const { regenFeedback, openModal, beginStreaming, startStreaming, setStreamingError, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration } = state
+    const { regenFeedback, openModal, beginStreaming, startStreaming, setStreamingError, activeProfileId, activePersonaId, getActivePresetForGeneration } = state
 
     const doRegen = async (feedback?: string | null) => {
       beginStreaming(message.id, 'swipe')
@@ -172,7 +168,6 @@ export async function executeSwipe(message: Message, chatId: string, direction: 
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
           preset_id: presetId,
-          force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         }
         if (feedback) {
           genOpts.regen_feedback = feedback

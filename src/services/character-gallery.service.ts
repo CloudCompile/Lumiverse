@@ -81,7 +81,8 @@ function rowToGalleryItem(
 
 export function listGallery(
   userId: string,
-  characterId: string
+  characterId: string,
+  options: { registerReferences?: boolean } = {},
 ): CharacterGalleryItem[] {
   const rows = getDb()
     .query(
@@ -94,7 +95,17 @@ export function listGallery(
     )
     .all(userId, characterId) as any[];
 
-  const registration = registerGalleryReferences(userId, characterId, rows);
+  let registration: GalleryReferenceRegistration;
+  if (options.registerReferences === false) {
+    // Read-only consumers retain saved references and legacy item-ID fallbacks.
+    const character = getCharacter(userId, characterId);
+    registration = {
+      assetMap: asStringMap(character?.extensions?.risu_asset_map),
+      referenceNames: asStringMap(character?.extensions?.[GALLERY_REFERENCE_NAMES_KEY]),
+    };
+  } else {
+    registration = registerGalleryReferences(userId, characterId, rows);
+  }
   return rows.map((row) => rowToGalleryItem(row, registration.assetMap, registration.referenceNames));
 }
 

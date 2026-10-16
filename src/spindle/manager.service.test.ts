@@ -2,12 +2,30 @@ import { describe, expect, test } from "bun:test";
 
 import {
   bunInstallCmd,
+  bunInstallEnv,
   declaredCapabilitiesFromManifest,
   detectDangerousBackendCapabilities,
   PRIVILEGED_PERMISSIONS,
   shouldUseWindowsSpindleBunSyncFallback,
 } from "./manager.service";
 import type { SpindleCapability, SpindleManifest } from "lumiverse-spindle-types";
+
+describe("Android dependency install environment", () => {
+  const environment = { LUMIVERSE_ANDROID_INSTALL_COMPAT: "/data/app/native/libbuninstallcompat.so", LD_PRELOAD: "/existing.so" };
+  test("loads the APK compatibility library before existing preload entries", () => {
+    expect(bunInstallEnv("android", environment).LD_PRELOAD).toBe("/data/app/native/libbuninstallcompat.so:/existing.so");
+    expect(environment.LD_PRELOAD).toBe("/existing.so");
+  });
+  test("keeps desktop, Termux, proot, and older APK environments unchanged", () => {
+    expect(bunInstallEnv("darwin", environment)).toBe(environment);
+    for (const key of ["LUMIVERSE_IS_TERMUX", "LUMIVERSE_IS_PROOT"]) {
+      const wrapped = { ...environment, [key]: "true" };
+      expect(bunInstallEnv("android", wrapped)).toBe(wrapped);
+    }
+    const older = { PATH: "/system/bin" };
+    expect(bunInstallEnv("android", older)).toBe(older);
+  });
+});
 
 function withEnv(overrides: Record<string, string | undefined>, fn: () => void): void {
   const previous = new Map<string, string | undefined>();
@@ -69,6 +87,58 @@ describe("detectDangerousBackendCapabilities", () => {
       }
     `;
 
+    expect(detectDangerousBackendCapabilities(code)).toEqual([]);
+  });
+
+  test("hard-blocks native fetch and common aliases even with all capabilities declared", () => {
+    const declared = new Set<SpindleCapability>(["dynamic_code_execution", "base64_decode"]);
+    const samples = [
+      'await fetch("https://example.com/script.js");',
+      'await fetch?.("https://example.com/script.js");',
+      'const request = fetch; await request(url);',
+      'fetch.call(globalThis, url);',
+      'const request = fetch.bind(globalThis);',
+      'globalThis.fetch(url);',
+      'global.fetch(url);',
+      'self.fetch(url);',
+      'globalThis["fetch"](url);',
+      'globalThis["fet" + "ch"](url);',
+      'globalThis[String.fromCharCode(102, 101, 116, 99, 104)](url);',
+      'const root = globalThis; root.fetch(url);',
+      'const { fetch: request } = globalThis; request(url);',
+      'const { fetch } = self; fetch(url);',
+      String.raw`globalThis.\u0066etch(url);`,
+      'const value = `result: ${fetch(url)}`;',
+      'import request from "node-fetch"; request(url);',
+      'const { fetch: request } = require("undici"); request(url);',
+      'const client = await import("cross-fetch"); client.fetch(url);',
+    ];
+
+    for (const code of samples) {
+      expect(detectDangerousBackendCapabilities(code, declared)).toContain("direct fetch API usage");
+    }
+
+    for (const code of [
+      'Bun.fetch(url);',
+      'Bun["fetch"](url);',
+      'const runtime = Bun; runtime.fetch(url);',
+      'const { fetch: request } = Bun; request(url);',
+      'import { fetch as request } from "bun"; request(url);',
+    ]) {
+      expect(detectDangerousBackendCapabilities(code, declared)).toContain("dangerous Bun system API usage");
+    }
+  });
+
+  test("allows the Spindle fetch bridge and unrelated fetch names", () => {
+    const code = String.raw`
+      const result = await spindle.cors(url, { responseType: "arraybuffer" });
+      const body = await client.fetch(url);
+      const options = { fetch: request };
+      const docs = "globalThis.fetch(url); Bun.fetch(url);";
+      const forbidden = /fetch\s*\(/;
+      // fetch(url);
+      /* const request = fetch; */
+    `;
     expect(detectDangerousBackendCapabilities(code)).toEqual([]);
   });
 
@@ -329,6 +399,14 @@ describe("PRIVILEGED_PERMISSIONS", () => {
 });
 
 describe("bunInstallCmd", () => {
+  test("APK installs use the installed Bun executable and copy dependencies", () => {
+    withEnv({ LUMIVERSE_IS_TERMUX: undefined, LUMIVERSE_IS_PROOT: undefined,
+      LUMIVERSE_BUN_EXECUTABLE: "/data/app/example/lib/arm64/libbun.so" }, () => {
+      expect(bunInstallCmd("android")).toEqual([
+        "/data/app/example/lib/arm64/libbun.so", "install", "--ignore-scripts", "--backend=copyfile",
+      ]);
+    });
+  });
   test("disables dependency lifecycle scripts for normal installs", () => {
     withEnv(
       {

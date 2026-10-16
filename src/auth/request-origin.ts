@@ -96,3 +96,9 @@ export function requestAtResolvedOrigin(
   rewritten.headers.delete("x-forwarded-port");
   return rewritten;
 }
+
+/** Give direct Better Auth APIs the same approved transport as the HTTP auth handler. */
+export function approvedAuthRequest(request: Request, trustForwarded: boolean): Request {
+  const url = new URL(request.url);
+  return requestAtResolvedOrigin(request, resolveDesktopRequestOrigin(request, trustForwarded), url.pathname + url.search);
+}

@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronRight, RotateCcw, Sliders } from 'lucide-react'
 import { ModalShell } from '@/components/shared/ModalShell'
 import NumberStepper from '@/components/shared/NumberStepper'
+import { DualRangeSlider, RangeSlider } from '@/components/shared/RangeSlider'
 import SearchableSelect, { type SearchableSelectOption } from '@/components/shared/SearchableSelect'
 import { Toggle } from '@/components/shared/Toggle'
 import type { PromptBlock, PromptBlockPlacement, PromptVariableDef, PromptVariableValue, PromptVariableValues } from '@/lib/loom/types'
@@ -34,13 +35,14 @@ function collectEligibleBlocks(blocks: PromptBlock[]): EligibleBlock[] {
 function resolveInitialValue(def: PromptVariableDef, stored: PromptVariableValue | undefined): PromptVariableValue {
   if (stored === undefined || stored === null) {
     // Clone arrays so a defaultValue-derived selection isn't shared across blocks.
-    if (def.type === 'multiselect') return Array.isArray(def.defaultValue) ? def.defaultValue.slice() : []
+    if (def.type === 'multiselect' || def.type === 'range') return [...def.defaultValue] as PromptVariableValue
     return def.defaultValue
   }
   if (def.type === 'number' || def.type === 'slider') {
     const n = Number(stored)
     return Number.isFinite(n) ? n : (def.defaultValue as number)
   }
+  if (def.type === 'range') return normalizeRangeValue(def, stored)
   if (def.type === 'switch') {
     if (typeof stored === 'number') return stored === 1 ? 1 : 0
     if (typeof stored === 'boolean') return stored ? 1 : 0
@@ -62,6 +64,20 @@ function resolveInitialValue(def: PromptVariableDef, stored: PromptVariableValue
     return list.filter((id) => validIds.has(id))
   }
   return String(stored)
+}
+
+function normalizeRangeValue(
+  def: Extract<PromptVariableDef, { type: 'range' }>,
+  value: unknown,
+): [number, number] {
+  const fallback = def.defaultValue
+  if (!Array.isArray(value) || value.length !== 2) return [...fallback]
+  const first = Number(value[0])
+  const second = Number(value[1])
+  if (!Number.isFinite(first) || !Number.isFinite(second)) return [...fallback]
+  const start = Math.min(def.max, Math.max(def.min, first))
+  const end = Math.min(def.max, Math.max(def.min, second))
+  return start <= end ? [start, end] : [end, start]
 }
 
 function clampNumeric(def: PromptVariableDef, value: number): number {
@@ -123,14 +139,21 @@ export function PromptVariablesModal({
   }
 
   const resetVar = (blockId: string, def: PromptVariableDef) => {
-    setVar(blockId, def.name, def.defaultValue)
+    setVar(
+      blockId,
+      def.name,
+      Array.isArray(def.defaultValue) ? ([...def.defaultValue] as PromptVariableValue) : def.defaultValue,
+    )
   }
 
   const resetAll = () => {
     const fresh: PromptVariableValues = {}
     for (const { block, variables } of eligible) {
       fresh[block.id] = Object.fromEntries(
-        variables.map((def) => [def.name, def.defaultValue]),
+        variables.map((def) => [
+          def.name,
+          Array.isArray(def.defaultValue) ? ([...def.defaultValue] as PromptVariableValue) : def.defaultValue,
+        ]),
       )
     }
     setDraft(fresh)
@@ -147,6 +170,8 @@ export function PromptVariablesModal({
         if (def.type === 'number' || def.type === 'slider') {
           const n = Number(raw)
           bucket[def.name] = clampNumeric(def, Number.isFinite(n) ? n : (def.defaultValue as number))
+        } else if (def.type === 'range') {
+          bucket[def.name] = normalizeRangeValue(def, raw)
         } else if (def.type === 'switch') {
           const n = typeof raw === 'number' ? raw : Number(raw)
           bucket[def.name] = n === 1 ? 1 : 0
@@ -281,6 +306,10 @@ interface VariableControlProps {
 function VariableControl({ def, value, placement, onChange, onReset }: VariableControlProps) {
   const { t } = useTranslation('shared', { keyPrefix: 'promptVariables' })
   const { t: tp } = useTranslation('panels')
+  const [liveDragValue, setLiveDragValue] = useState<number | [number, number] | null>(null)
+  useEffect(() => {
+    setLiveDragValue(null)
+  }, [value])
   const position = placement ? tp(`loomBuilder.blockEditor.positions.${placement.position}`) : ''
   const role = placement ? tp(`loomBuilder.blockEditor.roles.${placement.role}`) : ''
   const showDepth = placement && (placement.position === 'in_history' || placement.role === 'user_append' || placement.role === 'assistant_append')
@@ -305,7 +334,7 @@ function VariableControl({ def, value, placement, onChange, onReset }: VariableC
           {t(showDepth ? 'placementSummaryWithDepth' : 'placementSummary', { role, position, depth: placement.depth })}
         </div>
       )}
-      {renderControl(def, value, onChange)}
+      {renderControl(def, value, onChange, liveDragValue, setLiveDragValue)}
     </div>
   )
 }
@@ -314,6 +343,8 @@ function renderControl(
   def: PromptVariableDef,
   value: PromptVariableValue,
   onChange: (v: PromptVariableValue) => void,
+  liveDragValue: number | [number, number] | null,
+  onDragValue: (v: number | [number, number] | null) => void,
 ) {
   switch (def.type) {
     case 'text':
@@ -346,19 +377,52 @@ function renderControl(
       )
     case 'slider': {
       const numeric = typeof value === 'number' ? value : Number(value) || def.defaultValue
+      const displayNumeric = typeof liveDragValue === 'number' ? liveDragValue : numeric
       return (
         <>
           <div className={css.sliderRow}>
-            <input
-              type="range"
-              className={css.slider}
+            <RangeSlider
               min={def.min}
               max={def.max}
               step={def.step ?? 1}
               value={numeric}
-              onChange={(e) => onChange(Number(e.target.value))}
+              onDragValue={onDragValue}
+              onCommit={(next) => {
+                onDragValue(null)
+                onChange(next)
+              }}
+              className={css.slider}
             />
-            <span className={css.sliderValue}>{numeric}</span>
+            <span className={css.sliderValue}>{displayNumeric}</span>
+          </div>
+          <div className={css.sliderRange}>
+            <span>{def.min}</span>
+            <span>{def.max}</span>
+          </div>
+        </>
+      )
+    }
+    case 'range': {
+      const range = normalizeRangeValue(def, value)
+      const displayRange = Array.isArray(liveDragValue) ? liveDragValue : range
+      return (
+        <>
+          <div className={css.sliderRow}>
+            <DualRangeSlider
+              min={def.min}
+              max={def.max}
+              step={def.step ?? 1}
+              value={range}
+              onDragValue={onDragValue}
+              onCommit={(next) => {
+                onDragValue(null)
+                onChange(next)
+              }}
+              className={css.slider}
+              startLabel={`${def.label || def.name} start`}
+              endLabel={`${def.label || def.name} end`}
+            />
+            <span className={css.sliderValue}>{displayRange[0]} – {displayRange[1]}</span>
           </div>
           <div className={css.sliderRange}>
             <span>{def.min}</span>

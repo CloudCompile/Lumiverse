@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import type { MouseEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Minus, Square, X } from 'lucide-react'
@@ -9,7 +10,7 @@ export default function DesktopPwaTitlebar() {
   const { t } = useTranslation('common')
   const context = useContextualTitle()
   const title = context || t('appName')
-  const isTauriDesktop = '__TAURI_INTERNALS__' in window
+  const isTauriDesktop = hasTauriDesktopBridge()
 
   const startDragging = (event: MouseEvent<HTMLDivElement>) => {
     // Own the gesture explicitly instead of combining Tauri's injected drag

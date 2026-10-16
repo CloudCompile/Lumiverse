@@ -1,12 +1,18 @@
+mod bundled_server;
 mod capture;
+mod data_folder;
+mod desktop_updates;
 mod discord_rpc;
 mod frontend;
 mod notifications;
+mod profile;
 mod remote_instance;
 mod runner;
 mod system_audio;
 #[cfg(any(target_os = "linux", test))]
 mod webview_media;
+#[cfg(any(target_os = "windows", test))]
+mod webview_visibility;
 #[cfg(target_os = "linux")]
 mod wayland_background_effect;
 
@@ -217,21 +223,29 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     configure_linux_display_backend();
 
+    let mut context = tauri::generate_context!();
+    let profile = profile::prepare(context.config_mut(), std::env::args().skip(1))
+        .expect("invalid desktop profile arguments");
+    let remote_state = remote_instance::RemoteInstanceState::for_identifier(&profile.identifier);
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             None,
         ))
         .manage(runner::RunnerState::default())
+        .manage(bundled_server::BundledServerState::default())
+        .manage(desktop_updates::DesktopUpdatesState::default())
         .manage(runner::DesktopUpdateResumeState::default())
         .manage(frontend::FrontendState::default())
         .manage(frontend::DesktopWidgetCatalogState::default())
         .manage(notifications::DesktopNotificationTransportState::default())
-        .manage(remote_instance::RemoteInstanceState::default())
+        .manage(remote_state)
+        .manage(profile)
         .manage(discord_rpc::DiscordRpcState::default())
         .manage(capture::DesktopCaptureState::default())
         .manage(system_audio::SystemAudioState::default())
@@ -242,6 +256,22 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            profile::desktop_profile_info,
+            data_folder::open_lumiverse_data_folder,
+            desktop_updates::desktop_update_info,
+            desktop_updates::desktop_update_check,
+            desktop_updates::desktop_update_download,
+            desktop_updates::desktop_update_install,
+            bundled_server::bundled_server_available,
+            bundled_server::bundled_server_start,
+            bundled_server::bundled_server_stop,
+            bundled_server::bundled_server_status,
+            bundled_server::bundled_server_alive,
+            bundled_server::bundled_setup_defaults,
+            bundled_server::bundled_setup_save,
+            bundled_server::bundled_setup_status,
+            bundled_server::bundled_setup_complete,
+            bundled_server::bundled_setup_pick_folder,
             runner::runner_start,
             runner::runner_send,
             runner::runner_alive,
@@ -295,6 +325,9 @@ pub fn run() {
             system_audio::desktop_system_audio_stop,
         ]);
 
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(webview_visibility::init());
+
     #[cfg(target_os = "macos")]
     let builder = builder
         .menu(macos_menu)
@@ -302,6 +335,8 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            profile::initialize(app.handle())?;
+            desktop_updates::restore_resume(app.handle())?;
             #[cfg(target_os = "macos")]
             set_macos_app_icon();
             // Keep normal macOS application/menu integration; the frontend
@@ -316,7 +351,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building Lumiverse")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {

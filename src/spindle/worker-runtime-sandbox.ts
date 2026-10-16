@@ -3,7 +3,7 @@
  *
  * Called immediately before the extension entry is dynamically imported.
  * It patches global APIs that are common bypass vectors: eval, the Function
- * constructor, indirect Bun/process API access, and sensitive env vars.
+ * constructor, native fetch, indirect Bun/process API access, and sensitive env vars.
  *
  * IMPORTANT: This is a *cooperative* sandbox. It raises the cost of escape
  * but does not replace OS-level isolation (sandbox-exec, containers, etc.).
@@ -45,6 +45,10 @@ const BLOCKED_SPECIFIERS = new Set([
   "node:sqlite",
   "sqlite3",
   "better-sqlite3",
+  "bun",
+  "node-fetch",
+  "undici",
+  "cross-fetch",
 ]);
 
 const BLOCKED_BUN_APIS = new Set([
@@ -56,6 +60,7 @@ const BLOCKED_BUN_APIS = new Set([
   "connect",
   "listen",
   "openInEditor",
+  "fetch",
 ]);
 
 const BLOCKED_PROCESS_APIS = new Set([
@@ -151,7 +156,23 @@ function createMaskedEnv(rawEnv: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   });
 }
 
+function blockedFetch(): never {
+  throw new Error("fetch is disabled in extension context; use spindle.cors() instead");
+}
+
+/** Network requests must go through the host's permission-gated safeFetch path. */
+export function blockNativeFetch(): void {
+  Object.defineProperty(globalThis, "fetch", {
+    value: blockedFetch,
+    writable: false,
+    configurable: false,
+  });
+}
+
 export function initializeSandbox(): void {
+  // Fail closed if native fetch cannot be disabled before loading extension code.
+  blockNativeFetch();
+
   // ── Guard dynamic import (best-effort only) ──
   // NOTE: this overrides the `globalThis.import` property, which the native
   // `import()` operator does NOT consult. It does not stop `await import(...)`.

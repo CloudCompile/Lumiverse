@@ -20,17 +20,32 @@
         <fieldset>
           <legend>Connect using</legend>
           <div class="connection-options">
-            <label class="connection-option" for="connection-mode-local" data-connection-option="local" data-selected>
-              <input id="connection-mode-local" type="radio" name="connection-mode" value="local" checked />
+            <label class="connection-option" for="connection-mode-local" data-connection-option="bundled" data-selected>
+              <input id="connection-mode-local" type="radio" name="connection-mode" value="bundled" checked />
               <span class="option-icon" aria-hidden="true">
                 <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
               </span>
               <span class="option-copy">
                 <span class="option-heading">
-                  <strong>Local server</strong>
+                  <strong>Built-in server</strong>
                   <span class="current-badge" hidden>Current</span>
                 </span>
-                <small>Use the Lumiverse server running on this computer.</small>
+                <small>Create or use a local server managed entirely by this desktop app.</small>
+              </span>
+              <span class="radio-mark" aria-hidden="true"></span>
+            </label>
+
+            <label class="connection-option" for="connection-mode-checkout" data-connection-option="checkout">
+              <input id="connection-mode-checkout" type="radio" name="connection-mode" value="checkout" />
+              <span class="option-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg>
+              </span>
+              <span class="option-copy">
+                <span class="option-heading">
+                  <strong>Existing checkout</strong>
+                  <span class="current-badge" hidden>Current</span>
+                </span>
+                <small>Run your existing Lumiverse folder with its configuration, account, and data.</small>
               </span>
               <span class="radio-mark" aria-hidden="true"></span>
             </label>
@@ -52,7 +67,20 @@
           </div>
         </fieldset>
 
-        <section id="remote-settings" class="remote-settings" aria-labelledby="remote-url-label" data-disabled="true">
+        <section id="checkout-settings" class="remote-settings" aria-labelledby="checkout-folder-label" hidden>
+          <div class="field-heading">
+            <label id="checkout-folder-label" for="checkout-folder">Lumiverse folder</label>
+          </div>
+          <div class="checkout-field">
+            <div class="input-shell">
+              <input id="checkout-folder" type="text" placeholder="Choose your Lumiverse checkout" autocomplete="off" spellcheck="false" disabled />
+            </div>
+            <button id="browse-checkout" class="button button-secondary" type="button">Browse…</button>
+          </div>
+          <p class="field-hint">Uses this folder’s .env, account, and data. Requires an installed Bun runtime.</p>
+        </section>
+
+        <section id="remote-settings" class="remote-settings" aria-labelledby="remote-url-label" hidden>
           <div class="field-heading">
             <label id="remote-url-label" for="frontend-url">Instance URL</label>
             <span>HTTPS required</span>
@@ -61,14 +89,14 @@
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7.1.1l2-2a5 5 0 0 0-7.1-7.1l-1.1 1.1M14 11a5 5 0 0 0-7.1-.1l-2 2A5 5 0 0 0 12 20l1.1-1.1"/></svg>
             <input id="frontend-url" name="frontend-url" type="url" inputmode="url" placeholder="https://app.example.com" autocomplete="url" spellcheck="false" disabled />
           </div>
-          <p class="field-hint">You’ll sign in securely in your system browser after saving.</p>
+          <p class="field-hint">Your saved session is restored when available. If needed, you’ll sign in securely in your browser.</p>
         </section>
 
         <p id="error" class="error" role="alert" aria-live="polite" hidden></p>
 
         <footer class="actions">
           <button id="cancel" class="button button-secondary" type="button">Cancel</button>
-          <button id="save" class="button button-primary" type="submit">Save connection</button>
+          <button id="save" class="button button-primary" type="submit" disabled>Save connection</button>
         </footer>
       </form>
     </main>

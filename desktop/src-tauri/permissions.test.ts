@@ -84,6 +84,61 @@ describe("tauri command registration", () => {
 });
 
 describe("capability origins", () => {
+  test("signed release updates are available only to the bundled or development tray host", () => {
+    const grants = capabilities().filter((capability) =>
+      (capability.json.permissions as string[]).includes("desktop-release-updates"));
+    expect(grants.length).toBe(2);
+    for (const capability of grants) {
+      expect(capability.json.windows).toEqual(["main"]);
+      if (capability.json.remote !== undefined) {
+        expect((capability.json.remote as { urls: string[] }).urls).toEqual([
+          "http://127.0.0.1:1430", "http://localhost:1430",
+        ]);
+      } else expect(capability.json.local).toBe(true);
+    }
+    const build = readFileSync(join(HERE, "build.rs"), "utf8");
+    for (const name of ["desktop_update_info", "desktop_update_check", "desktop_update_download", "desktop_update_install"]) expect(build).toContain(`"${name}"`);
+  });
+  test("local data folder access is limited to the bundled or development tray host", () => {
+    const grants = capabilities().filter((capability) =>
+      (capability.json.permissions as string[]).includes("local-data-folder"));
+    expect(grants.length).toBe(2);
+    for (const capability of grants) {
+      expect(capability.json.windows).toEqual(["main"]);
+      if (capability.json.remote !== undefined) {
+        expect((capability.json.remote as { urls: string[] }).urls).toEqual([
+          "http://127.0.0.1:1430", "http://localhost:1430",
+        ]);
+      } else expect(capability.json.local).toBe(true);
+    }
+    expect(readFileSync(join(HERE, "build.rs"), "utf8")).toContain('"open_lumiverse_data_folder"');
+  });
+  test("checkout selection is available only to the local instance selector", () => {
+    const grants = capabilities().filter((capability) =>
+      (capability.json.permissions as string[]).includes("instance-connection-setup"));
+    expect(grants.length).toBe(2);
+    for (const capability of grants) {
+      expect(capability.json.windows).toEqual(["frontend-url-settings"]);
+      if (capability.json.remote !== undefined) {
+        expect((capability.json.remote as { urls: string[] }).urls).toEqual([
+          "http://localhost:1430/custom-url.html", "http://127.0.0.1:1430/custom-url.html",
+        ]);
+      } else expect(capability.json.local).toBe(true);
+    }
+  });
+  test("bundled setup callbacks are limited to their own local webview", () => {
+    const grants = capabilities().filter((capability) =>
+      (capability.json.permissions as string[]).includes("bundled-server-setup"));
+    expect(grants.length).toBe(2);
+    for (const capability of grants) {
+      expect(capability.json.windows).toEqual(["server-setup"]);
+      if (capability.json.remote !== undefined) {
+        expect((capability.json.remote as { urls: string[] }).urls).toEqual([
+          "http://localhost:1430/server-setup.html", "http://127.0.0.1:1430/server-setup.html",
+        ]);
+      } else expect(capability.json.local).toBe(true);
+    }
+  });
   /**
    * Labels of windows the Rust side builds from a bundled page. A capability
    * covering one of these must apply to local origins, or it matches the
@@ -270,6 +325,17 @@ describe("native capture boundary", () => {
     expect(plist.match(/<key>NSMicrophoneUsageDescription<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBeTruthy();
     const entitlements = readFileSync(join(HERE, config.bundle.macOS.entitlements), "utf8");
     expect(entitlements).toMatch(/<key>com\.apple\.security\.device\.audio-input<\/key>\s*<true\s*\/>/);
+  });
+
+  test("bundled debug macOS apps override the production plist identity", () => {
+    const config = JSON.parse(readFileSync(join(HERE, "tauri.conf.json"), "utf8"));
+    const debug = JSON.parse(readFileSync(join(HERE, "tauri.debug-profile.conf.json"), "utf8"));
+    const plist = readFileSync(join(HERE, debug.bundle.macOS.infoPlist), "utf8");
+    expect(debug.identifier).not.toBe(config.identifier);
+    expect(plist.match(/<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(debug.identifier);
+    expect(plist.match(/<key>CFBundleDisplayName<\/key>\s*<string>([^<]+)<\/string>/)?.[1]).toBe(debug.productName);
+    expect(plist).toContain("NSMicrophoneUsageDescription");
+    expect(plist).toContain("NSAudioCaptureUsageDescription");
   });
 
   test("macOS explicitly offers other-app windows and entire displays through the system picker", () => {

@@ -88,6 +88,7 @@ afterEach(async () => {
 describe('H7 host-surface registry', () => {
   test('exposes exactly the canonical static allowlist and permissions', () => {
     expect(listHostSurfaces().map((surface) => surface.id)).toEqual([
+      'message_preview',
       'provider_icon',
       'world_book_entry_editor',
       'world_book_entry_table',

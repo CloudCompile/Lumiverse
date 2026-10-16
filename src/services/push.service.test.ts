@@ -6,6 +6,7 @@ import { eventBus } from "../ws/bus";
 const db = new Database(":memory:");
 db.exec(await Bun.file(new URL("../db/migrations/035_push_subscriptions.sql", import.meta.url)).text());
 db.exec(await Bun.file(new URL("../db/migrations/117_desktop_notification_destinations.sql", import.meta.url)).text());
+db.exec(await Bun.file(new URL("../db/migrations/127_ios_push_destinations.sql", import.meta.url)).text());
 db.exec(`
   CREATE TABLE chats (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, character_id TEXT);
   CREATE TABLE characters (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL);
@@ -30,10 +31,17 @@ mock.module("@pushforge/builder", () => ({
 }));
 const validateHost = mock(async (_hostname: string) => {});
 mock.module("../utils/safe-fetch", () => ({ validateHost, SSRFError: class extends Error {} }));
+let apnsConfigured = true;
+const sendAPNsNotification = mock(async (_destination: unknown, _payload: unknown): Promise<{ sent: boolean; invalidatedAt?: number }> => ({ sent: true }));
+mock.module("./apns.service", () => ({
+  getAPNsInfo: () => ({ configured: apnsConfigured, bundleId: "chat.lumiverse.ios", reason: apnsConfigured ? null : "APNs key missing" }),
+  sendAPNsNotification,
+}));
 
 const {
   authenticateDesktopDestinationCredential,
   createDesktopDestination,
+  createIOSDestination,
   createSubscription,
   dispatchGenerationEndedPush,
   listNotificationDestinations,
@@ -59,10 +67,14 @@ app.route("/desktop-notifications", desktopNotificationTransportRoutes);
 beforeEach(() => {
   db.exec("DELETE FROM push_subscriptions");
   db.exec("DELETE FROM desktop_notification_destinations");
+  db.exec("DELETE FROM ios_push_destinations");
   db.exec("DELETE FROM chats");
   db.exec("DELETE FROM characters");
   fetchMock.mockClear();
   builtPayloads.length = 0;
+  apnsConfigured = true;
+  sendAPNsNotification.mockReset();
+  sendAPNsNotification.mockImplementation(async () => ({ sent: true }));
   pushNotificationPreferences = null;
   validateHost.mockReset();
   validateHost.mockImplementation(async () => {});
@@ -82,6 +94,58 @@ afterAll(() => {
 });
 
 describe("push presence suppression", () => {
+  const iosInput = { deviceId: "iphone-install-123456", deviceToken: "ab".repeat(32), bundleId: "chat.lumiverse.ios",
+    environment: "development" as const, serverOrigin: "https://lumiverse.example.com" };
+
+  test("registers native iOS destinations without leaking tokens and rotates them in place", () => {
+    const first = createIOSDestination(userId, iosInput);
+    const second = createIOSDestination(userId, { ...iosInput, deviceToken: "cd".repeat(32) });
+    expect(first.type).toBe("ios_apns");
+    expect(second.id).toBe(first.id);
+    expect(JSON.stringify(listNotificationDestinations(userId))).not.toContain(iosInput.deviceToken);
+    expect(listNotificationDestinations(userId).filter(row => row.type === "ios_apns")).toHaveLength(1);
+  });
+
+  test("moves a token to the newly enrolling account", () => {
+    createIOSDestination(userId, iosInput);
+    createIOSDestination("another-user", { ...iosInput, deviceId: "another-installation-1234" });
+    expect(listNotificationDestinations(userId).filter(row => row.type === "ios_apns")).toHaveLength(0);
+    expect(listNotificationDestinations("another-user").filter(row => row.type === "ios_apns")).toHaveLength(1);
+  });
+
+  test("native push can deliver with no browser subscription or connected WebSocket", async () => {
+    const destination = createIOSDestination(userId, iosInput);
+    expect(await sendPushToUser(userId, { title: "Hello", body: "From APNs" }, { destinationId: destination.id })).toBe(1);
+    expect(sendAPNsNotification).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(builtPayloads).toHaveLength(0);
+  });
+
+  test("does not delete a recently refreshed token after an older APNs invalidation", async () => {
+    createIOSDestination(userId, iosInput);
+    sendAPNsNotification.mockImplementation(async () => ({ sent: false, invalidatedAt: Date.now() - 60_000 }));
+    await sendPushToUser(userId, { title: "Hello", body: "Old receipt" });
+    expect(listNotificationDestinations(userId).some(row => row.type === "ios_apns")).toBe(true);
+    sendAPNsNotification.mockImplementation(async () => ({ sent: false, invalidatedAt: Date.now() + 1000 }));
+    await sendPushToUser(userId, { title: "Hello", body: "Expired token" });
+    expect(listNotificationDestinations(userId).some(row => row.type === "ios_apns")).toBe(false);
+  });
+
+  test("APNs configuration and destination validation return actionable errors", async () => {
+    apnsConfigured = false;
+    const disabled = await app.request("/push/ios", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(iosInput) });
+    expect(disabled.status).toBe(503);
+    apnsConfigured = true;
+    for (const patch of [{ deviceToken: "../../../bad" }, { bundleId: "other.app" }, { environment: "fake" }, { serverOrigin: "file:///secret" }]) {
+      const response = await app.request("/push/ios", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...iosInput, ...patch }) });
+      expect(response.status).toBe(400);
+    }
+    const created = createIOSDestination(userId, iosInput);
+    // Another user's destination cannot be removed through the current session.
+    const other = createIOSDestination("another-user", { ...iosInput, deviceToken: "ef".repeat(32) });
+    expect((await app.request(`/push/subscriptions/${other.id}`, { method: "DELETE" })).status).toBe(404);
+    expect((await app.request(`/push/subscriptions/${created.id}`, { method: "DELETE" })).status).toBe(200);
+  });
   test.each(["phone", "desktop"])("suppresses generation and extension pushes while %s is visible", async (visibleDevice) => {
     eventBus.setUserVisibility(userId, "phone", visibleDevice === "phone");
     eventBus.setUserVisibility(userId, "desktop", visibleDevice === "desktop");

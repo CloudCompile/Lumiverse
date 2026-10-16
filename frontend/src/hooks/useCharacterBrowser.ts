@@ -7,6 +7,7 @@ import { get } from '@/api/client'
 import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 import type { Character, CharacterSummary, TagCount } from '@/types/api'
 import type { LorebookInfo } from '@/components/modals/BulkImportProgressModal'
 import type { ExpressionsImportInfo } from '@/components/modals/ExpressionsImportModal'
@@ -147,11 +148,13 @@ export function useCharacterBrowser() {
     const offEdited = wsClient.on(EventType.CHARACTER_EDITED, refresh)
     const offDeleted = wsClient.on(EventType.CHARACTER_DELETED, refresh)
     const offLibraryChanged = wsClient.on(EventType.CHARACTER_LIBRARY_CHANGED, refresh)
+    const offImportComplete = subscribeImportedDataRefresh(refresh)
     return () => {
       offCreated()
       offEdited()
       offDeleted()
       offLibraryChanged()
+      offImportComplete()
     }
   }, [])
 

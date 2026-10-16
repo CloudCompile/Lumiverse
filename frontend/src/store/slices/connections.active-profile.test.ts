@@ -21,11 +21,13 @@ function settingsSliceExports() {
   return {
     REASONING_DEFAULTS: reasoningDefaults,
     clearDirtyKey: () => {},
+    flushSettingsNow: async () => {},
     persistKey: () => {},
     persistPendingImageGenerationPatch: () => {},
     resetSettingsPersistence: () => {},
     createSettingsSlice: (_set: unknown, get: () => AppStore) => ({
       reasoningSettings: { ...reasoningDefaults },
+      unboundReasoningSettings: null,
       hydrateStartupSettings: (settings: StartupSettings) => {
         if (!Object.prototype.hasOwnProperty.call(settings, 'activeProfileId')) return
         const raw = settings.activeProfileId

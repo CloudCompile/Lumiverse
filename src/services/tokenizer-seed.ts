@@ -1,4 +1,6 @@
 import { getDb } from "../db/connection";
+import { runDatabaseStatements } from "../db/queries";
+import type { SqlStatementOperation } from "../db/execution-protocol";
 
 // Kimi K2 / K2.5 / K3 tiktoken pre-tokenization regex. Ported from
 // `tokenization_kimi.py` in moonshotai/Kimi-K2.5. K3 ships the same regex and
@@ -302,29 +304,37 @@ const BUILT_IN_PATTERNS = [
   { id: "pat-fallback", tokenizer_id: "approximate-4", pattern: ".*", priority: -1 },
 ];
 
+const UPSERT_CONFIG_SQL = `INSERT INTO tokenizer_configs (id, name, type, config, is_built_in, updated_at)
+     VALUES (?, ?, ?, ?, 1, unixepoch())
+     ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, config=excluded.config, is_built_in=1, updated_at=unixepoch()`;
+const UPSERT_PATTERN_SQL = `INSERT INTO tokenizer_model_patterns (id, tokenizer_id, pattern, priority, is_built_in, updated_at)
+     VALUES (?, ?, ?, ?, 1, unixepoch())
+     ON CONFLICT(id) DO UPDATE SET tokenizer_id=excluded.tokenizer_id, pattern=excluded.pattern, priority=excluded.priority, is_built_in=1, updated_at=unixepoch()`;
+
+function tokenizerSeedStatements(): SqlStatementOperation[] {
+  return [
+    ...BUILT_IN_CONFIGS.map(c => ({ sql: UPSERT_CONFIG_SQL, bindings: [c.id, c.name, c.type, c.config] })),
+    ...BUILT_IN_PATTERNS.map(p => ({ sql: UPSERT_PATTERN_SQL, bindings: [p.id, p.tokenizer_id, p.pattern, p.priority] })),
+  ];
+}
+
+/** Synchronous compatibility API for local fixtures and synchronous helpers. */
 export function seedTokenizers(): void {
   const db = getDb();
 
-  const upsertConfig = db.prepare(
-    `INSERT INTO tokenizer_configs (id, name, type, config, is_built_in, updated_at)
-     VALUES (?, ?, ?, ?, 1, unixepoch())
-     ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, config=excluded.config, is_built_in=1, updated_at=unixepoch()`
-  );
-
-  const upsertPattern = db.prepare(
-    `INSERT INTO tokenizer_model_patterns (id, tokenizer_id, pattern, priority, is_built_in, updated_at)
-     VALUES (?, ?, ?, ?, 1, unixepoch())
-     ON CONFLICT(id) DO UPDATE SET tokenizer_id=excluded.tokenizer_id, pattern=excluded.pattern, priority=excluded.priority, is_built_in=1, updated_at=unixepoch()`
-  );
-
   db.transaction(() => {
-    for (const c of BUILT_IN_CONFIGS) {
-      upsertConfig.run(c.id, c.name, c.type, c.config);
+    for (const operation of tokenizerSeedStatements()) {
+      const statement = db.prepare(operation.sql);
+      try { statement.run(...operation.bindings!); }
+      finally { statement.finalize(); }
     }
-    for (const p of BUILT_IN_PATTERNS) {
-      upsertPattern.run(p.id, p.tokenizer_id, p.pattern, p.priority);
-    }
-  })();
+  }).immediate();
 
+  console.log("[Startup] Built-in tokenizer configs + model patterns seeded.");
+}
+
+/** Complete seeding atomically off-process, retrying only acknowledged busy rollbacks. */
+export async function seedTokenizersAsync(): Promise<void> {
+  await runDatabaseStatements(tokenizerSeedStatements());
   console.log("[Startup] Built-in tokenizer configs + model patterns seeded.");
 }

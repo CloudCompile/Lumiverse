@@ -12,6 +12,7 @@ import styles from './OpenRouterSettings.module.css'
 
 interface OpenRouterSettingsProps {
   connectionId?: string
+  model?: string
   /** Name to use when auto-creating the connection during OAuth (creation flow). */
   connectionName?: string
   hasApiKey: boolean
@@ -26,7 +27,7 @@ const QUANTIZATION_OPTIONS = [
   'int4', 'int8', 'fp4', 'fp6', 'fp8', 'fp16', 'bf16', 'fp32', 'unknown',
 ]
 
-export default function OpenRouterSettings({ connectionId, connectionName, hasApiKey, settings, onChange, onApiKeySet, onConnectionCreated }: OpenRouterSettingsProps) {
+export default function OpenRouterSettings({ connectionId, model = '', connectionName, hasApiKey, settings, onChange, onApiKeySet, onConnectionCreated }: OpenRouterSettingsProps) {
   const { t } = useTranslation('panels')
   const oauthCleanupRef = useRef<(() => void) | null>(null)
   const [credits, setCredits] = useState<OpenRouterCreditsInfo | null>(null)
@@ -40,6 +41,11 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
   const [pluginsOpen, setPluginsOpen] = useState(false)
   const [upstreamProviders, setUpstreamProviders] = useState<OpenRouterProviderEntry[]>([])
   const [providersLoading, setProvidersLoading] = useState(false)
+  const [modelEndpoints, setModelEndpoints] = useState<OpenRouterProviderEntry[]>([])
+  const [endpointsLoading, setEndpointsLoading] = useState(false)
+  const [endpointsError, setEndpointsError] = useState(false)
+  const [endpointRefresh, setEndpointRefresh] = useState(0)
+  const selectedModel = model.trim()
 
   const sortOptions = useMemo(
     () => [
@@ -63,10 +69,16 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
   const routing = useMemo(() => settings.provider_routing || {}, [settings.provider_routing])
   const plugins = useMemo(() => settings.plugins || [], [settings.plugins])
 
-  const providerOptions = useMemo(() =>
-    upstreamProviders.map((p) => ({ value: p.slug, label: p.name })),
-    [upstreamProviders]
-  )
+  const providerOptions = useMemo(() => {
+    const entries = new Map(upstreamProviders.map((provider) => [provider.slug, provider]))
+    for (const endpoint of modelEndpoints) entries.set(endpoint.slug, endpoint)
+    return [...entries.values()].map((provider) => {
+      const variant = provider.slug.split('/').slice(1).map((part) =>
+        ['flex', 'fast', 'priority', 'ultrafast'].includes(part) ? part[0].toUpperCase() + part.slice(1) : part,
+      ).join(' / ')
+      return { value: provider.slug, label: variant ? `${provider.name} — ${variant}` : provider.name }
+    }).sort((a, b) => a.label.localeCompare(b.label))
+  }, [upstreamProviders, modelEndpoints])
 
   const quantizationOptions = useMemo(() =>
     QUANTIZATION_OPTIONS.map((q) => ({ value: q, label: q })),
@@ -92,13 +104,38 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
 
   // Fetch upstream provider list when routing section opens
   useEffect(() => {
-    if (!routingOpen || !connectionId || !hasApiKey || upstreamProviders.length > 0) return
+    setUpstreamProviders([])
+    if (!routingOpen || !connectionId || !hasApiKey) {
+      setProvidersLoading(false)
+      return
+    }
+    let cancelled = false
     setProvidersLoading(true)
     openrouterApi.providers(connectionId)
-      .then((res) => setUpstreamProviders(res.providers))
+      .then((res) => { if (!cancelled) setUpstreamProviders(res.providers) })
       .catch(() => {})
-      .finally(() => setProvidersLoading(false))
-  }, [routingOpen, connectionId, hasApiKey]) // eslint-disable-line react-hooks/exhaustive-deps
+      .finally(() => { if (!cancelled) setProvidersLoading(false) })
+    return () => { cancelled = true }
+  }, [routingOpen, connectionId, hasApiKey])
+
+  // Model changes invalidate discovery, but never erase the user's routing restrictions.
+  useEffect(() => {
+    setModelEndpoints([])
+    setEndpointsError(false)
+    if (!routingOpen || !connectionId || !hasApiKey || !selectedModel) {
+      setEndpointsLoading(false)
+      return
+    }
+    let cancelled = false
+    setEndpointsLoading(true)
+    const timer = setTimeout(() => {
+      openrouterApi.endpoints(connectionId, selectedModel)
+        .then((res) => { if (!cancelled) setModelEndpoints(res.endpoints) })
+        .catch(() => { if (!cancelled) setEndpointsError(true) })
+        .finally(() => { if (!cancelled) setEndpointsLoading(false) })
+    }, 250)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [routingOpen, connectionId, hasApiKey, selectedModel, endpointRefresh])
 
   const updateRouting = useCallback((patch: Partial<OpenRouterConnectionSettings['provider_routing']>) => {
     onChange({
@@ -212,7 +249,7 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
         )
       )}
 
-      <button type="button" className={styles.sectionToggle} onClick={() => setRoutingOpen(!routingOpen)}>
+      <button type="button" className={styles.sectionToggle} aria-expanded={routingOpen} onClick={() => setRoutingOpen(!routingOpen)}>
         <ChevronRight size={12} className={`${styles.sectionChevron} ${routingOpen ? styles.sectionChevronOpen : ''}`} />
         <Settings2 size={13} className={styles.sectionToggleIcon} />
         <span>{t('openRouterSettings.providerRouting')}</span>
@@ -249,13 +286,33 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
               hint={t('openRouterSettings.requireParametersHint')}
             />
           </FormField>
+          <div className={styles.endpointStatus}>
+            <span>{t(connectionId && hasApiKey && selectedModel ? 'openRouterSettings.endpointChoicesHint' : 'openRouterSettings.saveForEndpointsHint')}</span>
+            {endpointsError && (
+              <>
+                <span role="alert">{t('openRouterSettings.endpointsError')}</span>
+                <Button variant="ghost" size="sm" onClick={() => setEndpointRefresh((value) => value + 1)}>
+                  {t('openRouterSettings.retryEndpoints')}
+                </Button>
+              </>
+            )}
+          </div>
           <FormField label={t('openRouterSettings.preferredProviders')} hint={t('openRouterSettings.preferredProvidersHint')}>
             <MultiChipSelect
               options={providerOptions}
               selected={routing.order || []}
               onChange={(v) => updateRouting({ order: v.length ? v : undefined })}
               placeholder={t('openRouterSettings.preferPlaceholder')}
-              loading={providersLoading}
+              loading={providersLoading || endpointsLoading}
+            />
+          </FormField>
+          <FormField label={t('openRouterSettings.onlyProviders')} hint={t('openRouterSettings.onlyProvidersHint')}>
+            <MultiChipSelect
+              options={providerOptions}
+              selected={routing.only || []}
+              onChange={(v) => updateRouting({ only: v.length ? v : undefined })}
+              placeholder={t('openRouterSettings.onlyPlaceholder')}
+              loading={providersLoading || endpointsLoading}
             />
           </FormField>
           <FormField label={t('openRouterSettings.ignoreProviders')} hint={t('openRouterSettings.ignoreProvidersHint')}>
@@ -264,7 +321,7 @@ export default function OpenRouterSettings({ connectionId, connectionName, hasAp
               selected={routing.ignore || []}
               onChange={(v) => updateRouting({ ignore: v.length ? v : undefined })}
               placeholder={t('openRouterSettings.ignorePlaceholder')}
-              loading={providersLoading}
+              loading={providersLoading || endpointsLoading}
             />
           </FormField>
           <FormField label={t('openRouterSettings.quantizations')} hint={t('openRouterSettings.quantizationsHint')}>

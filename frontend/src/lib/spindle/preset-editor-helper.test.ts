@@ -1226,6 +1226,45 @@ describe('scoped preset editor helper', () => {
     expect(current.metadata.fixture_extension).toEqual({ mode: 'parallel' })
 
   })
+
+  test('clones and detaches numeric range pairs in extension promptVariableValues snapshots', () => {
+    const current = publishedDraft()
+    current.blocks[0]!.variables = [{
+      id: 'window-id',
+      name: 'window',
+      label: 'Window',
+      type: 'range',
+      defaultValue: [10, 40],
+      min: 0,
+      max: 100,
+      step: 5,
+    }]
+    const livePair: [number, number] = [20, 75]
+    setPresetEditorController({
+      getState: (): SpindlePresetEditorState => ({
+        open: true,
+        presetId: current.id,
+        activeTabId: 'preset',
+        preset: current,
+      }),
+      getPromptVariableValues: () => ({ 'sealed-block': { window: livePair } }),
+      setActiveTab() {},
+      updatePreset() {},
+      async flush() {},
+    })
+    const access = createPresetEditorAccess(
+      'fixture_extension',
+      () => ['presets'],
+      (unsubscribe) => unsubscribe,
+    )
+    const helper = access.acquire()
+
+    const snapshot = helper.getState()
+    expect(snapshot.promptVariableValues).toEqual({ 'sealed-block': { window: [20, 75] } })
+    const pair = snapshot.promptVariableValues['sealed-block']?.window as [number, number]
+    pair[0] = 99
+    expect(livePair).toEqual([20, 75])
+  })
   test('permanently invalidates helpers when the extension frontend unloads', () => {
     const access = createPresetEditorAccess(
       'fixture_extension',

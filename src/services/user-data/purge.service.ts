@@ -350,6 +350,11 @@ function performSqlWipe(userId: string): Record<string, number> {
       "DELETE FROM push_subscriptions WHERE user_id = ?",
       userId,
     );
+    counts["ios_push_destinations"] = runDelete(
+      db,
+      "DELETE FROM ios_push_destinations WHERE user_id = ?",
+      userId,
+    );
     counts["desktop_notification_destinations"] = runDelete(
       db,
       "DELETE FROM desktop_notification_destinations WHERE user_id = ?",

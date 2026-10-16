@@ -80,6 +80,7 @@ describe("character gallery references", () => {
       reference: "gallery://beach-reunion",
     });
     expect(listGallery(USER_ID, character.id)[0].reference).toBe("gallery://beach-reunion");
+    expect(listGallery(USER_ID, character.id, { registerReferences: false })[0].reference).toBe("gallery://beach-reunion");
     expect(getCharacter(USER_ID, character.id)).toMatchObject({
       first_mes: "![Scene](gallery://beach-reunion)",
       alternate_greetings: ["Again: gallery://beach-reunion"],

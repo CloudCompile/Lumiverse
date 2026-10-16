@@ -10,13 +10,52 @@ import { imageGenConnectionsApi } from '@/api/image-gen-connections'
 import { personasApi } from '@/api/personas'
 import { packsApi } from '@/api/packs'
 import { resetUserScopedStoreState } from '@/store/user-scoped-reset'
-import { setSettingsPersistenceScope } from '@/store/slices/settings'
+import { flushSettingsNow, setSettingsPersistenceScope } from '@/store/slices/settings'
 import { setPresetSaveCoordinatorScope } from '@/lib/loom/preset-save-coordinator'
 import { listAllConnections } from '@/api/listAllConnections'
 import { useTokenizerWarmup } from './useTokenizerWarmup'
 import { activeTab } from '@/lib/active-tab'
+import { clearLandingPageSnapshot } from '@/lib/landingPageSnapshot'
+import { publishImportedDataRefresh } from '@/lib/import-data-events'
+import { loadoutsApi } from '@/api/loadouts'
 
 let appInitGeneration = 0
+const importRefreshes = new Map<string, Promise<void>>()
+
+/** Both WebSocket completion and status polling use this same refresh path. */
+export function refreshAppDataAfterImport(jobId: string): Promise<void> {
+  const userId = useStore.getState().user?.id
+  if (!userId || !useStore.getState().isAuthenticated || activeTab.signal.aborted) return Promise.resolve()
+  const key = `${userId}:${jobId}`
+  const existing = importRefreshes.get(key)
+  if (existing) return existing
+  const generation = ++appInitGeneration
+  const isCurrent = () => !activeTab.signal.aborted && appInitGeneration === generation
+    && useStore.getState().isAuthenticated && useStore.getState().user?.id === userId
+
+  clearLandingPageSnapshot()
+  useStore.setState({ charactersLoaded: false, packsWithItems: {}, landingRecentChats: null, loomRegistry: {} })
+  const refresh = (async () => {
+    // Preserve local edits and then read all restored settings, even if the
+    // initial settings load already completed or a debounce was pending.
+    await flushSettingsNow()
+    if (!isCurrent()) return
+    await Promise.all([
+      initialize(isCurrent, true),
+      loadoutsApi.list().then((loadouts) => {
+        if (isCurrent()) useStore.setState({ loadouts })
+      }).catch((error) => console.warn('[Import] Could not refresh loadouts:', error)),
+    ])
+    if (isCurrent()) publishImportedDataRefresh()
+  })().catch((error) => {
+    importRefreshes.delete(key)
+    throw error
+  })
+  importRefreshes.set(key, refresh)
+  // Keep recent completions deduplicated without growing for the whole session.
+  if (importRefreshes.size > 100) importRefreshes.delete(importRefreshes.keys().next().value!)
+  return refresh
+}
 
 /**
  * Eagerly load shared data that multiple panels depend on.
@@ -67,14 +106,14 @@ export function useAppInit() {
   }, [isAuthenticated, userId])
 }
 
-async function loadFullSettings(isCurrent: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 2 && !useStore.getState().fullSettingsLoaded; attempt += 1) {
+async function loadFullSettings(isCurrent: () => boolean, force = false): Promise<void> {
+  for (let attempt = 0; attempt < 2 && ((force && attempt === 0) || !useStore.getState().fullSettingsLoaded); attempt += 1) {
     if (!isCurrent()) return
     await useStore.getState().loadSettings().catch(() => {})
   }
 }
 
-async function initialize(isCurrent: () => boolean): Promise<void> {
+async function initialize(isCurrent: () => boolean, afterImport = false): Promise<void> {
   let payload: BootstrapPayload | null = null
   let errors: Record<string, string> = {}
   let landingPreloadHandled = false
@@ -134,13 +173,14 @@ async function initialize(isCurrent: () => boolean): Promise<void> {
         .catch(() => {})
     }
   }
-  if (payload && !errors['startupSettings']) {
-    void loadFullSettings(isCurrent)
-  }
-  if (Object.keys(errors).length > 0) await runFallbacks(errors, isCurrent)
+  const settingsPromise = payload && !errors['startupSettings']
+    ? loadFullSettings(isCurrent, afterImport)
+    : null
+  if (Object.keys(errors).length > 0) await runFallbacks(errors, isCurrent, afterImport)
   if (!isCurrent()) return
 
-  void landingPromise
+  await Promise.all([landingPromise, settingsPromise])
+  if (!isCurrent()) return
 
   // Council member pack items — always run after settings are loaded.
   // Walks the (now-populated) council member list and fetches full pack
@@ -261,11 +301,12 @@ export function applyBootstrap(
 async function runFallbacks(
   errors: Record<string, string>,
   isCurrent: () => boolean,
+  forceSettings = false,
 ): Promise<void> {
   if (!isCurrent()) return
   const store = useStore.getState()
   const fullSettingsPromise = errors['startupSettings']
-    ? loadFullSettings(isCurrent)
+    ? loadFullSettings(isCurrent, forceSettings)
     : null
 
   if (errors['llm.connections'] || errors['llm.providers']) {

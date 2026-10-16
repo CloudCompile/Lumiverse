@@ -136,14 +136,27 @@ pub struct RunnerState {
 
 /// Update launch intent is kept in memory and consumed once by the tray. It
 /// never changes normal auto-start preferences or survives a later app launch.
-#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopUpdateResume {
     resume_server: bool,
     reopen_frontend: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_port: Option<u16>,
 }
 
 impl DesktopUpdateResume {
+    pub(crate) fn new(resume_server: bool, reopen_frontend: bool) -> Self {
+        Self {
+            resume_server,
+            reopen_frontend,
+            local_port: None,
+        }
+    }
+    pub(crate) fn with_port(mut self, local_port: Option<u16>) -> Self {
+        self.local_port = local_port;
+        self
+    }
     fn from_args(args: impl IntoIterator<Item = String>) -> Option<Self> {
         let args: Vec<String> = args.into_iter().collect();
         args.iter()
@@ -151,11 +164,18 @@ impl DesktopUpdateResume {
             .then(|| Self {
                 resume_server: args.iter().any(|arg| arg == "--resume-server"),
                 reopen_frontend: args.iter().any(|arg| arg == "--reopen-frontend"),
+                local_port: None,
             })
     }
 }
 
 pub struct DesktopUpdateResumeState(Mutex<Option<DesktopUpdateResume>>);
+
+impl DesktopUpdateResumeState {
+    pub(crate) fn set(&self, resume: DesktopUpdateResume) {
+        *self.0.lock().unwrap() = Some(resume);
+    }
+}
 
 impl Default for DesktopUpdateResumeState {
     fn default() -> Self {
@@ -229,7 +249,7 @@ impl BoundedLog {
 }
 
 #[derive(Clone, Copy)]
-enum LogChannel {
+pub(crate) enum LogChannel {
     Stdout = 0,
     Stderr = 1,
 }
@@ -239,14 +259,14 @@ struct OpenLogSession {
     log: BoundedLog,
 }
 
-struct SessionLogs {
+pub(crate) struct SessionLogs {
     dir: Option<PathBuf>,
     channel_ids: [Option<String>; 2],
     sessions: HashMap<String, OpenLogSession>,
 }
 
 impl SessionLogs {
-    fn new(app: &AppHandle) -> Self {
+    pub(crate) fn new(app: &AppHandle) -> Self {
         let dir = app.path().app_log_dir().ok().and_then(|dir| {
             fs::create_dir_all(&dir).ok()?;
             Some(dir)
@@ -355,7 +375,7 @@ impl SessionLogs {
         }
     }
 
-    fn write_line(&mut self, channel: LogChannel, line: &str) {
+    pub(crate) fn write_line(&mut self, channel: LogChannel, line: &str) {
         self.write_chunk(channel, line);
         self.write_chunk(channel, "\n");
     }
@@ -454,28 +474,28 @@ fn log_session_frame(json: &str, expected_token: &str) -> Option<(String, String
 }
 
 #[cfg(windows)]
-fn suppress_console(cmd: &mut Command) {
+pub(crate) fn suppress_console(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn suppress_console(_cmd: &mut Command) {}
+pub(crate) fn suppress_console(_cmd: &mut Command) {}
 
 /// Put the runner in its own process group so a forced kill can take out
 /// the whole tree (runner + server child), not just the runner.
 #[cfg(unix)]
-fn isolate_process_group(cmd: &mut Command) {
+pub(crate) fn isolate_process_group(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
 #[cfg(not(unix))]
-fn isolate_process_group(_cmd: &mut Command) {}
+pub(crate) fn isolate_process_group(_cmd: &mut Command) {}
 
 /// Force-kill the runner and every process it spawned.
-fn kill_tree(child: &mut Child) {
+pub(crate) fn kill_tree(child: &mut Child) {
     let pid = child.id();
     #[cfg(unix)]
     {
@@ -678,6 +698,7 @@ pub fn runner_kill(state: State<'_, RunnerState>) {
 /// Quit action performs a graceful protocol shutdown first; native exit paths
 /// and a failed JS handshake use this process-tree fallback on every platform.
 pub fn force_stop<R: tauri::Runtime>(app: &AppHandle<R>) {
+    crate::bundled_server::force_stop(app);
     let state: State<'_, RunnerState> = app.state();
     let running = state.inner.lock().unwrap().take();
     if let Some(running) = running {
@@ -1186,21 +1207,24 @@ mod tests {
             parse(&["--resume-after-update"]),
             Some(DesktopUpdateResume {
                 resume_server: false,
-                reopen_frontend: false
+                reopen_frontend: false,
+                local_port: None,
             }),
         );
         assert_eq!(
             parse(&["--resume-after-update", "--resume-server"]),
             Some(DesktopUpdateResume {
                 resume_server: true,
-                reopen_frontend: false
+                reopen_frontend: false,
+                local_port: None,
             }),
         );
         assert_eq!(
             parse(&["--resume-after-update", "--reopen-frontend"]),
             Some(DesktopUpdateResume {
                 resume_server: false,
-                reopen_frontend: true
+                reopen_frontend: true,
+                local_port: None,
             }),
         );
         let resume = parse(&[

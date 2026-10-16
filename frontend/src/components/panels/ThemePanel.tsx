@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { useCallback, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Bookmark, Download, Upload, Code2, Lock, Unlock } from 'lucide-react'
@@ -28,7 +29,7 @@ export default function ThemePanel() {
   // Normalize so a malformed persisted theme (e.g. missing accent) can't throw
   // when the panel reads current.accent.* — falls back to DEFAULT_THEME.
   const current = normalizeTheme(theme) ?? DEFAULT_THEME
-  const isTauriDesktop = '__TAURI_INTERNALS__' in window
+  const isTauriDesktop = hasTauriDesktopBridge()
 
   // Always read the latest theme from the store to avoid stale closures
   // (e.g. useCharacterTheme may async-update accent/baseColors after render)

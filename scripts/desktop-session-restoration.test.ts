@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { restoreDesktopSession, type DesktopUpdateResume } from "../desktop/src/update-resume";
 
-function fixture(options: { remote?: boolean; canStartServer?: boolean; autoStartServer?: boolean } = {}) {
+function fixture(options: { remote?: boolean; canStartServer?: boolean; autoStartServer?: boolean; connectionChosen?: boolean } = {}) {
   const calls: string[] = [];
   const preferences = { remote: false, canStartServer: true, autoStartServer: true, ...options };
   return {
@@ -11,9 +11,19 @@ function fixture(options: { remote?: boolean; canStartServer?: boolean; autoStar
       startServer: async (reopen) => { calls.push(`start:${reopen}`); },
       detectExternalServer: async () => { calls.push("detect-external"); },
       showFrontend: async () => { calls.push("show"); },
+      chooseConnection: async () => { calls.push("choose"); },
     }),
   };
 }
+
+test("a fresh bundled profile chooses remote or local before any local server runs", async () => {
+  const f = fixture({ connectionChosen: false });
+  await f.restore(null);
+  expect(f.calls).toEqual(["choose"]);
+  f.calls.length = 0;
+  await f.restore({ resumeServer: true, reopenFrontend: true });
+  expect(f.calls).toEqual(["choose"]);
+});
 
 test("normal launches retain auto-start and browser behavior", async () => {
   const enabled = fixture();

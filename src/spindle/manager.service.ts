@@ -28,6 +28,7 @@ import { getUserExtensionPath } from "../auth/provision";
 import { spawnAsync, type SpawnAsyncResult } from "./spawn-async";
 import { normalizeSpindleHttpsUrl } from "./url-safety";
 import { bunCmd } from "../utils/bun-cmd";
+import { configuredBunExecutable } from "../runtime/bun-runtime";
 import {
   assertOwnGitRepositoryPath,
   resetGitRepositoryToRemoteHead,
@@ -82,10 +83,16 @@ const DANGEROUS_MODULE_LABELS = new Map<string, string>([
   ["node:cluster", "worker or cluster module access"],
   ["bun:sqlite", "direct SQLite module access"],
   ["node:sqlite", "direct SQLite module access"],
+  ["bun", "dangerous Bun system API usage"],
+  ["node-fetch", "direct fetch API usage"],
+  ["undici", "direct fetch API usage"],
+  ["cross-fetch", "direct fetch API usage"],
 ]);
 
-const DANGEROUS_BUN_PROPERTIES = new Set(["file", "write", "spawn", "spawnSync", "serve", "connect", "listen"]);
+const DANGEROUS_BUN_PROPERTIES = new Set(["file", "write", "spawn", "spawnSync", "serve", "connect", "listen", "fetch"]);
 const DANGEROUS_PROCESS_PROPERTIES = new Set(["env", "exit", "kill", "chdir", "dlopen"]);
+const FETCH_PROPERTIES = new Set(["fetch"]);
+const FETCH_GLOBALS = ["globalThis", "global", "self"] as const;
 const WINDOWS_SPINDLE_ASYNC_BUN_OVERRIDE = "LUMIVERSE_FORCE_SPINDLE_ASYNC_BUN";
 const warnedWindowsSpindleBunFallback = new Set<string>();
 const backendSafetyScanCache = new Map<string, {
@@ -121,6 +128,20 @@ const DANGEROUS_BACKEND_CHECKS: BackendSafetyCheck[] = [
   {
     label: "dangerous process API usage",
     regex: /\bprocess\.(?:env|exit|kill|chdir|dlopen)\b/,
+  },
+  {
+    label: "direct fetch API usage",
+    regex: /(?<![.\w$])fetch\s*(?:\?\.\s*)?\(|\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*fetch\b|(?<![.\w$])fetch\s*\.\s*(?:call|apply|bind)\s*\(/,
+  },
+  {
+    label: "direct fetch API usage",
+    regex: /(?:from\s*["'`](?:node-fetch|undici|cross-fetch)["'`]|import\s*["'`](?:node-fetch|undici|cross-fetch)["'`])/,
+  },
+  {
+    // Importing Bun exposes its immutable native fetch export, bypassing the
+    // global fetch override installed by the runtime sandbox.
+    label: "dangerous Bun system API usage",
+    regex: /(?:from\s*["'`]bun["'`]|import\s*["'`]bun["'`])/,
   },
 ];
 
@@ -515,13 +536,30 @@ function addDestructuringHits(source: ScannableSource, hits: Set<string>): void 
   }
 }
 
+function addNativeFetchHits(source: ScannableSource, hits: Set<string>): void {
+  for (const objectName of FETCH_GLOBALS) {
+    addPropertyAccessHits(source, objectName, FETCH_PROPERTIES, "direct fetch API usage", hits);
+  }
+
+  for (const match of matchOutsideIgnored(source, /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(globalThis|global|self)\b/)) {
+    addPropertyAccessHits(source, match[1], FETCH_PROPERTIES, "direct fetch API usage", hits);
+  }
+
+  for (const match of matchOutsideIgnored(source, /\b(?:const|let|var)\s*\{([^}]+)\}\s*=\s*(?:globalThis|global|self)\b/)) {
+    for (const prop of match[1].split(",")) {
+      const name = prop.trim().split(/\s*:/, 1)[0]?.trim();
+      if (name === "fetch") hits.add("direct fetch API usage");
+    }
+  }
+}
+
 /**
  * Maps a scanner label to the manifest-declared capability that, when
  * present, suppresses that label. Capabilities are install-time opt-ins
  * declared in `spindle.json`'s `requested_capabilities` field; the user
  * grants them on install just like `permissions`. Only labels with a
  * meaningful false-positive rate get a capability mapping — filesystem,
- * subprocess, sockets, sqlite, workers, Bun system APIs, and process APIs
+ * subprocess, sockets, fetch, sqlite, workers, Bun system APIs, and process APIs
  * remain hard-blocked with no opt-in available.
  */
 const LABEL_TO_CAPABILITY: ReadonlyMap<string, SpindleCapability> = new Map([
@@ -570,6 +608,7 @@ export function detectDangerousBackendCapabilities(
     addPropertyAccessHits(source, "process", DANGEROUS_PROCESS_PROPERTIES, "dangerous process API usage", hits);
     addAliasPropertyHits(source, hits);
     addDestructuringHits(source, hits);
+    addNativeFetchHits(source, hits);
     if (matchOutsideIgnored(source, /\bObject\.getOwnPropertyDescriptor\s*\(\s*process\s*,\s*["'`]env["'`]/).length > 0) {
       hits.add("dangerous process API usage");
     }
@@ -1056,9 +1095,15 @@ function applyStorageSeeds(identifier: string, manifest: SpindleManifest, allowO
  * filter blocks certain syscalls) and `--backend=copyfile` (no hardlinks).
  * Mirrors start.sh's `_proot_bun()` + install_deps().
  */
-export function bunInstallCmd(): string[] {
+export function bunInstallCmd(platform: NodeJS.Platform = process.platform): string[] {
   const isTermux = process.env.LUMIVERSE_IS_TERMUX === "true";
   const isProot = process.env.LUMIVERSE_IS_PROOT === "true";
+
+  if (platform === "android" && !isTermux && !isProot) {
+    // APK installations execute Bun from nativeLibraryDir and cannot create
+    // hard links in app-private storage. No Termux/proot wrapper is involved.
+    return [configuredBunExecutable(), "install", "--ignore-scripts", "--backend=copyfile"];
+  }
 
   if (!isTermux && !isProot) return ["bun", "install", "--ignore-scripts"];
 
@@ -1093,6 +1138,17 @@ export function bunInstallCmd(): string[] {
   ];
 }
 
+/** Only the APK's dependency installer needs Bun's temporary seccomp fallback. */
+export function bunInstallEnv(
+  platform: NodeJS.Platform = process.platform,
+  environment: Record<string, string | undefined> = process.env,
+): Record<string, string | undefined> {
+  const compat = environment.LUMIVERSE_ANDROID_INSTALL_COMPAT;
+  if (platform !== "android" || environment.LUMIVERSE_IS_TERMUX === "true" ||
+      environment.LUMIVERSE_IS_PROOT === "true" || !compat) return environment;
+  return { ...environment, LD_PRELOAD: [compat, environment.LD_PRELOAD].filter(Boolean).join(":") };
+}
+
 /**
  * Bun-on-Bun subprocesses that pipe stdout/stderr have been prone to host-process
  * assertion failures on Windows during long-running extension installs/builds.
@@ -1120,16 +1176,17 @@ function warnWindowsSpindleBunSyncFallback(context: string): void {
 
 async function runSpindleBunSubprocess(
   cmd: string[],
-  opts: { cwd: string; context: string },
+  opts: { cwd: string; context: string; env?: Record<string, string | undefined> },
 ): Promise<SpawnAsyncResult> {
   if (!shouldUseWindowsSpindleBunSyncFallback()) {
-    return spawnAsync(cmd, { cwd: opts.cwd });
+    return spawnAsync(cmd, { cwd: opts.cwd, env: opts.env });
   }
 
   warnWindowsSpindleBunSyncFallback(opts.context);
   const proc = Bun.spawnSync({
     cmd,
     cwd: opts.cwd,
+    env: opts.env,
     stdin: "ignore",
     stdout: "pipe",
     stderr: "pipe",
@@ -1140,18 +1197,19 @@ async function runSpindleBunSubprocess(
     stdout: proc.stdout.toString(),
     stderr: proc.stderr.toString(),
     timedOut: false,
+    ...(proc.signalCode ? { signalCode: proc.signalCode } : {}),
   };
 }
 
 function formatCommandFailure(
-  result: Pick<SpawnAsyncResult, "exitCode" | "stdout" | "stderr">,
+  result: Pick<SpawnAsyncResult, "exitCode" | "stdout" | "stderr" | "signalCode">,
   label: string,
 ): string {
-  const stderr = result.stderr.trim();
-  if (stderr) return stderr;
-  const stdout = result.stdout.trim();
-  if (stdout) return stdout;
-  return `${label} exited with code ${result.exitCode}`;
+  const output = result.stderr.trim() || result.stdout.trim();
+  const termination = result.signalCode
+    ? `signal ${result.signalCode} (exit code ${result.exitCode})`
+    : `code ${result.exitCode}`;
+  return `${output ? output + "\n" : ""}${label} exited with ${termination}`;
 }
 
 // ─── Build ───────────────────────────────────────────────────────────────
@@ -1169,28 +1227,39 @@ export async function buildExtension(identifier: string): Promise<void> {
     ? resolveWithin(repo, widgetFrontendEntry, "entry_frontend_widget")
     : null;
 
-  // Always install dependencies first if package.json exists
+  // Published dist files can run without the author's development toolchain.
+  // Keep runtime dependencies when declared; source builds still need all deps.
+  const distDir = join(repo, "dist");
+  let prebuilt = false;
+  if (existsSync(distDir)) {
+    const lsFiles = await spawnAsync(["git", "ls-files", "dist"], { cwd: repo });
+    prebuilt = lsFiles.exitCode === 0 && lsFiles.stdout.trim().length > 0;
+  }
+
   const pkgJson = join(repo, "package.json");
   if (existsSync(pkgJson)) {
-    const install = await runSpindleBunSubprocess(bunInstallCmd(), {
-      cwd: repo,
-      context: `dependency install for ${identifier}`,
-    });
-    if (install.exitCode !== 0) {
-      throw new Error(`Dependency install failed: ${formatCommandFailure(install, "bun install")}`);
+    const pkg = await Bun.file(pkgJson).json();
+    const hasRuntimeDependencies = [pkg.dependencies, pkg.optionalDependencies, pkg.peerDependencies]
+      .some(deps => deps && Object.keys(deps).length > 0);
+    if (!prebuilt || hasRuntimeDependencies) {
+      const cmd = bunInstallCmd();
+      if (prebuilt) cmd.push("--production");
+      const install = await runSpindleBunSubprocess(cmd, {
+        cwd: repo,
+        context: `dependency install for ${identifier}`,
+        env: bunInstallEnv(),
+      });
+      if (install.exitCode !== 0) {
+        throw new Error(`Dependency install failed: ${formatCommandFailure(install, "bun install")}`);
+      }
     }
   }
 
   const declaredCaps = declaredCapabilitiesFromManifest(manifest);
 
-  // If the repo ships pre-built dist/ (files tracked in git), skip build entirely
-  const distDir = join(repo, "dist");
-  if (existsSync(distDir)) {
-    const lsFiles = await spawnAsync(["git", "ls-files", "dist"], { cwd: repo });
-    if (lsFiles.exitCode === 0 && lsFiles.stdout.trim().length > 0) {
-      await assertSafeBackendBundle(identifier, backendOut, declaredCaps);
-      return;
-    }
+  if (prebuilt) {
+    await assertSafeBackendBundle(identifier, backendOut, declaredCaps);
+    return;
   }
 
   // Look for src/ to build from

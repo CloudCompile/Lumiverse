@@ -319,6 +319,17 @@ function compatiblePromptValue(variable: PromptVariableDTO, value: unknown, labe
     if (variable.max !== undefined && value > variable.max) return undefined
     return value
   }
+  if (variable.type === 'range') {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return undefined
+    const entries = ownArrayElements(value, label, 'maxPromptValuesPerBucket')
+    if (entries.length !== 2) return undefined
+    const [start, end] = entries
+    if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+      return undefined
+    }
+    if (start > end || start < variable.min || end > variable.max) return undefined
+    return [start, end]
+  }
   if (variable.type === 'switch') return value === 0 || value === 1 ? value : undefined
   const values = clonePromptArray(value, label)
   if (!values) return undefined

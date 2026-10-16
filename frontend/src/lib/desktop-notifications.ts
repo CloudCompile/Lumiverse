@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { invoke } from '@tauri-apps/api/core'
 
 export interface DesktopNotificationDeviceState {
@@ -37,7 +38,7 @@ export interface DesktopNotificationTransportStatus {
 }
 
 export function isTauriDesktop(): boolean {
-  return '__TAURI_INTERNALS__' in window
+  return hasTauriDesktopBridge()
 }
 
 export function getDesktopNotificationDevice(): Promise<DesktopNotificationDeviceState> {

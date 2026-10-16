@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { useStore } from '@/store'
@@ -235,7 +236,7 @@ function cacheDesktopStartupAppearance(
   vars: Record<string, string>,
   hasPaletteOverride: boolean,
 ) {
-  if (!('__TAURI_INTERNALS__' in window) || new URLSearchParams(window.location.search).has('desktopWidgetExtension')) return
+  if (!hasTauriDesktopBridge() || new URLSearchParams(window.location.search).has('desktopWidgetExtension')) return
 
   const efficiencyMode = config.renderingMode === 'efficiency'
   const configuredBackground = resolveDesktopSurfaceColor(config, vars, hasPaletteOverride)
@@ -274,7 +275,7 @@ function syncDesktopBackground(
 
   root.setAttribute('data-rendering-mode', config.renderingMode ?? 'balanced')
 
-  if (!('__TAURI_INTERNALS__' in window)) {
+  if (!hasTauriDesktopBridge()) {
     root.removeAttribute('data-desktop-background')
     root.removeAttribute('data-desktop-background-blur')
     root.style.removeProperty('--lumiverse-desktop-background')

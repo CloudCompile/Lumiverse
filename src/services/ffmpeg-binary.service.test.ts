@@ -2,6 +2,22 @@ import { describe, expect, test } from "bun:test";
 import { resolveFfmpegBinary } from "./ffmpeg-binary.service";
 
 describe("ffmpeg-binary.service", () => {
+  test("uses the installed APK binary before searching PATH", async () => {
+    const probes: string[] = [];
+    const binary = await resolveFfmpegBinary({ bundledBinaryPath: "/data/app/runtime/libffmpeg.so", canExecuteBinary: async candidate => {
+      probes.push(candidate); return true;
+    } });
+    expect(binary).toBe("/data/app/runtime/libffmpeg.so");
+    expect(probes).toEqual(["/data/app/runtime/libffmpeg.so"]);
+  });
+  test("does not hide a broken bundled binary with a PATH fallback", async () => {
+    const probes: string[] = [];
+    const binary = await resolveFfmpegBinary({ bundledBinaryPath: "/data/app/runtime/libffmpeg.so", canExecuteBinary: async candidate => {
+      probes.push(candidate); return candidate === "ffmpeg";
+    } });
+    expect(binary).toBeNull();
+    expect(probes).toEqual(["/data/app/runtime/libffmpeg.so"]);
+  });
   test("prefers system ffmpeg before the static fallback", async () => {
     const probes: string[] = [];
 

@@ -1,3 +1,4 @@
+import { getTauriMobilePlatform, hasTauriDesktopBridge, isTauriMobile } from '@/lib/desktopWebView'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { RouterProvider } from 'react-router'
@@ -89,6 +90,7 @@ const KEYBOARD_MIN_INSET = 80
 // occludes the bottom controls enough to trigger scroll bounce if ignored.
 const IOS_PWA_ACCESSORY_MIN_INSET = 44
 const isIOSStandalonePwa = (window.navigator as any).standalone === true && navigator.maxTouchPoints > 0
+const isIOSStandaloneClient = isIOSStandalonePwa || getTauriMobilePlatform() === 'ios'
 
 function isEditableElement(el: EventTarget | Element | null): boolean {
   return (
@@ -148,9 +150,9 @@ function syncViewportVars() {
     viewportHeight: height,
     offsetTop,
     keyboardActive,
-    ignoreOffsetTop: isIOSStandalonePwa,
+    ignoreOffsetTop: isIOSStandaloneClient,
     keyboardMinInset: KEYBOARD_MIN_INSET,
-    accessoryMinInset: isIOSStandalonePwa ? IOS_PWA_ACCESSORY_MIN_INSET : KEYBOARD_MIN_INSET,
+    accessoryMinInset: isIOSStandaloneClient ? IOS_PWA_ACCESSORY_MIN_INSET : KEYBOARD_MIN_INSET,
   })
 
   root.style.setProperty('--app-viewport-width', `${width}px`)
@@ -218,7 +220,7 @@ document.addEventListener('focusout', () => {
 // Composers and editors prevent native focus from panning the whole shell.
 // Fields retain native caret placement; their scroll containers own revealing.
 // Recover only real document scrolling, without resetting stale viewport offsets.
-if (isIOSStandalonePwa) {
+if (isIOSStandaloneClient) {
   installIOSEditableFocusScrollPrevention()
   installIOSKeyboardScrollGuard()
 }
@@ -231,7 +233,9 @@ const isStandalone =
   window.matchMedia('(display-mode: window-controls-overlay)').matches ||
   (window.navigator as any).standalone === true
 
-if (/^Mac/.test(navigator.platform) && navigator.maxTouchPoints === 0) {
+if (isTauriMobile()) {
+  document.documentElement.setAttribute('data-platform', getTauriMobilePlatform() || 'android')
+} else if (/^Mac/.test(navigator.platform) && navigator.maxTouchPoints === 0) {
   document.documentElement.setAttribute('data-platform', 'macos')
 } else if (/^Linux/.test(navigator.platform)) {
   document.documentElement.setAttribute('data-platform', 'linux')
@@ -247,7 +251,7 @@ if (isIOS) {
 // Mark the native dashboard WebView for desktop-specific behavior. The Tauri
 // window is frameless on every desktop platform, so the HTML titlebar owns its
 // drag surface and window controls outside browser PWA display-mode queries.
-if ('__TAURI_INTERNALS__' in window) {
+if (hasTauriDesktopBridge()) {
   document.documentElement.setAttribute('data-tauri-desktop', '')
   if (new URLSearchParams(window.location.search).has('desktopWidgetExtension')) {
     document.documentElement.setAttribute('data-tauri-floating-widget', '')

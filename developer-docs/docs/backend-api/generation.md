@@ -778,6 +778,24 @@ if (conn) {
 }
 ```
 
+### `spindle.connections.getModels(connectionId, userId?)`
+
+List the models available to a connection profile. This fetches the live list from the provider, using the profile's stored API key. Throws if the connection is not found or the provider request fails.
+
+This method is optional on older hosts; check support before calling.
+
+```ts
+if (spindle.connections.getModels) {
+  const models = await spindle.connections.getModels('some-connection-id')
+
+  for (const model of models) {
+    spindle.log.info(`${model.id}: ${model.label}`)
+  }
+}
+```
+
+Returns `Array<{ id: string; label: string }>`. `label` is the provider's display name when it has one (for example OpenRouter), otherwise the model ID.
+
 ### ConnectionProfileDTO
 
 | Field | Type | Description |

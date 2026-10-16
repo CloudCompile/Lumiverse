@@ -96,6 +96,7 @@ For form components, the host commits the next value before invoking `onChange`,
 | `mountNumericInput` | Validated number input with optional empty state |
 | `mountNumberStepper` | Number input with +/− buttons |
 | `mountRangeSlider` | Touch-friendly slider with optional label, hint, and formatted value display |
+| `mountDualRangeSlider` | Touch-friendly two-handle interval slider with optional label, hint, and formatted range display |
 | `mountCheckbox` | Standard checkbox with optional label and hint |
 | `mountSwitch` | Toggle switch |
 | `mountSelect` | Searchable single-select dropdown |
@@ -306,6 +307,54 @@ In addition to the [shared handle methods](#shared-handle-shape):
 | Method | Returns | Description |
 |---|---|---|
 | `getValue()` | `number` | The current committed value. |
+
+### Dual range slider
+
+A two-handle interval slider built on the same track, snapping, and mobile touch model as `mountRangeSlider`. The active handle is clamped so `start <= end`, and each handle supports keyboard navigation (`ArrowLeft`/`ArrowRight`/`ArrowUp`/`ArrowDown`/`Home`/`End`).
+
+```ts
+const windowRange = ctx.components.mountDualRangeSlider(target, {
+  label: 'Context window',
+  min: 0,
+  max: 100,
+  step: 5,
+  value: [20, 80],
+  format: { suffix: '%' },
+  startLabel: 'Window start',
+  endLabel: 'Window end',
+  onCommit: ([start, end]) => ctx.sendToBackend({ type: 'set_window', start, end }),
+})
+
+windowRange.update({ value: [10, 60] })
+const [start, end] = windowRange.getValue()
+```
+
+#### SpindleDualRangeSliderOptions
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `min` | `number` | — | **Required.** Inclusive lower bound. |
+| `max` | `number` | — | **Required.** Inclusive upper bound. |
+| `value` | `readonly [number, number]` | `[min, max]` | Initial committed `[start, end]` range. |
+| `step` | `number` | `1` | Snap increment. |
+| `integer` | `boolean` | `false` | Round endpoints to integers regardless of `step` formatting. |
+| `onCommit` | `(v: [number, number]) => void` | — | Fired once when a drag or keyboard adjustment commits a new range. |
+| `onDragValue` | `(v: [number, number] \| null) => void` | — | Fired with the live `[start, end]` range during a drag, and with `null` if cancelled without committing. |
+| `label` | `string` | — | If set, renders a header above the track with the label and live formatted range. |
+| `hint` | `string` | — | Helper text under the header. Ignored if `label` is omitted. |
+| `format` | `SpindleRangeSliderFormat` | — | Declarative formatting applied to each endpoint in the header. Ignored if `label` is omitted. |
+| `startLabel` | `string` | `'Start'` | Accessible label for the start handle. |
+| `endLabel` | `string` | `'End'` | Accessible label for the end handle. |
+| `disabled` | `boolean` | `false` | Dim the track and ignore input. |
+| `className` | `string` | — | Additional CSS class merged onto the track area. |
+
+#### SpindleDualRangeSliderHandle
+
+In addition to the [shared handle methods](#shared-handle-shape):
+
+| Method | Returns | Description |
+|---|---|---|
+| `getValue()` | `[number, number]` | Detached `[start, end]` snapshot of the current committed range. |
 
 ## Boolean inputs
 

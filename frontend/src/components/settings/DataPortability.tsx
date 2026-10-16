@@ -4,6 +4,8 @@ import { Download, Upload, X, KeyRound, ShieldAlert } from 'lucide-react'
 import { Button } from '@/components/shared/FormComponents'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { refreshAppDataAfterImport } from '@/hooks/useAppInit'
+import { flushSettingsNow } from '@/store/slices/settings'
 import {
   userDataApi,
   type DecryptionTicket,
@@ -97,7 +99,10 @@ export default function DataPortability() {
           setImportFileSummary(payload.fileSummary)
           setImporting(false)
           setImportProgress(null)
+          setAwaitingTicket(null)
           setImportSuccess(t('dataPortability.importComplete'))
+          void refreshAppDataAfterImport(payload.jobId)
+            .catch((error) => setImportError(error.message))
         },
       ),
     )
@@ -107,6 +112,7 @@ export default function DataPortability() {
         (payload: { error?: string; cancelled?: boolean }) => {
           setImporting(false)
           setImportProgress(null)
+          setAwaitingTicket(null)
           if (payload.cancelled) {
             setImportError(t('dataPortability.importCancelled'))
           } else {
@@ -119,6 +125,46 @@ export default function DataPortability() {
       for (const u of unsubs) u()
     }
   }, [t])
+
+  // File pickers/backgrounding can interrupt Android's WebSocket. Continue
+  // polling until a terminal state, including while waiting for a ticket.
+  useEffect(() => {
+    if (!importing || !importJobId) return
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+    const poll = async () => {
+      try {
+        const status = await userDataApi.getImportStatus(importJobId)
+        if (cancelled) return
+        if (status.status === 'complete') {
+          setImportSummary(status.summary)
+          setImportFileSummary(status.fileSummary)
+          setImporting(false)
+          setImportProgress(null)
+          setAwaitingTicket(null)
+          setImportSuccess(t('dataPortability.importComplete'))
+          void refreshAppDataAfterImport(status.jobId)
+            .catch((error) => { if (!cancelled) setImportError(error.message) })
+          return
+        }
+        if (status.status === 'failed' || status.status === 'cancelled') {
+          setImporting(false)
+          setImportProgress(null)
+          setAwaitingTicket(null)
+          setImportError(status.error || t(status.status === 'cancelled' ? 'dataPortability.importCancelled' : 'dataPortability.importFailed'))
+          return
+        }
+        if (status.status === 'awaiting_ticket') {
+          setAwaitingTicket({ jobId: status.jobId, secretsCount: status.manifest?.secretsCount ?? 0 })
+        } else {
+          setAwaitingTicket(null)
+        }
+      } catch { /* Reconnect on the next poll. */ }
+      if (!cancelled) timer = setTimeout(poll, 1000)
+    }
+    timer = setTimeout(poll, 1000)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [importing, importJobId, t])
 
   // ── Export action ─────────────────────────────────────────────────────
   const handleExport = async () => {
@@ -179,8 +225,11 @@ export default function DataPortability() {
     setImportFileSummary(null)
     setImportProgress(null)
     setImportUploadPct(0)
+    setImportJobId(null)
+    setAwaitingTicket(null)
     setImporting(true)
     try {
+      await flushSettingsNow()
       const { jobId } = await userDataApi.startImport(file, (pct) => {
         setImportUploadPct(pct)
         // Once bytes are on the wire, the server is verifying the archive
@@ -193,21 +242,6 @@ export default function DataPortability() {
       })
       setImportJobId(jobId)
       setImportUploadPct(null)
-      // From here, progress is delivered over the WebSocket. As a fallback,
-      // poll once after a short delay in case the WS subscription is slow.
-      setTimeout(() => {
-        userDataApi
-          .getImportStatus(jobId)
-          .then((status) => {
-            if (status.status === 'complete' && !importSummary) {
-              setImportSummary(status.summary)
-              setImportFileSummary(status.fileSummary)
-              setImporting(false)
-              setImportSuccess(t('dataPortability.importComplete'))
-            }
-          })
-          .catch(() => {/* ignore */})
-      }, 1500)
     } catch (err: any) {
       setImporting(false)
       setImportUploadPct(null)

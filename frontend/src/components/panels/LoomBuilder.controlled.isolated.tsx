@@ -3,7 +3,10 @@ import { JSDOM } from 'jsdom'
 import { act, createElement, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { flushSync } from 'react-dom'
-import type { PromptBlock, PromptVariableDef, PromptVariableValues } from '@/lib/loom/types'
+import type { LoomPreset, PromptBlock, PromptVariableDef, PromptVariableValues } from '@/lib/loom/types'
+import type { GenerateRequest } from '@/api/generate'
+import type { PresetProfileBinding } from '@/api/preset-profiles'
+import type { Message } from '@/types/api'
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost/',
@@ -66,20 +69,31 @@ const mainLoomState: Record<string, unknown> = {}
 const mainPresetProfilesState = {
   isResolved: true,
   resolvedPresetId: 'main-preset',
+  activeBinding: null as PresetProfileBinding | null,
 }
+const generationRequests: GenerateRequest[] = []
 const mainStoreState = {
   presetEditorTabs: [],
   presetEditorToolbarItems: [],
   addToast: () => {},
-  activeChatId: null,
-  activeCharacterId: null,
+  activeChatId: null as string | null,
+  activeCharacterId: null as string | null,
   activePersonaId: 'preview-persona',
   activeProfileId: 'preview-connection',
   isGroupChat: false,
   user: null,
   breakdownCache: {},
-  messages: [],
+  messages: [] as Message[],
   openModal: () => {},
+  isStreaming: false,
+  regeneratingMessageId: null,
+  streamingSwipeId: null,
+  streamingGenerationType: null,
+  beginStreaming: () => {},
+  startStreaming: () => {},
+  setStreamingError: () => {},
+  getActivePresetForGeneration: () => 'main-preset',
+  regenFeedback: { enabled: false, position: 'system', format: '' },
 }
 const mockedStore = Object.assign(
   (selector: (state: typeof mainStoreState) => unknown) => selector(mainStoreState),
@@ -100,6 +114,14 @@ mock.module('@/api/macros', () => ({
   resolveMacrosBatch: async () => ({ resolved: {} }),
   getMacroCatalog: async () => ({ categories: [] }),
 }))
+mock.module('@/api/generate', () => ({
+  generateApi: {
+    start: async (request: GenerateRequest) => {
+      generationRequests.push(request)
+      return { generationId: 'profile-regression-generation' }
+    },
+  },
+}))
 mock.module('@/store', () => ({ useStore: mockedStore }))
 mock.module('@/hooks/useLoomBuilder', () => ({ useLoomBuilder: () => mainLoomState }))
 mock.module('@/hooks/usePresetProfiles', () => ({
@@ -109,8 +131,8 @@ mock.module('@/hooks/usePresetProfiles', () => ({
     hasCharacterBinding: false,
     hasConnectionBinding: false,
     characterBindingEnabled: false,
-    activeSource: 'none',
-    activeBinding: null,
+    activeSource: mainPresetProfilesState.activeBinding ? 'chat' : 'none',
+    activeBinding: mainPresetProfilesState.activeBinding,
     resolvedPresetId: mainPresetProfilesState.resolvedPresetId,
     isResolved: mainPresetProfilesState.isResolved,
     isLoading: false,
@@ -118,9 +140,10 @@ mock.module('@/hooks/usePresetProfiles', () => ({
     chatBinding: null,
     characterBinding: null,
     connectionBinding: null,
-    activeChatId: null,
-    activeCharacterId: null,
-    activeProfileId: null,
+    activeChatId: mainStoreState.activeChatId,
+    activeCharacterId: mainStoreState.activeCharacterId,
+    activePersonaId: mainStoreState.activePersonaId,
+    activeProfileId: mainStoreState.activeProfileId,
     captureDefaults: () => {},
     clearDefaults: () => {},
     selectResolvedPreset: () => null,
@@ -149,6 +172,8 @@ mock.module('@/components/shared/ModalShell', () => ({ ModalShell: NullComponent
 mock.module('@/components/shared/RangeSlider', () => ({
   RangeSlider: NullComponent,
   LabeledRangeSlider: NullComponent,
+  DualRangeSlider: NullComponent,
+  LabeledDualRangeSlider: NullComponent,
 }))
 mock.module('@/components/shared/PromptVariablesModal', () => ({
   PromptVariablesModal: ({ isOpen }: { isOpen: boolean }) => isOpen
@@ -193,6 +218,7 @@ mock.module('./LoomBuilder.module.css', () => ({ default: {} }))
 
 // A static import would evaluate LoomBuilder before Bun installs the dependency mocks above.
 const { default: LoomBuilder, BlockEditor, ControlledLoomBlockEditor } = await import('./LoomBuilder')
+const { default: useSwipeAction } = await import('@/hooks/useSwipeAction')
 mock.restore()
 
 const promptVariables: PromptVariableValues = {}
@@ -247,6 +273,7 @@ function configureMainLoomState(withPromptVariable = false): void {
   })
   mainPresetProfilesState.isResolved = true
   mainPresetProfilesState.resolvedPresetId = 'main-preset'
+  mainPresetProfilesState.activeBinding = null
   Object.assign(mainLoomState, {
     registry: { 'main-preset': { name: 'Main preset', blockCount: 1 } },
     activePresetId: 'main-preset',
@@ -417,6 +444,11 @@ afterEach(() => {
   document.body.replaceChildren()
   resolverCalls = 0
   resolverRequests.length = 0
+  generationRequests.length = 0
+  mainStoreState.activeChatId = null
+  mainStoreState.activeCharacterId = null
+  mainStoreState.messages = []
+  mainPresetProfilesState.activeBinding = null
 })
 afterAll(async () => {
   await act(async () => {})
@@ -649,6 +681,74 @@ describe('controlled Loom editor trust boundary', () => {
     flushSync(() => button!.click())
     expect(container.querySelector('[data-testid="prompt-variables-modal"]')).not.toBeNull()
     unmountRoot(root)
+  })
+
+  test('opening, editing, and closing bound Loom leaves generation profile resolution enabled', async () => {
+    configureMainLoomState(true)
+    mainStoreState.activeChatId = 'profile-chat'
+    mainStoreState.activeCharacterId = 'profile-character'
+    const message: Message = {
+      id: 'profile-message', chat_id: 'profile-chat', index_in_chat: 0,
+      is_user: false, name: 'Assistant', content: 'Reply', send_date: 1,
+      swipe_id: 0, swipes: ['Reply'], swipe_dates: [1], extra: {},
+      parent_message_id: null, branch_id: null, created_at: 1,
+    }
+    mainStoreState.messages = [message]
+    mainPresetProfilesState.activeBinding = {
+      preset_id: 'main-preset', block_states: { 'main-block': true },
+      prompt_variables: { 'main-block': { tone: 'profile tone' } }, captured_at: 1,
+    }
+    const applications: unknown[][] = []
+    mainLoomState.applyRuntimeBlockProfile = (...args: unknown[]) => applications.push(args)
+    let savedUpdates: Partial<PromptBlock> | undefined
+    mainLoomState.updateBlock = (blockId: string, updates: Partial<PromptBlock>) => {
+      savedUpdates = updates
+      const preset = mainLoomState.activePreset as LoomPreset
+      mainLoomState.activePreset = {
+        ...preset,
+        blocks: preset.blocks.map((block) => block.id === blockId ? { ...block, ...updates } : block),
+      }
+      return true
+    }
+    function GenerationAction() {
+      const { handleRegenerate } = useSwipeAction(message, message.chat_id)
+      return createElement('button', { onClick: handleRegenerate }, 'Regenerate')
+    }
+    const actionContainer = document.createElement('div')
+    document.body.append(actionContainer)
+    const actionRoot = createRoot(actionContainer)
+    flushSync(() => actionRoot.render(createElement(GenerationAction)))
+    mountedRoots.add(actionRoot)
+    async function regenerate() {
+      await act(async () => actionContainer.querySelector<HTMLButtonElement>('button')!.click())
+      const request = generationRequests.at(-1)!
+      expect(request).toMatchObject({
+        chat_id: 'profile-chat', preset_id: 'main-preset', generation_type: 'swipe',
+      })
+      expect(request.force_preset_id).not.toBe(true)
+    }
+    await regenerate()
+
+    const container = document.createElement('div')
+    document.body.append(container)
+    const root = createRoot(container)
+    flushSync(() => root.render(createElement(LoomBuilder, { compact: true })))
+    mountedRoots.add(root)
+    expect(applications).toEqual([[
+      'main-preset', { 'main-block': true }, { 'main-block': { tone: 'profile tone' } },
+    ]])
+    await regenerate()
+
+    flushSync(() => container.querySelector<HTMLButtonElement>('button[title="actions.edit"]')!.click())
+    editRole(container, 'assistant')
+    flushSync(() => saveButton(container).click())
+    expect(savedUpdates?.role).toBe('assistant')
+    flushSync(() => root.render(createElement(LoomBuilder, { compact: true })))
+    await regenerate()
+    unmountRoot(root)
+    await regenerate()
+    expect(generationRequests).toHaveLength(4)
+    unmountRoot(actionRoot)
   })
 
   test('commits the exact changed payload when the callback returns without a value', () => {

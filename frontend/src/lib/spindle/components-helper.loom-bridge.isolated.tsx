@@ -71,7 +71,12 @@ mock.module('@/components/shared/FormComponents', () => ({ TextInput: NullCompon
 mock.module('@/components/shared/FormComponents.module.css', () => ({ default: {} }))
 mock.module('@/components/shared/NumericInput', () => ({ default: NullComponent }))
 mock.module('@/components/shared/NumberStepper', () => ({ default: NullComponent }))
-mock.module('@/components/shared/RangeSlider', () => ({ RangeSlider: NullComponent, LabeledRangeSlider: NullComponent }))
+mock.module('@/components/shared/RangeSlider', () => ({
+  RangeSlider: NullComponent,
+  LabeledRangeSlider: NullComponent,
+  DualRangeSlider: NullComponent,
+  LabeledDualRangeSlider: NullComponent,
+}))
 mock.module('@/components/shared/Toggle', () => ({ Toggle: NullComponent }))
 mock.module('@/components/shared/Badge', () => ({ Badge: NullComponent }))
 mock.module('@/components/shared/Spinner', () => ({ Spinner: NullComponent }))

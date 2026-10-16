@@ -43,6 +43,8 @@ jobs:
           src/db/maintenance-scheduler.test.ts
           src/services/database-execution.test.ts
           src/services/async-database-callers.test.ts
+          src/services/tokenizer-seed.test.ts
+          src/services/tokenizer-seed.database-execution.test.ts
           src/services/settings.service.test.ts
           src/services/presets.service.test.ts
           src/services/regex-scripts.service.test.ts

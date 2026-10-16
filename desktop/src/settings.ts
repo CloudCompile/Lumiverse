@@ -3,15 +3,20 @@
 import { LazyStore } from "@tauri-apps/plugin-store";
 import {
   LOCAL_INSTANCE_CONNECTION,
-  normalizeInstanceConnection,
+  savedConnectionPreferences,
   type InstanceConnection,
+  type RemoteInstanceConnection,
 } from "./instance-connection";
+import { type LocalServerSource } from "./local-server";
+import { type DesktopUpdateChannel } from "./desktop-updates";
 
 const store = new LazyStore("settings.json");
 
 export interface TraySettings {
-  /** Lumiverse checkout to manage; null = use the build-time default. */
+  /** Lumiverse checkout to manage; retained when using the built-in server or remote. */
   repoDir: string | null;
+  /** Null migrates older settings based on the saved checkout and available runtime. */
+  localServerSource: LocalServerSource | null;
   /** Explicit bun binary; null = auto-resolve. */
   bunPath: string | null;
   /** Start the Lumiverse server as soon as the tray app launches. */
@@ -29,21 +34,31 @@ export interface TraySettings {
   } | null;
   /** The local runner or one explicitly selected remote Lumiverse instance. */
   instanceConnection: InstanceConnection;
+  /** Derived from a persisted choice; a new bundled install asks first. */
+  instanceConnectionConfigured: boolean;
+  /** Retained while using a local instance; OAuth credentials stay in the native store. */
+  savedRemoteConnection: RemoteInstanceConnection | null;
+  /** Null uses the channel of the installed desktop release. */
+  desktopUpdateChannel: DesktopUpdateChannel | null;
 }
 
 const DEFAULTS: TraySettings = {
   repoDir: null,
+  localServerSource: null,
   bunPath: null,
   autoStartServer: true,
   discordRpcEnabled: false,
   systemAudioEnabled: false,
   frontendBounds: null,
   instanceConnection: LOCAL_INSTANCE_CONNECTION,
+  instanceConnectionConfigured: false,
+  savedRemoteConnection: null,
+  desktopUpdateChannel: null,
 };
 
 export async function loadSettings(): Promise<TraySettings> {
   const settings = { ...DEFAULTS };
-  for (const key of Object.keys(DEFAULTS).filter((key) => key !== "instanceConnection") as Array<keyof TraySettings>) {
+  for (const key of Object.keys(DEFAULTS).filter((key) => !["instanceConnection", "instanceConnectionConfigured", "savedRemoteConnection"].includes(key)) as Array<keyof TraySettings>) {
     const value = await store.get(key);
     if (value !== undefined && value !== null) {
       (settings as Record<string, unknown>)[key] = value;
@@ -51,7 +66,10 @@ export async function loadSettings(): Promise<TraySettings> {
   }
   const savedConnection = await store.get("instanceConnection");
   const legacyUrl = savedConnection == null ? await store.get("customFrontendUrl") : undefined;
-  settings.instanceConnection = normalizeInstanceConnection(savedConnection, legacyUrl);
+  const restored = savedConnectionPreferences(savedConnection, await store.get("savedRemoteConnection"), legacyUrl);
+  settings.instanceConnection = restored.connection;
+  settings.instanceConnectionConfigured = restored.configured || Boolean(settings.repoDir);
+  settings.savedRemoteConnection = restored.remote;
   return settings;
 }
 

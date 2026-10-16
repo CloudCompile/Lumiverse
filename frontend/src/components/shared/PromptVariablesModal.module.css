@@ -212,6 +212,8 @@
 .sliderValue {
   min-width: 54px;
   text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   font-family: var(--lumiverse-font-mono, ui-monospace, monospace);
   font-size: calc(12px * var(--lumiverse-font-scale, 1));
   color: var(--lumiverse-text);

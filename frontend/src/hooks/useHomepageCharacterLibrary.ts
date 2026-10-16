@@ -11,6 +11,7 @@ import type {
 import { useStore } from '@/store'
 import { wsClient } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 import { resolveCharacterDisplaySettings } from '@/lib/characterDisplaySettings'
 import { hasEnabledFrontendExtension } from '@/lib/spindle/frontend-extension-availability'
 import {
@@ -141,6 +142,7 @@ export function useHomepageCharacterLibrary() {
     }
 
     const unsubscribers = [
+      subscribeImportedDataRefresh(invalidate),
       wsClient.on(EventType.CHARACTER_CREATED, invalidate),
       wsClient.on(EventType.CHARACTER_EDITED, invalidate),
       wsClient.on(EventType.CHARACTER_DELETED, invalidate),

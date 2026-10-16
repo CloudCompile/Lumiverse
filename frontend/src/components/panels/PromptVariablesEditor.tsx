@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import clsx from 'clsx'
 import NumberStepper from '@/components/shared/NumberStepper'
+import { DualRangeSlider, RangeSlider } from '@/components/shared/RangeSlider'
 import { Toggle } from '@/components/shared/Toggle'
 import { DndContext, useScaledSortableStyle } from '@/lib/dndUiScale'
 import { generateUUID } from '@/lib/uuid'
@@ -60,6 +61,7 @@ const TYPE_ACCENT_CLASS: Record<PromptVariableType, string> = {
   textarea: css.typeTextarea,
   number: css.typeNumber,
   slider: css.typeSlider,
+  range: css.typeSlider,
   select: css.typeSelect,
   switch: css.typeSwitch,
   multiselect: css.typeMultiselect,
@@ -129,7 +131,9 @@ function coerceVariableType(
       const num =
         typeof current.defaultValue === 'number'
           ? current.defaultValue
-          : Number(current.defaultValue) || 0
+          : Array.isArray(current.defaultValue) && typeof current.defaultValue[0] === 'number'
+            ? current.defaultValue[0]
+            : Number(current.defaultValue) || 0
       return {
         ...base,
         type: 'number',
@@ -143,7 +147,9 @@ function coerceVariableType(
       const num =
         typeof current.defaultValue === 'number'
           ? current.defaultValue
-          : Number(current.defaultValue) || 0
+          : Array.isArray(current.defaultValue) && typeof current.defaultValue[0] === 'number'
+            ? current.defaultValue[0]
+            : Number(current.defaultValue) || 0
       const min =
         typeof (current as { min?: number }).min === 'number'
           ? (current as { min: number }).min
@@ -156,6 +162,31 @@ function coerceVariableType(
         ...base,
         type: 'slider',
         defaultValue: Math.min(Math.max(num, min), max),
+        min,
+        max,
+        step: (current as { step?: number }).step ?? 1,
+      }
+    }
+    case 'range': {
+      const min = typeof (current as { min?: number }).min === 'number'
+        ? (current as { min: number }).min
+        : 0
+      const max = typeof (current as { max?: number }).max === 'number'
+        ? (current as { max: number }).max
+        : 100
+      const prior = Array.isArray(current.defaultValue)
+        && current.defaultValue.length === 2
+        && current.defaultValue.every((entry) => typeof entry === 'number')
+        ? current.defaultValue as [number, number]
+        : typeof current.defaultValue === 'number' && Number.isFinite(current.defaultValue)
+          ? [current.defaultValue, max] as [number, number]
+          : [min, max] as [number, number]
+      const start = Math.min(max, Math.max(min, prior[0]))
+      const end = Math.min(max, Math.max(min, prior[1]))
+      return {
+        ...base,
+        type: 'range',
+        defaultValue: start <= end ? [start, end] : [end, start],
         min,
         max,
         step: (current as { step?: number }).step ?? 1,
@@ -571,21 +602,22 @@ function VariableRow({
   }, [setActivatorNodeRef])
   const typeOptions = useMemo(
     () =>
-      (['text', 'textarea', 'number', 'slider', 'select', 'switch', 'multiselect'] as const).map((value) => ({
+      (['text', 'textarea', 'number', 'slider', 'range', 'select', 'switch', 'multiselect'] as const).map((value) => ({
         value,
         label: t(`promptVariablesEditor.types.${value}`),
       })),
     [t],
   )
-  const isNumeric = variable.type === 'number' || variable.type === 'slider'
+  const isNumeric = variable.type === 'number' || variable.type === 'slider' || variable.type === 'range'
   const isSlider = variable.type === 'slider'
+  const isRange = variable.type === 'range'
   const isSelect = variable.type === 'select'
   const isMultiselect = variable.type === 'multiselect'
   const isSwitch = variable.type === 'switch'
 
-  const sliderMin = isSlider ? (variable as { min: number }).min : 0
-  const sliderMax = isSlider ? (variable as { max: number }).max : 100
-  const sliderStep = isSlider ? (variable as { step?: number }).step ?? 1 : 1
+  const sliderMin = isSlider || isRange ? (variable as { min: number }).min : 0
+  const sliderMax = isSlider || isRange ? (variable as { max: number }).max : 100
+  const sliderStep = isSlider || isRange ? (variable as { step?: number }).step ?? 1 : 1
   const position = index + 1
   const displayName = variable.name.trim() || variable.label.trim() || t('promptVariablesEditor.variableFallback', { position })
 
@@ -689,7 +721,7 @@ function VariableRow({
       {/* Row 3: default value — type-specific control.
           For select/multiselect the default is set via the options list below. */}
       {!isSelect && !isMultiselect && (
-        <div className={clsx(css.field, isSlider ? css.colHalf : css.colFull)}>
+        <div className={clsx(css.field, isSlider || isRange ? css.colHalf : css.colFull)}>
           <label className={css.fieldLabel}>{t('promptVariablesEditor.default')}</label>
           {variable.type === 'textarea' ? (
             <textarea
@@ -725,6 +757,30 @@ function VariableRow({
                 {t('promptVariablesEditor.switchHint')}
               </span>
             </div>
+          ) : isRange ? (
+            <div className={css.rangeDefaultRow}>
+              <NumberStepper
+                value={variable.defaultValue[0]}
+                onChange={(next) => {
+                  const start = Math.min(next ?? sliderMin, variable.defaultValue[1])
+                  onUpdate({ defaultValue: [start, variable.defaultValue[1]] } as Partial<PromptVariableDef>)
+                }}
+                min={sliderMin}
+                max={variable.defaultValue[1]}
+                step={sliderStep}
+              />
+              <span aria-hidden="true">–</span>
+              <NumberStepper
+                value={variable.defaultValue[1]}
+                onChange={(next) => {
+                  const end = Math.max(next ?? sliderMax, variable.defaultValue[0])
+                  onUpdate({ defaultValue: [variable.defaultValue[0], end] } as Partial<PromptVariableDef>)
+                }}
+                min={variable.defaultValue[0]}
+                max={sliderMax}
+                step={sliderStep}
+              />
+            </div>
           ) : (
             <NumberStepper
               value={
@@ -743,24 +799,27 @@ function VariableRow({
 
       {/* Slider-only preview: what end-users will see. Lives beside the
           stepper so the creator can cross-check. */}
-      {isSlider && (
+      {(isSlider || isRange) && (
         <div className={clsx(css.sliderPreview, css.colHalf)}>
-          <input
-            type="range"
-            className={css.sliderPreviewTrack}
-            min={sliderMin}
-            max={sliderMax}
-            step={sliderStep}
-            value={
-              typeof variable.defaultValue === 'number'
-                ? variable.defaultValue
-                : sliderMin
-            }
-            onChange={(e) =>
-              onUpdate({ defaultValue: Number(e.target.value) } as Partial<PromptVariableDef>)
-            }
-            aria-label={t('promptVariablesEditor.defaultPreviewAria')}
-          />
+          {isRange ? (
+            <DualRangeSlider
+              min={sliderMin}
+              max={sliderMax}
+              step={sliderStep}
+              value={variable.defaultValue}
+              onCommit={(next) => onUpdate({ defaultValue: next } as Partial<PromptVariableDef>)}
+              startLabel={t('promptVariablesEditor.rangeStart')}
+              endLabel={t('promptVariablesEditor.rangeEnd')}
+            />
+          ) : (
+            <RangeSlider
+              min={sliderMin}
+              max={sliderMax}
+              step={sliderStep}
+              value={typeof variable.defaultValue === 'number' ? variable.defaultValue : sliderMin}
+              onCommit={(next) => onUpdate({ defaultValue: next } as Partial<PromptVariableDef>)}
+            />
+          )}
           <div className={css.sliderPreviewScale}>
             <span>{sliderMin}</span>
             <span>{sliderMax}</span>
@@ -804,9 +863,22 @@ function VariableRow({
                   ? (variable as { min: number }).min
                   : null
               }
-              onChange={(n) =>
+              onChange={(n) => {
+                if (variable.type === 'range') {
+                  const nextMin = Math.min(n ?? 0, variable.max)
+                  const start = Math.min(variable.max, Math.max(nextMin, variable.defaultValue[0]))
+                  const end = Math.min(variable.max, Math.max(start, variable.defaultValue[1]))
+                  onUpdate({ min: nextMin, defaultValue: [start, end] } as Partial<PromptVariableDef>)
+                  return
+                }
+                if (variable.type === 'slider') {
+                  const nextMin = Math.min(n ?? 0, variable.max)
+                  const clamped = Math.min(variable.max, Math.max(nextMin, variable.defaultValue))
+                  onUpdate({ min: nextMin, defaultValue: clamped } as Partial<PromptVariableDef>)
+                  return
+                }
                 onUpdate({ min: n ?? undefined } as Partial<PromptVariableDef>)
-              }
+              }}
               allowEmpty={variable.type === 'number'}
             />
           </div>
@@ -818,9 +890,22 @@ function VariableRow({
                   ? (variable as { max: number }).max
                   : null
               }
-              onChange={(n) =>
+              onChange={(n) => {
+                if (variable.type === 'range') {
+                  const nextMax = Math.max(n ?? 100, variable.min)
+                  const end = Math.max(variable.min, Math.min(nextMax, variable.defaultValue[1]))
+                  const start = Math.max(variable.min, Math.min(end, variable.defaultValue[0]))
+                  onUpdate({ max: nextMax, defaultValue: [start, end] } as Partial<PromptVariableDef>)
+                  return
+                }
+                if (variable.type === 'slider') {
+                  const nextMax = Math.max(n ?? 100, variable.min)
+                  const clamped = Math.max(variable.min, Math.min(nextMax, variable.defaultValue))
+                  onUpdate({ max: nextMax, defaultValue: clamped } as Partial<PromptVariableDef>)
+                  return
+                }
                 onUpdate({ max: n ?? undefined } as Partial<PromptVariableDef>)
-              }
+              }}
               allowEmpty={variable.type === 'number'}
             />
           </div>

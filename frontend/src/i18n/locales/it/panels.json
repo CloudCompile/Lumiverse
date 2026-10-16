@@ -2095,6 +2095,7 @@
       "textarea": "Area di testo",
       "number": "Numero",
       "slider": "Slider",
+      "range": "Slider intervallo",
       "select": "Menu a tendina",
       "switch": "On / Off",
       "multiselect": "Multi-selezione"
@@ -2123,6 +2124,8 @@
     "switchOff": "Off",
     "switchHint": "Si risolve in 1 quando on, 0 quando off.",
     "defaultPreviewAria": "Anteprima valore predefinito",
+    "rangeStart": "Inizio intervallo",
+    "rangeEnd": "Fine intervallo",
     "min": "Min",
     "max": "Max",
     "step": "Passo",

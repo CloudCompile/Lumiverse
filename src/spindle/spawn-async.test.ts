@@ -36,6 +36,7 @@ describe("spawnAsync", () => {
 
     expect(result.exitCode).not.toBe(0);
     expect(result.timedOut).toBe(false);
+    expect(result.signalCode).toBe("SIGTERM");
   });
 
   test("does not wait for descendants holding inherited output pipes", async () => {

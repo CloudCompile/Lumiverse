@@ -19,6 +19,7 @@ import type {
 import { PERMISSION_DENIED_PREFIX } from "lumiverse-spindle-types";
 import * as spindleUploads from "./uploads";
 import * as charactersSvc from "../services/characters.service";
+import * as characterGallerySvc from "../services/character-gallery.service";
 import * as chatsSvc from "../services/chats.service";
 import { getCharacterWorldBookIds, setCharacterWorldBookIds } from "../utils/character-world-books";
 import * as worldBooksSvc from "../services/world-books.service";
@@ -33,6 +34,7 @@ import * as globalAddonsSvc from "../services/global-addons.service";
 import * as settingsSvc from "../services/settings.service";
 import * as imagesSvc from "../services/images.service";
 import { IMAGE_READ_MAX_BYTES } from "./image-binary-contract";
+import type { CharacterGalleryItemDTO } from "./gallery-models-contract";
 import { prepareActivationPatterns } from "../services/regex-activation-inputs.service";
 import type { ActivationPatternsOptions } from "./activation-patterns-contract";
 import * as mediaSvc from "../services/media.service";
@@ -260,6 +262,32 @@ export class WorkerHostContentApi {
         requestId,
         result: c ? this.toCharacterDTO(c) : null,
       });
+    } catch (err: any) {
+      this.postToWorker({ type: "response", requestId, error: err.message });
+    }
+  }
+
+  handleCharactersGetGallery(requestId: string, characterId: string, userId?: string): void {
+    try {
+      if (!this.hasPermission("characters")) {
+        throw new Error(`${PERMISSION_DENIED_PREFIX} characters — Characters permission not granted`);
+      }
+      const resolvedUserId = this.resolveEffectiveUserId(userId);
+      if (!resolvedUserId) throw new Error("userId is required for operator-scoped extensions");
+      this.enforceScopedUser(resolvedUserId);
+
+      const items: CharacterGalleryItemDTO[] = characterGallerySvc.listGallery(resolvedUserId, characterId, { registerReferences: false }).map((item) => ({
+        id: item.id,
+        image_id: item.image_id,
+        reference: item.reference,
+        caption: item.caption,
+        sort_order: item.sort_order,
+        created_at: item.created_at,
+        width: item.width,
+        height: item.height,
+        mime_type: item.mime_type,
+      }));
+      this.postToWorker({ type: "response", requestId, result: items });
     } catch (err: any) {
       this.postToWorker({ type: "response", requestId, error: err.message });
     }

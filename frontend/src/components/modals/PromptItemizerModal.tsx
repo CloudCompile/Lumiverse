@@ -17,7 +17,6 @@ import { getNanoGptCacheUsageSummary } from '@/lib/nanogpt-breakdown-cache'
 import { getOpenAiCompatibleCacheUsageSummary } from '@/lib/openai-compatible-breakdown-cache'
 import { copyTextToClipboard } from '@/lib/clipboard'
 import { dryRunToRawPromptInput, formatRawPrompt, type RawPromptView } from '@/lib/formatRawPrompt'
-import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import styles from './PromptItemizerModal.module.css'
 import clsx from 'clsx'
 
@@ -147,7 +146,6 @@ export default function PromptItemizerModal() {
         connection_id: activeProfileId || undefined,
         persona_id: activePersonaId || undefined,
         preset_id: presetId,
-        force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
         exclude_message_id: messageId,
         target_character_id: rawTargetCharacterId || undefined,
       })
@@ -159,7 +157,7 @@ export default function PromptItemizerModal() {
     } finally {
       setRawLoading(false)
     }
-  }, [rawData, chatId, messageId, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, rawTargetCharacterId, t])
+  }, [rawData, chatId, messageId, activeProfileId, activePersonaId, getActivePresetForGeneration, rawTargetCharacterId, t])
 
   const handleToggleRaw = useCallback(async () => {
     if (rawView !== 'off') {

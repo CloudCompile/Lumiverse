@@ -16,7 +16,7 @@ export function installIOSEditableFocusScrollPrevention(): () => void {
   let focusing = false
   const preventFocusScroll = (target: HTMLElement | null) => {
     if (!target || focusing || !target.isConnected) return
-    if (!document.documentElement.hasAttribute('data-ios-pwa')) return
+    if (!document.documentElement.matches('[data-ios-pwa], [data-tauri-mobile="ios"]')) return
     if (target.closest('[data-component="InputArea"]')) return
     if (Math.abs((window.visualViewport?.scale ?? 1) - 1) > 0.01) return
     focusing = true

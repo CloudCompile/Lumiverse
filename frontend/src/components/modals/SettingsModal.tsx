@@ -25,6 +25,7 @@ import { useTranslation } from 'react-i18next'
 import { translateSettingsField } from '@/lib/i18n/resolveLabel'
 import { Button, TextInput } from '@/components/shared/FormComponents'
 import NumericInput from '@/components/shared/NumericInput'
+import DrawerWidthSettings from '@/components/settings/DrawerWidthSettings'
 import { Toggle } from '@/components/shared/Toggle'
 import { spinClass } from '@/components/shared/Spinner'
 import { ExpandableTextarea } from '@/components/shared/ExpandedTextEditor'
@@ -590,6 +591,8 @@ function DisplaySettings() {
         label={t('display.drawer.showTabLabels')}
         hint={t('display.drawer.showTabLabelsHint')}
       />
+
+      <DrawerWidthSettings settings={drawerSettings} onChange={updateDrawer} />
 
       <p className={styles.helperText}>{t('display.drawer.resizeHint')}</p>
 

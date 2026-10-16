@@ -1376,6 +1376,17 @@ Alias: `{{lumiaCouncilQuirks}}` for `{{lumiaQuirks}}`
 
 ---
 
+## MCP
+
+| Macro | Description |
+|-------|-------------|
+| `{{mcpTools}}` | Callable MCP function names and descriptions available for this generation |
+| `{{mcpToolsActive}}` | `"yes"` / `"no"` — whether MCP tools are available |
+
+Place `{{mcpTools}}` in a preset block to choose its role, position, and depth. Native function definitions are sent with the model request automatically. Connect the server in **Settings → MCP Servers** and enable **Enable Function Calling** in the active preset. These macros return empty text / `"no"` when function calling is disabled or the generation is an impersonation.
+
+---
+
 ## Loom
 
 Macros for the Loom narrative system.

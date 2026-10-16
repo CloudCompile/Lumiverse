@@ -33,6 +33,7 @@ import { imageGenApi } from '@/api/image-gen'
 import { generateApi } from '@/api/generate'
 import { operatorApi } from '@/api/operator'
 import { presetsApi } from '@/api/presets'
+import { refreshAppDataAfterImport } from '@/hooks/useAppInit'
 import { toast } from '@/lib/toast'
 import { notifyImageDeleted, notifyDeletionOperation, notifyDeletionReconnect, notifyGalleryItemRemoved, onImageDeleted, type DeletionOperation, type GalleryItemRemoved } from '@/lib/deletion-events'
 import i18n from '@/i18n'
@@ -1436,6 +1437,11 @@ export function useWebSocket() {
         if (reload) {
           store.getState().loadSettings()
         }
+      }),
+
+      wsClient.on(EventType.USER_IMPORT_COMPLETE, (payload: { jobId: string }) => {
+        void refreshAppDataAfterImport(payload.jobId)
+          .catch((error) => console.error('[Import] Could not refresh imported data:', error))
       }),
 
       wsClient.on(EventType.CHARACTER_CREATED, (payload: { id: string; character?: import('@/types/api').Character }) => {

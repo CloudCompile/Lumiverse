@@ -30,6 +30,7 @@ describe('frontend authority map', () => {
   })
   test('keeps every H7 surface in the canonical authority map', () => {
     const expected: Record<string, string | null> = {
+      message_preview: null,
       provider_icon: null,
       world_book_entry_editor: 'world_books',
       world_book_entry_table: null,
@@ -86,6 +87,7 @@ describe('frontend authority map', () => {
       expect(projected.get(row?.ctxLeaf)?.permission).toBe(member.permission)
     }
     expect(frontendAuthorityPermission('ctx_member', 'ctx.connections.models')).toBe('generation')
+    expect(frontendAuthorityPermission('ctx_member', 'ctx.client.getInfo')).toBeNull()
     expect(frontendAuthorityPermission('ctx_member', 'ctx.stt.listProviders')).toBeNull()
     for (const method of ['prepare', 'start', 'transcribe']) {
       expect(frontendAuthorityPermission('ctx_member', `ctx.stt.${method}`)).toBe('media')

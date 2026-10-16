@@ -66,6 +66,8 @@ interface MessageContentProps {
   characterNameOverride?: string
   risuAssetMapOverride?: Record<string, string> | null
   disableInterceptors?: boolean
+  /** Display-only preview: no tag delivery, regex actions, widgets or shared collapse state. */
+  readOnly?: boolean
   findQuery?: string
 }
 
@@ -1685,6 +1687,7 @@ export default function MessageContent({
   characterNameOverride,
   risuAssetMapOverride,
   disableInterceptors = false,
+  readOnly = false,
   findQuery = '',
 }: MessageContentProps) {
   const { t } = useTranslation('chat')
@@ -1739,17 +1742,17 @@ export default function MessageContent({
     () => {
       // interceptorRegistryVersion is the external-store invalidation trigger.
       void interceptorRegistryVersion
-      return disableInterceptors
+      return disableInterceptors || readOnly
         ? { content, intercepts: [] }
         : stripMessageTags(content, { messageId, chatId, isUser, isStreaming })
     },
-    [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion, disableInterceptors],
+    [content, messageId, chatId, isUser, isStreaming, interceptorRegistryVersion, disableInterceptors, readOnly],
   )
 
   useLayoutEffect(() => {
-    if (disableInterceptors || interceptedMessageTags.intercepts.length === 0) return
+    if (disableInterceptors || readOnly || interceptedMessageTags.intercepts.length === 0) return
     dispatchMessageTagIntercepts(interceptedMessageTags.intercepts, deliveredTagInterceptsRef.current)
-  }, [interceptedMessageTags.intercepts, disableInterceptors])
+  }, [interceptedMessageTags.intercepts, disableInterceptors, readOnly])
 
   const interceptorCleanedContent = interceptedMessageTags.content
 
@@ -1795,7 +1798,7 @@ export default function MessageContent({
   ))
   const setLongMessageExpanded = useStore((s) => s.setLongMessageExpanded)
   const longMessageEligible = isLongMessageCollapseEligible({
-    enabled: longMessageCollapseEnabled,
+    enabled: longMessageCollapseEnabled && !readOnly,
     isUser,
     depth,
     collapseDepth: longMessageCollapseDepth,
@@ -1865,7 +1868,7 @@ export default function MessageContent({
   // island's shadow root. composedPath() finds the authored target in both.
   useEffect(() => {
     const container = containerRef.current
-    if (!container || isStreaming || !chatId) return
+    if (!container || isStreaming || !chatId || readOnly) return
 
     const findActionTarget = (event: Event): Element | null => (
       event.composedPath().find((node): node is Element => (
@@ -2005,13 +2008,13 @@ export default function MessageContent({
       container.removeEventListener('contextmenu', activate)
       longPress.destroy()
     }
-  }, [chatId, messageId, isUser, isStreaming, regexScripts, actionUsage, regexActionsSuperseded, t, regexSelectionVersion])
+  }, [chatId, messageId, isUser, isStreaming, regexScripts, actionUsage, regexActionsSuperseded, t, regexSelectionVersion, readOnly])
 
   useLayoutEffect(() => {
     const container = containerRef.current
     if (!container) return
     const elements: Element[] = Array.from(container.querySelectorAll('[data-lumiverse-regex-action]'))
-    for (const island of container.querySelectorAll<HTMLElement>(`.${styles.htmlIsland}`)) {
+    for (const island of container.querySelectorAll<HTMLElement>('[data-lumiverse-html-island]')) {
       if (island.shadowRoot) {
         elements.push(...Array.from(island.shadowRoot.querySelectorAll('[data-lumiverse-regex-action]')))
       }
@@ -2060,7 +2063,7 @@ export default function MessageContent({
         if (configured.multi_select) element.setAttribute('aria-pressed', selected ? 'true' : 'false')
         else element.removeAttribute('aria-pressed')
         const stateEffectBlocked = isUser && !!configured.effects?.length
-        const disabled = used || regexActionsSuperseded || stateEffectBlocked
+        const disabled = readOnly || used || regexActionsSuperseded || stateEffectBlocked
         element.toggleAttribute('data-lumiverse-regex-action-superseded', regexActionsSuperseded)
         element.toggleAttribute('data-lumiverse-regex-action-state-blocked', stateEffectBlocked)
         if (disabled) {
@@ -2098,7 +2101,7 @@ export default function MessageContent({
         }
       } catch {}
     }
-  }, [actionUsage, regexActionsSuperseded, regexScripts, renderContent, regexSelectionVersion, chatId, isUser, messageId])
+  }, [actionUsage, regexActionsSuperseded, regexScripts, renderContent, regexSelectionVersion, chatId, isUser, messageId, readOnly])
 
   // Attach click handler for code copy buttons
   useEffect(() => {
@@ -2418,7 +2421,7 @@ export default function MessageContent({
         >
           <div ref={contentBodyRef} className={styles.longMessageBody}>
             {renderedBlocks}
-      <SpindleMessageWidgets messageId={messageId} chatId={chatId} />
+      {!readOnly && <SpindleMessageWidgets messageId={messageId} chatId={chatId} />}
           </div>
         </div>
         {longMessageEligible && longMessageOverflowing && (

@@ -252,4 +252,20 @@ describe("desktop OAuth provider integration", () => {
     expect(location).toContain("client_id=lumiverse-desktop");
     expect(location).toContain("sig=");
   });
+
+  test("HTTPS browser sessions remain valid behind TLS termination", async () => {
+    const origin = "https://app.example.test";
+    const signedUp = await auth.handler(new Request(origin + "/api/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin, [CREATION_NONCE_HEADER]: allowCreation() },
+      body: JSON.stringify({ name: "HTTPS User", username: "httpsuser", email: "https-user@example.test", password: "https-cookie-regression-password" }),
+    }));
+    expect(signedUp.status).toBe(200);
+    const cookie = signedUp.headers.getSetCookie().find((value) => value.startsWith("__Secure-better-auth.session_token="));
+    expect(cookie).toContain("Secure");
+    const response = await app.request("http://app.example.test/api/v1/personas", {
+      headers: { host: "app.example.test", cookie: cookie!.split(";", 1)[0]! },
+    });
+    expect(response.status).toBe(200);
+  });
 });

@@ -5,7 +5,6 @@ import { chatsApi } from '@/api/chats'
 import { generateApi } from '@/api/generate'
 import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import { toast } from '@/lib/toast'
-import { shouldForceLoomRuntimePreset } from '@/lib/loom/runtimeProfile'
 import { Plus, VolumeX, Volume2, UserMinus, AudioLines } from 'lucide-react'
 import { IconBolt } from '@tabler/icons-react'
 import ContextMenu, { type ContextMenuPos, type ContextMenuEntry } from '@/components/shared/ContextMenu'
@@ -34,7 +33,6 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
   const isStreaming = useStore((s) => s.isStreaming)
   const activeProfileId = useStore((s) => s.activeProfileId)
   const activePersonaId = useStore((s) => s.activePersonaId)
-  const activeCharacterId = useStore((s) => s.activeCharacterId)
   const getActivePresetForGeneration = useStore((s) => s.getActivePresetForGeneration)
   const startStreaming = useStore((s) => s.startStreaming)
   const setStreamingError = useStore((s) => s.setStreamingError)
@@ -57,7 +55,6 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
           connection_id: activeProfileId || undefined,
           persona_id: activePersonaId || undefined,
           preset_id: presetId,
-          force_preset_id: shouldForceLoomRuntimePreset(presetId, chatId, activeCharacterId, activeProfileId),
           generation_type: 'normal',
         })
         startStreaming(res.generationId)
@@ -67,7 +64,7 @@ export default function GroupChatMemberBar({ chatId }: GroupChatMemberBarProps) 
         setStreamingError(msg)
       }
     },
-    [chatId, isStreaming, mutedCharacterIds, activeProfileId, activePersonaId, activeCharacterId, getActivePresetForGeneration, startStreaming, setStreamingError, te]
+    [chatId, isStreaming, mutedCharacterIds, activeProfileId, activePersonaId, getActivePresetForGeneration, startStreaming, setStreamingError, te]
   )
 
   const openContextMenu = useCallback((characterId: string, pos: ContextMenuPos) => {

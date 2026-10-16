@@ -1,3 +1,6 @@
+import { createRuntimeChannel } from "./runtime-channel";
+import { blockNativeFetch } from "./worker-runtime-sandbox";
+
 type BackendProcessInit = {
   processId: string;
   entry: string;
@@ -57,11 +60,7 @@ type ActiveBackendProcess = {
 let activeProcess: ActiveBackendProcess | null = null;
 
 function post(message: BackendProcessToHost): void {
-  if (typeof process.send === "function") {
-    process.send(message);
-    return;
-  }
-  self.postMessage(message);
+  channel.send(message);
 }
 
 function shutdown(kind: "complete" | "fail" | "stopped", error?: string): void {
@@ -83,16 +82,17 @@ function shutdown(kind: "complete" | "fail" | "stopped", error?: string): void {
 
   if (kind === "fail") {
     post({ type: "fail", error: error?.trim() || "Backend process failed" });
-    process.exit(1);
+    channel.exit(1);
     return;
   }
 
   post({ type: kind });
-  process.exit(0);
+  channel.exit(0);
 }
 
 async function handleInit(msg: Extract<HostToBackendProcess, { type: "init" }>): Promise<void> {
   try {
+    blockNativeFetch();
     const mod = await import(msg.process.entryPath);
     const handler = typeof mod.default === "function"
       ? (mod.default as BackendProcessHandler)
@@ -213,12 +213,4 @@ function onHostMessage(message: HostToBackendProcess): void {
   }
 }
 
-if (typeof process.send === "function") {
-  process.on("message", (message) => {
-    onHostMessage(message as HostToBackendProcess);
-  });
-} else {
-  self.onmessage = (event: MessageEvent<HostToBackendProcess>) => {
-    onHostMessage(event.data);
-  };
-}
+const channel = createRuntimeChannel((message) => onHostMessage(message as HostToBackendProcess));

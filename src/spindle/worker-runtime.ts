@@ -115,6 +115,7 @@ import {
 } from "lumiverse-spindle-types";
 import type { DryRunResultDTO, GetBreakdownWorkerMessage, SavedBreakdownDTO } from "./generation-contract";
 import type { ImageReadBinaryMessage } from "./image-binary-contract";
+import type { CharacterGalleryItemDTO, CharacterGalleryWorkerMessage, ConnectionModelDTO, ConnectionModelsWorkerMessage } from "./gallery-models-contract";
 import type { ActivationPatternsMessage, ActivationPatternsOptions, ActivationPatternsResult } from "./activation-patterns-contract";
 import type { DesktopCaptureWorkerMessage, SpindleDesktopAPI, DesktopCaptureDevice, CapturedMediaRef } from "./desktop-capture-contract";
 import { deserializeWorkerResponseError } from "./worker-response-error";
@@ -124,6 +125,7 @@ import {
   normalizeOwnedSharedRpcEndpoint,
 } from "./shared-rpc";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createRuntimeChannel } from "./runtime-channel";
 import type { Preset, CreatePresetInput, UpdatePresetInput, PromptBlock } from "../types/preset";
 import type { LumiaDlcCatalog } from "../types/pack";
 import type {
@@ -133,8 +135,6 @@ import type {
   SpindleMcpServerDTO,
   SpindleMcpToolCallOptionsDTO,
 } from "../types/mcp-server";
-
-const nativeProcessExit = process.exit.bind(process);
 
 type TokenModelSource = "main" | "sidecar" | "explicit";
 
@@ -178,7 +178,7 @@ type AssembleRequest = {
   connectionId?: string;
   personaId?: string;
   generationType?: string;
-  promptVariables?: Record<string, Record<string, string | number | string[]>>;
+  promptVariables?: Record<string, Record<string, string | number | string[] | [number, number]>>;
   signal?: AbortSignal;
 };
 
@@ -316,6 +316,8 @@ type SpindleUserRole = "operator" | "admin" | "user";
 type RuntimeWorkerToHost =
   | ActivationPatternsMessage
   | ImageReadBinaryMessage
+  | CharacterGalleryWorkerMessage
+  | ConnectionModelsWorkerMessage
   | GetBreakdownWorkerMessage
   | DesktopCaptureWorkerMessage
   | { type: 'context_handler_result'; requestId: string; context: unknown; error?: string }
@@ -326,6 +328,9 @@ type RuntimeWorkerToHost =
   | { type: 'intercept_result'; requestId: string; registrationId: string; messages: LlmMessageDTO[]; error: string }
   | WorkerToHost
   | ImageGenNativeControlWorkerMessage
+  | { type: "version_get_commit"; requestId: string }
+  | { type: "version_get_branch"; requestId: string }
+  | { type: "version_get_info"; requestId: string }
   | { type: "register_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "unregister_frontend_runtime_capability"; capability: "message_tag_interceptor" }
   | { type: "dlc_get_catalog"; requestId: string; userId?: string }
@@ -730,12 +735,31 @@ type RuntimeWorldBooksAPI = Omit<SpindleAPI["world_books"], "entries"> & {
 // PromptBlock type also carries host-only sealed-block provenance. Keeping the
 // runtime CRUD surface on the native type avoids narrowing data returned by
 // newer hosts when the installed public type package lags a release.
-type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop" | "generate" | "images" | "regex_scripts"> & {
+/** Version report returned by `spindle.version.getInfo()`; mirrors `LumiverseVersionInfo` in lumiverse-spindle-types. */
+interface RuntimeLumiverseVersionInfo {
+  backend: string;
+  frontend: string;
+  commit: string | null;
+  branch: string | null;
+}
+
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop" | "generate" | "images" | "regex_scripts" | "version"> & {
+  version: SpindleAPI["version"] & {
+    getCommit(): Promise<string | null>;
+    getBranch(): Promise<string | null>;
+    getInfo(): Promise<RuntimeLumiverseVersionInfo>;
+  };
   regex_scripts: SpindleAPI["regex_scripts"] & {
     prepareActivationPatterns(options: ActivationPatternsOptions): Promise<ActivationPatternsResult>;
   };
   images: SpindleAPI["images"] & {
     readBinary(imageId: string, userId?: string): Promise<Uint8Array>;
+  };
+  characters: SpindleAPI["characters"] & {
+    getGallery(characterId: string, userId?: string): Promise<CharacterGalleryItemDTO[]>;
+  };
+  connections: SpindleAPI["connections"] & {
+    getModels(connectionId: string, userId?: string): Promise<ConnectionModelDTO[]>;
   };
   generate: Omit<SpindleAPI["generate"], "dryRun"> & {
     dryRun(input: import("lumiverse-spindle-types").DryRunRequestDTO, userId?: string): Promise<DryRunResultDTO>;
@@ -1151,11 +1175,7 @@ function post(msg: RuntimeWorkerToHost): void {
   if (scope) {
     (msg as any).rpcPermissionScopeId = scope.id;
   }
-  if (typeof process.send === "function") {
-    process.send(msg);
-    return;
-  }
-  self.postMessage(msg);
+  channel.send(msg);
 }
 
 function request(msg: RuntimeWorkerToHost & { requestId: string }): Promise<unknown> {
@@ -2445,6 +2465,11 @@ const spindleApi: RuntimeSpindleAPI = {
       const result = await request({ type: "connections_get", requestId, connectionId, userId });
       return result as ConnectionProfileDTO | null;
     },
+    async getModels(connectionId: string, userId?: string): Promise<ConnectionModelDTO[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "connections_models", requestId, connectionId, userId });
+      return result as ConnectionModelDTO[];
+    },
     async resolveDispatch(connectionId: string): Promise<ConnectionDispatchDescriptorDTO | null> {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "connections_resolve_dispatch", requestId, connectionId });
@@ -2972,6 +2997,11 @@ const spindleApi: RuntimeSpindleAPI = {
       const requestId = crypto.randomUUID();
       const result = await request({ type: "characters_get", requestId, characterId, userId });
       return result as CharacterDTO | null;
+    },
+    async getGallery(characterId: string, userId?: string): Promise<CharacterGalleryItemDTO[]> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "characters_get_gallery", requestId, characterId, userId });
+      return result as CharacterGalleryItemDTO[];
     },
     async create(input: CharacterCreateDTO, userId?: string): Promise<CharacterDTO> {
       assertMutationAllowed("spindle.characters.create()");
@@ -4521,6 +4551,21 @@ const spindleApi: RuntimeSpindleAPI = {
       const result = await request({ type: "version_get_frontend", requestId });
       return result as string;
     },
+    async getCommit(): Promise<string | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "version_get_commit", requestId });
+      return result as string | null;
+    },
+    async getBranch(): Promise<string | null> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "version_get_branch", requestId });
+      return result as string | null;
+    },
+    async getInfo(): Promise<RuntimeLumiverseVersionInfo> {
+      const requestId = crypto.randomUUID();
+      const result = await request({ type: "version_get_info", requestId });
+      return result as RuntimeLumiverseVersionInfo;
+    },
   },
 
   get manifest() {
@@ -4551,7 +4596,7 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
       }
 
       // Initialize runtime sandbox before loading untrusted extension code.
-      // This patches eval, the Function constructor, and sensitive Bun/process
+      // This patches native fetch, eval, the Function constructor, and sensitive Bun/process
       // APIs (real property overrides that take effect). It CANNOT block the
       // native `import()` operator or `node:` builtins — those resolve through
       // Bun internals that neither a global override nor a loader plugin can
@@ -5216,18 +5261,10 @@ async function handleHostMessage(msg: RuntimeHostToWorker): Promise<void> {
         // If posting fails, the host's 5s fallback terminates us anyway.
       }
       // Allow extension to clean up
-      nativeProcessExit(0);
+      channel.exit(0);
       break;
     }
   }
 }
 
-if (typeof process.send === "function") {
-  process.on("message", (message) => {
-    void handleHostMessage(message as RuntimeHostToWorker);
-  });
-} else {
-  self.onmessage = (event: MessageEvent<RuntimeHostToWorker>) => {
-    void handleHostMessage(event.data);
-  };
-}
+const channel = createRuntimeChannel((message) => { void handleHostMessage(message as RuntimeHostToWorker); });

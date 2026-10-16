@@ -857,6 +857,7 @@ export default function ConnectionForm({ providers, profile, initialProvider, on
       {isOpenRouter && (
         <OpenRouterSettings
           connectionId={profile?.id}
+          model={model}
           connectionName={!profile ? name : undefined}
           hasApiKey={!!profile?.has_api_key || !!apiKey}
           settings={openrouterSettings}

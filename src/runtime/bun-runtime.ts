@@ -150,6 +150,14 @@ export async function ensureBunRuntime(
 ): Promise<string> {
   const minimum = requiredBunVersion(projectRoot);
 
+  // A packaged release owns its pinned runtime. Never replace it through the
+  // Windows side-by-side installer or select a separate system runtime.
+  if (env.LUMIVERSE_BUNDLE_ID) {
+    if (!meetsBunVersion(Bun.version, minimum)) throw new Error(`This server bundle requires Bun >= ${minimum}. Download a newer server artifact.`);
+    process.env[BUN_EXECUTABLE_ENV] = process.execPath;
+    return process.execPath;
+  }
+
   // On native Termux, start.sh may have launched this exact Bun binary through
   // grun/proot. The raw process.execPath is not executable by Android itself,
   // so probing it would incorrectly report a working Bun as too old.

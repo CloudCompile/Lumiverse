@@ -125,7 +125,12 @@ mock.module('@/components/shared/FormComponents', () => ({
 mock.module('@/components/shared/FormComponents.module.css', () => ({ default: {} }))
 mock.module('@/components/shared/NumericInput', () => ({ default: NullComponent }))
 mock.module('@/components/shared/NumberStepper', () => ({ default: NullComponent }))
-mock.module('@/components/shared/RangeSlider', () => ({ RangeSlider: NullComponent, LabeledRangeSlider: NullComponent }))
+mock.module('@/components/shared/RangeSlider', () => ({
+  RangeSlider: NullComponent,
+  LabeledRangeSlider: NullComponent,
+  DualRangeSlider: NullComponent,
+  LabeledDualRangeSlider: NullComponent,
+}))
 mock.module('@/components/shared/Toggle', () => ({ Toggle: NullComponent }))
 mock.module('@/components/shared/Badge', () => ({ Badge: NullComponent }))
 mock.module('@/components/shared/Spinner', () => ({ Spinner: NullComponent, spinClass: 'spin' }))
@@ -276,6 +281,9 @@ mock.module('./display-resolver-registry', () => ({
   getDisplayOwnerIdentifier: () => null,
   getDisplayResolverForChat: () => null,
   isDisplayChatOwned: () => false,
+  shouldSkipFormattingHealing: () => false,
+  shouldSkipInlineCardWrapping: () => false,
+  subscribeDisplayFormatting: () => () => {},
   registerDisplayResolver: () => {
     displayRegistrations += 1
     return () => {}
@@ -1652,6 +1660,30 @@ test('system audio is capability-gated, asks the user, and ends on revoke and un
     unregister()
     await unloadFrontendExtension(id)
     restoreGlobalProperty('__systemAudioContext', descriptor)
+  }
+})
+
+test('client discovery is advertised, permission-free, and scoped to the loaded frontend', async () => {
+  const id = 'client-discovery-lifecycle'
+  const globals = globalThis as typeof globalThis & Record<string, any>
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, '__clientContext')
+  try {
+    mockedGrantedPermissions = []
+    await loadPlacementBundle(id, placementManifest(id), 'export function setup(ctx) { globalThis.__clientContext = ctx }')
+    const ctx = globals.__clientContext
+    expect(ctx.host.capabilities['client-info-v1']).toBe(1)
+    expect(ctx.client.getInfo()).toMatchObject({ kind: 'browser', bridges: { desktop: false, ios: false, android: false } })
+    const prompts = confirmRequests.length
+    for (const handler of loaderWsHandlers.get('SPINDLE_PERMISSION_CHANGED') ?? []) {
+      handler({ extensionId: id, allGranted: [] })
+    }
+    expect(() => ctx.client.getInfo()).not.toThrow()
+    expect(confirmRequests).toHaveLength(prompts)
+    await unloadFrontendExtension(id)
+    expect(() => ctx.client.getInfo()).toThrow('SPINDLE_FRONTEND_INACTIVE')
+  } finally {
+    await unloadFrontendExtension(id)
+    restoreGlobalProperty('__clientContext', descriptor)
   }
 })
 

@@ -2093,7 +2093,8 @@
       "text": "文本",
       "textarea": "多行文本",
       "number": "數字",
-      "slider": "滑塊"
+      "slider": "滑塊",
+      "range": "範圍滑塊"
     },
     "dragToReorder": "拖曳{{name}}（第 {{position}} 項）以重新排序",
     "variableFallback": "變量 {{position}}",
@@ -2116,6 +2117,8 @@
     "defaultTextareaPlaceholder": "默認正文…",
     "defaultTextPlaceholder": "中性、溫暖、臨床…",
     "defaultPreviewAria": "默認值預覽",
+    "rangeStart": "範圍起點",
+    "rangeEnd": "範圍終點",
     "min": "最小",
     "max": "最大",
     "step": "步長",

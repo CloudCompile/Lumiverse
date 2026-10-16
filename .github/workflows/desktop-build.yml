@@ -1,11 +1,11 @@
 name: Build Desktop
 
 # Builds installers as downloadable workflow artifacts whenever the desktop
-# manifests or tray-runner integration changes on a non-main branch. Releases
-# are handled separately by desktop-release.yml on staging→main merges.
+# manifests or tray-runner integration changes on a feature branch. Bundled
+# stable/nightly releases use the separate desktop release workflows.
 on:
   push:
-    branches-ignore: [main]
+    branches-ignore: [main, staging]
     paths:
       - ".github/workflows/desktop-build.yml"
       - "desktop/package.json"
@@ -14,6 +14,8 @@ on:
       - "desktop/src-tauri/tauri.conf.json"
       - "desktop/src-tauri/src/capture/**"
       - "desktop/src-tauri/src/system_audio/**"
+      - "desktop/src-tauri/src/webview_visibility.rs"
+      - "desktop/src-tauri/src/lib.rs"
       - "desktop/tests/system-audio-coreaudio.test.ts"
       - "desktop/tests/fixtures/system-audio-coreaudio.m"
       - "desktop/tests/system-audio-benchmark.rs"
@@ -24,6 +26,8 @@ on:
       - "desktop/src-tauri/permissions.test.ts"
       - "desktop/src-tauri/build.rs"
       - "scripts/finalize-appimage.sh"
+      - "scripts/verify-appimage-permissions.sh"
+      - "scripts/appimage-packaging.test.ts"
       - "scripts/smoke-test-appimage.sh"
       - "scripts/tauri-finalized.ts"
       - "scripts/tauri-finalized.test.ts"
@@ -39,6 +43,11 @@ on:
       - "src/services/runner-control-transport.test.ts"
       - "src/types/operator.ts"
   workflow_dispatch:
+    inputs:
+      bundled_nightly:
+        description: Build and publish the bundled nightly from staging
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -50,6 +59,7 @@ concurrency:
 jobs:
   validate:
     name: Validate desktop manifests
+    if: ${{ !inputs.bundled_nightly }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
@@ -68,6 +78,15 @@ jobs:
             exit 1
           fi
 
+  nightly:
+    name: Test bundled nightly from staging
+    if: github.event_name == 'workflow_dispatch' && inputs.bundled_nightly
+    permissions:
+      contents: write
+      actions: read
+    uses: ./.github/workflows/desktop-nightly.yml
+    secrets: inherit
+
   build:
     name: Desktop (${{ matrix.target }})
     needs: validate
@@ -81,11 +100,11 @@ jobs:
             bundles: nsis,msi
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
-            bundles: appimage,deb
+            bundles: appimage
           # AppImage cannot be cross-compiled, so build Linux ARM64 natively.
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-            bundles: appimage,deb
+            bundles: appimage
           - os: macos-15
             target: aarch64-apple-darwin
             bundles: dmg
@@ -122,6 +141,7 @@ jobs:
         with:
           workspaces: desktop/src-tauri -> target
           key: ${{ matrix.target }}
+          cache-targets: false
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -130,19 +150,24 @@ jobs:
           sudo apt-get install -y build-essential libssl-dev libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf xdg-utils \
             dbus-x11 xauth xvfb gstreamer1.0-tools gstreamer1.0-plugins-base \
-            gstreamer1.0-plugins-good
+            gstreamer1.0-plugins-good squashfs-tools
+
+      - name: Test Linux AppImage packaging
+        if: runner.os == 'Linux'
+        run: bun test scripts/appimage-packaging.test.ts scripts/tauri-finalized.test.ts
 
       - name: Install desktop dependencies
         working-directory: desktop
         run: bun install --frozen-lockfile
 
-      - name: Test Windows native capture boundaries
+      - name: Test Windows native capture and WebView lifecycle
         if: matrix.target == 'x86_64-pc-windows-msvc'
         working-directory: desktop
         run: |
           bun run build
           cargo test --locked --lib --manifest-path src-tauri/Cargo.toml capture::
           cargo test --locked --lib --manifest-path src-tauri/Cargo.toml system_audio::
+          cargo test --locked --lib --manifest-path src-tauri/Cargo.toml webview_visibility::
 
       - name: Test Linux system audio boundaries
         if: matrix.target == 'x86_64-unknown-linux-gnu'
@@ -172,11 +197,23 @@ jobs:
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
           uploadUpdaterJson: false
           uploadUpdaterSignatures: false
-          uploadWorkflowArtifacts: true
-          workflowArtifactNamePattern: desktop-[platform]-[arch]-[bundle]
+          uploadWorkflowArtifacts: false
 
-      - name: Smoke-test Linux AppImage startup
+      - name: Smoke-test Linux AppImage offline as another user
         if: runner.os == 'Linux'
         run: >-
           bash scripts/smoke-test-appimage.sh
           desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage
+
+      - name: Retain feature-branch installers briefly
+        uses: actions/upload-artifact@v7
+        with:
+          name: desktop-${{ matrix.target }}
+          path: |
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/${{ matrix.target }}/release/bundle/msi/*.msi
+          compression-level: 0
+          retention-days: 3
+          if-no-files-found: error

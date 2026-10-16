@@ -3,6 +3,8 @@ import { auth } from "./index";
 import { getDb } from "../db/connection";
 import { getFirstUserId } from "./seed";
 import { forwardSessionCookies } from "./session-cookies";
+import { approvedAuthRequest } from "./request-origin";
+import { isConnectionFromExplicitTrustedProxy } from "../utils/client-ip";
 
 // Augment Hono's context variables
 declare module "hono" {
@@ -29,8 +31,11 @@ declare module "hono" {
 }
 
 export async function requireAuth(c: Context, next: Next) {
+  const request = approvedAuthRequest(c.req.raw, isConnectionFromExplicitTrustedProxy(c));
   const result = await auth.api.getSession({
-    headers: c.req.raw.headers,
+    request,
+    headers: request.headers,
+    asResponse: false,
     returnHeaders: true,
   });
   const session = result.response;

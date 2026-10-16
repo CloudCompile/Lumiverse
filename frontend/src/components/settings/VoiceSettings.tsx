@@ -19,6 +19,7 @@ import { formatTtsConnectionVoiceLabel } from '@/lib/qwenTts'
 import { synthesizeTtsSegments } from '@/lib/ttsSynthesis'
 import { resolveTtsConnectionId } from '@/lib/voiceResolution'
 import { isWebSpeechAvailable } from '@/lib/sttEngine'
+import { hasIOSNativeBridge } from '@/lib/ios-native'
 import { getWhistleUnavailableReason, isWhistleAvailable, whistleLanguage } from '@/lib/whistle/config'
 import { whistleClient } from '@/lib/whistle/client'
 import styles from './VoiceSettings.module.css'
@@ -465,7 +466,7 @@ export default function VoiceSettings() {
             onChange={(e) => setVoiceSettings({ sttProvider: e.target.value as typeof voiceSettings.sttProvider })}
           >
             <option value="webspeech" disabled={!isWebSpeechAvailable()}>
-              {t('voice.sttWebSpeech')} {!isWebSpeechAvailable() ? t('voice.sttUnavailable') : ''}
+              {hasIOSNativeBridge() ? t('voice.sttAppleSpeech', { defaultValue: 'Apple Speech Recognition' }) : t('voice.sttWebSpeech')} {!isWebSpeechAvailable() ? t('voice.sttUnavailable') : ''}
             </option>
             <option value="connection">{t('voice.sttConnection')}</option>
             <option value="whistle" disabled={!!whistleUnavailable}>

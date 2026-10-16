@@ -57,12 +57,23 @@ export interface OpenRouterConnectionSettings {
 
 // In-memory caches with TTL
 const _modelCache = new Map<string, { data: OpenRouterModelInfo[]; fetchedAt: number }>();
+const _endpointCache = new Map<string, { data: OpenRouterProviderEntry[]; fetchedAt: number }>();
 let _providerListCache: { data: OpenRouterProviderEntry[]; fetchedAt: number } | null = null;
 const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_ENDPOINT_CACHE_ENTRIES = 100;
+
+/** Routing variants use the base model's endpoints; catalog variants such as :free retain their identity. */
+export function normalizeOpenRouterEndpointModel(model: string): string | null {
+  const normalized = model.trim().replace(/(?::(?:floor|nitro|exacto))+$/, "");
+  const parts = normalized.split("/");
+  if (parts.length !== 2 || parts.some((part) => !part || part === "." || part === ".." || /[\s?#\\]/.test(part))) return null;
+  return normalized;
+}
 
 /** Drop provider metadata that can be fetched again on demand. */
 export function clearOpenRouterMetadataCache(): void {
   _modelCache.clear();
+  _endpointCache.clear();
   _providerListCache = null;
 }
 
@@ -285,6 +296,34 @@ export class OpenRouterProvider extends OpenAICompatibleProvider {
     } catch {
       return _providerListCache?.data || [];
     }
+  }
+
+  /** Discover exact endpoint tags, including Flex tiers and regional variants, for one model. */
+  async fetchModelEndpoints(apiKey: string, apiUrl: string, model: string): Promise<OpenRouterProviderEntry[]> {
+    const modelId = normalizeOpenRouterEndpointModel(model);
+    if (!modelId) throw new Error("A model ID in author/model format is required");
+    const baseUrl = this.baseUrl(apiUrl);
+    const cacheKey = `${baseUrl}/models/${modelId}`;
+    const cached = _endpointCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < MODEL_CACHE_TTL_MS) return cached.data;
+
+    const modelPath = modelId.split("/").map(encodeURIComponent).join("/");
+    const raw = await fetchProviderJson<{ data?: { endpoints?: { provider_name: string; tag: string }[] } }>(
+      this.displayName, "endpoint listing", `${baseUrl}/models/${modelPath}/endpoints`,
+      { headers: this.headers(apiKey) },
+    );
+    const endpoints = new Map<string, OpenRouterProviderEntry>();
+    for (const endpoint of raw.data?.endpoints || []) {
+      if (typeof endpoint.tag !== "string" || !endpoint.tag.trim() || typeof endpoint.provider_name !== "string") continue;
+      endpoints.set(endpoint.tag, { name: endpoint.provider_name, slug: endpoint.tag });
+    }
+    const data = [...endpoints.values()];
+    if (_endpointCache.size >= MAX_ENDPOINT_CACHE_ENTRIES) {
+      const oldest = _endpointCache.keys().next();
+      if (!oldest.done) _endpointCache.delete(oldest.value);
+    }
+    _endpointCache.set(cacheKey, { data, fetchedAt: Date.now() });
+    return data;
   }
 }
 

@@ -43,6 +43,8 @@ describe("finalized Tauri build routing", () => {
       KEEP: "yes",
       APPIMAGE_EXTRACT_AND_RUN: "1",
       NO_STRIP: "1",
+      PATCHELF: join(import.meta.dir, "appimage-patchelf.sh"),
+      LUMIVERSE_REAL_PATCHELF: Bun.which("patchelf") || "patchelf",
     });
   });
 
@@ -60,6 +62,8 @@ describe("finalized Tauri build routing", () => {
       KEEP: "yes",
       APPIMAGE_EXTRACT_AND_RUN: "1",
       NO_STRIP: "1",
+      PATCHELF: join(import.meta.dir, "appimage-patchelf.sh"),
+      LUMIVERSE_REAL_PATCHELF: Bun.which("patchelf") || "patchelf",
       GSTREAMER_PLUGINS_DIR: directories.pluginsdir,
       GSTREAMER_HELPERS_DIR: directories.pluginscannerdir,
     });

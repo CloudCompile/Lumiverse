@@ -41,6 +41,12 @@ curl -X PUT http://localhost:7860/api/v1/settings \
   }'
 ```
 
+## OpenRouter Endpoint Discovery
+
+`GET /api/v1/openrouter/endpoints/:connectionId?model=openai%2Fgpt-5.4` discovers exact endpoint choices for a saved OpenRouter connection owned by the authenticated user. It uses the saved API URL and credential and returns `{ "endpoints": [{ "name": "OpenAI", "slug": "openai/flex" }] }`. Endpoint tags are fetched from OpenRouter's model endpoints API and cached for five minutes. Routing suffixes (`:floor`, `:nitro`, `:exacto`) use the base model's endpoints; catalog variants such as `:free` are preserved.
+
+Save selections in connection `metadata.openrouter.provider_routing`: `only` restricts eligible providers, `order` specifies preference, and `ignore` excludes providers. Exact tier slugs such as `openai/flex` opt into that tier. `only` also constrains fallback routing. These settings apply to every generation using that connection, including after a model change.
+
 ## Decision Connections
 
 All routes below are account-scoped and require authentication. Credentials are encrypted and omitted from profile responses. Profile lists use `limit` and `offset` pagination.

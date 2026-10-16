@@ -294,7 +294,7 @@ function resolveAction(type: SegmentType, rules: SpeechDetectionRules): SegmentA
 export function parseSegments(text: string, rules: SpeechDetectionRules, options: TtsTextOptions = {}): TextSegment[] {
   const fishControls = usesFishDirections(options.fishModel) ? protectMarkers(text, FISH_CONTROL_RE) : null
   const parseText = fishControls?.text ?? text
-  const pattern = /\*([^*]+)\*|"([^"]+)"|([^*"]+)/g
+  const pattern = /\*([^*]+)\*|["“]([^"”]+)["”]|([^*"“”]+)/g
   const raw: TextSegment[] = []
 
   let match: RegExpExecArray | null

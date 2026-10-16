@@ -83,6 +83,13 @@ The OpenRouter connection form has two extra sections beyond the basics:
 
 The connection card also shows your live OpenRouter **credit balance** — handy as a usage gauge.
 
+To use **Flex**, save your connection with an API key, select a model, and expand **Provider Routing**. The provider pickers include that model's exact endpoints, such as **OpenAI — Flex** or regional variants. Availability depends on the model.
+
+- Choose Flex under **Only These Providers** to restrict requests and fallbacks to the selected Flex endpoints. Leave this list empty to allow other providers.
+- Choose Flex under **Preferred Providers** to try it first. With **Allow fallback providers** enabled, another provider can serve the request at its own rate, including standard pricing.
+
+Selecting the base **OpenAI** provider does not opt into Flex. Flex offers lower pricing in exchange for higher latency and lower availability. Routing restrictions belong to the connection and remain in place if you change its model. [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers)
+
 ---
 
 ## Anthropic Prompt Caching

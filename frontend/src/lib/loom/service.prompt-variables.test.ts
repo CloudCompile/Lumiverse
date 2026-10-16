@@ -79,6 +79,29 @@ describe('Loom prompt-variable schema and value reconciliation', () => {
     )).toEqual({ chat: { voice: 'concise' } })
   })
 
+  test('preserves and validates numeric range pairs during reconciliation and pruning', () => {
+    const previous = [block('chat', [{ id: 'win-id', name: 'window', label: 'window', type: 'range', defaultValue: [0, 100], min: 0, max: 100 }])]
+    const renamed = [block('chat', [{ id: 'win-id', name: 'bounds', label: 'bounds', type: 'range', defaultValue: [0, 100], min: 0, max: 100 }])]
+    const narrowed = [block('chat', [{ id: 'win-id', name: 'bounds', label: 'bounds', type: 'range', defaultValue: [0, 50], min: 0, max: 50 }])]
+
+    expect(reconcilePromptVariableValues(
+      { chat: { window: [15, 75] } },
+      previous,
+      renamed,
+    )).toEqual({ chat: { bounds: [15, 75] } })
+
+    expect(reconcilePromptVariableValues(
+      { chat: { bounds: [15, 75] } },
+      renamed,
+      narrowed,
+    )).toEqual({})
+
+    expect(pruneOrphanPromptVariables(
+      { chat: { bounds: [10, 40] } },
+      narrowed,
+    )).toEqual({ chat: { bounds: [10, 40] } })
+  })
+
   test('rejects duplicate final names, IDs, and block IDs before changing any values', () => {
     const previous = [block('chat', [text('tone-id', 'tone')])]
     const values: PromptVariableValues = { chat: { tone: 'preserve' } }
@@ -254,7 +277,7 @@ describe('Loom prompt-variable schema and value reconciliation', () => {
     expect(Array.isArray(returnedTags)).toBe(true)
     if (!Array.isArray(returnedTags)) throw new Error('expected a multiselect array')
     expect(returnedTags).not.toBe(values.chat?.tags)
-    returnedTags.push('beta')
+    ;(returnedTags as string[]).push('beta')
 
     const fresh = pruneOrphanPromptVariables(values, blocks)
     expect(fresh).not.toBe(pruned)

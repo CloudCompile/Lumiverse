@@ -4,6 +4,8 @@
 
 Full CRUD access to the user's character cards. Use this for extensions that manage, analyze, or batch-edit characters.
 
+Reading gallery image bytes with `spindle.images.readBinary()` also requires the `images` permission.
+
 ## Usage
 
 ```ts
@@ -14,6 +16,14 @@ const { data, total } = await spindle.characters.list({ limit: 20, offset: 0 })
 const char = await spindle.characters.get('character-id')
 if (char) {
   spindle.log.info(`Found: ${char.name}`)
+}
+
+// Check support on older hosts before listing gallery images (read-only).
+if (spindle.characters.getGallery) {
+  const gallery = await spindle.characters.getGallery('character-id')
+  for (const item of gallery) {
+    const bytes = await spindle.images.readBinary(item.image_id)
+  }
 }
 
 // Create a character (name is required)
@@ -60,6 +70,7 @@ const deleted = await spindle.characters.delete(newChar.id)
 |---|---|---|
 | `list(options?)` | `Promise<{ data: CharacterDTO[], total: number }>` | List characters. Options: `{ limit?, offset? }`. Defaults: limit 50, max 200. |
 | `get(characterId)` | `Promise<CharacterDTO \| null>` | Get a character by ID. Returns `null` if not found. |
+| `getGallery(characterId)` | `Promise<CharacterGalleryItemDTO[]>` | List the character's gallery images in gallery order without changing saved character data. Returns `[]` if the character has no gallery or is not found. Optional on older hosts; check support before calling. |
 | `create(input)` | `Promise<CharacterDTO>` | Create a new character. `name` is required. |
 | `update(characterId, input)` | `Promise<CharacterDTO>` | Update a character. All fields are optional. |
 | `delete(characterId)` | `Promise<boolean>` | Delete a character. Returns `true` if deleted. |
@@ -88,6 +99,22 @@ const deleted = await spindle.characters.delete(newChar.id)
   extensions: Record<string, any>
   created_at: number   // unix epoch seconds
   updated_at: number
+}
+```
+
+## CharacterGalleryItemDTO
+
+```ts
+{
+  id: string          // gallery item ID
+  image_id: string    // Lumiverse image ID; read bytes with spindle.images.readBinary()
+  reference: string   // portable gallery:// source for Markdown image embeds
+  caption: string
+  sort_order: number
+  created_at: number  // unix epoch seconds
+  width: number | null
+  height: number | null
+  mime_type: string
 }
 ```
 

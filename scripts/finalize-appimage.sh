@@ -36,6 +36,14 @@ appimage="${appimages[0]}"
 appdir="${appdirs[0]}"
 chmod +x "$appimage"
 
+# Tauri caches its AppRun launcher with mode 0770. linuxdeploy renames it to
+# AppRun.wrapped, preserving permissions that fail for other users when the
+# SquashFS is mounted. Repair the whole AppDir before every repack, including
+# builds that never bundled libwayland-client.
+chmod -R a+rX "$appdir"
+chmod a+x "$appdir/AppRun" "$appdir/AppRun.wrapped" "$appdir/usr/bin/lumiverse-tray"
+bash "$script_dir/verify-appimage-permissions.sh" "$appdir"
+
 # Tauri's GTK AppRun hook points GStreamer exclusively at the AppImage. An
 # empty or partial plugin directory therefore hides working host plugins and
 # can make WebKit's renderer abort on the first audio graph. Refuse to publish
@@ -64,62 +72,62 @@ while IFS= read -r -d '' candidate; do
 done < <(find "$appdir/usr" \( -type f -o -type l \) -name 'libwayland-client.so*' -print0)
 
 if [[ ${#bundled_wayland[@]} -gt 0 ]]; then
-  cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
-  output_plugin="${LUMIVERSE_APPIMAGE_PLUGIN:-$cache_root/tauri/linuxdeploy-plugin-appimage.AppImage}"
-  if [[ ! -f "$output_plugin" ]]; then
-    echo "Tauri's AppImage output plugin was not found at $output_plugin" >&2
-    exit 1
-  fi
-  if [[ ! -x "$output_plugin" ]]; then
-    chmod +x "$output_plugin"
-  fi
-
-  work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumiverse-appimage-finalize.XXXXXX")"
-  trap 'rm -rf "$work_dir"' EXIT
-  runtime_file="$work_dir/runtime"
-  replacement="$work_dir/$(basename "$appimage")"
-
-  runtime_size="$("$appimage" --appimage-offset)"
-  if [[ ! "$runtime_size" =~ ^[0-9]+$ ]] || [[ "$runtime_size" -le 0 ]]; then
-    echo "Could not determine the AppImage runtime size" >&2
-    exit 1
-  fi
-  head -c "$runtime_size" "$appimage" > "$runtime_file"
-  chmod +x "$runtime_file"
-
   printf 'Removing host-coupled Wayland libraries from the AppImage:\n'
   printf '  %s\n' "${bundled_wayland[@]}"
   rm -f -- "${bundled_wayland[@]}"
   assert_no_bundled_wayland_client "$appdir/usr"
-
-  APPIMAGE_EXTRACT_AND_RUN=1 \
-    LDAI_NO_APPSTREAM=1 \
-    LDAI_OUTPUT="$replacement" \
-    LDAI_RUNTIME_FILE="$runtime_file" \
-    "$output_plugin" --appimage-extract-and-run "--appdir=$appdir"
-
-  if [[ ! -s "$replacement" ]]; then
-    echo "AppImage output plugin did not create $replacement" >&2
-    exit 1
-  fi
-  chmod +x "$replacement"
-  mv -f "$replacement" "$appimage"
 else
   echo "AppDir already uses the host Wayland client library."
 fi
 
-verification_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumiverse-appimage-verify.XXXXXX")"
-if [[ -n "${work_dir:-}" ]]; then
-  trap 'rm -rf "$work_dir" "$verification_dir"' EXIT
-else
-  trap 'rm -rf "$verification_dir"' EXIT
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}"
+output_plugin="${LUMIVERSE_APPIMAGE_PLUGIN:-$cache_root/tauri/linuxdeploy-plugin-appimage.AppImage}"
+if [[ ! -f "$output_plugin" ]]; then
+  echo "Tauri's AppImage output plugin was not found at $output_plugin" >&2
+  exit 1
+fi
+chmod a+x "$output_plugin"
+
+work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumiverse-appimage-finalize.XXXXXX")"
+trap 'rm -rf "$work_dir"' EXIT
+runtime_file="$work_dir/runtime"
+replacement="$work_dir/$(basename "$appimage")"
+
+runtime_size="$("$appimage" --appimage-offset)"
+if [[ ! "$runtime_size" =~ ^[0-9]+$ ]] || [[ "$runtime_size" -le 0 ]]; then
+  echo "Could not determine the AppImage runtime size" >&2
+  exit 1
+fi
+head -c "$runtime_size" "$appimage" > "$runtime_file"
+chmod +x "$runtime_file"
+
+APPIMAGE_EXTRACT_AND_RUN=1 \
+  LDAI_NO_APPSTREAM=1 \
+  LDAI_OUTPUT="$replacement" \
+  LDAI_RUNTIME_FILE="$runtime_file" \
+  "$output_plugin" --appimage-extract-and-run "--appdir=$appdir"
+
+if [[ ! -s "$replacement" ]]; then
+  echo "AppImage output plugin did not create $replacement" >&2
+  exit 1
 fi
 
-(
-  cd "$verification_dir"
-  "$appimage" --appimage-extract >/dev/null
-)
-assert_no_bundled_wayland_client "$verification_dir/squashfs-root"
-bash "$script_dir/verify-appimage-gstreamer.sh" "$verification_dir/squashfs-root"
+verification_dir="$(mktemp -d "${TMPDIR:-/tmp}/lumiverse-appimage-verify.XXXXXX")"
+trap 'rm -rf "$work_dir" "$verification_dir"' EXIT
 
-echo "Finalized $(basename "$appimage"): host libwayland-client and bundled GStreamer media support verified."
+# The AppImage runtime's extractor creates directories with mode 0700, even
+# when the SquashFS stores 0755. Use unsquashfs to inspect the packaged modes;
+# changing permissions after runtime extraction would conceal real defects.
+if ! command -v unsquashfs >/dev/null 2>&1; then
+  echo "unsquashfs is required to verify packaged permissions (install squashfs-tools)." >&2
+  exit 1
+fi
+chmod a+x "$replacement"
+unsquashfs -no-progress -offset "$runtime_size" \
+  -dest "$verification_dir/squashfs-root" "$replacement" >/dev/null
+assert_no_bundled_wayland_client "$verification_dir/squashfs-root"
+bash "$script_dir/verify-appimage-permissions.sh" "$verification_dir/squashfs-root"
+bash "$script_dir/verify-appimage-gstreamer.sh" "$verification_dir/squashfs-root"
+mv -f "$replacement" "$appimage"
+
+echo "Finalized $(basename "$appimage"): launcher permissions, host libwayland-client and bundled GStreamer media support verified."

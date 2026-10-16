@@ -32,6 +32,20 @@ afterEach(async () => {
 });
 
 describe("supervised SQLite execution", () => {
+  test("runtime keeps the legacy lock budget while the subprocess uses short waits", async () => {
+    const main = initDatabase(path);
+    try {
+      await startDatabaseExecution();
+      expect(main.query("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
+      expect(await executeDatabaseOperation<{ timeout: number }>({
+        kind: "read", statement: { sql: "PRAGMA busy_timeout", mode: "get" },
+      })).toEqual({ timeout: 100 });
+    } finally {
+      await stopDatabaseExecution();
+      closeDatabase();
+    }
+  });
+
   test("periodic checkpoints defer under load but eventually join behind foreground requests", async () => {
     initDatabase(path);
     let tick: (() => Promise<void>) | undefined;
@@ -126,7 +140,7 @@ describe("supervised SQLite execution", () => {
 
   test("pipe transport preserves fragmented blobs and undefined metadata deletions", async () => {
     await executor.close();
-    executor = new DatabaseExecutor(path, { transport: "stdio" });
+    executor = new DatabaseExecutor(path, { transport: process.platform === "win32" ? "ipc" : "stdio" });
     const blob = new Uint8Array(256 * 1024).map((_, index) => index % 251);
     const row = await executor.execute<{ blob: Uint8Array }>({ kind: "read", statement: { sql: "SELECT ? AS blob", bindings: [blob], mode: "get" } });
     expect(row.blob).toEqual(blob);
@@ -252,7 +266,7 @@ describe("supervised SQLite execution", () => {
     expect(db.query("SELECT value FROM probe").get()).toEqual({ value: 0 });
   });
 
-  test.each([undefined, "stdio"] as const)("interrupts native SQL on deadline and starts a replacement (%s)", async (transport) => {
+  test.each([undefined, process.platform === "win32" ? "ipc" : "stdio"] as const)("interrupts native SQL on deadline and starts a replacement (%s)", async (transport) => {
     await executor.close();
     executor = new DatabaseExecutor(path, { transport });
     await executor.execute({ kind: "checkpoint" });
@@ -267,7 +281,7 @@ describe("supervised SQLite execution", () => {
     } finally { clearInterval(heartbeat); }
   });
 
-  test.each([undefined, "stdio"] as const)("does not replay a committed write after losing its acknowledgment (%s)", async (transport) => {
+  test.each([undefined, process.platform === "win32" ? "ipc" : "stdio"] as const)("does not replay a committed write after losing its acknowledgment (%s)", async (transport) => {
     await executor.close();
     executor = new DatabaseExecutor(path, { transport, runtimePath: join(import.meta.dir, "test-fixtures/execution-crash.ts") });
     const error = await executor.execute<never>({ kind: "transaction", statements: [{ sql: "UPDATE probe SET value = value + 1 /* lose-ack */" }] }).catch((error) => error);

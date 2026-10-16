@@ -7,6 +7,7 @@
  */
 
 import { invoke } from "@tauri-apps/api/core";
+import { LocalServerClient, resolveLocalServerSource } from "./local-server";
 import { Image } from "@tauri-apps/api/image";
 import {
   CheckMenuItem,
@@ -20,7 +21,6 @@ import { listen } from "@tauri-apps/api/event";
 import { disable as disableAutostart, enable as enableAutostart, isEnabled as autostartEnabled } from "@tauri-apps/plugin-autostart";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
-  RunnerClient,
   type DesktopShellState,
   type FullStatus,
   type ServerState,
@@ -29,7 +29,8 @@ import {
 import { loadSettings, saveSetting, type TraySettings } from "./settings";
 import { createDiscordPresenceRefreshQueue } from "./discord-presence";
 import { restoreDesktopSession, type DesktopUpdateResume } from "./update-resume";
-import { type InstanceConnection, LOCAL_INSTANCE_CONNECTION } from "./instance-connection";
+import { installDesktopRelease, type DesktopUpdateChannel, type DesktopUpdateInfo, type DesktopReleaseUpdate } from "./desktop-updates";
+import { type InstanceConnection, type InstanceConnectionChange, LOCAL_INSTANCE_CONNECTION } from "./instance-connection";
 import {
   pendingRemoteSnapshot,
   type RemoteInstanceSnapshot,
@@ -55,7 +56,10 @@ function alert(title: string, text: string, error = false): Promise<void> {
 
 // ─── App state ──────────────────────────────────────────────────────────────
 
-const client = new RunnerClient();
+const client = new LocalServerClient();
+let bundledServerAvailable = false;
+let connectionChange = Promise.resolve();
+let desktopProfile: { isolated: boolean; name: string | null } = { isolated: false, name: null };
 let settings: TraySettings;
 let repoDir: string | null = null;
 let bunPath: string | null = null;
@@ -65,6 +69,11 @@ let busyMessage: string | null = null;
 let port = 7860;
 let lastStatus: FullStatus | null = null;
 let updateState: UpdateState = { available: false, commitsBehind: 0, latestMessage: "" };
+let desktopUpdateInfo: DesktopUpdateInfo;
+let desktopUpdateChannel: DesktopUpdateChannel = "stable";
+let desktopReleaseUpdate: DesktopReleaseUpdate | null = null;
+let checkingDesktopUpdate = false;
+let installingDesktopUpdate = false;
 // The tray is a compiled binary the git update flow cannot replace, so a pull
 // carrying desktop changes leaves this process running superseded code.
 let desktopShellStale = false;
@@ -105,6 +114,8 @@ function isRemoteMode(): boolean {
   return instanceConnection.mode === "remote";
 }
 
+function usesBundledServer(): boolean { return client.source === "bundled"; }
+
 function remoteFrontendUrl(): string | null {
   return instanceConnection.mode === "remote" ? instanceConnection.origin : null;
 }
@@ -122,6 +133,12 @@ let statsVersionItem: MenuItem;
 let checkUpdatesItem: MenuItem;
 let applyUpdateItem: MenuItem;
 let rebuildDesktopItem: MenuItem;
+let openDataFolderItem: MenuItem;
+let desktopUpdatesItem: Submenu;
+let desktopCheckItem: MenuItem;
+let desktopInstallItem: MenuItem;
+let stableUpdatesItem: CheckMenuItem;
+let nightlyUpdatesItem: CheckMenuItem;
 let autoStartItem: CheckMenuItem;
 let discordRpcItem: CheckMenuItem;
 let systemAudioItem: CheckMenuItem;
@@ -246,7 +263,7 @@ function frontendUrl(): string {
 
 async function updateMenu(): Promise<void> {
   const running = serverState === "running";
-  const transitioning = serverState === "starting" || serverState === "stopping" || busyMessage !== null;
+  const transitioning = serverState === "starting" || serverState === "stopping" || busyMessage !== null || installingDesktopUpdate;
   const remote = isRemoteMode();
 
   await statusItem.setText(statusText());
@@ -259,7 +276,7 @@ async function updateMenu(): Promise<void> {
     await startStopItem.setEnabled(false);
   } else {
     await startStopItem.setText(running || serverState === "starting" ? "Stop Server" : "Start Server");
-    await startStopItem.setEnabled(!transitioning || serverState === "starting");
+    await startStopItem.setEnabled(!installingDesktopUpdate && (!transitioning || serverState === "starting"));
   }
 
   await updateFrontendMenuText();
@@ -288,14 +305,24 @@ async function updateMenu(): Promise<void> {
   await statsBranchItem.setText(`Branch: ${remote ? (remoteSnapshot?.status?.branch ?? "—") : (lastStatus?.branch ?? "—")}`);
   await statsVersionItem.setText(`Version: ${remote ? (remoteSnapshot?.status?.version ?? "—") : (lastStatus?.version ?? "—")}`);
 
-  await checkUpdatesItem.setEnabled(!remote && !busyMessage && !externalRunning);
+  await checkUpdatesItem.setEnabled(!usesBundledServer() && !remote && !busyMessage && !externalRunning);
   // The rebuild compiles from the configured checkout, so it needs one — but
   // unlike the update items it stays available when a server is running
   // externally, since it neither stops nor talks to that server.
-  await rebuildDesktopItem.setEnabled(!busyMessage && repoDir !== null);
+  await rebuildDesktopItem.setEnabled(!usesBundledServer() && !busyMessage && repoDir !== null);
+  await openDataFolderItem.setEnabled(!remote && !busyMessage && (usesBundledServer() || (!!repoDir && !!bunPath)));
+  const canUpdateDesktop = desktopUpdateInfo.enabled && !checkingDesktopUpdate && !installingDesktopUpdate && !busyMessage;
+  await desktopCheckItem.setEnabled(canUpdateDesktop);
+  await desktopCheckItem.setText(checkingDesktopUpdate ? "Checking for Desktop Updates…" : "Check for Desktop Updates");
+  await desktopInstallItem.setText(desktopReleaseUpdate ? `Update to ${desktopReleaseUpdate.version}…` : "Install Desktop Update…");
+  await desktopInstallItem.setEnabled(canUpdateDesktop && desktopReleaseUpdate !== null);
+  await stableUpdatesItem.setChecked(desktopUpdateChannel === "stable");
+  await nightlyUpdatesItem.setChecked(desktopUpdateChannel === "nightly");
+  await stableUpdatesItem.setEnabled(canUpdateDesktop);
+  await nightlyUpdatesItem.setEnabled(canUpdateDesktop);
   if (updateState.available) {
     await applyUpdateItem.setText(`Apply Update (${updateState.commitsBehind} behind)`);
-    await applyUpdateItem.setEnabled(!remote && !busyMessage && !externalRunning);
+    await applyUpdateItem.setEnabled(!usesBundledServer() && !remote && !busyMessage && !externalRunning);
   } else {
     await applyUpdateItem.setText("Apply Update");
     await applyUpdateItem.setEnabled(false);
@@ -338,8 +365,9 @@ async function updateFloatingWidgetMenu(): Promise<void> {
 
 async function ensureRunner(): Promise<void> {
   if (await client.alive()) return;
+  if (usesBundledServer()) { await client.spawn("", ""); return; }
   if (!repoDir) {
-    throw new Error("No Lumiverse folder configured. Use “Set Lumiverse Folder…” first.");
+    throw new Error("No Lumiverse checkout configured. Choose one under Browser → Instance Connection… first.");
   }
   if (!bunPath) {
     throw new Error("Bun was not found. Install it from https://bun.sh and relaunch.");
@@ -350,7 +378,11 @@ async function ensureRunner(): Promise<void> {
 async function refreshStatus(): Promise<void> {
   if (!(await client.alive())) return;
   try {
-    lastStatus = await client.fullStatus();
+    const source = client.source;
+    const checkout = repoDir;
+    const status = await client.fullStatus();
+    if (source !== client.source || (source === "checkout" && checkout !== repoDir)) return;
+    lastStatus = status;
     serverState = lastStatus.state;
     port = lastStatus.port;
     updateState = {
@@ -365,7 +397,21 @@ async function refreshStatus(): Promise<void> {
 
 async function startServer(reopenFrontend = true): Promise<void> {
   if (isRemoteMode()) throw new Error("Switch to the local instance before starting its server.");
+  if (!settings.instanceConnectionConfigured) {
+    settings.instanceConnectionConfigured = true;
+    await saveSetting("instanceConnection", LOCAL_INSTANCE_CONNECTION);
+  }
   await ensureRunner();
+  if (!usesBundledServer()) {
+    // Read the checkout's configured port before looking for a server started elsewhere.
+    await refreshStatus();
+    await detectExternalServer();
+    if (externalRunning) {
+      if (reopenFrontend) await invoke("show_frontend", { port, customUrl: null });
+      await updateMenu();
+      return;
+    }
+  }
   // The runner acknowledges this request while the server is still starting.
   // Defer opening the native WebView until its `running` state notification.
   openIntegratedBrowserWhenReady = reopenFrontend;
@@ -414,13 +460,82 @@ async function checkForUpdates(interactive: boolean): Promise<void> {
   }
 }
 
+async function checkDesktopUpdates(interactive = false): Promise<void> {
+  if (!desktopUpdateInfo.enabled || checkingDesktopUpdate || installingDesktopUpdate || busyMessage) return;
+  checkingDesktopUpdate = true;
+  await updateMenu();
+  try {
+    desktopReleaseUpdate = await invoke<DesktopReleaseUpdate | null>("desktop_update_check", { channel: desktopUpdateChannel });
+    if (interactive) {
+      await alert("Lumiverse Desktop", desktopReleaseUpdate
+        ? `Version ${desktopReleaseUpdate.version} is available on ${desktopUpdateChannel}.\n\n${desktopReleaseUpdate.notes || ""}\nUse Desktop Updates → Update to ${desktopReleaseUpdate.version}… to install.`
+        : `No newer ${desktopUpdateChannel} desktop release is available. Installed: ${desktopUpdateInfo.version}.`);
+    }
+  } catch (error) {
+    desktopReleaseUpdate = null;
+    if (interactive) throw error;
+    console.warn("Unable to check desktop updates", error);
+  } finally {
+    checkingDesktopUpdate = false;
+    await updateMenu();
+  }
+}
+
+async function selectDesktopUpdateChannel(channel: DesktopUpdateChannel): Promise<void> {
+  if (installingDesktopUpdate || checkingDesktopUpdate || busyMessage) { await updateMenu(); return; }
+  await saveSetting("desktopUpdateChannel", channel);
+  desktopUpdateChannel = channel;
+  desktopReleaseUpdate = null;
+  await updateMenu();
+  await checkDesktopUpdates();
+}
+
+async function applyDesktopUpdate(): Promise<void> {
+  const update = desktopReleaseUpdate;
+  if (!update || installingDesktopUpdate || checkingDesktopUpdate || busyMessage) return;
+  installingDesktopUpdate = true;
+  busyMessage = "Preparing desktop update…";
+  let downloaded = false;
+  await updateMenu();
+  try {
+    const confirmed = await invoke<boolean>("confirm", {
+      title: "Update Lumiverse Desktop",
+      message: `Download and install ${update.version} from ${update.channel}?\n\nLumiverse Desktop will restart after the download is verified. Your managed local server will stop for installation and resume if it was running.`,
+      okLabel: "Update and restart", cancelLabel: "Later",
+    });
+    if (!confirmed) return;
+    busyMessage = "Downloading desktop update…";
+    await updateMenu();
+    await installDesktopRelease({
+      download: async () => { await invoke("desktop_update_download", { version: update.version, channel: update.channel }); downloaded = true; },
+      captureResume: async () => {
+        await refreshStatus();
+        return {
+          resumeServer: !isRemoteMode() && !externalRunning && await client.alive() && (serverState === "running" || serverState === "starting"),
+          reopenFrontend: await invoke<boolean>("frontend_visible"),
+          localPort: isRemoteMode() ? undefined : port,
+        };
+      },
+      stop: async () => { busyMessage = "Installing desktop update…"; await updateMenu(); await shutdownRunner(); },
+      install: async (resume) => { await invoke("desktop_update_install", { version: update.version, channel: update.channel, ...resume }); },
+      restore: async (resume) => { await startServer(resume.reopenFrontend); },
+    });
+  } finally {
+    if (downloaded) desktopReleaseUpdate = null;
+    installingDesktopUpdate = false;
+    busyMessage = null;
+    await updateMenu();
+  }
+}
+
 /**
  * Ask the checkout whether it has moved past the desktop sources this binary
  * was compiled from. Only the checkout can answer — the shell knows just the
  * revision stamped into it at build time.
  */
 async function refreshDesktopShellState(): Promise<void> {
-  if (!repoDir || !(await client.alive())) return;
+  if (usesBundledServer() || !repoDir || !(await client.alive())) return;
+  const checkout = repoDir;
 
   // Separate the two failure modes. A runner that predates this message is
   // expected and transient — stay quiet and keep any verdict we already hold.
@@ -447,6 +562,7 @@ async function refreshDesktopShellState(): Promise<void> {
     // alone rather than clearing a warning we still believe.
     return;
   }
+  if (usesBundledServer() || repoDir !== checkout) return;
 
   const becameStale = state.stale && !desktopShellStale;
   desktopShellStale = state.stale;
@@ -628,7 +744,10 @@ async function persistRemoteIdentity(snapshot: RemoteInstanceSnapshot): Promise<
     displayName: snapshot.instance.name,
   };
   settings.instanceConnection = instanceConnection;
-  await saveSetting("instanceConnection", instanceConnection);
+  const remote = instanceConnection;
+  await saveSetting("instanceConnection", remote);
+  settings.savedRemoteConnection = remote;
+  await saveSetting("savedRemoteConnection", remote);
 }
 
 async function pollRemoteInstance(): Promise<void> {
@@ -650,9 +769,7 @@ async function connectRemoteInstance(): Promise<void> {
   try {
     const snapshot = await invoke<RemoteInstanceSnapshot>("remote_instance_connect", { origin });
     if (instanceConnection.mode !== "remote" || instanceConnection.origin !== origin) {
-      // The selection changed while the system browser was open. Remove the
-      // just-created credential instead of attaching it to an abandoned URL.
-      await invoke("remote_instance_disconnect", { origin }).catch(() => {});
+      // A completed sign-in remains available when returning to this instance.
       return;
     }
     remoteSnapshot = snapshot;
@@ -856,7 +973,7 @@ function updateMenuInBackground(): void {
 function action(fn: () => Promise<void>): () => void {
   return () => {
     fn().catch(async (err) => {
-      busyMessage = null;
+      if (!installingDesktopUpdate) busyMessage = null;
       updateMenuInBackground();
       await alert("Lumiverse", err instanceof Error ? err.message : String(err), true);
     });
@@ -991,7 +1108,8 @@ async function buildTray(): Promise<void> {
   });
   loginItem = await CheckMenuItem.new({
     text: "Launch at Login",
-    checked: await autostartEnabled().catch(() => false),
+    checked: desktopProfile.isolated ? false : await autostartEnabled().catch(() => false),
+    enabled: !desktopProfile.isolated,
     action: action(async () => {
       if (await autostartEnabled()) {
         await disableAutostart();
@@ -1003,41 +1121,27 @@ async function buildTray(): Promise<void> {
     }),
   });
 
-  const setFolderItem = await MenuItem.new({
-    text: "Set Lumiverse Folder…",
+  openDataFolderItem = await MenuItem.new({
+    text: "Open Lumiverse Data Folder",
+    enabled: false,
     action: action(async () => {
-      const picked = await invoke<string | null>("pick_folder");
-      if (typeof picked !== "string") return;
-      if (!(await invoke<boolean>("validate_repo", { path: picked }))) {
-        throw new Error("That folder doesn't look like a Lumiverse checkout (scripts/runner.ts not found).");
-      }
-      if (picked === repoDir) return;
-
-      // A live runner keeps controlling the old checkout — shut it down
-      // before switching so every later command targets the new folder.
-      const hadRunner = await client.alive();
-      const wasRunning = hadRunner && serverState !== "stopped" && serverState !== "crashed";
-      if (hadRunner) {
-        busyMessage = "Switching folder…";
-        updateMenuInBackground();
-        await shutdownRunner();
-      }
-
-      repoDir = picked;
-      await saveSetting("repoDir", picked);
-      serverState = "stopped";
-      lastStatus = null;
-      updateState = { available: false, commitsBehind: 0, latestMessage: "" };
-      busyMessage = null;
-      await detectExternalServer();
-      await updateMenu();
-      if (wasRunning) {
-        await alert(
-          "Lumiverse",
-          "The server in the previous folder was stopped. Use Start Server to run the newly selected one.",
-        );
-      }
+      if (isRemoteMode() || busyMessage) return;
+      await invoke("open_lumiverse_data_folder", { source: client.source, repoDir, bunPath });
     }),
+  });
+
+  desktopCheckItem = await MenuItem.new({ text: "Check for Desktop Updates", action: action(() => checkDesktopUpdates(true)) });
+  desktopInstallItem = await MenuItem.new({ text: "Install Desktop Update…", enabled: false, action: action(applyDesktopUpdate) });
+  stableUpdatesItem = await CheckMenuItem.new({ text: "Stable", checked: desktopUpdateChannel === "stable", action: action(() => selectDesktopUpdateChannel("stable")) });
+  nightlyUpdatesItem = await CheckMenuItem.new({ text: "Nightly", checked: desktopUpdateChannel === "nightly", action: action(() => selectDesktopUpdateChannel("nightly")) });
+  desktopUpdatesItem = await Submenu.new({
+    text: "Desktop Updates",
+    items: [
+      await MenuItem.new({ text: `Installed: ${desktopUpdateInfo.version}`, enabled: false }),
+      ...(desktopUpdateInfo.reason ? [await MenuItem.new({ text: desktopUpdateInfo.reason, enabled: false })] : []),
+      desktopCheckItem, desktopInstallItem,
+      await Submenu.new({ text: "Update Channel", items: [stableUpdatesItem, nightlyUpdatesItem] }),
+    ],
   });
 
   const quitItem = await MenuItem.new({ text: "Quit Lumiverse", action: action(quit) });
@@ -1055,12 +1159,13 @@ async function buildTray(): Promise<void> {
       checkUpdatesItem,
       applyUpdateItem,
       rebuildDesktopItem,
+      desktopUpdatesItem,
       await separator(),
       autoStartItem,
       discordRpcItem,
       systemAudioItem,
       loginItem,
-      setFolderItem,
+      openDataFolderItem,
       await separator(),
       quitItem,
     ],
@@ -1087,7 +1192,86 @@ async function toggleServer(): Promise<void> {
 
 // ─── Boot ───────────────────────────────────────────────────────────────────
 
+/** Serialize selections so a slow shutdown cannot overwrite a later choice. */
+function changeInstanceConnection(selection: InstanceConnectionChange): Promise<void> {
+  const task = connectionChange.then(() => applyInstanceConnection(selection));
+  connectionChange = task.catch(() => {});
+  return task;
+}
+
+async function applyInstanceConnection(selection: InstanceConnectionChange): Promise<void> {
+  if (installingDesktopUpdate) throw new Error("Wait for the desktop update to finish before changing instances.");
+  let source = client.source;
+  let checkout = repoDir;
+  let checkoutBun = bunPath;
+  if (selection.connection.mode === "local") {
+    source = selection.localServerSource ?? source;
+    if (source !== "bundled" && source !== "checkout") throw new Error("Choose a built-in server or an existing checkout.");
+    if (source === "bundled" && !bundledServerAvailable) throw new Error("This app does not include a built-in server. Choose a checkout or remote instance.");
+    if (source === "checkout") {
+      checkout = selection.repoDir ?? repoDir ?? settings.repoDir;
+      if (!checkout || !(await invoke<boolean>("validate_repo", { path: checkout }))) {
+        throw new Error("Choose an existing Lumiverse checkout containing scripts/runner.ts.");
+      }
+      checkoutBun = selection.bunPath ?? bunPath ?? settings.bunPath ?? await invoke<string | null>("resolve_bun");
+      if (!checkoutBun) throw new Error("Bun was not found. Install Bun to run your existing checkout, or choose the built-in server.");
+    }
+  }
+
+  await invoke("desktop_capture_disconnect");
+  openIntegratedBrowserWhenReady = false;
+  if (selection.connection.mode === "remote") {
+    if (!isRemoteMode() && await client.alive()) await shutdownRunner();
+  } else {
+    await client.select(source, source === "checkout" && (checkout !== repoDir || checkoutBun !== bunPath));
+    settings.localServerSource = source;
+    await saveSetting("localServerSource", source);
+    if (source === "checkout") {
+      repoDir = checkout;
+      bunPath = checkoutBun;
+      settings.repoDir = checkout;
+      settings.bunPath = checkoutBun;
+      await saveSetting("repoDir", checkout);
+      await saveSetting("bunPath", checkoutBun);
+    }
+    serverState = "stopped";
+    lastStatus = null;
+    externalRunning = false;
+    updateState = { available: false, commitsBehind: 0, latestMessage: "" };
+    desktopShellStale = false;
+    desktopShellNoticeShown = false;
+  }
+  if (instanceConnection.mode === "remote") {
+    settings.savedRemoteConnection = instanceConnection;
+    await saveSetting("savedRemoteConnection", instanceConnection);
+  }
+  instanceConnection = selection.connection;
+  remoteSnapshot = null;
+  settings.instanceConnection = selection.connection;
+  settings.instanceConnectionConfigured = true;
+  await saveSetting("instanceConnection", selection.connection);
+  if (selection.connection.mode === "local") {
+    await startServer();
+  } else {
+    const selectedOrigin = selection.connection.origin;
+    settings.savedRemoteConnection = selection.connection;
+    await saveSetting("savedRemoteConnection", selection.connection);
+    void pollRemoteInstance().then(async () => {
+      if (instanceConnection.mode !== "remote" || instanceConnection.origin !== selectedOrigin) return;
+      if (remoteSnapshot?.state === "disconnected" || remoteSnapshot?.state === "reauth_required") await connectRemoteInstance();
+      if (instanceConnection.mode === "remote" && instanceConnection.origin === selectedOrigin) {
+        await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
+      }
+    }).catch(async (error) => {
+      await alert("Lumiverse", error instanceof Error ? error.message : String(error), true);
+    });
+  }
+  void refreshDiscordPresence();
+  await updateMenu();
+}
+
 async function tick(): Promise<void> {
+  if (!settings.instanceConnectionConfigured) { await updateMenu(); return; }
   // Presence rides the shared tick; its polling handles its own errors.
   void refreshDiscordPresence();
   if (isRemoteMode()) {
@@ -1097,6 +1281,9 @@ async function tick(): Promise<void> {
   }
   if (await client.alive()) {
     await refreshStatus();
+    if (externalRunning || (!usesBundledServer() && (serverState === "stopped" || serverState === "crashed"))) {
+      await detectExternalServer();
+    }
   } else {
     await detectExternalServer();
   }
@@ -1105,37 +1292,31 @@ async function tick(): Promise<void> {
 
 async function boot(): Promise<void> {
   settings = await loadSettings();
+  desktopUpdateInfo = await invoke<DesktopUpdateInfo>("desktop_update_info");
+  desktopUpdateChannel = settings.desktopUpdateChannel === "stable" || settings.desktopUpdateChannel === "nightly"
+    ? settings.desktopUpdateChannel : desktopUpdateInfo.defaultChannel;
+  desktopProfile = await invoke("desktop_profile_info");
   instanceConnection = settings.instanceConnection;
+  bundledServerAvailable = await invoke<boolean>("bundled_server_available");
+  settings.localServerSource = resolveLocalServerSource(settings.localServerSource, settings.repoDir, bundledServerAvailable);
 
   await listen<SystemAudioStatus>("desktop-system-audio-state", ({ payload }) => {
     void renderSystemAudio(payload).catch((error) => console.warn("Unable to show system audio state", error));
+  });
+  await listen<{ version: string; downloaded: number; total: number | null }>("desktop-update-progress", ({ payload }) => {
+    if (!installingDesktopUpdate || payload.version !== desktopReleaseUpdate?.version) return;
+    busyMessage = payload.total
+      ? `Downloading desktop update: ${Math.min(100, Math.round(payload.downloaded * 100 / payload.total))}%`
+      : `Downloading desktop update: ${Math.round(payload.downloaded / 1024 / 1024)} MB`;
+    updateMenuInBackground();
   });
 
   await listen<{ origin: string }>("discord-presence-changed", ({ payload }) => {
     if (payload?.origin === presenceOrigin()) void refreshDiscordPresence();
   });
 
-  await listen<{ connection: InstanceConnection }>("instance-connection-changed", async ({ payload }) => {
-    await invoke("desktop_capture_disconnect");
-    const previousOrigin = instanceConnection.mode === "remote" ? instanceConnection.origin : null;
-    instanceConnection = payload.connection;
-    remoteSnapshot = null;
-    settings.instanceConnection = payload.connection;
-    await saveSetting("instanceConnection", payload.connection);
-    if (previousOrigin && (payload.connection.mode !== "remote" || payload.connection.origin !== previousOrigin)) {
-      await invoke("remote_instance_disconnect", { origin: previousOrigin }).catch(() => {});
-    }
-    if (!isRemoteMode()) {
-      await refreshStatus();
-      await detectExternalServer();
-    } else {
-      void connectRemoteInstance().catch(async (error) => {
-        await alert("Lumiverse", error instanceof Error ? error.message : String(error), true);
-      });
-    }
-    // Re-target (or clear) presence for the newly selected instance.
-    void refreshDiscordPresence();
-    await updateMenu();
+  await listen<InstanceConnectionChange>("instance-connection-changed", ({ payload }) => {
+    action(() => changeInstanceConnection(payload))();
   });
   await listen<DesktopWidgetCatalogEntry[]>("desktop-widget-catalog", ({ payload }) => {
     desktopWidgetCatalog = Array.isArray(payload) ? payload : [];
@@ -1159,7 +1340,7 @@ async function boot(): Promise<void> {
     });
   });
 
-  await client.init();
+  await client.init(settings.localServerSource);
   client.onState = (state) => {
     serverState = state;
     if (state === "running" && openIntegratedBrowserWhenReady) {
@@ -1173,7 +1354,7 @@ async function boot(): Promise<void> {
       // rather than waiting for the next tick.
       void refreshDiscordPresence();
     }
-    if (state === "running" || state === "stopped" || state === "crashed") {
+    if (!installingDesktopUpdate && (state === "running" || state === "stopped" || state === "crashed")) {
       busyMessage = null;
     }
     // Re-check on every start, not just the first. The checkout can move
@@ -1188,13 +1369,14 @@ async function boot(): Promise<void> {
     void refreshStatus().then(updateMenu);
   };
   client.onProgress = (_operation, progressText) => {
+    if (installingDesktopUpdate) return;
     busyMessage = progressText;
     void updateMenu();
   };
   client.onExit = () => {
     serverState = "stopped";
     lastStatus = null;
-    busyMessage = null;
+    if (!installingDesktopUpdate) busyMessage = null;
     void refreshDiscordPresence();
     void updateMenu();
   };
@@ -1203,15 +1385,19 @@ async function boot(): Promise<void> {
   // lives inside (dev builds run from <repo>/desktop/src-tauri/target).
   // Nothing is baked in at build time — installed copies with no stored
   // setting start unconfigured and ask for an explicit selection.
-  const candidateRepo = settings.repoDir ?? (await invoke<string | null>("discover_repo"));
+  const candidateRepo = settings.repoDir ?? (!bundledServerAvailable ? await invoke<string | null>("discover_repo") : null);
   repoDir =
     candidateRepo && (await invoke<boolean>("validate_repo", { path: candidateRepo }))
       ? candidateRepo
       : null;
-  bunPath = settings.bunPath ?? (await invoke<string | null>("resolve_bun"));
+  bunPath = settings.bunPath ?? (!usesBundledServer() ? await invoke<string | null>("resolve_bun") : null);
+  if (repoDir) settings.instanceConnectionConfigured = true;
+  if (!usesBundledServer() && !repoDir && !isRemoteMode()) settings.instanceConnectionConfigured = false;
 
   await buildTray();
   await updateMenu();
+  void checkDesktopUpdates();
+  setInterval(() => { void checkDesktopUpdates(); }, 6 * 60 * 60 * 1000);
   // Restore the owner's saved choice, then show what is really true (an unsupported OS stays off).
   if (settings.systemAudioEnabled) {
     await invoke("desktop_system_audio_set_enabled", { enabled: true }).catch(async (error) => {
@@ -1229,12 +1415,8 @@ async function boot(): Promise<void> {
   }
   await invoke("desktop_startup_ready");
   const updateResume = await invoke<DesktopUpdateResume | null>("take_desktop_update_resume");
-
-  if (!repoDir && !isRemoteMode()) {
-    await alert(
-      "Lumiverse",
-      "No Lumiverse folder is configured yet. Choose your Lumiverse checkout via “Set Lumiverse Folder…” in the tray menu.",
-    );
+  if (!isRemoteMode() && updateResume?.localPort && Number.isInteger(updateResume.localPort) && updateResume.localPort > 0 && updateResume.localPort <= 65535) {
+    port = updateResume.localPort;
   }
 
   if (isRemoteMode()) {
@@ -1245,14 +1427,22 @@ async function boot(): Promise<void> {
   action(async () => {
     await restoreDesktopSession(updateResume, {
       remote: isRemoteMode(),
-      canStartServer: Boolean(repoDir && bunPath),
+      canStartServer: usesBundledServer() || Boolean(repoDir && bunPath),
       autoStartServer: settings.autoStartServer,
+      connectionChosen: settings.instanceConnectionConfigured,
     }, {
       startServer,
-      detectExternalServer,
+      detectExternalServer: async () => {
+        if (!usesBundledServer() && repoDir && bunPath) {
+          await ensureRunner();
+          await refreshStatus();
+        }
+        await detectExternalServer();
+      },
       showFrontend: async () => {
         await invoke("show_frontend", { port, customUrl: remoteFrontendUrl() });
       },
+      chooseConnection: async () => { await invoke("show_frontend_url_settings"); },
     });
     await updateMenu();
   })();

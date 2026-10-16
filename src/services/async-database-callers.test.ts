@@ -22,14 +22,26 @@ import * as audio from "./audio.service";
 
 let directory: string;
 const originalDataDir = env.dataDir;
+
+async function expectDatabaseRejection(pending: Promise<unknown>, message: string): Promise<void> {
+  // Bun 1.4.2's .rejects matcher waits in a nested native event loop, which can
+  // stall Windows IPC. Let the operation settle through a normal await first.
+  const error = await pending.catch((error: unknown) => error);
+  expect(error).toBeInstanceOf(Error);
+  expect(error).toMatchObject({ message: expect.stringContaining(message), code: "SQLITE_CONSTRAINT_TRIGGER", outcome: "rolled-back" });
+}
+
 beforeEach(async () => {
   await stopDatabaseExecution();
   closeDatabase();
   directory = mkdtempSync(join(tmpdir(), "lumiverse-async-callers-"));
   env.dataDir = directory;
   const db = initDatabase(join(directory, "database.db"));
-  db.exec(await Bun.file(join(import.meta.dir, "../db/baseline.sql")).text());
-  for (const user of ["user", "other"]) db.query('INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, 0, 0)').run(user, user, `${user}@example.com`);
+  const baseline = await Bun.file(join(import.meta.dir, "../db/baseline.sql")).text();
+  db.transaction(() => {
+    db.exec(baseline);
+    for (const user of ["user", "other"]) db.query('INSERT INTO "user" (id, name, email, emailVerified, createdAt, updatedAt) VALUES (?, ?, ?, 1, 0, 0)').run(user, user, `${user}@example.com`);
+  })();
 });
 afterEach(async () => {
   await stopDatabaseExecution();
@@ -92,7 +104,7 @@ describe("async database callers with a real subprocess", () => {
     getDb().exec("CREATE TRIGGER reject_persona_update BEFORE UPDATE ON personas BEGIN SELECT RAISE(ABORT, 'blocked persona update'); END");
     const emit = spyOn(eventBus, "emit");
     try {
-      await expect(addons.deleteGlobalAddonAsync("user", addon.id)).rejects.toThrow("blocked persona update");
+      await expectDatabaseRejection(addons.deleteGlobalAddonAsync("user", addon.id), "blocked persona update");
       expect(await addons.getGlobalAddonAsync("user", addon.id)).not.toBeNull();
       expect((await personas.getPersonaAsync("user", persona.id))?.metadata.attached_global_addons).toHaveLength(1);
       expect(emit.mock.calls.filter(([type]) => type === EventType.GLOBAL_ADDON_DELETED)).toHaveLength(0);
@@ -110,7 +122,7 @@ describe("async database callers with a real subprocess", () => {
       db.query("INSERT INTO world_book_entries (id, world_book_id, uid, vectorized, content, vector_index_status) VALUES (?, ?, 1, 1, 'Text', 'indexed')").run(`entry-${user}`, `book-${user}`);
     }
     db.exec("CREATE TRIGGER reject_vector_invalidation BEFORE UPDATE ON world_book_entries BEGIN SELECT RAISE(ABORT, 'blocked invalidation'); END");
-    await expect(settings.putManyAsync("user", { example: 42, [WORLD_BOOK_VECTOR_SETTINGS_KEY]: { presetMode: "lean" } })).rejects.toThrow("blocked invalidation");
+    await expectDatabaseRejection(settings.putManyAsync("user", { example: 42, [WORLD_BOOK_VECTOR_SETTINGS_KEY]: { presetMode: "lean" } }), "blocked invalidation");
     expect(await settings.getSettingAsync("user", "example")).toBeNull();
     db.exec("DROP TRIGGER reject_vector_invalidation");
     await settings.putSettingAsync("user", WORLD_BOOK_VECTOR_SETTINGS_KEY, { presetMode: "lean" });
@@ -138,7 +150,7 @@ describe("async database callers with a real subprocess", () => {
     const first = await presets.createPresetAsync("user", { name: "First", provider: "loom", prompt_order: [linked] });
     const second = await presets.createPresetAsync("user", { name: "Second", provider: "loom", prompt_order: [{ ...linked, enabled: false, group: "local" }] });
     getDb().exec(`CREATE TRIGGER reject_linked_update BEFORE UPDATE ON presets WHEN OLD.id = '${second.id}' BEGIN SELECT RAISE(ABORT, 'blocked linked update'); END`);
-    await expect(presets.updatePresetAsync("user", first.id, { prompt_order: [{ ...linked, content: "Edited" }], expected_cache_revision: 0 })).rejects.toThrow("blocked linked update");
+    await expectDatabaseRejection(presets.updatePresetAsync("user", first.id, { prompt_order: [{ ...linked, content: "Edited" }], expected_cache_revision: 0 }), "blocked linked update");
     expect((await presets.getPresetAsync("user", first.id))?.cache_revision).toBe(0);
     expect((await stash.listPromptStashAsync("user"))[0].block.content).toBe("Original");
     getDb().exec("DROP TRIGGER reject_linked_update");

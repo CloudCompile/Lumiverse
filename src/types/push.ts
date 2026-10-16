@@ -26,7 +26,31 @@ export interface DesktopNotificationDestinationRecord {
 
 export type NotificationDestinationRecord =
   | PushSubscriptionRecord
+  | IOSPushDestinationRecord
   | DesktopNotificationDestinationRecord;
+
+export interface IOSPushDestinationRecord {
+  type: "ios_apns";
+  id: string;
+  user_id: string;
+  device_id: string;
+  bundle_id: string;
+  environment: "development" | "production";
+  label: string;
+  user_agent: string;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface CreateIOSPushDestinationInput {
+  deviceId: string;
+  deviceToken: string;
+  bundleId: string;
+  environment: "development" | "production";
+  serverOrigin: string;
+  label?: string;
+  userAgent?: string;
+}
 
 export interface CreatePushSubscriptionInput {
   endpoint: string;

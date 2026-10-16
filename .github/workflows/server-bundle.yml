@@ -1,0 +1,252 @@
+name: Build Bundled Desktop Release
+
+# One pipeline for both channels; builds a complete desktop/server distribution.
+# Large payloads go straight to an unpublished GitHub Release, never Actions artifacts.
+on:
+  workflow_call:
+    inputs:
+      source:
+        type: string
+        required: true
+      channel:
+        type: string
+        required: true
+      version:
+        type: string
+        required: true
+      tag:
+        type: string
+        required: true
+      fingerprint:
+        type: string
+        required: true
+    secrets:
+      LUMIVERSE_UPDATER_PUBLIC_KEY:
+        required: false
+      TAURI_SIGNING_PRIVATE_KEY:
+        required: true
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD:
+        required: false
+
+permissions:
+  contents: read
+concurrency:
+  group: bundled-desktop-${{ inputs.channel }}
+  cancel-in-progress: false
+env:
+  DESKTOP_CHANNEL: ${{ inputs.channel }}
+  DESKTOP_VERSION: ${{ inputs.version }}
+  DESKTOP_TAG: ${{ inputs.tag }}
+  DESKTOP_SHA: ${{ inputs.source }}
+  DESKTOP_SOURCE: ${{ inputs.fingerprint }}
+
+jobs:
+  prepare:
+    name: Prepare unpublished signed release
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Require updater signing configuration
+        env:
+          LUMIVERSE_UPDATER_PUBLIC_KEY: ${{ vars.LUMIVERSE_UPDATER_PUBLIC_KEY || secrets.LUMIVERSE_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          bun -e 'if (!process.env.LUMIVERSE_UPDATER_PUBLIC_KEY?.trim() || !process.env.TAURI_SIGNING_PRIVATE_KEY?.trim()) throw new Error("Configure LUMIVERSE_UPDATER_PUBLIC_KEY and TAURI_SIGNING_PRIVATE_KEY before publishing signed updates.")'
+      - name: Create or reuse matching draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/publish-desktop-release.ts create
+
+  build:
+    name: Bundled desktop (${{ matrix.platform }})
+    needs: prepare
+    timeout-minutes: ${{ matrix.platform == 'darwin-x86_64' && 180 || 60 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            platform: darwin-aarch64
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: macos-15-intel
+            platform: darwin-x86_64
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            bundles: appimage
+          - os: ubuntu-22.04-arm
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            bundles: appimage
+          - os: windows-2022
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: windows-11-arm
+            platform: windows-aarch64
+            target: aarch64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install Linux desktop build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf xdg-utils squashfs-tools dbus-x11 xauth xvfb gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+      - name: Install build dependencies
+        run: bun install --frozen-lockfile
+      - name: Install frontend build dependencies
+        working-directory: frontend
+        run: bun install --frozen-lockfile
+      - name: Install desktop build dependencies
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+      - name: Test launcher, release policy, and desktop lifecycle
+        run: bun test tests/server-bundle.test.ts tests/lancedb-macos-native.test.ts tests/bun-runtime-version-policy.test.ts scripts/desktop-release.test.ts desktop/src-tauri/permissions.test.ts desktop/tests/desktop-updates.test.ts desktop/tests/instance-connection.test.ts desktop/tests/custom-url-ui.test.ts desktop/tests/local-server.test.ts desktop/tests/runner-client.test.ts scripts/desktop-session-restoration.test.ts scripts/tauri-finalized.test.ts scripts/appimage-packaging.test.ts src/spindle/runtime-transport.test.ts src/db/execution-transport.test.ts
+      - name: Test production browser cookie transport
+        run: bun --no-env-file test src/auth/request-cookies.integration.test.ts
+        env:
+          NODE_ENV: production
+      - name: Typecheck backend and packaging
+        shell: bash
+        run: |
+          bun x tsc --noEmit
+          bun x tsc --project scripts/tsconfig.server-bundle.json --noEmit
+      - name: Restore validated Intel LanceDB addon
+        if: matrix.platform == 'darwin-x86_64'
+        id: intel-lancedb
+        uses: actions/cache/restore@v5
+        with:
+          path: dist/native/lancedb-darwin-x64
+          key: intel-lancedb-addon-${{ hashFiles('scripts/build-lancedb-macos.ts', 'scripts/lancedb-macos-native.ts', 'scripts/check-lancedb-macos.ts', 'src/runtime/lancedb-check.ts') }}
+      - name: Install Intel LanceDB build prerequisites
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit != 'true'
+        run: brew install protobuf cmake
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit != 'true'
+        with:
+          toolchain: 1.97.0
+          targets: x86_64-apple-darwin
+      - name: Prepare pinned Intel LanceDB source
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit != 'true'
+        run: bun run build:lancedb:macos --prepare-only
+      - name: Build and test Intel LanceDB native engine
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          CARGO_TERM_PROGRESS_WHEN: always
+          CARGO_TERM_PROGRESS_WIDTH: '100'
+        run: |
+          set -euo pipefail
+          # Cargo's last "Compiling" line may belong to a small crate while
+          # another parallel rustc process spends minutes on a large dependency.
+          # Report executable names only; process arguments can contain secrets.
+          (
+            while sleep 60; do
+              echo "[Intel LanceDB] $(date -u '+%Y-%m-%dT%H:%M:%SZ'): CPU %, RSS in KiB, and elapsed time"
+              ps -axo pid,ppid,pcpu,rss,etime,comm | awk 'NR == 1 || $NF ~ /(^|\/)(cargo|rustc|clang|clang\+\+|cc1|ld|cmake)$/'
+              /usr/sbin/sysctl vm.swapusage
+              df -h "$RUNNER_TEMP"
+            done
+          ) &
+          monitor_pid=$!
+          trap 'kill "$monitor_pid" 2>/dev/null || true' EXIT
+          bun run build:lancedb:macos
+      - name: Revalidate cached Intel LanceDB checksum and native operations
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit == 'true'
+        run: bun --no-env-file scripts/check-lancedb-macos.ts --artifact-dir dist/native/lancedb-darwin-x64
+      - name: Cache only the verified Intel addon, manifest, and license
+        if: matrix.platform == 'darwin-x86_64' && steps.intel-lancedb.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: dist/native/lancedb-darwin-x64
+          key: ${{ steps.intel-lancedb.outputs.cache-primary-key }}
+      - name: Build standalone server and test outside the checkout
+        shell: bash
+        run: |
+          bun run build:server
+          bun run test:server-bundle
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+          key: desktop-registry-${{ matrix.target }}
+          cache-targets: false
+          add-rust-environment-hash-key: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Stamp the actual release version in the CI checkout
+        run: bun run desktop:version "$env:DESKTOP_VERSION"
+        if: runner.os == 'Windows'
+      - name: Stamp the actual release version in the CI checkout
+        run: bun run desktop:version "$DESKTOP_VERSION"
+        if: runner.os != 'Windows'
+      - name: Stage the tested server and enable signed update artifacts
+        env:
+          LUMIVERSE_UPDATER_PUBLIC_KEY: ${{ vars.LUMIVERSE_UPDATER_PUBLIC_KEY || secrets.LUMIVERSE_UPDATER_PUBLIC_KEY }}
+        run: |
+          bun run build:desktop-server --reuse-server --stage-only
+          bun -e 'await Bun.write("desktop/src-tauri/tauri.release-updater.conf.json", JSON.stringify({bundle:{createUpdaterArtifacts:true},plugins:{updater:{pubkey:process.env.LUMIVERSE_UPDATER_PUBLIC_KEY?.trim()}}}))'
+      - name: Build self-contained signed desktop release
+        working-directory: desktop
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && '-' || '' }}
+          LUMIVERSE_UPDATER_PUBLIC_KEY: ${{ vars.LUMIVERSE_UPDATER_PUBLIC_KEY || secrets.LUMIVERSE_UPDATER_PUBLIC_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPIMAGE_EXTRACT_AND_RUN: '1'
+        run: bun run tauri:finalized build --verbose --config src-tauri/tauri.server-bundle.conf.json --config src-tauri/tauri.release-updater.conf.json --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} --ci -- --locked
+      - name: Verify finalized updater signatures against the embedded public key
+        env:
+          LUMIVERSE_UPDATER_PUBLIC_KEY: ${{ vars.LUMIVERSE_UPDATER_PUBLIC_KEY || secrets.LUMIVERSE_UPDATER_PUBLIC_KEY }}
+        run: cargo run --locked --release --manifest-path desktop/src-tauri/Cargo.toml --example verify-updater --target ${{ matrix.target }} -- desktop/src-tauri/target/${{ matrix.target }}/release/bundle
+      - name: Smoke-test finalized Linux AppImage offline as another user
+        if: runner.os == 'Linux'
+        run: bash scripts/smoke-test-appimage.sh desktop/src-tauri/target/${{ matrix.target }}/release/bundle/appimage
+      - name: Upload tested signed platform assets to draft release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DESKTOP_PLATFORM: ${{ matrix.platform }}
+          DESKTOP_TARGET: ${{ matrix.target }}
+        run: bun scripts/publish-desktop-release.ts upload
+
+  publish:
+    name: Publish complete release and advance channel
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - name: Require every signed platform before publication
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bun scripts/publish-desktop-release.ts publish

@@ -35,8 +35,9 @@
     padding-bottom var(--lcs-transition, 220ms cubic-bezier(0.4, 0, 0.2, 1));
 }
 
-:global(html[data-ios-pwa]) .container {
-  /* .app has no bottom safe-area padding on iOS PWA, so this positions from
+:global(html[data-ios-pwa]) .container,
+:global(html[data-tauri-mobile='ios']) .container {
+  /* Standalone iOS shells have no bottom safe-area padding, so position from
      the screen edge. Background fills to the bottom; extra padding-bottom
      keeps interactive content above the home indicator. When keyboard is
      open, move up and drop the safe-area padding (keyboard covers it).
@@ -45,7 +46,7 @@
   padding-bottom: calc(10px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)) / var(--lumiverse-ui-scale, 1));
 }
 
-:global(html[data-pwa]:not([data-ios-pwa])) .container {
+:global(html[data-pwa]:not([data-ios-pwa]):not([data-tauri-mobile='ios'])) .container {
   /* Chromium/Android PWA: .app is now edge-to-edge (no bottom padding), so
      pin the bar's glass to the screen edge and lift only its content above
      the gesture nav bar. Unlike iOS, Android sets
@@ -217,7 +218,6 @@
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows 250ms cubic-bezier(0.4, 0, 0.2, 1);
-  will-change: grid-template-rows;
 }
 
 .popoverSlotOpen {
@@ -1221,12 +1221,13 @@
     flex-shrink: 0;
   }
 
-  :global(html[data-ios-pwa]) .container {
+  :global(html[data-ios-pwa]) .container,
+  :global(html[data-tauri-mobile='ios']) .container {
     bottom: calc(var(--app-keyboard-inset-bottom, 0px) / var(--lumiverse-ui-scale, 1));
     padding-bottom: calc(8px + max(0px, env(safe-area-inset-bottom, 0px) - var(--app-keyboard-inset-bottom, 0px)) / var(--lumiverse-ui-scale, 1));
   }
 
-  :global(html[data-pwa]:not([data-ios-pwa])) .container {
+  :global(html[data-pwa]:not([data-ios-pwa]):not([data-tauri-mobile='ios'])) .container {
     bottom: 0;
     padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
   }

@@ -76,6 +76,23 @@ Each Loom Tool has:
 
 ---
 
+## MCP Tools
+
+Connect a server in **Settings → MCP Servers** to make its tools available to the main model when **Enable Function Calling** is enabled in the active preset. A successful **Test Connection** only checks the server; use **Connect** to keep it connected. **Auto-connect on startup** reconnects it when Lumiverse starts.
+
+To include the callable tool names and descriptions in the prompt, put `{{mcpTools}}` in a preset block. The block's role, position, and depth control where the list appears. The list is empty when no MCP tools are available, function calling is disabled, or you are generating an impersonation.
+
+```text
+{{if::{{mcpToolsActive}}}}
+Use these tools when they help answer the user's request:
+{{mcpTools}}
+{{/if}}
+```
+
+The native function definitions are sent automatically with the model request. You can also assign MCP tools to Council members for Council execution.
+
+---
+
 ## Assigning Tools to Members
 
 1. Open **Council → Setup**

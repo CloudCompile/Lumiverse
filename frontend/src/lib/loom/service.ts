@@ -148,13 +148,13 @@ function projectPublicPromptVariable(variable: PromptVariableDef): PromptVariabl
   }
   if (variable.description !== undefined) projected.description = variable.description
   if (variable.type === 'textarea' && variable.rows !== undefined) projected.rows = variable.rows
-  if ((variable.type === 'number' || variable.type === 'slider') && variable.min !== undefined) {
+  if ((variable.type === 'number' || variable.type === 'slider' || variable.type === 'range') && variable.min !== undefined) {
     projected.min = variable.min
   }
-  if ((variable.type === 'number' || variable.type === 'slider') && variable.max !== undefined) {
+  if ((variable.type === 'number' || variable.type === 'slider' || variable.type === 'range') && variable.max !== undefined) {
     projected.max = variable.max
   }
-  if ((variable.type === 'number' || variable.type === 'slider') && variable.step !== undefined) {
+  if ((variable.type === 'number' || variable.type === 'slider' || variable.type === 'range') && variable.step !== undefined) {
     projected.step = variable.step
   }
   if (variable.type === 'select' || variable.type === 'multiselect') {
@@ -766,13 +766,21 @@ function clonePromptVariableValue(value: unknown): PromptVariableValue | undefin
       return undefined
     }
   }
-  const entries: string[] = []
+  const entries: Array<string | number> = []
   for (let index = 0; index < length; index += 1) {
     const descriptor = hasEnumerableDataProperty(value, String(index))
-    if (!descriptor || typeof descriptor.value !== 'string') return undefined
+    if (
+      !descriptor
+      || (typeof descriptor.value !== 'string'
+        && (typeof descriptor.value !== 'number' || !Number.isFinite(descriptor.value)))
+    ) return undefined
     entries.push(descriptor.value)
   }
-  return entries
+  if (entries.every((entry): entry is string => typeof entry === 'string')) return entries
+  if (entries.length === 2 && entries.every((entry) => typeof entry === 'number')) {
+    return entries as [number, number]
+  }
+  return undefined
 }
 
 function isPromptVariableValueCompatible(
@@ -788,6 +796,16 @@ function isPromptVariableValueCompatible(
       && (variable.min === undefined || value >= variable.min)
       && (variable.max === undefined || value <= variable.max)
   }
+  if (variable.type === 'range') {
+    return Array.isArray(value)
+      && value.length === 2
+      && value.every((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry))
+      && typeof variable.min === 'number'
+      && typeof variable.max === 'number'
+      && value[0] <= value[1]
+      && value[0] >= variable.min
+      && value[1] <= variable.max
+  }
   if (variable.type === 'switch') {
     return value === 0 || value === 1
   }
@@ -801,7 +819,7 @@ function isPromptVariableValueCompatible(
       key === 'length'
       || (typeof key === 'string' && /^(0|[1-9]\d*)$/.test(key) && Number(key) < value.length)
     ))
-    && value.every((entry) => typeof entry === 'string' && optionIds.has(entry))
+    && value.every((entry): entry is string => typeof entry === 'string' && optionIds.has(entry))
     && new Set(value).size === value.length
 }
 
@@ -1092,13 +1110,16 @@ function normalizeTolerantPromptVariable(value: unknown): {
   if (type === 'text' || type === 'textarea' || type === 'switch') {
     return { name, variable: { type } as PromptVariableDef }
   }
-  if (type === 'number' || type === 'slider') {
+  if (type === 'number' || type === 'slider' || type === 'range') {
     const min = readOwnDataProperty(value, 'min')
     const max = readOwnDataProperty(value, 'max')
     if (
       (min !== undefined && (typeof min !== 'number' || !Number.isFinite(min)))
       || (max !== undefined && (typeof max !== 'number' || !Number.isFinite(max)))
     ) {
+      return undefined
+    }
+    if (type === 'range' && (typeof min !== 'number' || typeof max !== 'number' || min > max)) {
       return undefined
     }
     return {
@@ -1432,6 +1453,13 @@ export function getAvailableMacros(): MacroGroup[] {
         { name: 'Council Mode Active', syntax: '{{lumiaCouncilModeActive}}', description: 'Council mode status (yes/no)' },
         { name: 'Council Tools Active', syntax: '{{lumiaCouncilToolsActive}}', description: 'Council tools status (yes/no)' },
         { name: 'Council Tools List', syntax: '{{lumiaCouncilToolsList}}', description: 'Available council tools reminder' },
+      ],
+    },
+    {
+      category: 'MCP',
+      macros: [
+        { name: 'MCP Tools', syntax: '{{mcpTools}}', description: 'Available MCP function names and descriptions at this block’s role and position' },
+        { name: 'MCP Tools Active', syntax: '{{mcpToolsActive}}', description: 'MCP tools available for this generation (yes/no)' },
       ],
     },
     {

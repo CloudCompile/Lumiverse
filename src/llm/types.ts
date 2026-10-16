@@ -309,7 +309,7 @@ export interface AssemblyContext {
   skipPresetProfileBinding?: boolean;
   /** Whether macro handlers may commit side effects. Defaults to true. */
   macroCommit?: boolean;
-  /** When true, bypass preset-profile preset selection and use presetId directly. */
+  /** Explicit override: use presetId directly, bypassing profile block states and variable values too. */
   forcePresetId?: boolean;
   generationType: GenerationType;
   personaId?: string;
@@ -339,6 +339,8 @@ export interface AssemblyContext {
   councilNamedResults?: Record<string, string>;
   /** Prior retained council deliberations formatted as a historical baseline block. */
   councilHistoricalDeliberationBlock?: string;
+  /** Snapshot of MCP function definitions for preset macros, including in workers. */
+  mcpTools?: ToolDefinition[];
   /** Pre-computed vector-activated world info entries from the generation pipeline.
    *  When provided, assembly reuses these instead of re-running vector retrieval. */
   precomputedVectorEntries?: import("../services/prompt-assembly.service").VectorActivatedEntry[];

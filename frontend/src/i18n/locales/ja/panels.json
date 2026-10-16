@@ -2093,7 +2093,8 @@
       "text": "テキスト",
       "textarea": "テキストエリア",
       "number": "番号",
-      "slider": "スライダー"
+      "slider": "スライダー",
+      "range": "範囲スライダー"
     },
     "dragToReorder": "{{name}}（{{position}} 番目）をドラッグして並べ替え",
     "variableFallback": "変数 {{position}}",
@@ -2116,6 +2117,8 @@
     "defaultTextareaPlaceholder": "デフォルトの本文…",
     "defaultTextPlaceholder": "中立、温かい、臨床…",
     "defaultPreviewAria": "デフォルト値のプレビュー",
+    "rangeStart": "範囲の開始",
+    "rangeEnd": "範囲の終了",
     "min": "分",
     "max": "マックス",
     "step": "ステップ",

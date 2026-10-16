@@ -18,7 +18,7 @@ import {
   type ConnectionsOrder,
 } from './connections-order-merge'
 
-/** Default reasoning settings — used as initial state and for restore-on-unbind. */
+/** Default reasoning settings — used until the user has an unbound preference. */
 export const REASONING_DEFAULTS: ReasoningSettings = {
   prefix: '<think>\n',
   suffix: '\n</think>',
@@ -117,6 +117,7 @@ export const DATA_KEYS: ReadonlySet<string> = new Set([
   'useCharacterBackground',
   // Reasoning / CoT settings
   'reasoningSettings',
+  'unboundReasoningSettings',
   'promptBias',
   'regenFeedback',
   'swipeGesturesEnabled',
@@ -743,6 +744,7 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
     loomItems: { enabled: false, keepDepth: 5, keepOnly: false },
   },
   reasoningSettings: { ...REASONING_DEFAULTS },
+  unboundReasoningSettings: null,
   regenFeedback: {
     enabled: false,
     position: 'user',
@@ -916,7 +918,8 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
       get().setInputBarEnterToSend(value as EnterToSendSettings)
       return
     }
-    const previous = (get() as unknown as Record<string, unknown>)[key as string]
+    const state = get()
+    const previous = (state as unknown as Record<string, unknown>)[key as string]
     const changed = !pendingValuesMatch(previous, value)
     traceSettings('setSetting', {
       key: key as string,
@@ -931,7 +934,26 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
     // winning the load-generation merge solely because its object identity
     // changed.
     if (!changed) return
-    set({ [key]: value } as any)
+    let unboundReasoningSettings: ReasoningSettings | undefined
+    if (
+      key === 'reasoningSettings'
+      && !state.profiles?.find((profile) => profile.id === state.activeProfileId)?.metadata?.reasoningBindings?.settings
+    ) {
+      const next = value as ReasoningSettings
+      unboundReasoningSettings = { ...(state.unboundReasoningSettings ?? state.reasoningSettings) }
+      // Only user-edited fields replace the preference. A provider may have
+      // mapped the displayed effort to a supported tier in the meantime.
+      const fields = new Set([
+        ...Object.keys(state.reasoningSettings),
+        ...Object.keys(next),
+      ]) as Set<keyof ReasoningSettings>
+      for (const field of fields) {
+        if (pendingValuesMatch(state.reasoningSettings[field], next[field])) continue
+        if (field in next) Object.assign(unboundReasoningSettings, { [field]: next[field] })
+        else delete unboundReasoningSettings[field]
+      }
+    }
+    set({ [key]: value, ...(unboundReasoningSettings ? { unboundReasoningSettings } : {}) } as any)
     if (DATA_KEYS.has(key as string)) {
       // Runtime synchronization and migration may observe the default store
       // before the authoritative GET completes. They must not create a local
@@ -946,6 +968,7 @@ export const createSettingsSlice: StateCreator<AppStore, [], [], SettingsSlice> 
         || source === 'compatibility'
       if (!automatic || get().fullSettingsLoaded) {
         persistKey(key as string, value, source)
+        if (unboundReasoningSettings) persistKey('unboundReasoningSettings', unboundReasoningSettings, source)
       } else {
         traceSettings('setSetting:pre-hydration-skip', {
           key: key as string,

@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import * as svc from "../services/openrouter.service";
 import * as connSvc from "../services/connections.service";
+import { normalizeOpenRouterEndpointModel } from "../llm/providers/openrouter";
 
 const app = new Hono();
 
@@ -124,6 +125,20 @@ app.get("/providers/:connectionId", async (c) => {
   const result = await svc.fetchProviderList(userId, connectionId);
   if (!result) return c.json({ error: "Failed to fetch providers" }, 502);
   return c.json({ providers: result });
+});
+
+/** Exact endpoint choices for the selected model, including opt-in service tiers. */
+app.get("/endpoints/:connectionId", async (c) => {
+  const model = normalizeOpenRouterEndpointModel(c.req.query("model") || "");
+  if (!model) return c.json({ error: "A model ID in author/model format is required" }, 400);
+
+  try {
+    const endpoints = await svc.fetchModelEndpoints(c.get("userId"), c.req.param("connectionId"), model);
+    if (!endpoints) return c.json({ error: "Failed to fetch model endpoints" }, 502);
+    return c.json({ endpoints });
+  } catch {
+    return c.json({ error: "Failed to fetch model endpoints" }, 502);
+  }
 });
 
 export { app as openrouterRoutes };

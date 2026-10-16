@@ -96,6 +96,27 @@ const ROW_BATCH = 200;
 /** Yield to the event loop between batches. */
 const YIELD_INTERVAL_MS = 0;
 
+function isImportLockError(error: unknown): boolean {
+  const code = (error as { code?: string })?.code;
+  return typeof code === "string" && (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"));
+}
+
+/** Short writes share the database with the executor and background workers. */
+async function retryImportWrite<T>(action: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+  const deadline = Date.now() + 10_000;
+  let delay = 25;
+  for (;;) {
+    signal?.throwIfAborted();
+    try { return await action(); }
+    catch (error) {
+      if (!isImportLockError(error) || Date.now() >= deadline) throw error;
+      // Yield so a lock owner in this process can also finish.
+      await Bun.sleep(delay);
+      delay = Math.min(delay * 2, 200);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Job tracking
 // ---------------------------------------------------------------------------
@@ -1821,6 +1842,8 @@ async function* readNdjson(
  * reference those preset IDs resolve cleanly instead of 404'ing.
  */
 function mergeSettingValue(existingValue: unknown, importedValue: unknown): unknown {
+  // Fresh clients persist null selections before the restore begins.
+  if (existingValue === null || existingValue === undefined) return importedValue;
   const isPlainObject = (v: unknown): v is Record<string, unknown> =>
     !!v && typeof v === "object" && !Array.isArray(v);
   // An id-shaped array: every element is an object carrying an `id` string.
@@ -1916,34 +1939,40 @@ async function applySettingsTable(
     const importedValueText = typeof raw.value === "string" ? raw.value : JSON.stringify(raw.value);
     const updatedAt = Math.floor(Date.now() / 1000);
 
-    const existing = selectStmt.get(key, ctx.userId) as { value: string } | null;
-    if (!existing) {
-      insertStmt.run(key, importedValueText, ctx.userId, updatedAt);
-      imported++;
-    } else {
-      // Both rows present — attempt a deep merge.
-      let importedValue: unknown;
-      let existingValue: unknown;
-      try {
-        importedValue = JSON.parse(importedValueText);
-      } catch {
-        importedValue = importedValueText;
-      }
-      try {
-        existingValue = JSON.parse(existing.value);
-      } catch {
-        existingValue = existing.value;
-      }
-      const mergedValue = mergeSettingValue(existingValue, importedValue);
-      // If merge produced no change, count as skipped; otherwise UPDATE.
-      const mergedText = JSON.stringify(mergedValue);
-      if (mergedText === existing.value) {
-        skipped++;
+    const outcome = await retryImportWrite(() => db.transaction(() => {
+      const existing = selectStmt.get(key, ctx.userId) as { value: string } | null;
+      if (!existing) {
+        insertStmt.run(key, importedValueText, ctx.userId, updatedAt);
+        return "imported";
       } else {
-        updateStmt.run(mergedText, updatedAt, key, ctx.userId);
-        merged++;
+        // Both rows present — attempt a deep merge.
+        let importedValue: unknown;
+        let existingValue: unknown;
+        try {
+          importedValue = JSON.parse(importedValueText);
+        } catch {
+          importedValue = importedValueText;
+        }
+        try {
+          existingValue = JSON.parse(existing.value);
+        } catch {
+          existingValue = existing.value;
+        }
+        const mergedValue = mergeSettingValue(existingValue, importedValue);
+        // If merge produced no change, count as skipped; otherwise UPDATE.
+        const mergedText = JSON.stringify(mergedValue);
+        if (mergedText === existing.value) {
+          return "skipped";
+        } else {
+          updateStmt.run(mergedText, updatedAt, key, ctx.userId);
+          return "merged";
+        }
       }
-    }
+
+    }).immediate(), ctx.signal);
+    if (outcome === "imported") imported++;
+    else if (outcome === "merged") merged++;
+    else skipped++;
 
     lineCount++;
     if (lineCount % ROW_BATCH === 0) {
@@ -2029,9 +2058,11 @@ async function applyTable(
     return prepared;
   };
 
-  const commitBatch = () => {
+  const commitBatch = async () => {
     if (batch.length === 0) return;
     const txn = db.transaction((rows: Record<string, any>[]) => {
+      let imported = 0;
+      let skipped = 0;
       for (const row of rows) {
         const insert = getInsert(row);
         if (!insert) {
@@ -2047,8 +2078,11 @@ async function applyTable(
         if (res.changes > 0) imported++;
         else skipped++;
       }
+      return { imported, skipped };
     });
-    txn(batch);
+    const committed = await retryImportWrite(() => txn.immediate(batch), ctx.signal);
+    imported += committed.imported;
+    skipped += committed.skipped;
     batch = [];
   };
 
@@ -2078,7 +2112,7 @@ async function applyTable(
     lineCount++;
 
     if (batch.length >= ROW_BATCH) {
-      commitBatch();
+      await commitBatch();
       emit(ctx.job, EventType.USER_IMPORT_PROGRESS, {
         phase: "table",
         table,
@@ -2087,7 +2121,7 @@ async function applyTable(
       await yieldAndCheck(ctx.signal);
     }
   }
-  commitBatch();
+  await commitBatch();
 
   ctx.job.summary[table] = { imported, skipped };
   emit(ctx.job, EventType.USER_IMPORT_PROGRESS, {
@@ -2394,6 +2428,7 @@ function scrubOrphanForeignKeys(userId: string): void {
       }
     } catch (err) {
       // A schema mismatch (column removed in a future migration) — log and continue.
+      if (isImportLockError(err)) throw err;
       console.warn(`[user-data import] orphan FK scrub on ${child}.${col} failed:`, err);
     }
   }
@@ -2411,6 +2446,7 @@ function scrubMemoryCortexOrphans(userId: string): void {
       [userId],
     );
   } catch (err) {
+    if (isImportLockError(err)) throw err;
     console.warn(`[user-data import] memory cortex orphan scrub failed:`, err);
   }
 }
@@ -2449,10 +2485,13 @@ async function applySecrets(
       continue;
     }
     try {
-      await putSecret(ctx.userId, entry.key, plaintext);
-      if (plaintext.length > 0) markConnectionSecretRestored(ctx.userId, entry.key);
+      await retryImportWrite(async () => {
+        await putSecret(ctx.userId, entry.key!, plaintext);
+        if (plaintext.length > 0) markConnectionSecretRestored(ctx.userId, entry.key!);
+      }, ctx.signal);
       restored++;
     } catch (err) {
+      if (isImportLockError(err) || ctx.signal.aborted) throw err;
       console.warn(`[user-data import] secret re-encrypt failed for ${entry.key}:`, err);
       skipped++;
     }
@@ -2501,7 +2540,9 @@ export async function submitTicket(
   const wasReused = !!prior;
   const previouslyConsumedAt = prior?.consumedAt ?? null;
 
-  const recorded = recordConsumedTicket(verified.ticket.archiveId, job.userId);
+  const recorded = await retryImportWrite(() => getDb().transaction(() =>
+    recordConsumedTicket(verified.ticket.archiveId, job.userId)
+  ).immediate(), job.abort.signal);
   job.ticketReused = wasReused;
   job.ticketResolver?.(verified);
   return { wasReused, previouslyConsumedAt, uses: recorded.uses };
@@ -2595,18 +2636,43 @@ async function runImportJob(job: ImportJob): Promise<void> {
       }
     }
 
+    // Restore assets before publishing rows that reference them. Concurrent
+    // library/avatar requests must never see a restored row with a missing file.
+    emit(job, EventType.USER_IMPORT_PROGRESS, { phase: "files", total: buf.binaryEntryCount });
+    let filesDone = 0;
+    for await (const raw of readNdjson(buf.binaryJournalPath)) {
+      if (job.abort.signal.aborted) throw job.abort.signal.reason ?? new Error("cancelled");
+      const entry = raw as Partial<BufferedBinaryEntry>;
+      if (
+        entry.kind !== "binary" ||
+        typeof entry.bucket !== "string" ||
+        typeof entry.inner !== "string" ||
+        typeof entry.stagingPath !== "string" ||
+        typeof entry.byteSize !== "number"
+      ) {
+        throw new Error("binary entry journal is malformed");
+      }
+      try {
+        await applyBinary(ctx, entry as BufferedBinaryEntry);
+      } catch (err) {
+        throw new Error(`Could not restore ${entry.bucket}/${entry.inner}`, { cause: err });
+      }
+      filesDone++;
+      if ((filesDone & 31) === 0) {
+        emit(job, EventType.USER_IMPORT_PROGRESS, {
+          phase: "files",
+          processed: filesDone,
+          total: buf.binaryEntryCount,
+        });
+        await yieldAndCheck(job.abort.signal);
+      }
+    }
+    emit(job, EventType.USER_IMPORT_PROGRESS, { phase: "files_done", processed: filesDone });
+
     // Bulk-load pattern: temporarily disable FK enforcement so tables can be
     // applied in topological order even when they contain dependency cycles.
     db.run("PRAGMA foreign_keys = OFF");
     fkDisabled = true;
-
-    // Phase 2a: apply images first (binary), then images table rows.
-    // Image FILES go before image ROWS so the row's referenced filename is on
-    // disk when the row inserts. Actually, the FK from characters/personas is
-    // on the row ID — the file's presence isn't enforced by SQLite. So we
-    // can apply all DB rows first and then write files, OR interleave. To
-    // keep the merge non-destructive, apply DB rows in topological order
-    // (Phase 2b), then write binary files (Phase 2c).
 
     // Phase 2b: apply DB rows in topological order.
     for (const table of IMPORT_ORDER) {
@@ -2626,41 +2692,15 @@ async function runImportJob(job: ImportJob): Promise<void> {
     // run by import time, so repair restored rows explicitly before any vector
     // or Cortex consumers can observe them.
     if (tableEntries.has("chat_chunks")) {
-      backfillImportedChatChunkMessageRanges(ctx.userId);
+      await retryImportWrite(() => backfillImportedChatChunkMessageRanges(ctx.userId), ctx.signal);
     }
 
-    // Phase 2c: binary files.
-    emit(job, EventType.USER_IMPORT_PROGRESS, { phase: "files", total: buf.binaryEntryCount });
-    let filesDone = 0;
-    for await (const raw of readNdjson(buf.binaryJournalPath)) {
-      if (job.abort.signal.aborted) throw job.abort.signal.reason ?? new Error("cancelled");
-      const entry = raw as Partial<BufferedBinaryEntry>;
-      if (
-        entry.kind !== "binary" ||
-        typeof entry.bucket !== "string" ||
-        typeof entry.inner !== "string" ||
-        typeof entry.stagingPath !== "string" ||
-        typeof entry.byteSize !== "number"
-      ) {
-        throw new Error("binary entry journal is malformed");
-      }
-      try {
-        await applyBinary(ctx, entry as BufferedBinaryEntry);
-      } catch (err) {
-        // Per-file failure is logged but doesn't kill the job.
-        console.warn(`[user-data import] binary failed (${entry.bucket}/${entry.inner}):`, err);
-      }
-      filesDone++;
-      if ((filesDone & 31) === 0) {
-        emit(job, EventType.USER_IMPORT_PROGRESS, {
-          phase: "files",
-          processed: filesDone,
-          total: buf.binaryEntryCount,
-        });
-        await yieldAndCheck(job.abort.signal);
-      }
-    }
-    emit(job, EventType.USER_IMPORT_PROGRESS, { phase: "files_done", processed: filesDone });
+    await retryImportWrite(() => db.transaction(() => {
+      scrubOrphanForeignKeys(job.userId);
+      scrubMemoryCortexOrphans(job.userId);
+    }).immediate(), ctx.signal);
+    db.run("PRAGMA foreign_keys = ON");
+    fkRestored = true;
 
     // Phase 2d: LanceDB vectors if present and compatible.
     await applyLancedbVectors(ctx, buf, buf.manifest?.embeddingConfig ?? null);
@@ -2703,13 +2743,15 @@ async function runImportJob(job: ImportJob): Promise<void> {
     job.finishedAt = Math.floor(Date.now() / 1000);
     emit(job, EventType.USER_IMPORT_FAILED, { error: job.error, cancelled: job.status === "cancelled" });
   } finally {
-    if (fkDisabled) {
+    if (fkDisabled && !fkRestored) {
       // Scrub orphan FK references introduced by the bulk load before
       // re-arming enforcement. A scrub failure must not strand the server
       // with FKs disabled.
       try {
-        scrubOrphanForeignKeys(job.userId);
-        scrubMemoryCortexOrphans(job.userId);
+        await retryImportWrite(() => db.transaction(() => {
+          scrubOrphanForeignKeys(job.userId);
+          scrubMemoryCortexOrphans(job.userId);
+        }).immediate());
       } catch (err) {
         console.warn("[user-data import] orphan scrub raised:", err);
       }

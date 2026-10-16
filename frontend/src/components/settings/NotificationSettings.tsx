@@ -121,7 +121,7 @@ export default function NotificationSettings() {
               <button
                 className={clsx(styles.actionBtn, styles.actionBtnPrimary)}
                 onClick={handleSubscribe}
-                disabled={subscribing}
+                disabled={subscribing || (registrationKind === 'native' && registrationStatus !== 'ready')}
               >
                 <IconBellRinging size={12} />
                 {subscribing ? t('notifications.subscribing') : t('notifications.enable')}
@@ -229,6 +229,7 @@ export default function NotificationSettings() {
               <span className={styles.deviceName}>
                 {sub.type === 'tauri_desktop'
                   ? `${sub.label || 'Lumiverse Desktop'}${sub.platform ? ` · ${sub.platform}` : ''}`
+                  : sub.type === 'ios_apns' ? sub.label || 'Lumiverse iOS'
                   : parseUserAgent(sub.user_agent, t)}
               </span>
               <span className={styles.deviceDate}>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import type { Dispatch, SetStateAction } from 'react'
 import { wsClient, WS_OPEN } from '@/ws/client'
 import { EventType } from '@/ws/events'
+import { subscribeImportedDataRefresh } from '@/lib/import-data-events'
 import { upsertById } from '@/lib/worldBookList'
 import type { WorldBookChangedPayload, WorldBookDeletedPayload } from '@/types/ws-events'
 import type { WorldBook } from '@/types/api'
@@ -70,10 +71,12 @@ export function useWorldBookListLiveSync({
     const offLibraryChanged = wsClient.on(EventType.WORLD_BOOK_LIBRARY_CHANGED, () => {
       void refreshRef.current?.()
     })
+    const offImport = subscribeImportedDataRefresh(() => { void refreshRef.current?.() })
     return () => {
       offChanged()
       offDeleted()
       offLibraryChanged()
+      offImport()
     }
   }, [])
 

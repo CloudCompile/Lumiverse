@@ -30,9 +30,14 @@ export function resolveFloatWidgetStyle(
   if (fullscreen) return FULLSCREEN_FLOAT_WIDGET_STYLE
 
   return {
-    left: position.x,
-    top: position.y,
+    left: 0,
+    top: 0,
+    transform: floatWidgetTransform(position),
     width: size.width,
     height: size.height,
   }
+}
+
+export function floatWidgetTransform(position: { x: number; y: number }): string {
+  return `translate3d(${position.x}px, ${position.y}px, 0)`
 }

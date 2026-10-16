@@ -231,3 +231,13 @@ export async function fetchProviderList(userId: string, connectionId: string): P
   const provider = getOpenRouterProvider();
   return provider.fetchProviderList(apiKey, connSvc.resolveEffectiveApiUrl(conn));
 }
+
+export async function fetchModelEndpoints(userId: string, connectionId: string, model: string): Promise<OpenRouterProviderEntry[] | null> {
+  const conn = connSvc.getConnection(userId, connectionId);
+  if (!conn || conn.provider !== "openrouter") return null;
+
+  const apiKey = await secretsSvc.getSecret(userId, connSvc.connectionSecretKey(connectionId));
+  if (!apiKey) return null;
+
+  return getOpenRouterProvider().fetchModelEndpoints(apiKey, connSvc.resolveEffectiveApiUrl(conn), model);
+}

@@ -267,6 +267,62 @@
   text-transform: lowercase;
 }
 
+.passwordRecovery {
+  font-size: calc(13px * var(--lumiverse-font-scale, 1));
+  line-height: 1.6;
+  color: var(--lumiverse-text-muted);
+}
+
+.passwordRecoveryToggle {
+  width: fit-content;
+  min-height: 44px;
+  align-content: center;
+  color: var(--lumiverse-primary);
+  cursor: pointer;
+}
+
+.passwordRecoveryToggle:hover {
+  text-decoration: underline;
+}
+
+.passwordRecoveryToggle:focus-visible {
+  outline: 2px solid var(--lumiverse-primary);
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+
+.passwordRecoveryInstructions {
+  padding: 12px 14px;
+  border: 1px solid var(--lumiverse-border);
+  border-radius: 12px;
+  background: var(--lumiverse-fill-hover);
+  overflow-wrap: anywhere;
+}
+
+.passwordRecoveryInstructions p {
+  margin: 0;
+}
+
+.passwordRecoveryInstructions ol {
+  margin: 12px 0;
+  padding-left: 20px;
+  list-style: decimal;
+}
+
+.passwordRecoveryInstructions li + li {
+  margin-top: 8px;
+}
+
+.passwordRecoveryCommand {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--lumiverse-bg-deep, #0a0812);
+  color: var(--lumiverse-text);
+  white-space: pre-wrap;
+  user-select: text;
+}
+
 /* ─── Submit button ──────────────────────────────────────────────────── */
 
 .submitBtn {

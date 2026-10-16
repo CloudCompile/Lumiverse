@@ -44,6 +44,8 @@ export interface DatabaseExecutorOptions {
   startupTimeoutMs?: number;
   runtimePath?: string;
   transport?: "ipc" | "stdio";
+  /** Bootstrap requests may start the child before synchronous initialization ends. */
+  deferBackgroundWork?: boolean;
 }
 
 /** One bounded queue and one native operation at a time per backend database. */
@@ -57,8 +59,10 @@ export class DatabaseExecutor {
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private stopping: Promise<unknown> | null = null;
+  private backgroundWorkEnabled: boolean;
 
   constructor(readonly path: string, private readonly options: DatabaseExecutorOptions = {}, previousClosed?: Promise<void>) {
+    this.backgroundWorkEnabled = !options.deferBackgroundWork;
     if (previousClosed) {
       this.stopping = previousClosed;
       void previousClosed.then(() => {
@@ -108,6 +112,16 @@ export class DatabaseExecutor {
     return this.execute<T>(operation);
   }
 
+  /** Remember the runtime phase across child replacements. Starting background
+   * indexing is idempotent; a lost signal is repaired on the next child spawn.
+   */
+  enableBackgroundWork(): void {
+    this.backgroundWorkEnabled = true;
+    if (!this.ready || this.closed || !this.process) return;
+    try { this.sendMessage!({ type: "start-background" }); }
+    catch { this.transportFailed(this.process); }
+  }
+
   private finish(item: PendingOperation, result: unknown, error?: unknown): void {
     clearTimeout(item.timer);
     if (error) item.reject(error);
@@ -139,10 +153,12 @@ export class DatabaseExecutor {
   private spawn(): void {
     try {
       // The desktop runner also avoids Bun's Windows IPC exit/disconnect gaps.
-      const pipes = (this.options.transport ?? (process.platform === "win32" ? "stdio" : "ipc")) === "stdio";
+      const pipes = this.options.transport === "stdio";
+      // Note: stdio fallback removed for win32 due to Bun 1.4.2 binary stream corruption (PR #39897, #23340).
       let outputDrained: Promise<void> = Promise.resolve();
       const launch = {
-        cmd: bunCmd(this.options.runtimePath ?? join(import.meta.dir, "execution-subprocess.ts"), this.path, ...(pipes ? ["--stdio"] : [])),
+        cmd: bunCmd(this.options.runtimePath ?? join(import.meta.dir, "execution-subprocess.ts"), this.path,
+          ...(pipes ? ["--stdio"] : []), ...(!this.backgroundWorkEnabled ? ["--defer-background"] : [])),
         stderr: "inherit" as const,
         onExit: (child: ReturnType<typeof Bun.spawn>) => {
           // Pipe messages already written before exit must be delivered first.
@@ -207,6 +223,8 @@ export class DatabaseExecutor {
     if (message.type === "ready") {
       this.clearStartup();
       this.ready = true;
+      // Activation can race a child that was spawned in bootstrap mode.
+      if (this.backgroundWorkEnabled) this.enableBackgroundWork();
       this.pump();
       return;
     }
@@ -278,11 +296,20 @@ export class DatabaseExecutor {
     this.retryTimer = null;
     const proc = this.process;
     this.process = null;
+    const sendMessage = this.sendMessage;
     this.sendMessage = null;
     this.ready = false;
     if (!proc) return Promise.resolve();
-    try { proc.kill("SIGKILL"); } catch { /* onExit/exited confirms release */ }
+    // Graceful shutdown: send shutdown message before SIGKILL to avoid disconnect gaps.
+    if (sendMessage) {
+      try { sendMessage({ type: "shutdown" }); } catch { /* ignore */ }
+    }
+    // Give the child a brief window to exit cleanly after shutdown message.
+    const gracefulTimeout = setTimeout(() => {
+      try { proc.kill("SIGKILL"); } catch { /* already exited */ }
+    }, 500);
     const stopping = proc.exited.catch(() => {}).finally(() => {
+      clearTimeout(gracefulTimeout);
       if (this.stopping === stopping) this.stopping = null;
     });
     this.stopping = stopping;
@@ -307,6 +334,7 @@ let checkpointRunning = false;
 let checkpointGeneration = 0;
 let previousExecutorClosed: Promise<void> = Promise.resolve();
 let executionStopped = false;
+let runtimeStarted = false;
 
 export function executeDatabaseOperation<T>(operation: DatabaseOperation, options?: DatabaseExecutionOptions): Promise<T> {
   let db: ReturnType<typeof getDb>;
@@ -322,7 +350,7 @@ export function executeDatabaseOperation<T>(operation: DatabaseOperation, option
     catch (err) { return Promise.reject(err); }
   }
   // A reset must release the old writer before opening its replacement.
-  if (!executor || executor.path !== path) executor = new DatabaseExecutor(path, {}, previousExecutorClosed);
+  if (!executor || executor.path !== path) executor = new DatabaseExecutor(path, { deferBackgroundWork: !runtimeStarted }, previousExecutorClosed);
   return executor.execute<T>(operation, options);
 }
 
@@ -340,6 +368,8 @@ export async function startDatabaseExecution(): Promise<void> {
   const path = getDatabasePath();
   if (path === ":memory:") return;
   await executeDatabaseOperation({ kind: "checkpoint" });
+  runtimeStarted = true;
+  executor?.enableBackgroundWork();
   const generation = ++checkpointGeneration;
   if (checkpointTimer) clearInterval(checkpointTimer);
   checkpointRunning = false;
@@ -374,6 +404,7 @@ export async function startDatabaseExecution(): Promise<void> {
 
 export async function stopDatabaseExecution(): Promise<void> {
   executionStopped = true;
+  runtimeStarted = false;
   checkpointGeneration++;
   checkpointRunning = false;
   if (checkpointTimer) clearInterval(checkpointTimer);

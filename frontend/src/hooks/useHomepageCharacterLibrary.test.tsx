@@ -2,6 +2,7 @@ import { afterAll, afterEach, describe, expect, jest, mock, test } from 'bun:tes
 import { JSDOM } from 'jsdom'
 import { act, createElement } from 'react'
 import type { Root } from 'react-dom/client'
+import { publishImportedDataRefresh } from '@/lib/import-data-events'
 
 const listSummaries = jest.fn()
 const listTags = jest.fn(async () => [])
@@ -207,6 +208,14 @@ describe('useHomepageCharacterLibrary websocket invalidation', () => {
       expect(listSummaries).toHaveBeenCalledTimes(callsBefore + 1)
       expect(listSummaries.mock.calls.at(-1)?.[0]).toMatchObject({ offset: 0, sort: 'recent' })
     }
+
+    const beforeImportRefresh = listSummaries.mock.calls.length
+    await act(async () => {
+      publishImportedDataRefresh()
+      await flush()
+    })
+    expect(listSummaries).toHaveBeenCalledTimes(beforeImportRefresh + 1)
+    expect(listSummaries.mock.calls.at(-1)?.[0]).toMatchObject({ offset: 0, sort: 'recent' })
 
     await act(async () => {
       mountedRoot?.unmount()

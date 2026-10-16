@@ -1,3 +1,4 @@
+import { hasTauriDesktopBridge } from '@/lib/desktopWebView'
 import { useEffect, useMemo, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { publishSsoCompletion } from '@/lib/ssoPopup'
@@ -10,7 +11,7 @@ function sanitizeReturnTo(value: string | null): string {
 }
 
 function closeCompletionWindow() {
-  if ('__TAURI_INTERNALS__' in window) {
+  if (hasTauriDesktopBridge()) {
     // A Tauri window.open target is a native WebviewWindow, which browser
     // window.close() does not consistently destroy on every platform. The
     // native command is deliberately restricted to the invoking SSO popup.

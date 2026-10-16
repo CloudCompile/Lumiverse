@@ -6,6 +6,7 @@ import { getWhistleRuntimeUnavailableReason, getWhistleUnavailableReason, WHISTL
 import { transcribeWhistleAudio } from '../whistle/transcribe'
 import { createFrontendSTTAPI, type FrontendSTTDependencies } from './stt-api'
 import type { SpindleSTTOptions, SpindleSTTProviderOption } from 'lumiverse-spindle-types'
+import { hasIOSNativeBridge } from '../ios-native'
 
 export function createNativeSTTAPI(deps: Pick<FrontendSTTDependencies, 'assertActive' | 'requirePermission' | 'onTeardown'>) {
   const getConfig = (): STTConfig => {
@@ -23,7 +24,7 @@ export function createNativeSTTAPI(deps: Pick<FrontendSTTDependencies, 'assertAc
     const reason = getWhistleUnavailableReason()
     const connection = microphoneReason() ?? connectionReason(getConfig())
     return [
-      { id: 'webspeech', name: 'Web Speech API', onDevice: false, available: isWebSpeechAvailable(),
+      { id: 'webspeech', name: hasIOSNativeBridge() ? 'Apple Speech Recognition' : 'Web Speech API', onDevice: false, available: isWebSpeechAvailable(),
         ...(!isWebSpeechAvailable() ? { unavailableReason: 'webSpeech' } : {}), supportsAudioTranscription: false },
       { id: 'whistle', name: 'Whistle (on this device)', onDevice: true, available: !reason,
         ...(reason ? { unavailableReason: reason } : {}), supportsAudioTranscription: true, languages: WHISTLE_LANGUAGES },

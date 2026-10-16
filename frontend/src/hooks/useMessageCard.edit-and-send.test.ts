@@ -172,9 +172,6 @@ mock.module('@/api/chats', () => ({
 mock.module('@/api/generate', () => ({
   generateApi: { start: generateStart },
 }))
-mock.module('@/lib/loom/runtimeProfile', () => ({
-  shouldForceLoomRuntimePreset: () => false,
-}))
 let nextRequestId = 0
 mock.module('@/lib/uuid', () => ({
   generateUUID: () => `request-${++nextRequestId}`,
