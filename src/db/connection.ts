@@ -2,7 +2,8 @@ import { Database } from "bun:sqlite";
 import { env } from "../env";
 import { mkdirSync, existsSync } from "fs";
 import { dirname } from "path";
-import { applyBaseDatabasePragmas, type DatabasePragmaOptions } from "./maintenance";
+import { applyBaseDatabasePragmas, type DatabasePragmaOptions as BaseDatabasePragmaOptions } from "./maintenance";
+import { isSqliteCorruptionError, recoverDatabaseFile } from "./corruption";
 
 /** Transactions must finish before yielding control to unrelated requests. */
 class ManagedDatabase extends Database {
@@ -32,6 +33,26 @@ let dbPathResolved: string | null = null;
 let _generation = 0;
 const _resetListeners = new Set<() => void>();
 
+export interface DatabasePragmaOptions extends BaseDatabasePragmaOptions {
+  /**
+   * Recover automatically when the file is malformed (`SQLITE_CORRUPT` /
+   * `SQLITE_NOTADB`) instead of failing startup. Defaults to true; set false
+   * for read-only probes that must never touch the file.
+   */
+  autoRecover?: boolean;
+}
+
+function openManagedDatabase(dbPath: string, options: DatabasePragmaOptions): ManagedDatabase {
+  const candidate = new ManagedDatabase(dbPath);
+  try {
+    applyBaseDatabasePragmas(candidate, options);
+  } catch (err) {
+    candidate.close(true);
+    throw err;
+  }
+  return candidate;
+}
+
 export function initDatabase(path?: string, options: DatabasePragmaOptions = {}): Database {
   if (db) return db;
 
@@ -41,13 +62,25 @@ export function initDatabase(path?: string, options: DatabasePragmaOptions = {})
     mkdirSync(dir, { recursive: true });
   }
 
-  const candidate = new ManagedDatabase(dbPath);
+  let candidate: ManagedDatabase;
   try {
-    applyBaseDatabasePragmas(candidate, options);
+    candidate = openManagedDatabase(dbPath, options);
   } catch (err) {
-    candidate.close(true);
-    throw err;
+    // A malformed or non-database file must not be a permanent startup wall.
+    // Quarantine the broken file (never delete it) and rebuild from whatever
+    // tables are still readable, then retry the open once.
+    if (options.autoRecover === false || !isSqliteCorruptionError(err) || dbPath === ":memory:") {
+      throw err;
+    }
+    console.error(`[db] Database at ${dbPath} is unreadable (${(err as { code?: string }).code ?? "corrupt"}). Attempting automatic recovery...`);
+    const recovery = recoverDatabaseFile(dbPath);
+    if (recovery.quarantinedPath) {
+      console.warn(`[db] Corrupt database preserved at ${recovery.quarantinedPath}`);
+    }
+    console.warn(`[db] Automatic recovery: ${recovery.detail}.`);
+    candidate = openManagedDatabase(dbPath, options);
   }
+
   db = candidate;
   dbPathResolved = dbPath;
   _generation++;

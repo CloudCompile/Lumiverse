@@ -4,6 +4,7 @@ import { totalmem } from "node:os";
 import { dirname } from "node:path";
 import { isMainThread } from "node:worker_threads";
 import { env } from "../env";
+import { isSqliteCorruptionError } from "./corruption";
 
 const MiB = 1024 * 1024;
 const DEFAULT_DB_PATH = `${env.dataDir}/lumiverse.db`;
@@ -555,8 +556,8 @@ export function runStartupDatabaseMaintenance(
   try {
     db.run("PRAGMA optimize");
   } catch (err: any) {
-    if (err?.code && typeof err.code === "string" && err.code.startsWith("SQLITE_CORRUPT")) {
-      console.warn(`[db] WARNING: SQLite database disk image is malformed (${err.code}) during startup optimize. Entering recovery path...`);
+    if (isSqliteCorruptionError(err)) {
+      console.warn(`[db] WARNING: SQLite database is corrupt (${err?.code ?? err?.errno ?? "unknown"}) during startup optimize. Entering recovery path...`);
       healCorruptDatabase(db, dbPath);
       
       // Try again after healing
@@ -700,8 +701,8 @@ export function runDatabaseMaintenance(
       db.run("PRAGMA optimize");
     }
   } catch (err: any) {
-    if (err?.code && typeof err.code === "string" && err.code.startsWith("SQLITE_CORRUPT")) {
-      console.warn(`[db] WARNING: SQLite database disk image is malformed (${err.code}) during periodic maintenance. Entering recovery path...`);
+    if (isSqliteCorruptionError(err)) {
+      console.warn(`[db] WARNING: SQLite database is corrupt (${err?.code ?? err?.errno ?? "unknown"}) during periodic maintenance. Entering recovery path...`);
       healCorruptDatabase(db, options.dbPath);
       // Skip the rest of the maintenance this tick; we'll try again next time
     } else {

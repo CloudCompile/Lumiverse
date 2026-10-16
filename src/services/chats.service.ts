@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { shieldMessageLiterals } from "../macros/message-literals";
 import { getDatabasePath, getDb } from "../db/connection";
 import { healCorruptDatabase } from "../db/maintenance";
+import { isSqliteCorruptionError } from "../db/corruption";
 import { eventBus } from "../ws/bus";
 import { EventType } from "../ws/events";
 import { getCharacter, LANDING_PERSPECTIVE_LAYERS_KEY, normalizeLandingPerspectiveLayers, getCharacterAsync } from "./characters.service";
@@ -149,12 +150,6 @@ export function getCharacterVoiceOverride(
   const chars = (overrides as any).characters;
   if (!chars || typeof chars !== "object") return null;
   return parseVoiceRef(chars[characterId]);
-}
-
-function isSqliteCorruptionError(err: any): boolean {
-  return err?.errno === 11
-    || (typeof err?.code === "string" && err.code.startsWith("SQLITE_CORRUPT"))
-    || (typeof err?.message === "string" && /database disk image is malformed/i.test(err.message));
 }
 
 function withRecentChatRecovery<T>(label: string, fn: () => T): T {

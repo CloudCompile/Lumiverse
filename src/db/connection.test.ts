@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { mkdtempSync, rmSync, readFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { closeDatabase, getDb, initDatabase } from "./connection";
@@ -98,5 +98,25 @@ describe("managed SQLite connections", () => {
       if (blocker.inTransaction) blocker.exec("ROLLBACK");
       blocker.close(true);
     }
+  });
+
+  test("recovers from a malformed database file instead of failing startup", () => {
+    const path = join(directory, "malformed.db");
+    writeFileSync(path, Buffer.from("not a sqlite database, just bytes".repeat(20)));
+
+    const db = initDatabase(path);
+
+    // A usable database is now published, and the broken file is preserved.
+    expect(db.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "wal" });
+    expect(readdirSync(directory).some((name) => name.includes(".corrupt-"))).toBe(true);
+  });
+
+  test("rejects a malformed file when autoRecover is disabled", () => {
+    const path = join(directory, "malformed-strict.db");
+    writeFileSync(path, Buffer.from("not a sqlite database, just bytes".repeat(20)));
+
+    expect(() => initDatabase(path, { autoRecover: false })).toThrow();
+    expect(() => getDb()).toThrow("not initialized");
+    expect(readdirSync(directory).some((name) => name.includes(".corrupt-"))).toBe(false);
   });
 });

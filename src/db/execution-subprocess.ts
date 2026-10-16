@@ -58,7 +58,7 @@ process.on('exit', () => {
 });
 
 try {
-  db = initDatabase(path, { busyTimeoutMs: 100, automaticCheckpoint: false, allowMmap: false });
+  db = initDatabase(path, { busyTimeoutMs: 100, automaticCheckpoint: false, allowMmap: false, autoRecover: false });
   if (!process.argv.includes("--defer-background")) startBackgroundWork();
   send({ type: "ready" });
 } catch (err) {

@@ -22,7 +22,7 @@
  * with explicit mode flags can fail on non-POSIX filesystems.
  */
 
-import { mkdirSync, chmodSync } from "node:fs";
+import { mkdirSync, chmodSync, existsSync, renameSync } from "node:fs";
 import { dirname } from "node:path";
 
 const MAGIC = new Uint8Array([0x89, 0x4c, 0x4d, 0x56]); // \x89LMV
@@ -71,6 +71,20 @@ export function constantTimeEqual(a: Uint8Array, b: Uint8Array): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
   return diff === 0;
+}
+
+/**
+ * Raised when an identity file exists but cannot be trusted: wrong size, bad
+ * magic/version, or a failed HMAC integrity check. Callers distinguish this
+ * from "file missing" because a corrupt file needs quarantine-and-rebuild
+ * rather than fresh generation.
+ */
+export class IdentityFileCorruptError extends Error {
+  readonly code = "IDENTITY_CORRUPT";
+  constructor(message: string) {
+    super(message);
+    this.name = "IdentityFileCorruptError";
+  }
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────
@@ -141,19 +155,19 @@ export async function readIdentityFile(filePath: string): Promise<Uint8Array> {
   const file = new Uint8Array(buffer);
 
   if (file.length !== FILE_SIZE) {
-    throw new Error(`Identity file is ${file.length} bytes, expected ${FILE_SIZE}`);
+    throw new IdentityFileCorruptError(`Identity file is ${file.length} bytes, expected ${FILE_SIZE}`);
   }
 
   // Validate magic
   for (let i = 0; i < MAGIC.length; i++) {
     if (file[i] !== MAGIC[i]) {
-      throw new Error("Not a Lumiverse identity file (bad magic)");
+      throw new IdentityFileCorruptError("Not a Lumiverse identity file (bad magic)");
     }
   }
 
   // Validate version
   if (file[4] !== VERSION) {
-    throw new Error(`Unsupported identity file version: ${file[4]}`);
+    throw new IdentityFileCorruptError(`Unsupported identity file version: ${file[4]}`);
   }
 
   const salt = file.slice(8, 40);
@@ -167,10 +181,75 @@ export async function readIdentityFile(filePath: string): Promise<Uint8Array> {
   // Verify integrity
   const expectedHmac = await hmacSha256(key, salt);
   if (!constantTimeEqual(storedHmac, expectedHmac)) {
-    throw new Error("Identity file integrity check failed — file may be corrupted");
+    throw new IdentityFileCorruptError("Identity file integrity check failed — file may be corrupted");
   }
 
   return key;
+}
+
+/**
+ * Move a corrupt identity file aside so a replacement can be written at the
+ * original path. The original is preserved (never deleted) because it is the
+ * only thing that can still decrypt existing secrets if it is repaired offline.
+ */
+export function quarantineIdentityFile(filePath: string): string | null {
+  if (!existsSync(filePath)) return null;
+  const target = `${filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  try {
+    renameSync(filePath, target);
+    return target;
+  } catch {
+    return null;
+  }
+}
+
+export interface IdentityRecoveryResult {
+  key: Uint8Array;
+  /** Where the unreadable identity file was preserved, when it could be moved. */
+  quarantinedPath: string | null;
+  /** True when the replacement key came from ENCRYPTION_KEY rather than a new random key. */
+  rebuiltFromEnvKey: boolean;
+}
+
+/**
+ * Rebuild an unreadable identity file.
+ *
+ * When `ENCRYPTION_KEY` is still present it is authoritative: the operator has
+ * the real key, so we re-seal it into a fresh file and existing secrets keep
+ * decrypting. Without it there is no way to recover the old key, so a new
+ * random identity is generated and the caller must warn that previously
+ * encrypted secrets can no longer be decrypted.
+ */
+export async function rebuildIdentityFile(
+  filePath: string,
+  envKeyHex: string,
+): Promise<IdentityRecoveryResult> {
+  const quarantinedPath = quarantineIdentityFile(filePath);
+
+  if (envKeyHex) {
+    const key = hexToBytes(envKeyHex);
+    await createIdentityFile(filePath, key);
+    return { key, quarantinedPath, rebuiltFromEnvKey: true };
+  }
+
+  const key = await createIdentityFile(filePath);
+  return { key, quarantinedPath, rebuiltFromEnvKey: false };
+}
+
+/**
+ * Whether an identity file exists but is not usable (wrong size, bad magic, or
+ * failed integrity). Returns the reason so the caller can log it; returns null
+ * when the file is absent or valid.
+ */
+export async function inspectIdentityFile(filePath: string): Promise<string | null> {
+  if (!existsSync(filePath)) return null;
+  try {
+    await readIdentityFile(filePath);
+    return null;
+  } catch (err) {
+    if (err instanceof IdentityFileCorruptError) return err.message;
+    return err instanceof Error ? err.message : String(err);
+  }
 }
 
 /**
@@ -214,15 +293,17 @@ export interface ResolvedIdentity {
   key: Uint8Array;
   /** Hex representation for backwards-compat APIs */
   keyHex: string;
-  source: "file" | "env-migrated" | "env-ephemeral" | "generated";
+  source: "file" | "env-migrated" | "env-ephemeral" | "generated" | "recovered";
 }
 
 /**
  * Resolve the encryption identity using the priority chain:
  *
- * 1. Identity file exists → use it
- * 2. ENCRYPTION_KEY env var set → migrate to identity file, use it
- * 3. Neither → generate new identity file
+ * 1. Identity file exists and is readable → use it
+ * 2. Identity file exists but is corrupt → quarantine it and rebuild, reusing
+ *    ENCRYPTION_KEY when present so existing secrets stay decryptable
+ * 3. ENCRYPTION_KEY env var set → migrate to identity file, use it
+ * 4. Neither → generate new identity file
  *
  * @param identityPath  Full path to the identity file
  * @param envKeyHex     Value of ENCRYPTION_KEY env var (may be empty)
@@ -230,8 +311,30 @@ export interface ResolvedIdentity {
 export async function resolveIdentity(identityPath: string, envKeyHex: string): Promise<ResolvedIdentity> {
   // 1. Identity file exists
   if (await Bun.file(identityPath).exists()) {
-    const key = await readIdentityFile(identityPath);
-    return { key, keyHex: bytesToHex(key), source: "file" };
+    try {
+      const key = await readIdentityFile(identityPath);
+      return { key, keyHex: bytesToHex(key), source: "file" };
+    } catch (err) {
+      if (!(err instanceof IdentityFileCorruptError)) throw err;
+
+      // The file is unusable. Rebuild rather than refusing to start: a corrupt
+      // identity file used to make the server completely unbootable.
+      console.error(`[identity] Identity file is corrupt (${err.message}). Attempting automatic recovery...`);
+      const recovered = await rebuildIdentityFile(identityPath, envKeyHex);
+      if (recovered.quarantinedPath) {
+        console.warn(`[identity] Corrupt identity file preserved at ${recovered.quarantinedPath}`);
+      }
+      if (recovered.rebuiltFromEnvKey) {
+        console.warn("[identity] Rebuilt identity file from ENCRYPTION_KEY. Existing secrets remain readable.");
+      } else {
+        console.error(
+          "[identity] Rebuilt identity file with a NEW random key. Secrets encrypted with the "
+            + "previous identity can no longer be decrypted and must be re-entered. Restore the "
+            + "quarantined file (or set ENCRYPTION_KEY) to recover them.",
+        );
+      }
+      return { key: recovered.key, keyHex: bytesToHex(recovered.key), source: "recovered" };
+    }
   }
 
   // 2. Env var set — migrate to identity file
