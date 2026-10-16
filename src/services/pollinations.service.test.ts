@@ -119,6 +119,15 @@ test("routes validate required inputs", async () => {
   expect((await app.request("/pollinations/device/poll", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_code: "device" }) })).status).toBe(400);
 });
 
+test("device routes answer malformed JSON with 400 instead of an unhandled 500", async () => {
+  mockConnection();
+  const app = routes();
+  const init = { method: "POST", headers: { "Content-Type": "application/json" }, body: "{not json" };
+  const poll = await app.request("/pollinations/device/poll", init);
+  expect(poll.status).toBe(400);
+  expect(await poll.json()).toEqual({ error: "device_code is required" });
+});
+
 test("routes expose a pending device poll and store the key once approved", async () => {
   mockConnection();
   const setKey = spy(connSvc, "setConnectionApiKey").mockResolvedValue(undefined);

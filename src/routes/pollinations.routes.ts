@@ -33,7 +33,7 @@ app.post("/device/start", async (c) => {
  */
 app.post("/device/poll", async (c) => {
   const userId = c.get("userId");
-  const body = await c.req.json();
+  const body = await c.req.json().catch(() => ({}));
   const deviceCode = String(body?.device_code || "").trim();
   if (!deviceCode) return c.json({ error: "device_code is required" }, 400);
 
