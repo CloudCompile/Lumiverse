@@ -6,7 +6,7 @@ import {
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
   GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database,
-  FolderTree,
+  FolderTree, Aperture,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -36,6 +36,7 @@ import CouncilWorkspace from '@/components/panels/CouncilWorkspace'
 import { councilViewForTab, resolveCouncilTabId } from './council-navigation'
 import WorldInfoFeedback from '@/components/panels/WorldInfoFeedback'
 import ImageGenPanel from '@/components/panels/ImageGenPanel'
+import ImageStudioPanel from '@/components/panels/image-studio/ImageStudioPanel'
 import WallpaperPanel from '@/components/panels/WallpaperPanel'
 import BranchTreePanel from '@/components/panels/BranchTreePanel'
 import RegexPanel from '@/components/panels/RegexPanel'
@@ -365,6 +366,15 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabHeaderTitle: 'Image Gen',
     keywords: ['image', 'generation', 'scene', 'art', 'picture', 'ai', 'background', 'novelai', 'nai', 'dalle', 'illustration'],
     mount: (root) => mountReactComponent(root, <ImageGenPanel />),
+  },
+  {
+    id: 'imagestudio',
+    shortName: 'Studio',
+    tabName: 'Image Studio',
+    tabDescription: 'Edit, crop and generate avatars, greeting images and gallery art',
+    tabIcon: Aperture,
+    keywords: ['studio', 'avatar', 'greeting', 'gallery', 'crop', 'generate', 'art', 'portrait', 'reference', 'img2img'],
+    mount: (root) => mountReactComponent(root, <ImageStudioPanel />),
   },
   {
     id: 'wallpaper',
