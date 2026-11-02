@@ -6,6 +6,7 @@ import {
   Users, Drama, PenTool, MessageCircle, FileText, Brain, ScrollText,
   MessageSquareReply, Image, Palette, Puzzle, Terminal,
   GitBranch, Globe, Wallpaper, Replace, Library, Feather, Database,
+  FolderTree,
 } from 'lucide-react'
 import { IconUsersGroup } from '@tabler/icons-react'
 import { useStore } from '@/store'
@@ -19,6 +20,7 @@ import ErrorBoundary from '@/components/shared/ErrorBoundary'
 import { RouterContextBridge } from './router-bridge'
 import CharacterProfile from '@/components/panels/CharacterProfile'
 import CharacterBrowser from '@/components/panels/CharacterBrowser'
+import FoldersPanel from '@/components/panels/folders/FoldersPanel'
 import PersonaManager from '@/components/panels/PersonaManager'
 import PresetManager from '@/components/panels/PresetManager'
 import LoomBuilder from '@/components/panels/LoomBuilder'
@@ -215,6 +217,15 @@ export const DRAWER_TABS: DrawerTabEntry[] = [
     tabHeaderTitle: 'Characters',
     keywords: ['character', 'list', 'import', 'card', 'browse', 'export', 'png', 'charx', 'gallery', 'switch', 'select'],
     mount: (root) => mountReactComponent(root, <CharacterBrowser />),
+  },
+  {
+    id: 'folders',
+    shortName: 'Folders',
+    tabName: 'Folders',
+    tabDescription: 'Organize your character cards into folders',
+    tabIcon: FolderTree,
+    keywords: ['folders', 'folder', 'organize', 'sort', 'categorize', 'move', 'cards', 'library', 'batch', 'ai'],
+    mount: (root) => mountReactComponent(root, <FoldersPanel />),
   },
   {
     id: 'personas',
