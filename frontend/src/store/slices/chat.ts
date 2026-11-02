@@ -1,4 +1,5 @@
 import type { StateCreator } from 'zustand'
+import { sharedReadScope } from '@/lib/shared-read'
 import type { ChatSlice } from '@/types/store'
 import type { Message } from '@/types/api'
 import { settingsApi } from '@/api/settings'
@@ -141,6 +142,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     activeChatWallpaper: null,
     activeChatAvatarId: null,
     activeChatMetadata: null,
+    activeChatLoadedCharacterIds: null,
     messages: [],
     isStreaming: false,
     streamingNavigationPaused: false,
@@ -158,8 +160,9 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     totalChatLength: 0,
     impersonateDraftContent: null,
     landingRecentChats: null,
+    landingRecentChatsScope: null,
 
-    setLandingRecentChats: (result) => set({ landingRecentChats: result }),
+    setLandingRecentChats: (result) => set({ landingRecentChats: result, landingRecentChatsScope: result ? sharedReadScope() : null }),
 
     setActiveChat: (chatId, characterId = null, hydration) => {
       generationEpoch++
@@ -191,6 +194,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
         activeChatWallpaper: hydration?.wallpaper ?? null,
         activeChatAvatarId: avatarId,
         activeChatMetadata: metadata,
+        activeChatLoadedCharacterIds: null,
         messages: hydration?.messages ?? [],
         isStreaming: false,
         streamingNavigationPaused: false,
@@ -220,6 +224,7 @@ export const createChatSlice: StateCreator<ChatSlice> = (set, get) => {
     },
 
     setActiveChatWallpaper: (wallpaper) => set({ activeChatWallpaper: wallpaper }),
+    setActiveChatLoadedCharacterIds: (ids) => set({ activeChatLoadedCharacterIds: ids }),
 
     setActiveChatAvatarId: (imageId) => set({ activeChatAvatarId: imageId }),
 

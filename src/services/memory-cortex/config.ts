@@ -174,7 +174,11 @@ export interface MemoryCortexConfig {
   formatterMode: "shadow" | "attributed" | "clinical" | "minimal";
   /** Render the Long-Term Memory block with the user's chat memory templates */
   useChatMemoryFormatting: boolean;
-  /** Max tokens for all cortex-injected content */
+  /** Replace complete source spans with saved scene summaries during prompt assembly. */
+  replaceConsolidatedMessagesInContext: boolean;
+  /** Prefer saved arc summaries over the scenes/raw messages they cover. */
+  replaceArcSummariesInContext: boolean;
+  /** Max tokens for retrieved Cortex content. History replacements use the chat context budget. */
   contextTokenBudget: number;
 
   /** Max milliseconds to wait for cortex retrieval during prompt assembly.
@@ -299,6 +303,8 @@ export const DEFAULT_CORTEX_CONFIG: MemoryCortexConfig = {
   },
   formatterMode: "shadow",
   useChatMemoryFormatting: true,
+  replaceConsolidatedMessagesInContext: false,
+  replaceArcSummariesInContext: false,
   contextTokenBudget: 600,
   retrievalTimeoutMs: 60000,
   sidecarTimeoutMs: 60000,
@@ -716,6 +722,8 @@ export function normalizeCortexConfig(
     useChatMemoryFormatting: typeof input.useChatMemoryFormatting === "boolean"
       ? input.useChatMemoryFormatting
       : defaults.useChatMemoryFormatting,
+    replaceConsolidatedMessagesInContext: input.replaceConsolidatedMessagesInContext === true,
+    replaceArcSummariesInContext: input.replaceArcSummariesInContext === true,
     contextTokenBudget: input.contextTokenBudget ?? defaults.contextTokenBudget,
     retrievalTimeoutMs: input.retrievalTimeoutMs ?? defaults.retrievalTimeoutMs,
     sidecarTimeoutMs: input.sidecarTimeoutMs ?? defaults.sidecarTimeoutMs,
@@ -734,9 +742,9 @@ export function normalizeCortexConfig(
     },
     consolidation: {
       enabled: input.consolidation?.enabled ?? defaults.consolidation.enabled,
-      chunkThreshold: input.consolidation?.chunkThreshold ?? defaults.consolidation.chunkThreshold,
-      chunksPerConsolidation: input.consolidation?.chunksPerConsolidation ?? defaults.consolidation.chunksPerConsolidation,
-      arcThreshold: input.consolidation?.arcThreshold ?? defaults.consolidation.arcThreshold,
+      chunkThreshold: Math.floor(boundedNumber(input.consolidation?.chunkThreshold, 1, Number.MAX_SAFE_INTEGER, defaults.consolidation.chunkThreshold)),
+      chunksPerConsolidation: Math.floor(boundedNumber(input.consolidation?.chunksPerConsolidation, 1, Number.MAX_SAFE_INTEGER, defaults.consolidation.chunksPerConsolidation)),
+      arcThreshold: Math.floor(boundedNumber(input.consolidation?.arcThreshold, 1, Number.MAX_SAFE_INTEGER, defaults.consolidation.arcThreshold)),
       useSidecar: input.consolidation?.useSidecar ?? defaults.consolidation.useSidecar,
       maxTokensPerSummary: input.consolidation?.maxTokensPerSummary ?? defaults.consolidation.maxTokensPerSummary,
     },

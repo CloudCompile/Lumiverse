@@ -268,7 +268,7 @@ export function verifyMacOSPayload(root: string, request: LinuxReleaseRequest, b
     || typeof build.nativePublished !== "boolean") throw new Error("Invalid macOS bundle metadata");
   const entry = `${build.applicationName}/Contents/MacOS/lumiverse-server`;
   const listing = Bun.spawnSync(["tar", "-tzf", archive], { stdout: "pipe", stderr: "pipe" });
-  if (listing.exitCode !== 0 || listing.stdout.toString().split("\n").filter(path => path === entry).length !== 1) {
+  if (listing.exitCode !== 0 || listing.stdout.toString().split(/\r?\n/).filter(path => path === entry).length !== 1) {
     throw new Error("macOS application archive does not contain exactly one bundled server");
   }
   const extraction = Bun.spawnSync(["tar", "-xOzf", archive, entry], { stdout: "pipe", stderr: "pipe" });

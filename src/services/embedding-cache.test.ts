@@ -65,6 +65,19 @@ describe("EmbeddingCache disk persistence", () => {
     expect(cache.get("key-54")).toEqual([54]);
   });
 
+  test("recreates disk backing when the database connection is replaced", () => {
+    const cache = new EmbeddingCache();
+    cache.set("old-database", [1]);
+    closeDatabase();
+    initDatabase(join(directory, "replacement.db"));
+    cache.clearMemory();
+
+    cache.set("new-database", [2]);
+    cache.clearMemory();
+    expect(cache.get("new-database")).toEqual([2]);
+    expect(cache.get("old-database")).toBeNull();
+  });
+
   test("batch persistence produces fewer WAL frames than individual writes", () => {
     const values = Array.from({ length: 100 }, (_, index) => ({
       key: `key-${index}`,

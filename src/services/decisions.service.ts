@@ -43,13 +43,13 @@ export async function evaluateDecision<const Q extends Record<string, DecisionQu
 
 /** Internal batch consumer; the public evaluate API continues to require
  * every answer to be valid. Credentials, ownership and deadlines are shared. */
-export async function evaluateDecisionAnswers(userId: string, input: DecisionEvaluationInput, signal?: AbortSignal): Promise<DecisionAnswerReport> {
-  return evaluateDecisionRequest(userId, input, evaluateProviderDecisionAnswers, signal);
+export async function evaluateDecisionAnswers(userId: string, input: DecisionEvaluationInput, signal?: AbortSignal, onDispatch?: () => void): Promise<DecisionAnswerReport> {
+  return evaluateDecisionRequest(userId, input, evaluateProviderDecisionAnswers, signal, onDispatch);
 }
 
 async function evaluateDecisionRequest<T>(userId: string, input: DecisionEvaluationInput,
-  evaluate: (profile: Parameters<typeof evaluateProviderDecision>[0], apiKey: string, input: DecisionEvaluationInput, signal: AbortSignal) => Promise<T>,
-  signal?: AbortSignal): Promise<T> {
+  evaluate: (profile: Parameters<typeof evaluateProviderDecision>[0], apiKey: string, input: DecisionEvaluationInput, signal: AbortSignal, onDispatch?: () => void) => Promise<T>,
+  signal?: AbortSignal, onDispatch?: () => void): Promise<T> {
   validateDecisionInput(input);
   signal?.throwIfAborted();
   const profile = input.connection_id ? connections.getConnection(userId, input.connection_id) : connections.getDefaultConnection(userId);
@@ -61,7 +61,7 @@ async function evaluateDecisionRequest<T>(userId: string, input: DecisionEvaluat
   try {
     const resolved = await resolveImageAssets(userId, input, effectiveSignal);
     effectiveSignal.throwIfAborted();
-    return await evaluate(profile, apiKey, resolved, effectiveSignal);
+    return await evaluate(profile, apiKey, resolved, effectiveSignal, onDispatch);
   } catch (error) {
     if (signal?.aborted) throw new Error("AbortError: Decision evaluation cancelled");
     if (timeout.aborted) throw new DecisionTimeoutError("Decision evaluation timed out after 30 seconds");

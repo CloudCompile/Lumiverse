@@ -1,3 +1,5 @@
+import { createThemeAuthoringRuntime } from './theme-authoring-runtime';
+import { createThemeReferencesRuntime } from './theme-references-runtime';
 import { createOrganizationRuntime } from './connection-organization-runtime';
 import type { OrganizationWorkerMessage, OrganizationHostMessage, BackendOrganizationAPI } from './connection-organization-contract';
 /**
@@ -320,6 +322,7 @@ type ChatAppendMessageOptions =
 type SpindleUserRole = "operator" | "admin" | "user";
 
 type RuntimeWorkerToHost =
+  | import("./uuid-contract").UUIDWorkerMessage
   | import("./live-activities-contract").LiveActivityWorkerMessage
   | { type: "message_generation_begin"; requestId: string; input: import("./message-generation").BeginMessageGenerationInput }
   | { type: "message_generation_finish" | "message_generation_abort"; requestId: string; sessionId: string }
@@ -758,7 +761,8 @@ interface RuntimeLumiverseVersionInfo {
   branch: string | null;
 }
 
-type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop" | "generate" | "images" | "regex_scripts" | "version" | "liveActivities"> & {
+type RuntimeSpindleAPI = Omit<SpindleAPI, "presets" | "world_books" | "runtimeState" | "desktop" | "generate" | "images" | "regex_scripts" | "version" | "liveActivities" | "uuid"> & {
+  readonly uuid: import("./uuid-contract").SpindleUUIDAPI;
   liveActivities: import("./live-activities-contract").SpindleLiveActivitiesAPI;
   chat: SpindleAPI["chat"] & {
     setSwipeVariables(chatId: string, messageId: string, input: import("../db/swipe-variable-state").SetSwipeVariablesInput): Promise<boolean>;
@@ -1617,6 +1621,14 @@ async function getChatMessages(
 const organizationRuntime = createOrganizationRuntime({ request, send: post });
 
 const spindleApi: RuntimeSpindleAPI = {
+  uuid: {
+    async v4(): Promise<string> {
+      return await request({ type: "uuid_generate", requestId: crypto.randomUUID(), version: 4 }) as string;
+    },
+    async v7(): Promise<string> {
+      return await request({ type: "uuid_generate", requestId: crypto.randomUUID(), version: 7 }) as string;
+    },
+  },
   decisions: {
     async listProviders(options) {
       return await request({ type: "decisions_providers", requestId: crypto.randomUUID(), userId: options?.userId }) as Awaited<ReturnType<SpindleDecisionsAPI["listProviders"]>>;
@@ -2683,6 +2695,8 @@ const spindleApi: RuntimeSpindleAPI = {
   },
 
   theme: {
+    authoring: createThemeAuthoringRuntime(request, assertMutationAllowed),
+    references: createThemeReferencesRuntime(request),
     async apply(overrides: { variables?: Record<string, string>; variablesByMode?: { dark?: Record<string, string>; light?: Record<string, string> } }, userId?: string): Promise<void> {
       assertMutationAllowed("spindle.theme.apply()");
       const requestId = crypto.randomUUID();

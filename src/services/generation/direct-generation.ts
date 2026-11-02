@@ -52,6 +52,9 @@ export interface RawGenerateInput {
 }
 
 export interface QuietGenerateInput {
+  /** Consume a provider stream while returning the complete validated result. */
+  stream?: boolean;
+  onStreamActivity?: (phase: "waiting" | "thinking" | "responding") => void;
   messages: LlmMessage[];
   connection_id?: string;
   parameters?: GenerationParameters;
@@ -109,6 +112,7 @@ async function resolveRawProviderAndKey(
 async function consumeStream(
   stream: AsyncGenerator<StreamChunk, void, unknown>,
   userId?: string,
+  onActivity?: QuietGenerateInput["onStreamActivity"],
 ): Promise<GenerationResponse> {
   let content = "";
   let reasoning = "";
@@ -125,6 +129,8 @@ async function consumeStream(
     ? wrapDelimitedReasoningForUser(userId, stream)
     : stream;
   for await (const chunk of source) {
+    if (chunk.reasoning) onActivity?.("thinking");
+    if (chunk.token || chunk.tool_calls?.length) onActivity?.("responding");
     if (chunk.token) content += chunk.token;
     if (chunk.reasoning) reasoning += chunk.reasoning;
     if (chunk.usage) usage = chunk.usage;
@@ -301,10 +307,16 @@ export async function quietGenerate(
     leaseOptionsFor(userId, apiUrl, input.signal, options, "background", "quiet-generate"),
     async (lease) => {
       const signal = withLeaseAbort(request.signal, lease);
-      if (request.tools && request.tools.length > 0) {
+      if (input.stream || (request.tools && request.tools.length > 0)) {
         const result = await consumeStream(
-          provider.generateStream(apiKey, apiUrl, { ...request, signal, stream: true }),
+          provider.generateStream(apiKey, apiUrl, { ...request, signal, stream: true,
+            onProviderRequest: input.onStreamActivity ? (snapshot) => {
+              input.onStreamActivity!("waiting");
+              return request.onProviderRequest?.(snapshot);
+            } : request.onProviderRequest,
+            onResponseActivity: () => input.onStreamActivity?.("responding") }),
           userId,
+          input.onStreamActivity,
         );
         throwIfGenerationAborted(signal);
         return result;

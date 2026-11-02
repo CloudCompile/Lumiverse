@@ -9,6 +9,7 @@
  *   - Cortex rebuild trigger
  */
 
+import { CortexActivityTracker, getCortexActivity } from "../services/memory-cortex/activity";
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { getDb } from "../db/connection";
@@ -85,20 +86,18 @@ async function resolveCortexParticipants(userId: string, chat: ReturnType<typeof
 
   const character = chat.character_id ? (await getCharacterAsync(userId, chat.character_id)) : null;
   if (character) {
-    const normalized = memoryCortex.normalizeCharacterName(character.name);
-    characterNames.push(normalized);
-    aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, character.description, character.personality, character.scenario));
+    const names = memoryCortex.getCortexCharacterNames(character.name);
+    characterNames.push(...names);
+    if (names.length === 1) aliasMaps.push(memoryCortex.extractDescriptionAliases(names[0]!, character.description, character.personality, character.scenario));
   }
 
   if (chat.metadata?.character_ids) {
     for (const cid of chat.metadata.character_ids as string[]) {
       const ch = await getCharacterAsync(userId, cid);
       if (!ch) continue;
-      const normalized = memoryCortex.normalizeCharacterName(ch.name);
-      if (!characterNames.includes(normalized)) {
-        characterNames.push(normalized);
-        aliasMaps.push(memoryCortex.extractDescriptionAliases(normalized, ch.description, ch.personality));
-      }
+      const names = memoryCortex.getCortexCharacterNames(ch.name);
+      for (const name of names) if (!characterNames.includes(name)) characterNames.push(name);
+      if (names.length === 1) aliasMaps.push(memoryCortex.extractDescriptionAliases(names[0]!, ch.description, ch.personality));
     }
   }
 
@@ -303,6 +302,13 @@ function logCortexRebuildTrigger(
   );
 }
 
+function readCortexRequestTiming(body: unknown, requestedAt: number) {
+  const clientRequestId = isRecord(body) && typeof body.requestId === "string" && body.requestId.length <= 128 ? body.requestId : undefined;
+  const clientRequestedAt = isRecord(body) && Number.isSafeInteger(body.initiatedAt)
+    && Math.abs(Number(body.initiatedAt) - requestedAt) < 86_400_000 ? Number(body.initiatedAt) : undefined;
+  return { requestedAt, clientRequestedAt, clientRequestId };
+}
+
 type TrackedCortexRebuildOptions = {
   userId: string;
   chatId: string;
@@ -312,6 +318,7 @@ type TrackedCortexRebuildOptions = {
   sidecarConnectionId?: string;
   snapshot: CortexFreshnessSnapshot;
   source?: "warmup";
+  timing?: { requestedAt: number; clientRequestedAt?: number; clientRequestId?: string };
 };
 
 /** Per-chat registry of the rebuild currently running. Two warmups for the same
@@ -354,6 +361,8 @@ function launchTrackedCortexRebuild(
 ): void {
   const { userId, chatId, characterNames, descriptionAliases, generateRawFn, sidecarConnectionId, snapshot, source } = options;
   const abort = new AbortController();
+  const activity = new CortexActivityTracker(userId, chatId, source === "warmup" ? "warmup" : "rebuild", options.timing);
+  let activityStatus: "complete" | "cancelled" | "error" = "complete";
   const entry: InFlightCortexRebuild = {
     kind: source === "warmup" ? "warmup" : "force",
     abort,
@@ -372,7 +381,7 @@ function launchTrackedCortexRebuild(
           ? { action: "skip", reason: "aborted_before_start" }
           : { action: "run" }
       ),
-      run: (laneSignal) => memoryCortex.rebuildCortex(
+      run: (laneSignal) => activity.run(() => memoryCortex.rebuildCortex(
         userId,
         chatId,
         characterNames,
@@ -398,9 +407,9 @@ function launchTrackedCortexRebuild(
           warmupSignature: snapshot.rebuildSignature,
           signal: AbortSignal.any([abort.signal, laneSignal]),
         },
-      ),
+      )),
     }).then((scheduled) => {
-      if (scheduled.status !== "completed" || !scheduled.value) return;
+      if (scheduled.status !== "completed" || !scheduled.value) { activityStatus = "cancelled"; return; }
       const result = scheduled.value;
       try {
         stampCortexFreshnessSnapshot(userId, chatId, snapshot);
@@ -417,7 +426,8 @@ function launchTrackedCortexRebuild(
     }).catch((err) => {
       // Preempted by a superseding rebuild — that run owns the progress stream,
       // so stay silent instead of flashing a spurious error in the UI.
-      if (abort.signal.aborted) return;
+      if (abort.signal.aborted) { activityStatus = "cancelled"; return; }
+      activityStatus = "error";
       console.error(source === "warmup" ? "[memory-cortex] Warmup rebuild failed:" : "[memory-cortex] Rebuild failed:", err);
       eventBus.emit(EventType.CORTEX_REBUILD_PROGRESS, {
         chatId,
@@ -427,6 +437,7 @@ function launchTrackedCortexRebuild(
         error: err?.message || (source === "warmup" ? "Warmup failed" : "Rebuild failed"),
       }, userId);
     }).finally(() => {
+      activity.finish(activityStatus);
       // Only clear if we're still the active entry; a preemptor may have already
       // replaced us in the registry.
       if (cortexRebuildsInFlight.get(chatId) === entry) cortexRebuildsInFlight.delete(chatId);
@@ -496,7 +507,9 @@ async function warmLongTermChatMemory(options: {
   return { status: "skipped", reason: "chat_memory_already_fresh" };
 }
 
-async function performChatWarmup(userId: string, chatId: string, force: boolean): Promise<WarmupResponse> {
+async function performChatWarmup(userId: string, chatId: string, force: boolean,
+  timing?: TrackedCortexRebuildOptions["timing"],
+): Promise<WarmupResponse> {
   const chat = await getChatAsync(userId, chatId);
   if (!chat) {
     return {
@@ -630,6 +643,7 @@ async function performChatWarmup(userId: string, chatId: string, force: boolean)
                 generateRawFn: sidecar.generateRawFn,
                 sidecarConnectionId: sidecar.sidecarConnectionId,
                 snapshot,
+                timing,
                 ...(force ? {} : { source: "warmup" as const }),
               });
               cortex = { status: "started", reason: force ? "rebuild_started" : "warmup_started" };
@@ -2128,26 +2142,46 @@ app.put("/chats/:chatId/settings", async (c) => {
   });
 });
 
+function getChatIngestionSnapshot(chatId: string) {
+  const status = memoryCortex.getIngestionStatus(chatId);
+  const scheduler = getChatPipelineStatus(chatId);
+  return status ? { ...status, scheduler } : {
+    status: "idle", phase: "complete", chatId, chunkId: null,
+    startedAt: null, updatedAt: Date.now(), pendingJobs: 0, timings: null, scheduler,
+  };
+}
+
+function getChatRebuildSnapshot(chatId: string) {
+  return { ...(memoryCortex.getRebuildStatus(chatId) ?? { status: "idle" }), scheduler: getChatPipelineStatus(chatId) };
+}
+
+/** Passive snapshots only. A failed optional section must not hide the others. */
+app.get("/chats/:chatId/status", (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  const read = <T>(get: () => T): T | null => {
+    try { return get(); } catch { return null; }
+  };
+  return c.json({
+    activity: read(() => getCortexActivity(chatId)),
+    ingestion: read(() => getChatIngestionSnapshot(chatId)),
+    rebuild: read(() => getChatRebuildSnapshot(chatId)),
+  });
+});
+
 app.get("/chats/:chatId/ingestion-status", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const status = memoryCortex.getIngestionStatus(chatId);
-  const scheduler = getChatPipelineStatus(chatId);
-  if (!status) {
-    return c.json({
-      status: "idle",
-      phase: "complete",
-      chatId,
-      chunkId: null,
-      startedAt: null,
-      updatedAt: Date.now(),
-      pendingJobs: 0,
-      timings: null,
-      scheduler,
-    });
-  }
-  return c.json({ ...status, scheduler });
+  return c.json(getChatIngestionSnapshot(chatId));
+});
+
+app.get("/chats/:chatId/activity", (c) => {
+  const chatId = c.req.param("chatId");
+  const owned = ensureChatOwnership(c, chatId);
+  if (!owned.ok) return owned.response;
+  return c.json(getCortexActivity(chatId));
 });
 
 // ─── Rebuild ───────────────────────────────────────────────────
@@ -2157,18 +2191,18 @@ app.get("/chats/:chatId/rebuild-status", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const status = memoryCortex.getRebuildStatus(chatId);
-  const scheduler = getChatPipelineStatus(chatId);
-  if (!status) return c.json({ status: "idle", scheduler });
-  return c.json({ ...status, scheduler });
+  return c.json(getChatRebuildSnapshot(chatId));
 });
 
 /** POST /chats/:chatId/rebuild — Rebuild cortex from canonical chunks.
  *  Returns immediately with { status: "started" }. Progress is streamed via
  *  CORTEX_REBUILD_PROGRESS WebSocket events. Final result sent as status: "complete". */
 app.post("/chats/:chatId/rebuild", async (c) => {
+  const requestedAt = Date.now();
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
+  const body = await c.req.json().catch(() => ({}));
+  const timing = readCortexRequestTiming(body, requestedAt);
 
   const chat = await getChatAsync(userId, chatId);
   if (!chat) return c.json({ error: "Chat not found" }, 404);
@@ -2196,12 +2230,14 @@ app.post("/chats/:chatId/rebuild", async (c) => {
     generateRawFn: sidecar.generateRawFn,
     sidecarConnectionId: sidecar.sidecarConnectionId,
     snapshot,
+    timing,
   });
 
-  return c.json({ status: "started", chatId });
+  return c.json({ status: "started", chatId, activity: getCortexActivity(chatId) });
 });
 
 app.post("/chats/:chatId/warm", async (c) => {
+  const requestedAt = Date.now();
   const userId = c.get("userId");
   const chatId = c.req.param("chatId");
   const body = await c.req.json().catch(() => ({})) as { force?: boolean };
@@ -2220,7 +2256,8 @@ app.post("/chats/:chatId/warm", async (c) => {
     } satisfies WarmupResponse);
   }
 
-  return c.json(await performChatWarmup(userId, chatId, true));
+  const result = await performChatWarmup(userId, chatId, true, readCortexRequestTiming(body, requestedAt));
+  return c.json({ ...result, activity: getCortexActivity(chatId) });
 });
 
 // ─── Heuristics Engine Migration ──────────────────────────────

@@ -15,7 +15,12 @@
  *   The chat chunk creation pipeline calls scheduleProcessChunk() on new chunks.
  */
 
+import { CortexActivityTracker, withCortexActivity, withCortexBatch, updateCortexActivity, updateCortexBatchPhase } from "./activity";
+import { isCortexDebugEnabled } from "./diagnostics";
 import { getDb } from "../../db/connection";
+import { buildCortexIdentityContext } from "./identity-context";
+import { getCortexCharacterNames, normalizeCharacterName } from "./character-names";
+export { getCortexCharacterNames, normalizeCharacterName } from "./character-names";
 import { arbitrateCortexCandidates, CORTEX_ARBITRATION_VERSION } from "./arbitration";
 import { buildCortexArbitrationPlan, attributeFactsToEntities, type CortexGraphPlan, type CortexCleanupAction } from "./arbitration-plan";
 import {
@@ -44,7 +49,10 @@ import * as entityGraph from "./entity-graph";
 import * as entityContext from "./entity-context";
 import * as consolidation from "./consolidation";
 import { buildEmotionalContext } from "./emotional-context";
-import { queryCortex as queryCortexImpl, queryVaultCortex as queryVaultCortexImpl } from "./retrieval";
+import { assembleCortexGraphContext, queryCortex as queryCortexImpl, queryVaultCortex as queryVaultCortexImpl } from "./retrieval";
+import { filterCortexMemoriesForPrompt } from "./prompt-memory-filter";
+import { filterCortexMemoriesByDistance } from "../chat-memory-distance";
+import { getChatMemoryDistanceThreshold } from "../embeddings.service";
 import { formatShadowPrompt, type FormatterMode, type ShadowPromptResult } from "./shadow-formatter";
 import { getCortexUsageStats, runMaintenance, debouncedVectorize } from "./gc";
 import { processChunkFontColors, formatColorMapForPrompt, deleteColorMapForChat, getColorMap, recordColorAttribution, stripFontTags, stripThoughtDelimiters, mergeColorAttributions, FONT_ATTRIBUTION_VERSION } from "./font-attribution";
@@ -59,6 +67,7 @@ import type {
   ChunkIngestionData,
   CortexQuery,
   CortexResult,
+  CortexCacheSnapshot,
   CortexMemory,
   MemoryEntity,
   EntitySnapshot,
@@ -526,6 +535,7 @@ function buildCortexQueryKey(query: CortexQuery, config: MemoryCortexConfig): st
     emotionalContext: query.emotionalContext ?? [],
     generationType: query.generationType,
     topK: query.topK,
+    maxDistance: query.maxDistance ?? 0,
     includeConsolidations: query.includeConsolidations,
     includeRelationships: query.includeRelationships,
     excludeMessageIds: [...(query.excludeMessageIds ?? [])].sort(),
@@ -544,17 +554,20 @@ function buildCortexQueryKey(query: CortexQuery, config: MemoryCortexConfig): st
  * When `requiredExcludedMessageIds` is provided, the cached entry is only
  * returned if every required message was excluded when the entry was warmed.
  * Otherwise it could contain the regen target or current live-context tail and
- * re-inject it as "memory". On a reject the caller falls through to
- * exclusion-aware vector retrieval.
+ * re-inject it as "memory". Prompt assembly uses readCortexPromptContext to
+ * revalidate individual sources when this strict lookup rejects an entry.
  */
 export function getCachedCortexResult(
   chatId: string,
   requiredExcludedMessageIds?: string | string[],
+  snapshot?: CortexCacheSnapshot,
 ): CortexResult | null {
-  const entry = cortexResultCache.get(chatId);
+  const entry = snapshot
+    ? (snapshot.chatId === chatId ? snapshot.local : null)
+    : cortexResultCache.get(chatId);
   if (!entry) return null;
   if (Date.now() - entry.queriedAt > CACHE_TTL_MS) {
-    cortexResultCache.delete(chatId);
+    if (!snapshot) cortexResultCache.delete(chatId);
     return null;
   }
   const required = typeof requiredExcludedMessageIds === "string"
@@ -576,6 +589,34 @@ export function getCachedCortexResult(
 /** Invalidate cached cortex result for a chat (e.g. on rebuild or delete). */
 export function invalidateCortexCache(chatId: string): void {
   cortexResultCache.delete(chatId);
+}
+
+/** Read usable prompt context even on a new turn or a cold vector cache.
+ * Retrieval exclusions protect source memories; they must not discard the
+ * entire graph whenever a new message arrives. No provider calls run here. */
+export function readCortexPromptContext(
+  query: Pick<CortexQuery, "chatId" | "queryText">,
+  config: MemoryCortexConfig,
+  excludedMessageIds: string[],
+  snapshot?: CortexCacheSnapshot,
+  maxDistance = 0,
+): CortexResult | null {
+  if (!config.enabled) return null;
+  const trusted = getCachedCortexResult(query.chatId, excludedMessageIds, snapshot);
+  const cached = trusted ?? getCachedCortexResult(query.chatId, undefined, snapshot);
+  const eligibleMemories = filterCortexMemoriesByDistance(cached?.memories ?? [], maxDistance);
+  const memories = trusted ? eligibleMemories : filterCortexMemoriesForPrompt(query.chatId, eligibleMemories, excludedMessageIds);
+  const graph = cached && (cached.entityContext.length || cached.activeRelationships.length || cached.arcContext)
+    ? cached
+    : assembleCortexGraphContext(query, config);
+  return {
+    ...(cached ?? EMPTY_CORTEX_RESULT),
+    memories,
+    entityContext: graph.entityContext,
+    activeRelationships: graph.activeRelationships,
+    arcContext: graph.arcContext,
+    stats: { ...(cached ?? EMPTY_CORTEX_RESULT).stats, topScore: memories[0]?.finalScore ?? 0 },
+  };
 }
 
 /**
@@ -635,14 +676,26 @@ function scheduleVaultAutoReindex(userId: string, vaultId: string): void {
   })();
 }
 
-export function getCachedLinkedCortexResult(chatId: string): LinkedCortexResult | null {
-  const entry = linkedCortexResultCache.get(chatId);
+export function getCachedLinkedCortexResult(chatId: string, snapshot?: CortexCacheSnapshot): LinkedCortexResult | null {
+  const entry = snapshot
+    ? (snapshot.chatId === chatId ? snapshot.linked : null)
+    : linkedCortexResultCache.get(chatId);
   if (!entry) return null;
   if (Date.now() - entry.queriedAt > CACHE_TTL_MS) {
-    linkedCortexResultCache.delete(chatId);
+    if (!snapshot) linkedCortexResultCache.delete(chatId);
     return null;
   }
   return entry.result;
+}
+
+/** Capture at dispatch time. Preserve timestamps and exclusions across isolates;
+ * an empty snapshot must also override any state in a reused worker. */
+export function getCortexCacheSnapshot(chatId: string): CortexCacheSnapshot {
+  return {
+    chatId,
+    local: getCachedCortexResult(chatId) ? cortexResultCache.get(chatId)! : null,
+    linked: getCachedLinkedCortexResult(chatId) ? linkedCortexResultCache.get(chatId)! : null,
+  };
 }
 
 export function invalidateLinkedCortexCache(chatId: string): void {
@@ -732,6 +785,7 @@ function updateIngestionStatus(
   chatId: string,
   patch: Partial<CortexIngestionStatus>,
 ): CortexIngestionStatus {
+  if (patch.phase) updateCortexBatchPhase(patch.phase);
   const next = {
     ...getOrCreateIngestionStatus(chatId),
     ...patch,
@@ -923,6 +977,7 @@ export async function queryLinkedCortex(
   const linked = getLinkedCortexData(userId, chatId);
   const topK = cfg.retrieval?.maxEntitySnapshots ?? 10;
   const includeRelationships = cfg.retrieval?.relationshipInjection ?? true;
+  const maxDistance = await getChatMemoryDistanceThreshold(userId);
 
   // Fire all linked queries in parallel (vault self-contained retrieval + interlinks)
   const promises: Promise<void>[] = [];
@@ -956,6 +1011,7 @@ export async function queryLinkedCortex(
               queryText,
               topK,
               includeRelationships,
+              maxDistance,
               signal,
             }, cfg);
             vault.memories = result.memories;
@@ -989,6 +1045,7 @@ export async function queryLinkedCortex(
               topK,
               includeConsolidations: false,
               includeRelationships,
+              maxDistance,
             }, cfg, signal);
             interlinkResults.push({ targetChatId: target.chatId, targetChatName: target.chatName, result });
           } catch (err) {
@@ -1030,6 +1087,9 @@ export async function queryCortex(
 ): Promise<CortexResult> {
   const cfg = config ?? getCortexConfig(query.userId);
   if (!cfg.enabled) return EMPTY_CORTEX_RESULT;
+  if (signal?.aborted) return EMPTY_CORTEX_RESULT;
+
+  query = { ...query, maxDistance: query.maxDistance ?? await getChatMemoryDistanceThreshold(query.userId) };
   if (signal?.aborted) return EMPTY_CORTEX_RESULT;
 
   const queryKey = buildCortexQueryKey(query, cfg);
@@ -1407,6 +1467,8 @@ export function scheduleProcessChunk(
     .get(data.chunkId, data.chatId) as { updated_at?: number } | null;
   const queuedRevision = queuedRow?.updated_at ?? null;
 
+  const activity = isCortexEnabledForStoredChat(data.userId, data.chatId, getCortexConfig(data.userId))
+    ? new CortexActivityTracker(data.userId, data.chatId, "ingestion") : null;
   return enqueueChatPipelineTask({
     chatId: data.chatId,
     kind: "cortex_ingest",
@@ -1432,20 +1494,31 @@ export function scheduleProcessChunk(
       }
       return { action: "run" } as const;
     },
-    run: (laneSignal) => processChunk(
-      data,
-      characterNames,
-      generateRawFn,
-      sidecarConnectionId,
-      descriptionAliases,
-      undefined,
-      false,
-      signal ? AbortSignal.any([signal, laneSignal]) : laneSignal,
-    ),
-  });
+    run: (laneSignal) => {
+      const run = () => processChunk(
+        data,
+        characterNames,
+        generateRawFn,
+        sidecarConnectionId,
+        descriptionAliases,
+        undefined,
+        false,
+        signal ? AbortSignal.any([signal, laneSignal]) : laneSignal,
+      );
+      return activity ? activity.run(run) : run();
+    },
+  }).then((result) => {
+    activity?.finish(result.status === "completed" ? "complete" : "cancelled");
+    return result;
+  }, (error) => { activity?.finish("error"); throw error; });
 }
 
-export async function processChunk(
+export async function processChunk(...args: Parameters<typeof processChunkImpl>): Promise<void> {
+  if (!isCortexEnabledForStoredChat(args[0].userId, args[0].chatId, getCortexConfig(args[0].userId))) return;
+  return withCortexActivity(args[0].userId, args[0].chatId, "ingestion", () => processChunkImpl(...args));
+}
+
+async function processChunkImpl(
   data: ChunkIngestionData,
   characterNames: string[],
   generateRawFn?: (opts: {
@@ -1531,6 +1604,8 @@ export async function processChunk(
     const participants = getStoredConversationParticipants(data.chatId);
 
     const knownEntities = entityGraph.getActiveEntities(data.chatId);
+    const identity = buildCortexIdentityContext(characterNames, knownEntities, descriptionAliases, participants);
+    const identityAliases = identity.aliases;
     const entityIdByName = new Map<string, string>();
     for (const e of knownEntities) {
       entityIdByName.set(e.name.toLowerCase(), e.id);
@@ -1545,13 +1620,13 @@ export async function processChunk(
     // resolve correctly even before they're persisted.
     const allowedColorNames = new Set<string>();
     for (const n of characterNames) allowedColorNames.add(n.toLowerCase());
-    if (descriptionAliases) {
-      for (const [alias] of descriptionAliases.entries()) allowedColorNames.add(alias.toLowerCase());
-    }
     for (const e of knownEntities) {
       if (e.entityType !== "character") continue;
       allowedColorNames.add(e.name.toLowerCase());
       for (const alias of e.aliases) allowedColorNames.add(alias.toLowerCase());
+    }
+    for (const [alias, name] of identityAliases) {
+      if (allowedColorNames.has(name.toLowerCase())) allowedColorNames.add(alias);
     }
     const isAllowedColorName = (name: string): boolean => allowedColorNames.has(name.trim().toLowerCase());
 
@@ -1595,9 +1670,7 @@ export async function processChunk(
           entityWhitelist: config.entityWhitelist,
           minConfidence: config.entityPruning.minConfidence,
           entityExtractionFilters: config.entityExtractionFilters,
-          descriptionAliases: descriptionAliases
-            ? [...descriptionAliases.entries()].map(([alias, canonicalName]) => ({ alias, canonicalName }))
-            : undefined,
+          descriptionAliases: [...identityAliases].map(([alias, canonicalName]) => ({ alias, canonicalName })),
         })
       : null;
     if (heuristicPromise) {
@@ -1648,7 +1721,7 @@ export async function processChunk(
             participants,
             knownEntities: entityContext,
             thoughtDelimiters,
-            descriptionAliases: buildSidecarAliasList(descriptionAliases, knownEntities),
+            descriptionAliases: buildSidecarAliasList(identityAliases, knownEntities),
             samplingParameters: buildSidecarSamplingParameters(config.sidecar, {
               model: target.model,
             }),
@@ -1732,7 +1805,7 @@ export async function processChunk(
         score: extraction.score,
         source: "sidecar",
         emotionalTags: extraction.emotionalTags,
-        statusChanges: extraction.statusChanges,
+        statusChanges: extraction.statusChanges.map((change) => ({ ...change, entity: identity.canonicalize(change.entity) })),
         narrativeFlags: extraction.narrativeFlags,
         hasDialogue: /[""\u201C]/.test(proseContent),
         hasAction: /\*[^*]{10,}\*/.test(proseContent),
@@ -1765,14 +1838,7 @@ export async function processChunk(
     let graphPlan: CortexGraphPlan = { entities: [], relationships: [], aliases: [] };
     let cleanupActions: CortexCleanupAction[] = [];
     if (config.entityTracking && config.entityExtractionMode !== "off") {
-      const canonicalNames = new Map<string, string>();
-      for (const name of characterNames) canonicalNames.set(name.toLowerCase(), name);
-      for (const entity of knownEntities) {
-        canonicalNames.set(entity.name.toLowerCase(), entity.name);
-        for (const alias of entity.aliases) canonicalNames.set(alias.toLowerCase(), entity.name);
-      }
-      for (const [alias, canonical] of descriptionAliases ?? []) canonicalNames.set(alias.toLowerCase(), canonical);
-      const canonicalize = (name: string) => canonicalNames.get(name.toLowerCase()) ?? name;
+      const canonicalize = identity.canonicalize;
       const colorProposals = mergeColorAttributions(proseContent, fontResult.attributions, sidecarFontColors, thoughtDelimiters, canonicalize)
         .filter((color) => isAllowedColorName(color.entityName!));
       const provisionalEntities: import("./types").ExtractedEntity[] = sidecarActive ? extractNPsFromChunk(cleanContent)
@@ -1806,7 +1872,7 @@ export async function processChunk(
         return targets?.size === 1 ? [...targets][0]! : name;
       };
       const participantRelationships = extractParticipantRelationships(proseContent, characterNames,
-        [...(descriptionAliases ?? [])].map(([alias, canonicalName]) => ({ alias, canonicalName })),
+        [...(identityAliases ?? [])].map(([alias, canonicalName]) => ({ alias, canonicalName })),
         [...knownEntities.filter((entity) => entity.entityType === "character").flatMap((entity) => [entity.name, ...entity.aliases]),
           ...sidecarEntities.filter((entity) => entity.type === "character").map((entity) => entity.name)], participants);
       const relationships = mergeRelationships([...(heuristicResult?.relationships ?? []), ...participantRelationships], sidecarRelationships)
@@ -1814,7 +1880,7 @@ export async function processChunk(
       const knownReferences = new Map([
         ...characterNames.map((name) => [name.toLowerCase(), { name, type: "character" }] as const),
         ...resolveConversationParticipants(proseContent, characterNames,
-          [...(descriptionAliases ?? [])].map(([alias, canonicalName]) => ({ alias, canonicalName })), participants)
+          [...(identityAliases ?? [])].map(([alias, canonicalName]) => ({ alias, canonicalName })), participants)
           .map(({ name }) => [name.toLowerCase(), { name, type: "character" }] as const),
         ...knownEntities.map((entity) => [entity.name.toLowerCase(), { name: entity.name, type: entity.entityType }] as const),
       ]);
@@ -1830,14 +1896,14 @@ export async function processChunk(
           ...colorProposals.map((color) => ({ name: color.entityName!, type: "character" })),
         ]),
         cleanContent, config.entityExtractionFilters,
-      );
+      ).filter((entity) => !identity.isSharedLabel(entity.name));
       const allowedNames = new Set(entities.map((e) => e.name.toLowerCase()));
       const allowedEndpoint = (name: string) => allowedNames.has(name.toLowerCase()) || allowedNames.has(proposedEndpoint(name).toLowerCase());
       graphPlan = {
         entities,
         colors: colorProposals,
         relationships: relationships.filter((r) => allowedEndpoint(r.source) && allowedEndpoint(r.target) && r.source.toLowerCase() !== r.target.toLowerCase()) as any,
-        aliases,
+        aliases: aliases.filter((alias) => !identity.isSharedLabel(alias.alias) && !identity.isSharedLabel(alias.canonicalName)),
       };
       if (arbitrationActive) {
         const reviewEntities = config.sidecarReliability.gradesExistingRecords ? entityGraph.getEntities(data.chatId) : knownEntities;
@@ -1847,20 +1913,47 @@ export async function processChunk(
           for (const entity of reviewEntities) evidence.set(entity.id, (excerpts.all(entity.id) as Array<{ excerpt: string }>).map((row) => row.excerpt));
         }
         const plan = buildCortexArbitrationPlan({ passage: proseContent, graph: graphPlan,
-          knownEntities: reviewEntities, characterNames, participants, canonicalAliases: descriptionAliases, existingEvidence: evidence,
+          knownEntities: reviewEntities, characterNames, participants, canonicalAliases: identityAliases, existingEvidence: evidence,
           gradeExisting: config.sidecarReliability.gradesExistingRecords });
         const result = await arbitrateCortexCandidates({ userId: data.userId, config, input: plan.input, signal });
         const applied = plan.apply(result.verdicts);
         graphPlan = applied.graph;
         cleanupActions = applied.cleanup;
         timings.sidecarMs += result.durationMs;
-        const relationshipIds = new Set(plan.input.candidates.filter((candidate) => candidate.kind === "relationship").map((candidate) => candidate.id));
-        const relationshipVerdicts = result.verdicts.filter((verdict) => relationshipIds.has(verdict.id));
-        console.info(`[memory-cortex] arbitration backend=${config.arbitration.backend} candidates=${result.verdicts.length} models=${result.models.join(",")} ms=${Math.round(result.durationMs)}`
-          + ` relationships_sidecar=${sidecarRelationships.length} relationships_participant=${participantRelationships.length}`
-          + ` relationships_proposed=${relationshipIds.size} relationships_kept=${relationshipVerdicts.filter((verdict) => verdict.action === "keep").length}`
-          + ` relationships_rejected=${relationshipVerdicts.filter((verdict) => verdict.action === "reject").length}`
-          + ` relationships_deferred=${relationshipVerdicts.filter((verdict) => verdict.action === "defer").length} relationships_applied=${graphPlan.relationships.length}`);
+        const counts = { keep: 0, resolve: 0, reject: 0, defer: 0 };
+        for (const verdict of result.verdicts) counts[verdict.action]++;
+        console.info(`[memory-cortex] review chunk=${data.chunkId.slice(0, 8)} candidates=${result.verdicts.length}`
+          + ` keep=${counts.keep} resolve=${counts.resolve} reject=${counts.reject} defer=${counts.defer} ms=${Math.round(result.durationMs)}`);
+        if (isCortexDebugEnabled()) {
+          const relationshipIds = new Set(plan.input.candidates.filter((candidate) => candidate.kind === "relationship").map((candidate) => candidate.id));
+          const relationshipVerdicts = result.verdicts.filter((verdict) => relationshipIds.has(verdict.id));
+          const entityIds = new Set(plan.input.candidates.filter((candidate) => candidate.kind === "entity").map((candidate) => candidate.id));
+          const entityVerdicts = result.verdicts.filter((verdict) => entityIds.has(verdict.id));
+          console.info(`[memory-cortex] arbitration backend=${config.arbitration.backend} candidates=${result.verdicts.length} models=${result.models.join(",")} ms=${Math.round(result.durationMs)}`
+            + ` entities_sidecar=${sidecarEntities.length} entities_proposed=${entityIds.size}`
+            + ` entities_kept=${entityVerdicts.filter((verdict) => verdict.action === "keep").length}`
+            + ` entities_resolved=${entityVerdicts.filter((verdict) => verdict.action === "resolve").length}`
+            + ` entities_rejected=${entityVerdicts.filter((verdict) => verdict.action === "reject").length}`
+            + ` entities_deferred=${entityVerdicts.filter((verdict) => verdict.action === "defer").length} entities_applied=${graphPlan.entities.length}`
+            + ` relationships_sidecar=${sidecarRelationships.length} relationships_participant=${participantRelationships.length}`
+            + ` relationships_proposed=${relationshipIds.size} relationships_kept=${relationshipVerdicts.filter((verdict) => verdict.action === "keep").length}`
+            + ` relationships_rejected=${relationshipVerdicts.filter((verdict) => verdict.action === "reject").length}`
+            + ` relationships_deferred=${relationshipVerdicts.filter((verdict) => verdict.action === "defer").length} relationships_applied=${graphPlan.relationships.length}`);
+          if (entityVerdicts.some((verdict) => verdict.action === "defer")) {
+            console.info(`[memory-cortex] entity_review chunk=${data.chunkId} threshold=${config.arbitration.minConfidence} verdicts=${JSON.stringify(entityVerdicts.map((verdict) => ({
+              id: verdict.id, action: verdict.action,
+              model_choice: verdict.deferralReason === "invalid_answer" ? undefined : verdict.modelChoice ?? verdict.action,
+              confidence: verdict.confidence, probability: verdict.probability, deferred_by: verdict.deferralReason,
+            })))}`);
+          }
+          if (relationshipVerdicts.length) {
+            console.info(`[memory-cortex] relationship_review chunk=${data.chunkId} threshold=${config.arbitration.minConfidence} verdicts=${JSON.stringify(relationshipVerdicts.map((verdict) => ({
+              id: verdict.id, action: verdict.action,
+              model_choice: verdict.deferralReason === "invalid_answer" ? undefined : verdict.modelChoice ?? verdict.action,
+              confidence: verdict.confidence, probability: verdict.probability, deferred_by: verdict.deferralReason,
+            })))}`);
+          }
+        }
       }
     }
     signal?.throwIfAborted();
@@ -2010,14 +2103,23 @@ export async function processChunk(
         };
         const approvedNames = new Set(mergedEntities.map((entity) => entity.name.toLowerCase()));
         const attributed = attributeFactsToEntities(sidecarFacts, mergedEntities.map((entity) => ({
-          name: entity.name, aliases: [...entity.aliases, ...allDiscoveredAliases.filter((alias) => alias.canonicalName === entity.name).map((alias) => alias.alias)],
+          name: entity.name, aliases: [...entity.aliases, ...[...identityAliases].filter(([, name]) => name.toLowerCase() === entity.name.toLowerCase()).map(([alias]) => alias), ...allDiscoveredAliases.filter((alias) => alias.canonicalName === entity.name).map((alias) => alias.alias)],
         })));
+        let appliedFactLinks = 0;
         if (chunkImportance >= factThreshold) {
           for (const [name, facts] of attributed) {
             const entity = entityGraph.findEntityByName(data.chatId, name);
             if (!entity || entity.userEditedAt) continue;
             recordFacts(entity, facts, chunkImportance);
+            appliedFactLinks += facts.length;
           }
+        }
+        if (isCortexDebugEnabled()) {
+          const attributedFacts = new Set([...attributed.values()].flat());
+          console.info(`[memory-cortex] fact_attribution chunk=${data.chunkId} proposed=${sidecarFacts.length}`
+            + ` matched=${attributedFacts.size} unmatched=${sidecarFacts.filter((fact) => !attributedFacts.has(fact)).length}`
+            + ` importance=${chunkImportance} threshold=${factThreshold}`
+            + ` applied_links=${appliedFactLinks}`);
         }
 
         if (salienceResult.statusChanges.length > 0) {
@@ -2140,9 +2242,11 @@ export async function processChunk(
   // ── Consolidation Check ──
 
   if (config.consolidation.enabled && !skipConsolidation) {
-    // Run async — don't block the ingestion pipeline
-    consolidation
-      .maybeConsolidate(
+    updateCortexActivity({ phase: "consolidating" });
+    // Keep consolidation in this chat's lane so rebuilds cannot clear its
+    // sources while a detached summary is still being generated.
+    await consolidation
+      .consolidateBacklog(
         data.userId,
         data.chatId,
         config.consolidation,
@@ -2151,6 +2255,7 @@ export async function processChunk(
         config.sidecarTimeoutMs,
         buildSidecarSamplingParameters(config.sidecar),
         config.nonProseScaffoldTags,
+        { signal },
       )
       .catch((err) => {
         console.warn("[memory-cortex] Consolidation failed:", err);
@@ -2213,7 +2318,14 @@ export function getRebuildStatus(chatId: string): RebuildState | null {
 const REBUILD_CONCURRENCY = 5;
 
 
-export async function rebuildCortex(
+export async function rebuildCortex(...args: Parameters<typeof rebuildCortexImpl>) {
+  if (!isCortexEnabledForStoredChat(args[0], args[1], getCortexConfig(args[0]))) {
+    return { chunksProcessed: 0, entitiesFound: 0, relationsFound: 0 };
+  }
+  return withCortexActivity(args[0], args[1], "rebuild", () => rebuildCortexImpl(...args));
+}
+
+async function rebuildCortexImpl(
   userId: string,
   chatId: string,
   characterNames: string[],
@@ -2322,7 +2434,10 @@ export async function rebuildCortex(
     startedAt: Date.now(),
   };
   activeRebuilds.set(chatId, state);
-  const emit = () => { if (onProgress) onProgress(state); };
+  const emit = () => {
+    updateCortexActivity({ completedChunks: state.current, totalChunks: state.total, phase: state.phase });
+    if (onProgress) onProgress(state);
+  };
   emit();
 
   try {
@@ -2356,21 +2471,23 @@ export async function rebuildCortex(
       // Each worker pulls up to chunkBatchSize chunks and resolves them in one
       // request. At most concurrency batch requests run at once.
       const chunkBatchSize = Math.max(1, config.sidecar?.chunkBatchSize ?? 5);
+      updateCortexActivity({ totalBatches: Math.ceil(chunks.length / chunkBatchSize) });
       let nextChunkIdx = 0;
       let completed = completedBeforeStart;
       const activeGenerateRawFn = generateRawFn!;
       const activeSidecarConnectionId = sidecarConnectionId!;
 
-      // Resolve a token counter once for the whole rebuild. The same counter
-      // is shared across all batches because they all use the same sidecar
-      // connection / model.
+      // Debug dispatch traces share one counter across batches. Avoid loading
+      // a model tokenizer when those diagnostics are disabled.
       let rebuildTokenCounter: ((text: string) => number) | undefined;
-      try {
-        const resolved = await resolveCounter(config.sidecar.model || "");
-        rebuildTokenCounter = resolved.count;
-        console.info(`[memory-cortex] Rebuild dispatch logging using tokenizer=${resolved.name}`);
-      } catch {
-        rebuildTokenCounter = undefined;
+      if (isCortexDebugEnabled()) {
+        try {
+          const resolved = await resolveCounter(config.sidecar.model || "");
+          rebuildTokenCounter = resolved.count;
+          console.info(`[memory-cortex] Rebuild dispatch logging using tokenizer=${resolved.name}`);
+        } catch {
+          rebuildTokenCounter = undefined;
+        }
       }
       let batchCounter = 0;
       const participants = getStoredConversationParticipants(chatId);
@@ -2391,98 +2508,105 @@ export async function rebuildCortex(
           nextChunkIdx = end;
 
           const batch = chunks.slice(start, end);
-          const batchInput = await Promise.all(batch.map(async (chunk, i) => ({
-            index: i,
-            // Strip non-prose content before the sidecar sees it — matching what
-            // the live processChunk path does. Without this, Spindle extension
-            // tags, HUD blocks, scaffold markup, and other XML-wrapped content
-            // would leak into the batch prompt and pollute extraction/salience.
-            // keepFontTags: true so the sidecar can still do color attribution.
-            content: stripNonProseTags(
-              await regexScriptsSvc.applyMemoryIngestionRegex(userId,
-                hydrateChunkContentFromMessages(safeJsonArray(chunk.message_ids), chunk.content), { characterId, chatId }),
-              {
-                keepFontTags: true,
-                preserveFontInnerTags: getThoughtMarkerHtmlTags(config.thoughtMarkers),
-                extraScaffoldTags: config.nonProseScaffoldTags,
-              },
-            ),
-          })));
-
           const batchIdx = ++batchCounter;
-          const requestStart = Date.now();
-          state.inFlightBatches += 1;
-          state.lastProviderRequestAt = requestStart;
-          state.phase = "awaiting_provider";
-          emit();
+          await withCortexBatch(batchIdx, batch.length, async () => {
+            const batchInput = await Promise.all(batch.map(async (chunk, i) => ({
+              index: i,
+              // Strip non-prose content before the sidecar sees it — matching what
+              // the live processChunk path does. Without this, Spindle extension
+              // tags, HUD blocks, scaffold markup, and other XML-wrapped content
+              // would leak into the batch prompt and pollute extraction/salience.
+              // keepFontTags: true so the sidecar can still do color attribution.
+              content: stripNonProseTags(
+                await regexScriptsSvc.applyMemoryIngestionRegex(userId,
+                  hydrateChunkContentFromMessages(safeJsonArray(chunk.message_ids), chunk.content), { characterId, chatId }),
+                {
+                  keepFontTags: true,
+                  preserveFontInnerTags: getThoughtMarkerHtmlTags(config.thoughtMarkers),
+                  extraScaffoldTags: config.nonProseScaffoldTags,
+                },
+              ),
+            })));
 
-          let sidecarResults: Array<import("./types").SidecarExtractionResult | null>;
-          try {
-            sidecarResults = await extractBatchWithSidecar(
-              batchInput,
-              activeGenerateRawFn,
-              activeSidecarConnectionId,
-              {
-                characterNames,
-                participants,
-                thoughtDelimiters: config.thoughtMarkers,
-                knownEntities: entityGraph.getActiveEntities(chatId).map((e) => ({ name: e.name, type: e.entityType, aliases: e.aliases })),
-                descriptionAliases: buildSidecarAliasList(
-                  descriptionAliases,
-                  entityGraph.getActiveEntities(chatId),
-                ),
-                samplingParameters: buildSidecarSamplingParameters(config.sidecar),
-                tokenCounter: rebuildTokenCounter,
-                logTag: `rebuild:batch-${batchIdx} chat=${chatId.slice(0, 8)}`,
-              },
-            );
-          } catch (err: any) {
-            console.warn(`[memory-cortex] rebuild:batch-${batchIdx} threw, all chunks falling back to heuristic:`, err?.message ?? err);
-            sidecarResults = new Array(batch.length).fill(null);
-          } finally {
-            state.inFlightBatches = Math.max(0, state.inFlightBatches - 1);
-            state.lastProviderResponseMs = Date.now() - requestStart;
-            // Other concurrent workers may still be awaiting the provider, so
-            // only flip back to "ingesting" if nothing else is in flight.
-            state.phase = state.inFlightBatches > 0 ? "awaiting_provider" : "ingesting";
+            const requestStart = Date.now();
+            state.inFlightBatches += 1;
+            state.lastProviderRequestAt = requestStart;
+            state.phase = "awaiting_provider";
             emit();
-          }
 
-          for (let i = 0; i < batch.length; i++) {
-            // Bail before persisting this batch if a superseding rebuild has
-            // preempted us — its clearDerivedCortexData + reprocess owns the
-            // chat now, so writing here would just be overwritten work.
-            if (signal?.aborted) return;
-            const chunk = batch[i];
+            let sidecarResults: Array<import("./types").SidecarExtractionResult | null>;
             try {
-              const sidecarResult = sidecarResults[i];
-              if (sidecarResult) {
-                await processChunkWithPrecomputedSidecar(
-                  chunk, chatId, userId, characterId, characterNames, sidecarResult, descriptionAliases,
-                  activeGenerateRawFn, activeSidecarConnectionId, signal,
-                );
-              } else {
-                if (config.sidecarReliability.fallback === "skip") {
-                  tickProgress();
-                  continue;
-                }
-                await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, activeGenerateRawFn, activeSidecarConnectionId, descriptionAliases, true, signal, true);
-              }
-            } catch (error) {
-              // A failed quality gate must never downgrade to an unreviewed ingest.
-              throw error;
+              sidecarResults = await extractBatchWithSidecar(
+                batchInput,
+                activeGenerateRawFn,
+                activeSidecarConnectionId,
+                {
+                  characterNames,
+                  participants,
+                  thoughtDelimiters: config.thoughtMarkers,
+                  knownEntities: entityGraph.getActiveEntities(chatId).map((e) => ({ name: e.name, type: e.entityType, aliases: e.aliases })),
+                  descriptionAliases: buildSidecarAliasList(
+                    descriptionAliases,
+                    entityGraph.getActiveEntities(chatId),
+                    participants,
+                  ),
+                  samplingParameters: buildSidecarSamplingParameters(config.sidecar),
+                  tokenCounter: rebuildTokenCounter,
+                  logTag: `rebuild:batch-${batchIdx} chat=${chatId.slice(0, 8)}`,
+                },
+              );
+            } catch (err: any) {
+              console.warn(`[memory-cortex] rebuild:batch-${batchIdx} threw, all chunks falling back to heuristic:`, err?.message ?? err);
+              sidecarResults = new Array(batch.length).fill(null);
+            } finally {
+              state.inFlightBatches = Math.max(0, state.inFlightBatches - 1);
+              state.lastProviderResponseMs = Date.now() - requestStart;
+              // Other concurrent workers may still be awaiting the provider, so
+              // only flip back to "ingesting" if nothing else is in flight.
+              state.phase = state.inFlightBatches > 0 ? "awaiting_provider" : "ingesting";
+              emit();
             }
-            tickProgress();
-          }
+
+            for (let i = 0; i < batch.length; i++) {
+              // Bail before persisting this batch if a superseding rebuild has
+              // preempted us — its clearDerivedCortexData + reprocess owns the
+              // chat now, so writing here would just be overwritten work.
+              if (signal?.aborted) return;
+              const chunk = batch[i];
+              try {
+                const sidecarResult = sidecarResults[i];
+                if (sidecarResult) {
+                  await processChunkWithPrecomputedSidecar(
+                    chunk, chatId, userId, characterId, characterNames, sidecarResult, descriptionAliases,
+                    activeGenerateRawFn, activeSidecarConnectionId, signal,
+                  );
+                } else {
+                  if (config.sidecarReliability.fallback === "skip") {
+                    tickProgress();
+                    continue;
+                  }
+                  await processChunkFromRaw(chunk, chatId, userId, characterId, characterNames, activeGenerateRawFn, activeSidecarConnectionId, descriptionAliases, true, signal, true);
+                }
+              } catch (error) {
+                // A failed quality gate must never downgrade to an unreviewed ingest.
+                throw error;
+              }
+              tickProgress();
+            }
+          }, signal);
         }
       }
 
       // concurrency workers, each pulls batches
       const workers = Array.from({ length: Math.min(concurrency, chunks.length) }, () => processNextBatch());
-      await Promise.all(workers);
+      // Keep the run active until every worker has unwound, including when
+      // another batch fails review. No sibling may outlive the progress run.
+      const outcomes = await Promise.allSettled(workers);
+      const failed = outcomes.find((outcome) => outcome.status === "rejected");
+      if (failed?.status === "rejected") throw failed.reason;
     }
 
-    if (config.consolidation.enabled && config.consolidation.useSidecar && sidecarAvailable) {
+    if (config.consolidation.enabled) {
       state.phase = "consolidating";
       emit();
       const created = await consolidation.consolidateBacklog(
@@ -2911,7 +3035,11 @@ function safeJsonArray(raw: string | null | undefined): string[] {
 function getStoredConversationParticipants(chatId: string): CortexParticipant[] {
   const rows = getDb().query("SELECT DISTINCT name, is_user FROM messages WHERE chat_id = ? AND trim(name) != ''")
     .all(chatId) as Array<{ name: string; is_user: number }>;
-  return rows.map((row) => ({ name: normalizeCharacterName(row.name), role: row.is_user ? "user" : "character", aliases: [row.name] }));
+  return rows.flatMap((row): CortexParticipant[] => {
+    const names = row.is_user ? [normalizeCharacterName(row.name)] : getCortexCharacterNames(row.name);
+    return names.map((name) => ({ name, role: row.is_user ? "user" : "character",
+      ...(names.length > 1 ? { authorLabel: row.name } : { aliases: [row.name] }) }));
+  });
 }
 
 function hydrateChunkContentFromMessages(messageIds: string[], fallbackContent: string): string {
@@ -2972,107 +3100,6 @@ function findPrefixMatch(np: string, characterNames: string[]): string | null {
  * Usage: call once per character/persona during chunk processing setup,
  * pass the merged map to processChunk as `descriptionAliases`.
  */
-// ─── Bot Name Filler ──────────────────────────────────────────
-// Words that appear in sloppy bot-card names as genre tags, meta labels,
-// or scenario descriptors. Used by normalizeCharacterName to distinguish
-// the real character name from the surrounding noise.
-
-const BOT_NAME_FILLER = new Set([
-  // Meta / platform tags
-  "live", "new", "old", "reloaded", "remake", "rework", "updated", "original",
-  "alternate", "version", "edition", "nsfw", "sfw", "oc", "wip", "beta", "au", "canon",
-  // Narrative structure
-  "episode", "chapter", "part", "scenario", "adventure", "story", "encounter",
-  "meeting", "date", "quest", "tale", "journey", "arc", "prologue", "epilogue",
-  // Genre tags
-  "modern", "fantasy", "romance", "action", "horror", "mystery", "drama",
-  "comedy", "thriller", "historical", "futuristic", "dystopian", "supernatural",
-  // Common descriptive filler
-  "chance", "interrogation", "confrontation", "conversation", "introduction",
-  // Interjections / filler words
-  "ah", "oh", "hey", "hi", "yo", "welcome",
-  // Articles / prepositions (short ones caught by length, but include for safety)
-  "the", "a", "an", "of", "in", "at", "to", "for", "with", "by", "and", "or",
-]);
-
-/**
- * Normalize a sloppy character card name to extract the real character name.
- *
- * Handles common bot-card naming patterns:
- *   - Tag prefixes: "LIVE:", "NSFW:", "OC:", "[WIP]"
- *   - Structural separators: |, _, —, –, :, /
- *   - Decorative Unicode: emoji, CJK brackets, symbols
- *   - Scenario suffixes: "A Chance Interrogation", "Episode 3", "Modern AU"
- *
- * Returns the extracted proper name, or the original trimmed name if
- * no clear proper noun sequence is found.
- */
-export function normalizeCharacterName(rawName: string): string {
-  // 1. Strip emoji and decorative Unicode
-  let cleaned = rawName;
-  try {
-    cleaned = cleaned.replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}]/gu, "");
-  } catch { /* regex unicode support varies */ }
-  cleaned = cleaned.replace(/[\u{300}-\u{36F}]/gu, ""); // combining diacritical marks that aren't part of names
-  cleaned = cleaned.replace(/[「」『』【】〖〗★☆✨~♡♥●○◆◇■□▪▫▲△▶◀♪♫§†‡※•·]/g, "");
-
-  // 2. Strip bracketed tags: [OC], (NSFW), {WIP}, etc.
-  cleaned = cleaned.replace(/[\[({]\s*(?:OC|NSFW|SFW|WIP|BETA|AU|CANON|NEW|UPDATED?|REMAKE|V\d+(?:\.\d+)?)\s*[\])}]/gi, "");
-
-  // 3. Split on structural separators
-  const segments = cleaned.split(/[|_—–:\/\\]/).map((s) => s.trim()).filter((s) => s.length >= 2);
-
-  // 4. From each segment, extract runs of title-cased non-filler words
-  const candidates: { text: string; wordCount: number; index: number }[] = [];
-  let candidateIndex = 0;
-
-  for (const segment of segments) {
-    const words = segment.split(/[\s,]+/).filter(Boolean);
-    let current: string[] = [];
-
-    const flush = () => {
-      if (current.length >= 1 && current.length <= 5) {
-        candidates.push({ text: current.join(" "), wordCount: current.length, index: candidateIndex++ });
-      }
-      current = [];
-    };
-
-    for (const word of words) {
-      const clean = word.replace(/[.,;:!?"'()\[\]{}]+/g, "").trim();
-      if (!clean || clean.length < 2) { flush(); continue; }
-
-      // Must be title-cased (uppercase + lowercase) and not a filler word
-      if (/^[A-Z][a-z]/.test(clean) && !BOT_NAME_FILLER.has(clean.toLowerCase())) {
-        current.push(clean);
-      } else {
-        flush();
-      }
-    }
-    flush();
-  }
-
-  if (candidates.length === 0) return rawName.trim();
-
-  // 5. Pick the best candidate
-  // Priority: 2-3 word names > other multi-word > single word > fallback
-  // Tiebreaker: earlier position in the string (real name usually comes first)
-  candidates.sort((a, b) => {
-    const aMulti = a.wordCount >= 2 ? 1 : 0;
-    const bMulti = b.wordCount >= 2 ? 1 : 0;
-    if (aMulti !== bMulti) return bMulti - aMulti;
-    // Among multi-word, prefer 2-3 words (typical name length)
-    if (aMulti && bMulti) {
-      const aIdeal = a.wordCount >= 2 && a.wordCount <= 3 ? 1 : 0;
-      const bIdeal = b.wordCount >= 2 && b.wordCount <= 3 ? 1 : 0;
-      if (aIdeal !== bIdeal) return bIdeal - aIdeal;
-    }
-    // Earlier position wins (stable tiebreaker)
-    return a.index - b.index;
-  });
-
-  return candidates[0].text;
-}
-
 export function extractDescriptionAliases(
   canonicalName: string,
   ...descriptions: (string | null | undefined)[]
@@ -3168,12 +3195,9 @@ function addAlias(map: Map<string, string>, alias: string, canonical: string): v
 /**
  * Build the alias list passed to the sidecar's <canonical_aliases> block.
  *
- * Merges two sources:
- *   1. Persisted entity-graph aliases (includes prior user-curated edits and
- *      learned aliases from earlier rebuild passes). These survive rebuilds via
- *      memory_entities.user_edited_at and the entity row's `aliases` JSON.
- *   2. Description aliases from character/persona/world-book definitions —
- *      take priority on key collision since they're the canonical authority.
+ * Uses the shared identity vocabulary: established graph aliases, definition
+ * aliases and stored participant display labels. Ambiguous mappings and aliases
+ * colliding with another canonical name are excluded.
  *
  * Resulting list is what the sidecar sees as authoritative alias→canonical
  * mappings for the current chat.
@@ -3181,19 +3205,9 @@ function addAlias(map: Map<string, string>, alias: string, canonical: string): v
 export function buildSidecarAliasList(
   descriptionAliases: Map<string, string> | undefined,
   knownEntities: Array<{ name: string; aliases: string[] }>,
+  participants: CortexParticipant[] = [],
 ): Array<{ alias: string; canonicalName: string }> {
-  const merged = new Map<string, string>();
-  for (const e of knownEntities) {
-    for (const alias of e.aliases) {
-      const lower = alias.toLowerCase();
-      if (!merged.has(lower)) merged.set(lower, e.name);
-    }
-  }
-  if (descriptionAliases) {
-    for (const [alias, canonical] of descriptionAliases.entries()) {
-      merged.set(alias.toLowerCase(), canonical);
-    }
-  }
+  const merged = buildCortexIdentityContext([], knownEntities, descriptionAliases, participants).aliases;
   return [...merged.entries()].map(([alias, canonicalName]) => ({ alias, canonicalName }));
 }
 

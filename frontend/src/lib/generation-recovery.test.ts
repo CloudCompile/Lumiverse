@@ -49,6 +49,34 @@ beforeEach(() => {
 })
 
 describe('generation recovery races', () => {
+  test('equivalent concurrent recovery shares status and terminal message refresh', async () => {
+    const response = deferred<GenerationStatusResponse>()
+    getStatus = mock(() => response.promise)
+    const first = recoverPooledGeneration('chat')
+    const second = recoverPooledGeneration('chat')
+    expect(first).toBe(second)
+    expect(getStatus).toHaveBeenCalledTimes(1)
+    response.resolve(completed)
+    await Promise.all([first, second])
+    expect(list).toHaveBeenCalledTimes(1)
+    await recoverPooledGeneration('chat')
+    expect(getStatus).toHaveBeenCalledTimes(2)
+  })
+
+  test('returning to the same chat uses a new recovery and rejects the old snapshot', async () => {
+    const old = deferred<GenerationStatusResponse>()
+    getStatus = mock(() => old.promise)
+    const first = recoverPooledGeneration('chat')
+    store.getState().setActiveChat('other')
+    store.getState().setActiveChat('chat')
+    getStatus = mock(async () => ({ active: false }))
+    await recoverPooledGeneration('chat')
+    expect(getStatus).toHaveBeenCalledTimes(1)
+    old.resolve(active)
+    await first
+    expect(store.getState().isStreaming).toBe(false)
+  })
+
   test('reconnecting after a persisted generation stops restores its saved partial reply', async () => {
     store.getState().startStreaming('generation', 'assistant', 'normal', 'persisted-message')
     getStatus = mock(async () => ({ active: false, generationId: 'generation', status: 'stopped', renderMode: 'persisted-message', targetMessageId: 'assistant' }))

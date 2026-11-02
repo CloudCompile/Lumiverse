@@ -311,6 +311,22 @@
     "showFewer": "Show fewer"
   },
   "chatView": {
+    "cortexFailedBatches": "Failed batches: {{count}}",
+    "cortexBatchProgress": "{{current}}/{{total}} batches · {{queued}} queued",
+    "cortexElapsed": "{{seconds}}s elapsed",
+    "cortexBatchActivity": "Batch {{batch}} · {{phase}}",
+    "cortexBatchChunks": "Chunks: {{count}}",
+    "cortexActiveBatches": "Active memory batches",
+    "cortexActivity": {
+      "queued": "Queued",
+      "waiting": "Waiting for provider",
+      "thinking": "Thinking",
+      "responding": "Responding",
+      "reviewing": "Reviewing",
+      "preparing": "Preparing",
+      "saving": "Saving",
+      "consolidating": "Consolidating"
+    },
     "togglePortraitPanel": "Toggle portrait panel",
     "exitSelectionMode": "Exit selection mode",
     "selectMessages": "Select messages",

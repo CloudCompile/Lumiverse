@@ -100,7 +100,7 @@ export class GoogleProvider implements LlmProvider {
 
     if (!res.ok) await throwProviderResponseError(this.displayName, "stream", res);
 
-    yield* readGoogleStream(res, this.displayName, request.parameters?._replay_thought_signatures === true, request.signal);
+    yield* readGoogleStream(res, this.displayName, request.parameters?._replay_thought_signatures === true, request.signal, request.onResponseActivity);
   }
 
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {

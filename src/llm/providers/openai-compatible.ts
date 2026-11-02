@@ -253,6 +253,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       if (typeof delta?.refusal === "string") refusal += delta.refusal;
 
       for (const tc of (delta?.tool_calls ?? [])) {
+        request.onResponseActivity?.();
         const idx = tc.index ?? toolCallBuffer.length;
         if (!toolCallBuffer[idx]) toolCallBuffer[idx] = { id: tc.id ?? "", name: "", argsJson: "" };
         if (tc.id && !toolCallBuffer[idx].id) toolCallBuffer[idx].id = tc.id;

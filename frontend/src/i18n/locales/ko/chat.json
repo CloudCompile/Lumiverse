@@ -311,6 +311,22 @@
     "showFewer": "접기"
   },
   "chatView": {
+    "cortexFailedBatches": "실패한 배치: {{count}}",
+    "cortexBatchProgress": "배치 {{current}}/{{total}} · {{queued}}개 대기 중",
+    "cortexElapsed": "{{seconds}}초 경과",
+    "cortexBatchActivity": "배치 {{batch}} · {{phase}}",
+    "cortexBatchChunks": "청크 수: {{count}}",
+    "cortexActiveBatches": "진행 중인 메모리 배치",
+    "cortexActivity": {
+      "queued": "대기 중",
+      "waiting": "공급자 응답 대기 중",
+      "thinking": "생각 중",
+      "responding": "응답 중",
+      "reviewing": "검토 중",
+      "preparing": "준비 중",
+      "saving": "저장 중",
+      "consolidating": "통합 중"
+    },
     "togglePortraitPanel": "초상화 패널 전환",
     "exitSelectionMode": "선택 모드 종료",
     "selectMessages": "메시지 선택",

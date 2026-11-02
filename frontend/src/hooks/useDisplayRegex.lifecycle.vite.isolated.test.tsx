@@ -262,6 +262,47 @@ afterAll(() => {
 })
 
 describe('useDisplayRegex resolver lifecycle', () => {
+  test.each(['body', 'templates'] as const)(
+    'HTML replacement runs once with both inputs ready when %s resolves first',
+    async (first) => {
+      const raw = 'chunk ordered HTML'
+      const html = '<section class="scene-card"><strong>Resolved scene</strong></section>'
+      getPresetScripts.mockImplementationOnce(async () => [{ ...storeState.regexScripts[0],
+        id: 'source-only', preset_id: 'source-preset',
+        replace_string: '{{getvar::scene}}', substitute_macros: 'escaped' }])
+      storeState.messages = [{ ...sourceMessage(), content: raw, swipes: [raw] }]
+      let completeTemplates!: (result: { resolved: Record<string, string> }) => void
+      ownedTemplateResolver.mockImplementationOnce(() => new Promise((resolve) => { completeTemplates = resolve }))
+      holdPreprocess(raw)
+      const { host, root } = await createHarness()
+      const finishTemplates = () => act(async () => {
+        completeTemplates({ resolved: { 'replace:source-only': html } })
+        await Promise.resolve()
+      })
+      try {
+        await renderWhilePreprocessPending(root, { content: raw,
+          identity: { chatId: 'source-chat', messageId: 'source-message' }, isStreaming: false })
+        expect(typeof completeTemplates).toBe('function')
+        expect(pendingPreprocess.has(raw)).toBe(true)
+        if (first === 'body') await releasePreprocess(raw)
+        else await finishTemplates()
+        await flushReact()
+        expect(applyDisplayRegexTiered).not.toHaveBeenCalled()
+        expect(host.querySelector('output')?.getAttribute('data-pending')).toBe('true')
+
+        if (first === 'body') await finishTemplates()
+        else await releasePreprocess(raw)
+        await waitForPending(raw)
+        expect(applyDisplayRegexTiered).toHaveBeenCalledTimes(1)
+        const context = applyDisplayRegexTiered.mock.calls[0][2] as { resolvedReplacements: Map<string, string> }
+        expect(context.resolvedReplacements.get('source-only')).toBe(html)
+        await settle(raw, html)
+        expect(readRendered(host)).toBe(html)
+        expect(host.querySelector('output')?.getAttribute('data-pending')).toBe('false')
+      } finally { await destroyHarness(host, root) }
+    },
+  )
+
   test('source template caches keep identical preset variables separate across messages', async () => {
     getPresetScripts.mockImplementationOnce(async () => [{ ...storeState.regexScripts[0], id: 'source-only', preset_id: 'source-preset',
       replace_string: '{{getvar::template_marker}}', substitute_macros: 'escaped' }])
@@ -334,6 +375,37 @@ describe('useDisplayRegex resolver lifecycle', () => {
       storeState.regexScripts = originalScripts
       await destroyHarness(host, root)
     }
+  })
+
+  test('oversized template results still resolve when the reuse cache rejects them', async () => {
+    const replacement = '{{getvar::large}}' + 'x'.repeat(2 * 1024 * 1024)
+    getPresetScripts.mockImplementationOnce(async () => [{ ...storeState.regexScripts[0], id: 'source-only', preset_id: 'source-preset',
+      replace_string: replacement, substitute_macros: 'escaped' }])
+    storeState.messages = [{ ...sourceMessage(), id: 'large-template' }]
+    const { host, root } = await createHarness()
+    try {
+      await render(root, { content: 'chunk large template', identity: { chatId: 'source-chat', messageId: 'large-template' }, isStreaming: false })
+      await waitForPending('chunk large template')
+      const context = applyDisplayRegexTiered.mock.calls.at(-1)?.[2] as { resolvedReplacements: Map<string, string> }
+      expect(context.resolvedReplacements.get('source-only')).toBe(replacement)
+      await settle('chunk large template', 'fully resolved')
+      expect(readRendered(host)).toBe('fully resolved')
+      expect(host.querySelector('output')?.getAttribute('data-pending')).toBe('false')
+      expect(getDisplayContentCacheStatsForTests().templateSize).toBe(0)
+    } finally { await destroyHarness(host, root) }
+  })
+
+  test('oversized bodies finish both display stages without requiring a cache entry', async () => {
+    const content = 'chunk ' + 'x'.repeat(2 * 1024 * 1024)
+    const { host, root } = await createHarness()
+    try {
+      await render(root, { content, identity: { chatId: 'source-chat', messageId: 'large-body' }, isStreaming: false })
+      await waitForPending(content)
+      await settle(content, 'large body resolved')
+      expect(readRendered(host)).toBe('large body resolved')
+      expect(host.querySelector('output')?.getAttribute('data-pending')).toBe('false')
+      expect(getDisplayContentCacheStatsForTests().size).toBe(0)
+    } finally { await destroyHarness(host, root) }
   })
 
   test.each(['replacement', 'actions', 'reload', 'order'])('script %s changes invalidate cached output without relying on timestamps', async change => {

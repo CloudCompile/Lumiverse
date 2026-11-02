@@ -13,8 +13,10 @@ export function getMessagePresetContext(userId: string, chatId: string, messageI
 }
 
 /** All preset lookups remain scoped to the message owner. Rendering never commits variables. */
-export function applyMessagePresetContext(env: MacroEnv, userId: string, context: MessagePresetContext): boolean {
-  const preset = getPreset(userId, context.preset_id);
+export function applyMessagePresetContext(
+  env: MacroEnv, userId: string, context: MessagePresetContext, loadPreset = getPreset,
+): boolean {
+  const preset = loadPreset(userId, context.preset_id);
   if (!preset) return false;
   env.commit = false;
   env.extra.presetId = preset.id;

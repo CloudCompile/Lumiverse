@@ -6,6 +6,7 @@ import { IconPlaylistAdd } from '@tabler/icons-react'
 import { useStore } from '@/store'
 import { sendConfirmedRoomMessage } from '@/ws/confirmedRoomMessage'
 import { wsClient } from '@/ws/client'
+import { readAccountEpoch } from '@/lib/shared-read'
 import { EventType } from '@/types/ws-events'
 import { messagesApi, chatsApi } from '@/api/chats'
 import { presetsApi } from '@/api/presets'
@@ -13,7 +14,6 @@ import { presetProfilesApi, type PresetProfileBinding } from '@/api/preset-profi
 import { charactersApi } from '@/api/characters'
 import { generateApi } from '@/api/generate'
 import { memoryCortexApi } from '@/api/memory-cortex'
-import { expressionsApi } from '@/api/expressions'
 import { personasApi } from '@/api/personas'
 import { globalAddonsApi } from '@/api/global-addons'
 import { imagesApi } from '@/api/images'
@@ -28,7 +28,6 @@ import {
 } from '@/lib/impersonationPreset'
 import { unmarshalPreset } from '@/lib/loom/service'
 import {
-  inspectPromptVariablesAvailability,
   type PromptVariablesAvailability,
 } from '@/lib/loom/prompt-variable-availability'
 import { presetSaveCoordinator, StalePresetHydrationError } from '@/lib/loom/preset-save-coordinator'
@@ -110,7 +109,7 @@ import { ComposerActionBarLive } from './InputAreaComposerBar'
 import { isCoreOwnedComposerActionId, isExtensionComposerActionId } from './composerActionOwnership'
 import { isGuideActive, isGuideAutoEnabled } from '@/lib/guided-generations'
 import {
-  chatHasDisplayableExpressions,
+  hasDisplayableExpressions,
   getChatExpressionCharacterIds,
 } from '@/lib/chatExpressionAvailability'
 
@@ -214,7 +213,6 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     image_id: string | null
     metadata?: Record<string, any>
   }>>([])
-  const [characterName, setCharacterName] = useState('')
   const [impersonationPresetId, setImpersonationPresetId] = useState<string | null>(null)
   const [impersonationModeOverride, setImpersonationModeOverride] = useState<ImpersonationPreference | null>(null)
   const [promptVariablesModalOpen, setPromptVariablesModalOpen] = useState(false)
@@ -298,6 +296,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const guidedGenerations = useStore((s) => s.guidedGenerations)
   const quickReplySets = useStore((s) => s.quickReplySets)
   const personas = useStore((s) => s.personas)
+  const personasLoaded = useStore((s) => s.personasLoaded)
   const recentPersonaIds = useStore((s) => s.recentPersonaIds)
   const characterPersonaBindings = useStore((s) => s.characterPersonaBindings)
   const personaTagBindings = useStore((s) => s.personaTagBindings)
@@ -322,6 +321,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const activeChatMetadata = useStore((s) => s.activeChatMetadata)
   const setActiveChatMetadata = useStore((s) => s.setActiveChatMetadata)
   const characters = useStore((s) => s.characters)
+  const loadedCharacterIds = useStore((s) => s.activeChatLoadedCharacterIds)
   const setMentionQueue = useStore((s) => s.setMentionQueue)
   const expressionDisplay = useStore((s) => s.expressionDisplay)
   const setExpressionDisplay = useStore((s) => s.setExpressionDisplay)
@@ -357,38 +357,33 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   ])
 
   // Track whether the solo character or any group member has expressions configured.
-  const [hasExpressions, setHasExpressions] = useState(false)
   const expressionCharacterIds = useMemo(
     () => getChatExpressionCharacterIds(activeCharacterId, isGroupChat, groupCharacterIds),
     [activeCharacterId, groupCharacterIds, isGroupChat],
   )
-  useEffect(() => {
-    let cancelled = false
-
-    const refresh = async () => {
-      const available = await chatHasDisplayableExpressions(expressionCharacterIds, expressionsApi.get)
-      if (!cancelled) setHasExpressions(available)
-    }
-
-    setHasExpressions(false)
-    void refresh()
-
-    const unsubscribe = wsClient.on(EventType.CHARACTER_EDITED, (payload: { id: string }) => {
-      if (expressionCharacterIds.includes(payload.id)) void refresh()
-    })
-
-    return () => {
-      cancelled = true
-      unsubscribe()
-    }
-  }, [expressionCharacterIds])
+  const hasExpressions = useMemo(() => expressionCharacterIds.some((id) =>
+    hasDisplayableExpressions(characters.find((character) => character.id === id)?.extensions?.expressions)),
+  [expressionCharacterIds, characters])
 
   // Track alternate fields for the active character or group members.
   type AltFieldVariant = { id: string; label: string; content: string }
-  const [altFieldsData, setAltFieldsData] = useState<Record<string, AltFieldVariant[]>>({})
-  const [groupAltFieldsData, setGroupAltFieldsData] = useState<Record<string, Record<string, AltFieldVariant[]>>>({})
-  const [altFieldsLoaded, setAltFieldsLoaded] = useState(false)
-  const [groupAltFieldsLoadedIds, setGroupAltFieldsLoadedIds] = useState<string[]>([])
+  const { altFieldsData, groupAltFieldsData, altFieldsLoaded, groupAltFieldsLoadedIds } = useMemo(() => {
+    const single = !isGroupChat ? characters.find((character) => character.id === activeCharacterId) : undefined
+    const fields = single?.extensions?.alternate_fields
+    const group: Record<string, Record<string, AltFieldVariant[]>> = {}
+    for (const id of isGroupChat ? groupCharacterIds : []) {
+      const variants = characters.find((character) => character.id === id)?.extensions?.alternate_fields
+      if (variants && typeof variants === 'object') group[id] = variants as Record<string, AltFieldVariant[]>
+    }
+    return {
+      altFieldsData: fields && typeof fields === 'object' ? fields as Record<string, AltFieldVariant[]> : {},
+      groupAltFieldsData: group,
+      // Cached cards can populate controls immediately, but must not prune
+      // valid selections before the fresh opening snapshot arrives.
+      altFieldsLoaded: !!single && !!loadedCharacterIds?.includes(single.id),
+      groupAltFieldsLoadedIds: isGroupChat ? groupCharacterIds.filter((id) => loadedCharacterIds?.includes(id)) : [],
+    }
+  }, [activeCharacterId, characters, groupCharacterIds, isGroupChat, loadedCharacterIds])
   const [altFieldSelections, setAltFieldSelections] = useState<Record<string, string>>({})
   const [groupAltFieldSelections, setGroupAltFieldSelections] = useState<Record<string, Record<string, string>>>({})
   const [groupScenarioMode, setGroupScenarioMode] = useState<'individual' | 'member' | 'custom'>('individual')
@@ -408,64 +403,26 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const activeAltSelectionCount = isGroupChat
     ? Object.values(groupAltFieldSelections).reduce((total, selections) => total + Object.keys(selections || {}).length, 0)
     : Object.keys(altFieldSelections).length
-  const groupCharacterKey = useMemo(() => groupCharacterIds.join('\0'), [groupCharacterIds])
-  const groupAltFieldsKey = useMemo(() => {
-    if (!isGroupChat) return ''
-    return groupCharacterIds.map((id) => {
-      const altFields = characters.find((c) => c.id === id)?.extensions?.alternate_fields
-      return `${id}:${altFields ? JSON.stringify(altFields) : ''}`
-    }).join('\0')
-  }, [characters, groupCharacterIds, isGroupChat])
-
   useEffect(() => {
-    if (isGroupChat) {
-      setAltFieldsData({})
-      setAltFieldsLoaded(false)
-      if (groupCharacterIds.length === 0) { setGroupAltFieldsData({}); setGroupAltFieldsLoadedIds([]); return }
-      let cancelled = false
-      const characterSnapshot = useStore.getState().characters
-      Promise.all(groupCharacterIds.map(async (id) => {
-        const cached = characterSnapshot.find((c) => c.id === id)
-        if (cached?.extensions?.alternate_fields) {
-          return { id, loaded: true, altFields: cached.extensions.alternate_fields as Record<string, AltFieldVariant[]> }
-        }
-        if (cached) {
-          return { id, loaded: true, altFields: undefined }
-        }
-        const fetched = await charactersApi.get(id).catch(() => null)
-        if (fetched) useStore.getState().updateCharacter(fetched.id, fetched)
-        return {
-          id,
-          loaded: !!fetched,
-          altFields: fetched?.extensions?.alternate_fields as Record<string, AltFieldVariant[]> | undefined,
-        }
-      }))
-        .then((items) => {
-          if (cancelled) return
-          const next: Record<string, Record<string, AltFieldVariant[]>> = {}
-          for (const item of items) {
-            if (item.altFields && typeof item.altFields === 'object') next[item.id] = item.altFields
-          }
-          setGroupAltFieldsData(next)
-          setGroupAltFieldsLoadedIds(items.filter((item) => item.loaded).map((item) => item.id))
-        })
-        .catch(() => { if (!cancelled) { setGroupAltFieldsData({}); setGroupAltFieldsLoadedIds([]) } })
-      return () => { cancelled = true }
-    }
-
-    setGroupAltFieldsData({})
-    setGroupAltFieldsLoadedIds([])
-    setAltFieldsLoaded(false)
-    if (!activeCharacterId) { setAltFieldsData({}); return }
-    charactersApi.get(activeCharacterId)
-      .then((c) => {
-        useStore.getState().updateCharacter(c.id, c)
-        const af = c.extensions?.alternate_fields as Record<string, AltFieldVariant[]> | undefined
-        setAltFieldsData(af && typeof af === 'object' ? af : {})
-        setAltFieldsLoaded(true)
-      })
-      .catch(() => { setAltFieldsData({}); setAltFieldsLoaded(false) })
-  }, [activeCharacterId, isGroupChat, groupCharacterIds, groupCharacterKey, groupAltFieldsKey])
+    // New group members can be added after the open response. Fetch only a
+    // missing record once the opening loader has finished its own fallbacks.
+    if (!chatId || loadedCharacterIds == null || isRoomPeer) return
+    const ids = isGroupChat ? groupCharacterIds : activeCharacterId ? [activeCharacterId] : []
+    const missing = ids.filter((id) => !characters.some((character) => character.id === id))
+    if (!missing.length) return
+    const abort = new AbortController()
+    let cancelled = false
+    Promise.all(missing.map((id) => charactersApi.get(id, { signal: abort.signal }).catch(() => null))).then((results) => {
+      const state = useStore.getState()
+      if (cancelled || state.activeChatId !== chatId) return
+      const found = results.filter(Boolean) as typeof characters
+      for (const character of found) state.updateCharacter(character.id, character)
+      if (found.length) state.setActiveChatLoadedCharacterIds([
+        ...(state.activeChatLoadedCharacterIds ?? []), ...found.map((character) => character.id),
+      ])
+    })
+    return () => { cancelled = true; abort.abort() }
+  }, [chatId, activeCharacterId, groupCharacterIds, isGroupChat, isRoomPeer, characters, loadedCharacterIds])
 
   const pruneAltSelections = useCallback((
     selections: Record<string, string>,
@@ -551,26 +508,9 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   }, [activeChatMetadata, chatId])
 
   useEffect(() => {
-    if (!chatId) {
-      setImpersonationPresetId(null)
-      setImpersonationModeOverride(null)
-      return
-    }
-    let cancelled = false
-    chatsApi.get(chatId, { messages: false })
-      .then((chat) => {
-        if (cancelled) return
-        const value = chat.metadata?.impersonation_preset_id
-        setImpersonationPresetId(typeof value === 'string' && value ? value : null)
-        setImpersonationModeOverride(resolveImpersonationModeOverride(chat.metadata?.impersonation_mode))
-      })
-      .catch(() => {
-        if (cancelled) return
-        setImpersonationPresetId(null)
-        setImpersonationModeOverride(null)
-      })
-    return () => { cancelled = true }
-  }, [chatId])
+    const value = activeChatMetadata?.impersonation_preset_id
+    setImpersonationPresetId(chatId && typeof value === 'string' && value ? value : null)
+  }, [activeChatMetadata?.impersonation_preset_id, chatId])
 
   const handleAltFieldSelect = useCallback(async (field: string, variantId: string | null) => {
     const character = characters.find((entry) => entry.id === activeCharacterId)
@@ -628,23 +568,13 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const hasAddons = personaAddons.length > 0 || attachedGlobalAddons.length > 0
 
   useEffect(() => {
-    if (!chatId) { setChatAddonStatesByPersona({}); return }
-    chatsApi.get(chatId, { messages: false })
-      .then((chat) => {
-        const states = chat.metadata?.persona_addon_states
-        setChatAddonStatesByPersona(states && typeof states === 'object' ? states : {})
-      })
-      .catch(() => setChatAddonStatesByPersona({}))
-  }, [chatId])
-
-  // Keep quick-toggle state coherent when another tab (or a websocket chat
-  // update) changes the active chat's add-ons and avatar version.
-  useEffect(() => {
     const states = activeChatMetadata?.persona_addon_states
-    if (states && typeof states === 'object') setChatAddonStatesByPersona(states)
-  }, [activeChatMetadata?.persona_addon_states])
+    setChatAddonStatesByPersona(chatId && states && typeof states === 'object' ? states : {})
+  }, [chatId, activeChatMetadata?.persona_addon_states])
 
   const activeCharacter = activeCharacterId ? characters.find((c) => c.id === activeCharacterId) : null
+  const characterName = activeCharacter?.name ?? ''
+
   const resolvedPersonaBinding = useMemo(() => resolveAutoPersonaBinding({
     characterId: activeCharacterId,
     characterTags: activeCharacter?.tags ?? [],
@@ -775,50 +705,29 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     ? effectivePersonaAddonStates
     : undefined
 
+  const addonPersona = useMemo(() => personas.find((persona) => persona.id === activePersonaId), [activePersonaId, personas])
   useEffect(() => {
-    if (!activePersonaId) { setPersonaAddons([]); setAttachedGlobalAddons([]); return }
-    personasApi.get(activePersonaId)
-      .then(async (p) => {
-        const raw = p.metadata?.addons
-        setPersonaAddons(Array.isArray(raw) ? raw : [])
-        // Resolve attached global addons
-        const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
-        if (refs.length > 0) {
-          try {
-            const globalRes = await globalAddonsApi.list({ limit: 200, offset: 0 })
-            const refMap = new Map(refs.map(r => [r.id, r]))
-            const resolved = globalRes.data
-              .filter(g => refMap.has(g.id))
-              .map(g => ({ ...g, ...refMap.get(g.id)! }))
-            setAttachedGlobalAddons(resolved)
-          } catch {
-            setAttachedGlobalAddons([])
-          }
-        } else {
-          setAttachedGlobalAddons([])
-        }
-      })
-      .catch(() => { setPersonaAddons([]); setAttachedGlobalAddons([]) })
-  }, [activePersonaId])
-
-  // Listen for persona changes via store to keep addons in sync
-  const storePersonas = useStore((s) => s.personas)
-  useEffect(() => {
+    let cancelled = false
+    setPersonaAddons([])
+    setAttachedGlobalAddons([])
     if (!activePersonaId) return
-    const p = storePersonas.find((x) => x.id === activePersonaId)
-    if (p) {
-      const raw = p.metadata?.addons
+    if (!addonPersona && !personasLoaded) return
+    const request = addonPersona ? Promise.resolve(addonPersona) : personasApi.get(activePersonaId)
+    request.then(async (persona) => {
+      if (cancelled) return
+      const raw = persona.metadata?.addons
       setPersonaAddons(Array.isArray(raw) ? raw : [])
-      // Update global addon enabled state from store
-      const refs: AttachedGlobalAddon[] = Array.isArray(p.metadata?.attached_global_addons) ? p.metadata.attached_global_addons : []
-      setAttachedGlobalAddons(prev => {
-        const refMap = new Map(refs.map(r => [r.id, r]))
-        return prev
-          .filter(g => refMap.has(g.id))
-          .map(g => ({ ...g, ...refMap.get(g.id)! }))
-      })
-    }
-  }, [storePersonas, activePersonaId])
+      const refs: AttachedGlobalAddon[] = Array.isArray(persona.metadata?.attached_global_addons)
+        ? persona.metadata.attached_global_addons : []
+      if (!refs.length) return
+      const globalRes = await globalAddonsApi.list({ limit: 200, offset: 0 })
+      if (cancelled) return
+      const refMap = new Map(refs.map((ref) => [ref.id, ref]))
+      setAttachedGlobalAddons(globalRes.data.filter((addon) => refMap.has(addon.id))
+        .map((addon) => ({ ...addon, ...refMap.get(addon.id)! })))
+    }).catch(() => {})
+    return () => { cancelled = true }
+  }, [activePersonaId, addonPersona, personasLoaded])
 
   // Mirror the server-returned metadata into the shared chat state. The
   // dedicated toggle endpoint records both boolean state and recency/version,
@@ -1048,7 +957,7 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
   const manuallyActiveGuideCount = guidedGenerations.filter((guide) => guide.enabled).length
   const activeQuickReplySets = quickReplySets.filter((s) => s.enabled)
   const activeLoomPresetRegistryUpdatedAt = activeLoomPresetId
-    ? loomRegistry[activeLoomPresetId]?.updatedAt ?? null
+    ? loomRegistry[activeLoomPresetId]?.cacheRevision ?? loomRegistry[activeLoomPresetId]?.updatedAt ?? null
     : null
   const promptVariablesAvailable = !!activeLoomPresetId
     && promptVariablesAvailability?.presetId === activeLoomPresetId
@@ -1062,24 +971,18 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     let cancelled = false
     const presetId = activeLoomPresetId
     const registryUpdatedAt = activeLoomPresetRegistryUpdatedAt
+    const epoch = readAccountEpoch()
     const isCurrent = () => {
       const state = useStore.getState()
       return !cancelled
+        && readAccountEpoch() === epoch
         && state.activeLoomPresetId === presetId
-        && (state.loomRegistry[presetId]?.updatedAt ?? null) === registryUpdatedAt
+        && (state.loomRegistry[presetId]?.cacheRevision ?? state.loomRegistry[presetId]?.updatedAt ?? null) === registryUpdatedAt
     }
 
-    void inspectPromptVariablesAvailability({
-      presetId,
-      registryUpdatedAt,
-      loadBlocks: async () => {
-        const preset = await presetsApi.get(presetId)
-        return unmarshalPreset(preset).blocks
-      },
-      isCurrent,
-    }).then((availability) => {
-      if (!availability) return
-      setPromptVariablesAvailability(availability)
+    void presetsApi.capabilities(presetId).then((capabilities) => {
+      if (!isCurrent()) return
+      setPromptVariablesAvailability({ presetId, registryUpdatedAt, hasDefinitions: capabilities.has_prompt_variables })
     }).catch((err) => {
       if (!isCurrent()) return
       console.warn('[InputArea] Failed to inspect prompt variable availability:', err)
@@ -1100,8 +1003,10 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     setPromptVariablesLoading(true)
     const presetId = activeLoomPresetId
     try {
-      const resolvedProfile = await presetProfilesApi.resolve(chatId, presetId, activeProfileId, activePersonaId)
-      const preset = await presetsApi.get(presetId)
+      const [resolvedProfile, preset] = await Promise.all([
+        presetProfilesApi.resolve(chatId, presetId, activeProfileId, activePersonaId),
+        presetsApi.get(presetId),
+      ])
       if (useStore.getState().activeLoomPresetId !== presetId) {
         return
       }
@@ -1483,10 +1388,6 @@ function InputAreaNative({ chatId, onNavigateHome, onOpenChatFind }: InputAreaPr
     }).catch(() => {})
   }, [openPopover, personas])
 
-  useEffect(() => {
-    if (!activeCharacterId) return
-    charactersApi.get(activeCharacterId).then((c) => setCharacterName(c.name)).catch(() => {})
-  }, [activeCharacterId])
 
   const DOCUMENT_EXTENSIONS = useMemo(() => new Set([
     '.txt', '.md', '.markdown', '.csv', '.tsv', '.json', '.xml',

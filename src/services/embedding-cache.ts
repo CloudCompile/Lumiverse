@@ -8,7 +8,7 @@
  * from the in-memory LRU without hitting the embedding API again.
  */
 
-import { getDb } from "../db/connection";
+import { getDb, getDbGeneration } from "../db/connection";
 
 export interface ModelFingerprint {
   provider: string;
@@ -40,7 +40,7 @@ export class EmbeddingCache {
   private map = new Map<string, CacheEntry>();
   private maxSize: number;
   private ttlMs: number;
-  private diskReady = false;
+  private diskGeneration = -1;
 
   constructor(maxSize = 2048, ttlMs = 600_000) {
     this.maxSize = maxSize;
@@ -49,8 +49,9 @@ export class EmbeddingCache {
 
   // ---- SQLite disk layer ----
 
-  private ensureDiskTable(): void {
-    if (this.diskReady) return;
+  private ensureDiskTable(): boolean {
+    const generation = getDbGeneration();
+    if (this.diskGeneration === generation) return true;
     try {
       const db = getDb();
       db.run(`
@@ -60,17 +61,18 @@ export class EmbeddingCache {
           created_at INTEGER NOT NULL
         )
       `);
-      this.diskReady = true;
+      this.diskGeneration = generation;
+      return true;
     } catch {
       // DB not initialised yet — disk layer unavailable, memory-only is fine
+      return false;
     }
   }
 
   private writeToDisk(entries: ReadonlyArray<{ key: string; entry: CacheEntry }>): void {
     if (entries.length === 0) return;
     try {
-      this.ensureDiskTable();
-      if (!this.diskReady) return;
+      if (!this.ensureDiskTable()) return;
       const db = getDb();
       const insert = db.query(
         `INSERT OR REPLACE INTO embedding_cache (cache_key, vector, created_at) VALUES (?, ?, ?)`,
@@ -107,8 +109,7 @@ export class EmbeddingCache {
 
   private readFromDisk(key: string): CacheEntry | null {
     try {
-      this.ensureDiskTable();
-      if (!this.diskReady) return null;
+      if (!this.ensureDiskTable()) return null;
       const db = getDb();
       const row = db.query<{ vector: string; created_at: number }, [string]>(
         `SELECT vector, created_at FROM embedding_cache WHERE cache_key = ?`
@@ -122,8 +123,7 @@ export class EmbeddingCache {
 
   private deleteFromDisk(key: string): void {
     try {
-      this.ensureDiskTable();
-      if (!this.diskReady) return;
+      if (!this.ensureDiskTable()) return;
       const db = getDb();
       db.run(`DELETE FROM embedding_cache WHERE cache_key = ?`, [key]);
     } catch {
@@ -133,8 +133,7 @@ export class EmbeddingCache {
 
   private clearDisk(): void {
     try {
-      this.ensureDiskTable();
-      if (!this.diskReady) return;
+      if (!this.ensureDiskTable()) return;
       const db = getDb();
       db.run(`DELETE FROM embedding_cache`);
     } catch {

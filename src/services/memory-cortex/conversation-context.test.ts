@@ -53,3 +53,23 @@ test("co-presence, hotel plans, negation, hypotheticals and third-party dialogue
   expect(extractParticipantRelationships('[USER | Prolix]: "I love you."', [...names, "Tovin"])).toEqual([]);
   expect(extractParticipantRelationships('"I love you."', names)).toEqual([]);
 });
+
+test("a shared author label keeps members separate and does not select a speaker or addressee", () => {
+  const label = "Pulchra Fellini and Jane Doe";
+  const shared: CortexParticipant[] = [
+    { name: "Pulchra Fellini", role: "character", authorLabel: label },
+    { name: "Jane Doe", role: "character", authorLabel: label },
+    { name: "Darran", role: "user" },
+  ];
+  const names = shared.map((p) => p.name);
+  for (const passage of [`[CHARACTER | ${label}]: I love you.`, '[USER | Darran]: I love you.']) {
+    const resolved = resolveConversationParticipants(passage, names, [], shared);
+    expect(resolved.map((p) => p.name).sort()).toEqual([...names].sort());
+    expect(resolved.filter((p) => p.authorLabel === label)).toHaveLength(2);
+    expect(extractParticipantRelationships(passage, names, [], [], shared)).toEqual([]);
+  }
+  const passage = `[CHARACTER | Pulchra Fellini]: I love you.`;
+  expect(extractParticipantRelationships(passage, names, [], [], shared)).toEqual([
+    expect.objectContaining({ source: "Pulchra Fellini", target: "Darran", type: "lover" }),
+  ]);
+});

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -291,6 +291,25 @@ function macOSPayload(macRequest: LinuxReleaseRequest = { ...desktopRequest, for
   writeFileSync(join(native, "manifest.json"), JSON.stringify({ ...INTEL_LANCEDB, format: 1, buildId: intelLanceDbBuildId(), sha256: hash(nativeBytes) }));
   return { root, directory, native, macRequest };
 }
+test.each(["\n", "\r\n"])("macOS handoff validates exact server entries with line ending %j", (lineEnding) => {
+  const f = macOSPayload();
+  const archive = join(f.directory, "Lumiverse.app.tar.gz");
+  const listing = Bun.spawnSync(["tar", "-tzf", archive], { stdout: "pipe", stderr: "pipe" });
+  expect(listing.exitCode).toBe(0);
+  const entry = "Lumiverse Desktop.app/Contents/MacOS/lumiverse-server";
+  const tar = spyOn(Bun, "spawnSync").mockReturnValueOnce({
+    ...listing, stdout: Buffer.from(listing.stdout.toString().replace(/\r?\n/g, lineEnding)),
+  });
+  try {
+    // Keep extraction real so only the textual listing changes, never server bytes.
+    expect(verifyMacOSPayload(f.root, f.macRequest, identity).archive).toBe(archive);
+    expect(tar).toHaveBeenCalledTimes(2);
+    for (const entries of [[entry, entry], [`${entry}.bak`]]) {
+      tar.mockReturnValueOnce({ ...listing, stdout: Buffer.from(entries.join(lineEnding) + lineEnding) });
+      expect(() => verifyMacOSPayload(f.root, f.macRequest, identity)).toThrow("exactly one bundled server");
+    }
+  } finally { tar.mockRestore(); }
+});
 test("macOS handoff binds native server, installer and updater bytes to the requested run", () => {
   const f = macOSPayload();
   const payload = verifyMacOSPayload(f.root, f.macRequest, identity);

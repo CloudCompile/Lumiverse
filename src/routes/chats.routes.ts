@@ -15,6 +15,8 @@ import {
   type MessageContentProcessorCtx,
 } from "../spindle/message-content-processor";
 import { preprocessDisplayMessage } from "../services/display-message-preprocess.service";
+import { createDisplayRenderContext, type DisplayRenderContext } from "../services/chat-macro-render.service";
+import type { DisplayMessageSource, Message } from "../types/message";
 import { computeMessageTokenCount } from "../services/message-token-count";
 import { resolveRegexActionEffects, getMessageDisplayScripts } from "../services/associative-regex-effects.service";
 import {
@@ -126,12 +128,17 @@ async function runDisplayPreprocessItem(
   chatId: string,
   item: DisplayPreprocessItem,
   signal?: AbortSignal,
+  sources?: Map<string, DisplayMessageSource>,
+  context?: DisplayRenderContext,
 ) {
-  const savedMessage = item.messageId ? svc.getMessage(userId, item.messageId) : null;
+  const savedMessage = item.messageId
+    ? (sources && !messageContentProcessorChain.hasForUser(userId)
+        ? sources.get(item.messageId) : svc.getMessage(userId, item.messageId))
+    : null;
   const processed = await preprocessDisplayMessage({
     userId, chatId, content: item.rawContent, message: savedMessage ?? undefined,
     messageId: item.messageId, messageIndex: item.messageIndex, role: item.role,
-    swipeIndex: item.swipeIndex, signal,
+    swipeIndex: item.swipeIndex, signal, context,
   });
 
   return {
@@ -445,6 +452,35 @@ app.get("/:id", async (c) => {
   if (c.req.query("messages") === "false") return c.json({ ...chat, character_display_owner });
   const messages = svc.getMessages(userId, chat.id);
   return c.json({ ...chat, character_display_owner, messages });
+});
+
+/** Bounded first-page data; legacy metadata and message routes remain available. */
+app.get("/:id/open", async (c) => {
+  const userId = c.get("userId");
+  const chat = await svc.getChatAsync(userId, c.req.param("id"), { priority: "interactive" });
+  if (!chat) return c.json({ error: "Not found" }, 404);
+  const limit = Math.min(parsePagination(c.req.query("limit"), undefined).limit, 1000);
+  const memberIds = chat.metadata?.group === true && Array.isArray(chat.metadata.character_ids)
+    ? chat.metadata.character_ids.filter((id): id is string => typeof id === "string")
+    : [];
+  const ids = [...new Set([...(chat.character_id ? [chat.character_id] : []), ...memberIds])];
+  // Member lists originate in metadata. Bound both the response and SQL bindings.
+  const characterMap = await charactersSvc.getCharactersByIdsAsync(userId, ids.slice(0, 100), {
+    priority: "interactive",
+  }).catch((error) => {
+    console.warn("[chats] Open character snapshot unavailable:", error);
+    return new Map();
+  });
+  const characters = [...characterMap.values()];
+  const ownerCandidates = managerSvc.getEnabledExtensionIdentifiers();
+  const character_display_owner = chat.character_id
+    ? charactersSvc.getCharacterDisplayOwner(userId, chat.character_id, ownerCandidates)
+    : null;
+  return c.json({
+    chat: { ...chat, character_display_owner },
+    messages: svc.listMessagesTail(userId, chat.id, limit, { light: true }),
+    characters,
+  });
 });
 
 app.put("/:id", async (c) => {
@@ -797,6 +833,16 @@ app.get("/:chatId/messages", async (c) => {
   // arrays) — non-active swipe data dominated the payload but is only needed
   // by swipe actions, which re-fetch the full message. ?full=true opts out.
   const light = c.req.query("full") !== "true";
+
+  if (c.req.query("beforeIndex") !== undefined) {
+    const index = Number(c.req.query("beforeIndex"));
+    const id = c.req.query("beforeId");
+    if (!Number.isSafeInteger(index) || index < 0 || !id) {
+      return c.json({ error: "beforeIndex and beforeId must identify a message boundary" }, 400);
+    }
+    const limit = Math.min(parsePagination(c.req.query("limit"), undefined).limit, 1000);
+    return c.json(await svc.listMessagesBefore(userId, chatId, { index, id }, limit, { light }));
+  }
 
   // tail=true fetches the last N messages efficiently (single index scan from end)
   if (c.req.query("tail") === "true") {
@@ -1235,9 +1281,15 @@ app.post("/:chatId/display-preprocess", async (c) => {
       return c.json({ error: "each item requires rawContent (string)" }, 400);
     }
 
+    // A processor can synchronously edit a later source before its turn starts.
+    // Preserve those per-item reads for extension-controlled batches.
+    const sources = messageContentProcessorChain.hasForUser(userId) ? undefined
+      : await svc.getDisplayMessageSourcesByIds(userId, chatId,
+        (items as DisplayPreprocessItem[]).flatMap((item) => item.messageId ? [item.messageId] : []));
+    const context = createDisplayRenderContext(userId, chatId);
     const processed = await Promise.all(
       (items as DisplayPreprocessItem[]).map((item) =>
-        runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal)
+        runDisplayPreprocessItem(userId, chatId, item, c.req.raw.signal, sources, context)
       )
     );
 

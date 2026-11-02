@@ -1,3 +1,4 @@
+import { useCharacterCatalog } from '@/hooks/useCharacterCatalog'
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { motion } from 'motion/react'
@@ -53,7 +54,7 @@ import {
 import { imagesApi } from '@/api/images'
 import { settingsApi } from '@/api/settings'
 import { notificationSoundsApi } from '@/api/notification-sounds'
-import { unlockNotificationAudio } from '@/lib/notificationAudio'
+import { playNotificationSound, unlockNotificationAudio } from '@/lib/notificationAudio'
 import { webSearchApi, type WebSearchProvider, type WebSearchProviderProfile, type WebSearchSettingsInput, type WebSearchTestResponse } from '@/api/web-search'
 import type { DrawerSettings, GuidedGeneration, LongMessageCollapsePreset, QuickReplySet } from '@/types/store'
 import type { EmbeddingConfig, ChatMemorySettings, ChatSummary, Character, CharacterSummary } from '@/types/api'
@@ -856,10 +857,7 @@ function CompletionSoundUploader({ disabled, current, onChange, onError, onSucce
         onError(t('display.completionSound.blocked'))
         return
       }
-      const url = notificationSoundsApi.completionUrl(current.uploadedAt)
-      const audio = new Audio(url)
-      audio.volume = 0.5
-      await audio.play().catch((err) => {
+      await playNotificationSound(current.uploadedAt).catch((err) => {
         onError(err?.message || t('display.completionSound.playFailed'))
       })
     } finally {
@@ -1394,7 +1392,7 @@ interface SortableGuideRowProps {
   guide: GuidedGeneration
   editing: boolean
   chats: ChatSummary[]
-  characters: Character[]
+  characters: Array<Pick<Character, 'id' | 'name'>>
   activeChatId: string | null
   activeCharacterId: string | null
   onToggleEnabled: (id: string, value: boolean) => void
@@ -1684,7 +1682,7 @@ function GuidedGenerationSettings() {
   const openModal = useStore((s) => s.openModal)
   const activeChatId = useStore((s) => s.activeChatId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
-  const characters = useStore((s) => s.characters)
+  const characters = useCharacterCatalog()
   const [editingId, setEditingId] = useState<string | null>(null)
   const [chats, setChats] = useState<ChatSummary[]>([])
 

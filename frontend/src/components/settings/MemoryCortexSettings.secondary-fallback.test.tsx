@@ -34,6 +34,8 @@ const config = {
   },
   formatterMode: "shadow" as const,
   useChatMemoryFormatting: true,
+  replaceConsolidatedMessagesInContext: false,
+  replaceArcSummariesInContext: false,
   contextTokenBudget: 600,
   retrievalTimeoutMs: 60000,
   sidecarTimeoutMs: 60000,
@@ -197,7 +199,10 @@ mock.module("@/components/shared/ConnectionSelect", () => ({
     ),
 }));
 mock.module("@/components/shared/NumericInput", () => ({
-  default: ({ value }: { value: number }) => createElement("input", { defaultValue: String(value) }),
+  default: ({ value, onChange, integer: _integer, commitOnBlur: _commit, ...props }: any) => createElement("input", {
+    ...props, type: "number", defaultValue: String(value),
+    onInput: (event: any) => onChange(event.currentTarget.valueAsNumber),
+  }),
 }));
 mock.module("@/components/shared/Toggle", () => ({
   Toggle: { Checkbox: ({ checked, disabled, label, hint, onChange }: {
@@ -320,6 +325,44 @@ describe("MemoryCortexSettings secondary fallback", () => {
     expect(select?.getAttribute("data-kind")).toBe("decision");
     await changeSelect(select!, "decision-conn");
     expect(patches.at(-1)).toMatchObject({ arbitration: { backend: "decision", connectionProfileId: "decision-conn", minConfidence: 0.8 } });
+  });
+
+  test("consolidation intervals are visible and persist independently with their units", async () => {
+    const h = await mount();
+    await click(h.querySelector('[aria-label="memoryCortex.enableConsolidation"]'));
+    for (const [field, initial, value] of [["chunkThreshold", 40, 12], ["chunksPerConsolidation", 10, 6], ["arcThreshold", 5, 3]] as const) {
+      const input = h.querySelector<HTMLInputElement>(`[data-testid="cortex-consolidation-${field}"]`)!;
+      expect(input).not.toBeNull();
+      expect(input.value).toBe(String(initial));
+      expect(input.min).toBe("1");
+      await act(async () => {
+        input.value = String(value);
+        input.dispatchEvent(new dom.window.Event("input", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+    expect(persistedConfig.consolidation).toEqual({ ...config.consolidation,
+      enabled: true, chunkThreshold: 12, chunksPerConsolidation: 6, arcThreshold: 3,
+    });
+    expect(h.textContent).toContain("memoryCortex.consolidationIntervalHint");
+  });
+
+  test("history replacement toggles persist independently of consolidation generation", async () => {
+    const h = await mount();
+    const scene = h.querySelector<HTMLInputElement>('[aria-label="memoryCortex.replaceConsolidatedMessagesInContext"]');
+    const arc = h.querySelector<HTMLInputElement>('[aria-label="memoryCortex.replaceArcSummariesInContext"]');
+    expect(scene?.checked).toBe(false);
+    expect(arc?.checked).toBe(false);
+    await click(scene);
+    expect(patches.at(-1)).toEqual({ replaceConsolidatedMessagesInContext: true });
+    await click(arc);
+    expect(patches.at(-1)).toEqual({ replaceArcSummariesInContext: true });
+    expect(persistedConfig.replaceConsolidatedMessagesInContext).toBe(true);
+    expect(persistedConfig.replaceArcSummariesInContext).toBe(true);
+    expect(persistedConfig.consolidation.enabled).toBe(false);
+    await click(scene);
+    expect(persistedConfig.replaceConsolidatedMessagesInContext).toBe(false);
+    expect(persistedConfig.replaceArcSummariesInContext).toBe(true);
   });
 
   test("candidate review cannot be enabled without a Decision connection", async () => {

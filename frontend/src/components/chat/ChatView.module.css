@@ -221,11 +221,13 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chatColumnInner[data-chat-chrome-entering] .chatToolbar,
-  .chatColumnInner[data-chat-chrome-entering] :global([data-component='ChatFindBar']),
-  .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageList']),
-  .chatColumnInner[data-chat-chrome-entering] :global([data-component='InputArea']),
-  .chatColumnInner[data-chat-chrome-entering] :global([data-component='MessageSelectBar']) {
+  /* Keep transitions disabled after the entry flag clears too: transitions
+     use the destination style's duration when the hidden state is removed. */
+  .chatColumnInner .chatToolbar,
+  .chatColumnInner :global([data-component='ChatFindBar']),
+  .chatColumnInner :global([data-component='MessageList']),
+  .chatColumnInner :global([data-component='InputArea']),
+  .chatColumnInner :global([data-component='MessageSelectBar']) {
     transform: none;
     transition: none;
   }
@@ -298,6 +300,25 @@
   background: color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 10%, var(--lcs-glass-bg, var(--lumiverse-bg-elevated)));
   box-shadow: var(--lumiverse-shadow-sm), 0 0 0 1px color-mix(in srgb, var(--lumiverse-danger, #ff6b6b) 18%, transparent);
 }
+
+.cortexNoticeWithBatches { border-radius: 16px; }
+.cortexBatchList {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  white-space: normal;
+}
+.cortexBatch {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--lumiverse-fill-subtle);
+  font-size: calc(10px * var(--lumiverse-font-scale, 1));
+  color: var(--lumiverse-text-muted);
+  pointer-events: auto;
+}
+.cortexBatch[data-phase="thinking"] { color: var(--lumiverse-primary); }
+.cortexBatch[data-phase="responding"] { color: var(--lumiverse-success, #74bd9a); }
 
 .cortexNoticeDismiss {
   position: absolute;

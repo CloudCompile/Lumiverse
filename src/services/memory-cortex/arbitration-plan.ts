@@ -1,4 +1,5 @@
 import { isPlausibleAlias } from "./alias-validation";
+import { normalizeCharacterName } from "./character-names";
 import { validateArbitrationVerdicts } from "./arbitration";
 import type { ArbitrationCanonical, ArbitrationCandidate, ArbitrationVerdict, CortexArbitrationInput } from "./arbitration";
 import type { DiscoveredAlias, ExtractedEntity, ExtractedRelationship, MemoryEntity } from "./types";
@@ -36,23 +37,54 @@ export function buildCortexArbitrationPlan(options: {
       if (isPlausibleAlias(alias, entity.name) && !graph.aliases.some((a) => a.alias === alias && a.canonicalName === entity.name)) graph.aliases.push({ alias, canonicalName: entity.name });
     }
   }
+  const sharedLabels = new Set((options.participants ?? []).flatMap((p) => p.authorLabel
+    ? [p.authorLabel.toLowerCase(), normalizeCharacterName(p.authorLabel).toLowerCase()] : []));
   const canonicals: ArbitrationCanonical[] = [];
   const canonicalEntityIds = new Map<string, string>();
   const seen = new Set<string>();
   for (const entity of [...knownEntities, ...options.characterNames.map((name) => ({ name, aliases: [], id: undefined })),
     ...graph.entities.filter((e) => !e.provisional).map((e) => ({ name: e.name, aliases: [] as string[], id: undefined }))]) {
-    if (seen.has(entity.name.toLowerCase())) continue;
+    if (seen.has(entity.name.toLowerCase()) || sharedLabels.has(entity.name.toLowerCase())) continue;
     seen.add(entity.name.toLowerCase());
     const id = `c${canonicals.length}`;
     const aliases = [...entity.aliases, ...[...(options.canonicalAliases ?? [])].filter(([, name]) => name.toLowerCase() === entity.name.toLowerCase()).map(([alias]) => alias)];
-    canonicals.push({ id, name: entity.name, aliases: [...new Set(aliases)] });
+    canonicals.push({ id, name: entity.name, aliases: [...new Set(aliases)].filter((alias) => !sharedLabels.has(alias.toLowerCase())) });
     if (entity.id) canonicalEntityIds.set(id, entity.id);
   }
+  // Extraction already expands first/last-name references to full character
+  // names. Carry that identity context across the independent review boundary,
+  // without turning inferred name parts into approved/persisted aliases.
+  const characterIdentities = new Set([...options.characterNames,
+    ...knownEntities.filter((e) => e.entityType === "character").map((e) => e.name)].map((name) => name.toLowerCase()));
+  const partsById = new Map(canonicals.map((canonical) => [canonical.id,
+    characterIdentities.has(canonical.name.toLowerCase())
+      ? canonical.name.split(/\s+/).filter((part) => part.length >= 3 && isPlausibleAlias(part, canonical.name)) : []]));
+  const owners = new Map<string, Set<string>>();
+  for (const canonical of canonicals) {
+    // A newly proposed short-name entity is precisely what review must resolve;
+    // it must not invalidate the configured full name's identity hint.
+    if (!characterIdentities.has(canonical.name.toLowerCase())
+      && !knownEntities.some((entity) => entity.name.toLowerCase() === canonical.name.toLowerCase())) continue;
+    for (const name of [canonical.name, ...canonical.aliases, ...partsById.get(canonical.id)!]) {
+      const key = name.toLowerCase();
+      const ids = owners.get(key) ?? new Set<string>();
+      ids.add(canonical.id);
+      owners.set(key, ids);
+    }
+  }
+  for (const canonical of canonicals) {
+    const parts = [...new Set(partsById.get(canonical.id)!)].filter((part) => owners.get(part.toLowerCase())!.size === 1);
+    if (parts.length) canonical.nameParts = parts;
+  }
+  const nameWords = (name: string) => name.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter((word) => word.length >= 3);
+  // Co-presence supplies no identity link. Offering every nearby canonical as
+  // a resolution choice dilutes ordinary keep/reject judgments for all entities.
   const shortlist = (name: string) => canonicals.filter((c) => c.name.toLowerCase() !== name.toLowerCase())
-    .map((c) => ({ c, score: (options.characterNames.includes(c.name) ? 2 : 0)
-      + (passage.toLowerCase().includes(c.name.toLowerCase()) ? 2 : 0)
-      + (c.aliases.some((a) => a.toLowerCase() === name.toLowerCase()) ? 10 : 0)
-      + (name.toLowerCase().split(/\W+/).some((w) => w.length >= 3 && c.name.toLowerCase().includes(w)) ? 4 : 0) }))
+    .map((c) => ({ c, score:
+      (c.aliases.some((a) => a.toLowerCase() === name.toLowerCase()) ? 10 : 0)
+      + (graph.aliases.some((a) => a.alias.toLowerCase() === name.toLowerCase() && a.canonicalName.toLowerCase() === c.name.toLowerCase()) ? 8 : 0)
+      + (nameWords(name).some((word) => nameWords(c.name).includes(word)) ? 4 : 0)
+      + (nameWords(name).length === 1 && (c.nameParts ?? []).some((part) => part.toLowerCase().startsWith(name.toLowerCase())) ? 2 : 0) }))
     .filter((entry) => entry.score > 0).sort((a, b) => b.score - a.score).slice(0, 48).map(({ c }) => c.id);
   const cleanupEntities = options.gradeExisting ? knownEntities.filter((e) => e.userEditedAt == null) : [];
   const candidates: ArbitrationCandidate[] = [

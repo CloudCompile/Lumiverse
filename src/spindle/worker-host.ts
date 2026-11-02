@@ -1,3 +1,5 @@
+import { ThemeAuthoringHost } from './theme-authoring-host';
+import { handleThemeReferences } from './theme-references-host';
 import { ConnectionOrganizationHost } from './connection-organization-host';
 import type { OrganizationWorkerMessage, OrganizationHostMessage } from './connection-organization-contract';
 import { CONNECTION_ORGANIZATION_CAPABILITIES } from '../shared/connection-organization';
@@ -34,6 +36,7 @@ import type { DryRunResultDTO, GetBreakdownWorkerMessage, StreamDoneChunkDTO } f
 import type { DesktopCaptureWorkerMessage } from "./desktop-capture-contract";
 import { safeFetch, SSRFError } from "../utils/safe-fetch";
 import { getGitMetadata } from "../utils/git-metadata";
+import { uuidv4, uuidv7 } from "../utils/uuid";
 import type { ImageReadBinaryMessage } from "./image-binary-contract";
 import type { CharacterGalleryWorkerMessage, ConnectionModelDTO, ConnectionModelsWorkerMessage } from "./gallery-models-contract";
 import type { ActivationPatternsMessage } from "./activation-patterns-contract";
@@ -349,6 +352,7 @@ type BackendProcessRuntimeToHost =
   | { type: "stopped" };
 
 type RuntimeWorkerToHost =
+  | import("./uuid-contract").UUIDWorkerMessage
   | import("./live-activities-contract").LiveActivityWorkerMessage
   | { type: "message_generation_begin"; requestId: string; input: BeginMessageGenerationInput }
   | { type: "message_generation_finish" | "message_generation_abort"; requestId: string; sessionId: string }
@@ -1043,6 +1047,7 @@ export class WorkerHost {
   private readonly embeddingsApi: WorkerHostEmbeddingsApi;
   private readonly processApi: WorkerHostProcessApi;
   private readonly interactionApi: WorkerHostInteractionApi;
+  private readonly themeAuthoringApi: ThemeAuthoringHost;
   private readonly presentationApi: WorkerHostPresentationApi;
   private readonly mcpApi: WorkerHostMcpApi;
   private readonly desktopCaptureApi: WorkerHostDesktopCaptureApi;
@@ -1054,6 +1059,15 @@ export class WorkerHost {
     extensionInfo: ExtensionInfo
   ) {
     this.messageGenerations = new MessageGenerations(extensionId);
+    this.themeAuthoringApi = new ThemeAuthoringHost({
+      resolveUser: (userId) => {
+        const resolved = this.resolveEffectiveUserId(userId);
+        this.enforceScopedUser(resolved);
+        return resolved;
+      },
+      canMutate: () => this.hasPermission("app_manipulation"),
+      post: (message) => this.postToWorker(message),
+    });
     const metadata = (extensionInfo.metadata || {}) as Record<string, unknown>;
     this.installScope = metadata.install_scope === "user" ? "user" : "operator";
     this.installedByUserId =
@@ -1379,6 +1393,7 @@ export class WorkerHost {
         lumiverseVersion: await getBackendVersion(),
         capabilities: Object.freeze({
           ...SPINDLE_HOST_CAPABILITIES,
+          "uuid-v1": 1,
           ...CONNECTION_ORGANIZATION_CAPABILITIES,
           "character-search-v1": 1,
           "message-preset-context-v1": 1,
@@ -1415,6 +1430,7 @@ export class WorkerHost {
   }
 
   async stop(): Promise<void> {
+    this.themeAuthoringApi.dispose();
     this.decisionsApi.dispose();
     this.embeddingsApi.dispose();
     await this.filesApi.dispose();
@@ -2626,6 +2642,10 @@ export class WorkerHost {
       case "ui_navigate":
         this.presentationApi.handleUINavigate(msg.requestId, msg.action, msg.tabId, msg.viewId, msg.userId);
         break;
+      // ─── UUID Generation (free tier) ─────────────────────────────────
+      case "uuid_generate":
+        this.handleUUIDGenerate(msg.requestId, msg.version);
+        break;
       // ─── Version (free tier) ─────────────────────────────────────────
       case "version_get_backend":
         this.handleVersionGetBackend(msg.requestId);
@@ -2809,6 +2829,12 @@ export class WorkerHost {
         this.presentationApi.handleChatSetStyleMode(msg.requestId, msg.chatId, msg.mode, msg.userId);
         break;
       // ─── Theme (gated: "app_manipulation") ──────────────────────────────
+      case "theme_authoring":
+        void this.themeAuthoringApi.handle(msg);
+        break;
+      case "theme_references":
+        void handleThemeReferences(msg, message => this.postToWorker(message));
+        break;
       case "theme_apply":
         this.presentationApi.handleThemeApply(msg.requestId, msg.overrides, msg.userId);
         break;
@@ -5383,6 +5409,20 @@ export class WorkerHost {
   }
 
   // ─── Frontend Process Lifecycle (free tier) ─────────────────────────
+
+  // ─── UUID Generation (free tier) ────────────────────────────────────
+
+  private handleUUIDGenerate(requestId: string, version: 4 | 7): void {
+    try {
+      if (version !== 4 && version !== 7) {
+        throw new Error("UUID version must be 4 or 7");
+      }
+      const result = version === 4 ? uuidv4() : uuidv7();
+      this.postToWorker({ type: "response", requestId, result });
+    } catch (err) {
+      this.postToWorker({ type: "response", requestId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
 
   // ─── Version (free tier) ────────────────────────────────────────────
 

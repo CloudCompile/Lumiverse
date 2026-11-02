@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { closeDatabase, initDatabase } from "../db/connection";
+import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { closeDatabase, getDb, initDatabase } from "../db/connection";
 import * as settingsSvc from "./settings.service";
 import * as secretsSvc from "./secrets.service";
 import { embeddingCache, computeCacheKey } from "./embedding-cache";
+import * as vectorStores from "./vector-store";
+import type { VectorStore } from "./vector-store/types";
+import { stubVectorStore } from "./test-fixtures/vector-store";
 import {
   EMBEDDING_ERROR_CODES,
   EMBEDDING_SETTINGS_KEY,
@@ -32,6 +35,10 @@ const UNKNOWN_ID = "44444444-4444-4444-8444-444444444444";
 const settings = new Map<string, unknown>();
 const secrets = new Map<string, string>();
 const spies: Array<{ mockRestore(): void }> = [];
+const deleteVectors = mock<VectorStore["deleteByFilter"]>(async () => {});
+const baselineSql = await Bun.file(new URL("../db/baseline.sql", import.meta.url)).text();
+let secretReadSpy: ReturnType<typeof spyOn<typeof secretsSvc, "getSecret">>;
+let secretStatusSpy: ReturnType<typeof spyOn<typeof secretsSvc, "getSecretForStatus">>;
 
 function sk(userId: string, key: string): string {
   return `${userId}::${key}`;
@@ -88,10 +95,15 @@ function enabledProfiles(overrides: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  closeDatabase();
+  initDatabase(":memory:");
+  getDb().run(baselineSql);
   settings.clear();
   secrets.clear();
   embeddingCache.clear();
+  deleteVectors.mockClear();
   spies.push(
+    spyOn(vectorStores, "getActiveVectorStore").mockResolvedValue(stubVectorStore({ deleteByFilter: deleteVectors })),
     spyOn(settingsSvc, "getSetting").mockImplementation((userId: string, key: string) => {
       const value = settings.get(sk(userId, key));
       return value === undefined ? null : { key, value, updated_at: 0 };
@@ -100,10 +112,10 @@ beforeEach(() => {
       settings.set(sk(userId, key), value);
       return { key, value, updated_at: 0 };
     }),
-    spyOn(secretsSvc, "getSecret").mockImplementation(async (userId: string, key: string) => {
+    secretReadSpy = spyOn(secretsSvc, "getSecret").mockImplementation(async (userId: string, key: string) => {
       return secrets.get(sk(userId, key)) ?? null;
     }),
-    spyOn(secretsSvc, "getSecretForStatus").mockImplementation(async (userId: string, key: string) => {
+    secretStatusSpy = spyOn(secretsSvc, "getSecretForStatus").mockImplementation(async (userId: string, key: string) => {
       return secrets.get(sk(userId, key)) ?? null;
     }),
     spyOn(settingsSvc, "getSettingAsync").mockImplementation(async (...args) => settingsSvc.getSetting(...args)),
@@ -120,6 +132,7 @@ beforeEach(() => {
 afterEach(() => {
   while (spies.length > 0) spies.pop()?.mockRestore();
   embeddingCache.clear();
+  closeDatabase();
 });
 
 describe("embedding connection profiles", () => {
@@ -336,6 +349,10 @@ describe("embedding connection profiles", () => {
     expect(secrets.get(sk(USER, embeddingProfileSecretKey(PRIMARY_ID)))).toBe("bananabread-user-key");
     expect(requestUrl).toBe("http://localhost:8008/v1/embeddings");
     expect(authorization).toBe("Bearer bananabread-user-key");
+    expect(deleteVectors.mock.calls).toEqual([
+      ["embeddings", { op: "eq", field: "user_id", value: USER }],
+      ["embeddings_world_books", { op: "eq", field: "user_id", value: USER }],
+    ]);
   });
 
   test("copies a selected OpenAI-compatible LLM connection key into its dedicated embedding profile", async () => {
@@ -722,13 +739,11 @@ describe("embedding connection profiles", () => {
 
     const secretReads: string[] = [];
     const statusReads: string[] = [];
-    spies[2]?.mockRestore();
-    spies[3]?.mockRestore();
-    spies[2] = spyOn(secretsSvc, "getSecret").mockImplementation(async (userId: string, key: string) => {
+    secretReadSpy.mockImplementation(async (userId: string, key: string) => {
       secretReads.push(key);
       return secrets.get(sk(userId, key)) ?? null;
     });
-    spies[3] = spyOn(secretsSvc, "getSecretForStatus").mockImplementation(async (userId: string, key: string) => {
+    secretStatusSpy.mockImplementation(async (userId: string, key: string) => {
       statusReads.push(key);
       return secrets.get(sk(userId, key)) ?? null;
     });

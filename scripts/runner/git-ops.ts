@@ -806,7 +806,8 @@ export function restoreDependencyInstall(
 // Keep these aligned with frontend/package.json overrides and optionalDependencies.
 // Rolldown >=1.2.4 includes the Android ARMv8.0 SIGILL fix.
 const TERMUX_FRONTEND_NATIVE_DEPS = [
-  "@rolldown/binding-android-arm64@1.2.14",
+  "@oxc-transform-react/binding-android-arm64@0.154.0",
+  "@rolldown/binding-android-arm64@1.2.15",
   "lightningcss-android-arm64@1.33.0",
 ];
 
@@ -1050,6 +1051,11 @@ export const FRONTEND_BUILD_STEPS = [
     label: "frontend CSS variable extraction",
     progress: "Extracting frontend CSS variables...",
     command: ["bun", "run", "scripts/extract-css-vars.ts"],
+  },
+  {
+    label: "frontend theme reference generation",
+    progress: "Generating frontend theme references...",
+    command: ["bun", "run", "scripts/generate-theme-reference.ts"],
   },
   {
     label: "frontend Vite bundling",

@@ -1,20 +1,21 @@
-import type { Message } from "../types/message";
+import type { DisplayMessageSource } from "../types/message";
 import type { MessagePresetContext } from "../types/preset-context";
 import { messageContentProcessorChain } from "../spindle/message-content-processor";
-import { resolveDisplayMessageBody } from "./chat-macro-render.service";
+import { resolveDisplayMessageBody, type DisplayRenderContext } from "./chat-macro-render.service";
 
 /** The body stage shared by native display and server-side action verification. */
 export async function preprocessDisplayMessage(input: {
   userId: string;
   chatId: string;
   content: string;
-  message?: Message;
+  message?: DisplayMessageSource;
   messageId?: string;
   messageIndex?: number;
   role?: string;
   swipeIndex?: number;
   presetContext?: MessagePresetContext;
   signal?: AbortSignal;
+  context?: DisplayRenderContext;
 }) {
   const hasContentProcessor = messageContentProcessorChain.hasForUser(input.userId);
   const processed = hasContentProcessor
@@ -34,6 +35,9 @@ export async function preprocessDisplayMessage(input: {
   const content = await resolveDisplayMessageBody(
     input.userId, input.chatId, processed.content ?? input.content,
     input.message, input.swipeIndex, input.signal, input.presetContext,
+    // Processors can change chat state while running; keep their existing
+    // per-item reads rather than sharing a snapshot across those mutations.
+    hasContentProcessor ? undefined : input.context,
   );
   return { content, incrementalRawAppendSafe: !hasContentProcessor };
 }

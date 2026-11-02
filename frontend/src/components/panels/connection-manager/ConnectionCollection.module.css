@@ -51,7 +51,6 @@
   color: var(--lumiverse-text-dim);
   background: transparent;
   cursor: pointer;
-  touch-action: none;
 }
 
 .iconButton:hover {

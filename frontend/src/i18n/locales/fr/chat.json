@@ -252,6 +252,22 @@
     "showFewer": "Afficher moins"
   },
   "chatView": {
+    "cortexFailedBatches": "Lots en échec : {{count}}",
+    "cortexBatchProgress": "{{current}}/{{total}} lots · {{queued}} en attente",
+    "cortexElapsed": "{{seconds}} s écoulées",
+    "cortexBatchActivity": "Lot {{batch}} · {{phase}}",
+    "cortexBatchChunks": "Segments : {{count}}",
+    "cortexActiveBatches": "Lots de mémoire actifs",
+    "cortexActivity": {
+      "queued": "En attente",
+      "waiting": "En attente du fournisseur",
+      "thinking": "Réflexion",
+      "responding": "Réponse en cours",
+      "reviewing": "Vérification",
+      "preparing": "Préparation",
+      "saving": "Enregistrement",
+      "consolidating": "Consolidation"
+    },
     "togglePortraitPanel": "Basculer le panneau de portrait",
     "exitSelectionMode": "Quitter le mode de sélection",
     "selectMessages": "Sélectionner les messages",

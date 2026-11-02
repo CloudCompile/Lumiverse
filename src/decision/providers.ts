@@ -7,6 +7,7 @@ const PROVIDERS: DecisionProviderDTO[] = [
   { id: "openrouter", name: "OpenRouter", capabilities: { apiKeyRequired: true, defaultUrl: "https://openrouter.ai/api/v1", suggestedModel: "~typesafe/jev-latest", modelListStyle: "dynamic" } },
   { id: "typesafe", name: "TypeSafe", capabilities: { apiKeyRequired: true, defaultUrl: "https://api.typesafe.ai/v1", suggestedModel: "jev-latest", modelListStyle: "dynamic" } },
   { id: "nanogpt", name: "NanoGPT", capabilities: { apiKeyRequired: true, defaultUrl: "https://nano-gpt.com/api/v1", suggestedModel: "typesafe/jev-latest", modelListStyle: "dynamic" } },
+  { id: "inception", name: "Inception", capabilities: { apiKeyRequired: true, defaultUrl: "https://api.inceptionlabs.ai/v1", suggestedModel: "mercury-decide", modelListStyle: "dynamic" } },
   // Any TypeSafe-compatible deployment (proxy, gateway, self-hosted server): the
   // base URL is entered by the user and the `/v1/systemone` + `/v1/models`
   // routes are appended, exactly like TypeSafe's own endpoint.
@@ -34,7 +35,7 @@ export function decisionEvaluationUrl(profile: { provider: string; api_url?: str
   const url = new URL(resolveDecisionApiUrl(profile));
   url.pathname = profile.provider === "openrouter"
     ? `${url.pathname.slice(0, -3)}/alpha/decisions`
-    : profile.provider === "nanogpt"
+    : (profile.provider === "nanogpt" || profile.provider === "inception")
       ? `${url.pathname}/decisions`
       : `${url.pathname}/systemone`;
   return url.toString();
@@ -78,7 +79,9 @@ export async function fetchDecisionModels(profile: { provider: string; api_url?:
       const id = profile.provider === "typesafe" ? item.name
         : typeof item.id === "string" && item.id.trim() ? item.id : item.name;
     if (typeof id !== "string" || !id.trim()) continue;
-    const architecture = isRecord(item.architecture) ? item.architecture : {};
+    // Inception advertises modalities at the top level and mixes chat and decision models.
+    const architecture = profile.provider === "inception" ? item : isRecord(item.architecture) ? item.architecture : {};
+    if (profile.provider === "inception" && (!Array.isArray(item.supported_endpoints) || !item.supported_endpoints.includes("decisions"))) continue;
     const inputModalities = Array.isArray(architecture.input_modalities) ? architecture.input_modalities.filter((v): v is string => typeof v === "string") : [];
     const outputModalities = Array.isArray(architecture.output_modalities) ? architecture.output_modalities.filter((v): v is string => typeof v === "string") : [];
     if (profile.provider === "openrouter" && Array.isArray(architecture.output_modalities) && !architecture.output_modalities.includes("decisions")) continue;
@@ -87,11 +90,11 @@ export async function fetchDecisionModels(profile: { provider: string; api_url?:
     // A custom endpoint is reachable but its catalog cannot be verified here, so
     // its models stay selectable and are reported as unverified rather than
     // silently claimed to be Decision models.
-    const supported = profile.provider === "typesafe" || profile.provider === "nanogpt" || /^~?typesafe\/jev-|^(cloudflare\/clef|perplexity\/pplx-decider|upstage\/solar-decide|inception\/mercury-decide|liquid\/d1|openai\/gpt-6-luna-decisions)/.test(id);
+    const supported = profile.provider === "inception" || profile.provider === "typesafe" || profile.provider === "nanogpt" || /^~?typesafe\/jev-|^(cloudflare\/clef|perplexity\/pplx-decider|upstage\/solar-decide|inception\/mercury-decide|liquid\/d1|openai\/gpt-6-luna-decisions)/.test(id);
     const protocol = profile.provider === "custom" ? "unverified" : supported ? "supported" : "unverified";
     const pricing = decisionModelPricing(item.pricing);
     models.set(id, {
-      id, label: (profile.provider === "openrouter" || profile.provider === "nanogpt") && typeof item.name === "string" ? item.name : id,
+      id, label: (profile.provider === "openrouter" || profile.provider === "nanogpt" || profile.provider === "inception") && typeof item.name === "string" ? item.name : id,
       ...(typeof item.description === "string" ? { description: item.description } : {}),
       ...(profile.provider === "typesafe" || profile.provider === "custom" ? { input_modalities: ["text", "image"] } : inputModalities.length ? { input_modalities: inputModalities } : {}),
       ...(outputModalities.length ? { output_modalities: outputModalities } : {}),
@@ -122,7 +125,7 @@ export function validateDecisionParameters(provider: string, parameters: unknown
 }
 type DecisionProviderProfile = { provider: string; api_url?: string; model: string; default_parameters: Record<string, unknown>; metadata?: Record<string, unknown> };
 
-async function requestProviderDecision(profile: DecisionProviderProfile, apiKey: string, input: DecisionEvaluationInput, signal?: AbortSignal): Promise<unknown> {
+async function requestProviderDecision(profile: DecisionProviderProfile, apiKey: string, input: DecisionEvaluationInput, signal?: AbortSignal, onDispatch?: () => void): Promise<unknown> {
   const provider = getProvider(profile.provider);
   const model = input.model?.trim() || profile.model.trim();
   if (!model) throw new DecisionValidationError("Select a Decision model for this connection");
@@ -140,6 +143,8 @@ async function requestProviderDecision(profile: DecisionProviderProfile, apiKey:
   const dangerZoneImages = profile.provider === "typesafe" || profile.provider === "custom";
   const sendImages = imageOptIn && images;
   const body = { ...validateDecisionParameters(profile.provider, profile.default_parameters), model, state: input.state, questions: input.questions, ...(input.assets && imageOptIn ? { assets: input.assets } : {}) };
+  signal?.throwIfAborted();
+  onDispatch?.();
   return fetchProviderJson<unknown>(provider.name, "decision evaluation", decisionEvaluationUrl(profile), {
     method: "POST", headers: {
       Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json",
@@ -165,8 +170,8 @@ export async function evaluateProviderDecision(profile: DecisionProviderProfile,
 
 /** Internal Cortex path: return only individually validated answers, with
  * explicit issues for candidates that require retry or host-side deferral. */
-export async function evaluateProviderDecisionAnswers(profile: DecisionProviderProfile, apiKey: string, input: DecisionEvaluationInput, signal?: AbortSignal): Promise<DecisionAnswerReport> {
-  const value = await requestProviderDecision(profile, apiKey, input, signal);
+export async function evaluateProviderDecisionAnswers(profile: DecisionProviderProfile, apiKey: string, input: DecisionEvaluationInput, signal?: AbortSignal, onDispatch?: () => void): Promise<DecisionAnswerReport> {
+  const value = await requestProviderDecision(profile, apiKey, input, signal, onDispatch);
   try { return inspectDecisionAnswers(value, input.questions); }
   catch (error) { throw invalidDecisionResponse(profile, error); }
 }

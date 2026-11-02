@@ -578,7 +578,7 @@ export class GoogleVertexProvider implements LlmProvider {
 
     if (!res.ok) await throwProviderResponseError("Vertex AI", "stream", res);
 
-    yield* readGoogleStream(res, this.displayName, request.parameters?._replay_thought_signatures === true, request.signal);
+    yield* readGoogleStream(res, this.displayName, request.parameters?._replay_thought_signatures === true, request.signal, request.onResponseActivity);
   }
 
   async validateKey(apiKey: string, apiUrl: string): Promise<boolean> {

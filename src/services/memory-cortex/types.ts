@@ -374,6 +374,8 @@ export interface CortexQuery {
   emotionalContext?: EmotionalTag[];
   generationType: string;
   topK: number;
+  /** Maximum cosine distance; 0 disables filtering. Resolved before retrieval. */
+  maxDistance?: number;
   includeConsolidations: boolean;
   includeRelationships: boolean;
   /** Message IDs to exclude from retrieval (e.g., regeneration target) */
@@ -385,6 +387,8 @@ export interface CortexMemory {
   sourceId: string;
   content: string;
   finalScore: number;
+  /** Raw measured cosine distance, distinct from the fused ranking score. */
+  vectorDistance?: number;
   components: {
     semantic: number;
     salience: number;
@@ -472,6 +476,13 @@ export interface InterlinkCortexData {
 export interface LinkedCortexResult {
   vaults: VaultCortexData[];
   interlinks: InterlinkCortexData[];
+}
+
+/** Per-request transfer of main-process warm results into prompt assembly workers. */
+export interface CortexCacheSnapshot {
+  chatId: string;
+  local: { result: CortexResult; queriedAt: number; excludeMessageIds: string[] } | null;
+  linked: { result: LinkedCortexResult; queriedAt: number } | null;
 }
 
 // ─── Ingestion Pipeline Types ──────────────────────────────────

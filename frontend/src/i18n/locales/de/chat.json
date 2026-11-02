@@ -311,6 +311,22 @@
     "showFewer": "Weniger anzeigen"
   },
   "chatView": {
+    "cortexFailedBatches": "Fehlgeschlagene Stapel: {{count}}",
+    "cortexBatchProgress": "{{current}}/{{total}} Stapel · {{queued}} in Warteschlange",
+    "cortexElapsed": "{{seconds}} s vergangen",
+    "cortexBatchActivity": "Stapel {{batch}} · {{phase}}",
+    "cortexBatchChunks": "Abschnitte: {{count}}",
+    "cortexActiveBatches": "Aktive Speicherstapel",
+    "cortexActivity": {
+      "queued": "In Warteschlange",
+      "waiting": "Warten auf Anbieter",
+      "thinking": "Denkt nach",
+      "responding": "Antwortet",
+      "reviewing": "Prüft",
+      "preparing": "Vorbereitung",
+      "saving": "Speichern",
+      "consolidating": "Konsolidierung"
+    },
     "togglePortraitPanel": "Porträtbereich ein-/ausblenden",
     "exitSelectionMode": "Auswahlmodus beenden",
     "selectMessages": "Nachrichten auswählen",

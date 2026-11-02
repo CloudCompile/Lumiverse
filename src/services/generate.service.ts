@@ -15,6 +15,7 @@ import * as personasSvc from "./personas.service";
 import { readGenerationVariableSeed } from "../db/swipe-variable-state";
 import {
   assemblePrompt,
+  collapseToSingleUserMessage,
   collectVectorActivatedWorldInfo,
   mergeActivatedWorldInfoEntries,
   isChatHistoryMessage,
@@ -1100,6 +1101,7 @@ async function runPromptPipeline(opts: {
   let macroEnv: import("../macros/types").MacroEnv | undefined;
   let variableStateSeed: import("../utils/variable-checkpoint").VariableStateSeed | undefined;
   let trimIncompleteWords = false;
+  let collapseMessages = false;
   let resolvedPreset:
     | { id: string; name: string; metadata?: Record<string, unknown> }
     | undefined;
@@ -1192,6 +1194,7 @@ async function runPromptPipeline(opts: {
     macroEnv = assemblyResult.macroEnv;
     variableStateSeed = assemblyResult.variableStateSeed;
     trimIncompleteWords = assemblyResult.trimIncompleteWords === true;
+    collapseMessages = assemblyResult.collapseMessages === true;
     resolvedPreset = assemblyResult.resolvedPreset;
   }
 
@@ -1418,6 +1421,9 @@ async function runPromptPipeline(opts: {
   if (chatHistoryMessages) {
     chatHistoryMessages = chatHistoryMessages.filter(hasNonEmptyContent);
   }
+
+  // Preserve history identities until extensions finish replacing or editing turns.
+  if (collapseMessages) collapseToSingleUserMessage(messages);
 
   breakdown = appendInterceptorBreakdownEntries(
     breakdown,

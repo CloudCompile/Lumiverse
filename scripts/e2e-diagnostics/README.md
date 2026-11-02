@@ -149,11 +149,91 @@ Probe output includes:
 
 The summary highlights one class of frontend race directly: extension frontend messages that arrived before the app logged `[Spindle] Loaded frontend: ...`.
 
+## Chat memory and rendering telemetry
+
+`bun run diagnose` now samples memory and responsiveness during the scroll gesture.
+It uses full Chromium's newer headless mode by default. The report records the
+actual GPU renderer and acceleration status; hardware acceleration depends on the
+host. Set `DIAG_BROWSER_CHANNEL=headless-shell` to select the older lightweight
+shell, or `DIAG_HEADED=1` to show the browser.
+
+```bash
+# Lightweight memory, DOM, layout/task counters and callback cadence
+bun run diagnose
+
+# Also save a Chromium performance trace with before/after GPU memory dumps
+DIAG_GPU_TRACE=1 bun run diagnose
+node analyze-trace.mjs performance-trace.json
+
+# Controlled regression checks; no account or live backend needed
+bun run check:telemetry
+```
+
+Options:
+
+- `DIAG_SAMPLE_MS`: sample interval, default `500`, range `100`–`10000`.
+- `DIAG_SETTLE_MS`: wait after messages appear, default `2000`.
+- `DIAG_SCROLL_WAIT_MS`: wait for each scroll direction, default `1500`.
+- `DIAG_GPU_TRACE=1`: opt into the more expensive trace and memory dumps.
+
+`report.json` retains `stats`, `diag`, `metricsBefore`, `metricsAfter` and
+`metricDelta`, and adds `beforeStats`, `schemaVersion: 2` and `telemetry`.
+`telemetry.json` contains the same standalone telemetry report. Raw CDP durations
+remain in seconds in `metricsBefore`/`metricsAfter`/`metricDelta`; derived
+`telemetry.counterDelta` durations are explicitly labeled in milliseconds.
+`metricDelta` now includes supported work counters and memory/DOM gauges rather
+than subtracting unrelated navigation timestamps. Invalid counter comparisons
+after navigation or a reset are `null`, with reasons in the telemetry report.
+
+Heap summaries distinguish JS heap, embedder heap and backing storage, with
+before/after values and sampled peaks. These components are not a total RAM
+measurement. DOM/listener counters cover the renderer, including objects awaiting
+collection. Samples are bounded, polling does not overlap, and peaks continue to
+update after the raw-sample limit. Recording stops after two minutes in the chat
+diagnostic. `diag.rafCount` now counts the collector's callbacks rather than
+application rAF requests. Callback intervals describe scheduling cadence, not
+presented FPS. Percentiles use retained interval samples; totals/maxima keep
+updating when the sample limit is reached. Long task, long animation frame and
+layout shift support is reported explicitly.
+
+With GPU tracing enabled, `performance-trace.json` can be opened in Chrome
+DevTools or Perfetto. `telemetry.trace.gpuMemory.checkpoints` reports the GPU
+process's root allocator size without summing shared or nested allocations.
+These are browser-wide Chromium allocation bytes, not physical VRAM residency,
+GPU utilization or memory owned by one extension. Missing values are `null`.
+Clock markers bound each requested dump because Perfetto can rewrite dump IDs
+when exporting JSON. Missing or ambiguous checkpoint records remain unavailable.
+Memory dumps happen outside the browser collector's responsiveness window, but
+tracing itself adds overhead: compare runs using the same recording options.
+Traces have a 64 MiB recording buffer and a 128 MiB export limit; failures or data
+loss are reported, and an interrupted export may leave a `.partial` file. Raw
+traces can contain script URLs and other page metadata; review them before sharing.
+
+For manual measurements, paste `telemetry-browser.iife.js` into DevTools:
+
+```js
+__LUMIVERSE_PERF__.start({ label: 'panel lifecycle' })
+// Open, use and close the extension's UI several times.
+__LUMIVERSE_PERF__.mark('panel closed')
+await __LUMIVERSE_PERF__.stop()
+__LUMIVERSE_PERF__.download()
+```
+
+This console-only collector works without Playwright. It reports supported
+responsiveness signals and a coarse `performance.memory` heap estimate where
+available; CDP memory/GPU measurements require the automated collector. Console
+recordings default to 60 seconds and can be released with
+`__LUMIVERSE_PERF__.dispose()`. The generic Spindle sweep has not been wired to
+the collector yet. For regression comparisons, use the same browser, rendering
+backend, data and action sequence; repeat open/close cycles in one document.
+
 ## Output
 
 Results are written to `out/`:
 
-- `report.json` — message-list stats, long-task count, layout-event count, scroll-event count, rAF count, and Chrome Performance metrics before/after the scroll gesture.
+- `report.json` — message-list stats, browser responsiveness records and sampled memory/DOM/Performance telemetry before/during/after the scroll gesture.
+- `telemetry.json` — standalone telemetry, capabilities, rendering environment and optional GPU memory checkpoints.
+- `performance-trace.json` — optional Chromium trace when `DIAG_GPU_TRACE=1`.
 - `chat-loaded.png`
 - `chat-after-scroll.png`
 

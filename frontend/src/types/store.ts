@@ -1,4 +1,5 @@
 import type { RecentConnections } from '@/lib/connectionRecents'
+import type { CharacterIndexItem } from './api'
 import type { ConnectionLibraries } from '@/lib/connectionLibrary'
 import type { Message, Character, Persona, Preset, ConnectionProfile, ProviderInfo, RecentChat, GroupedRecentChat, PaginatedResult, Pack, PackWithItems, LumiaItem, LoomItem, ImageGenConnectionProfile, ImageGenProviderInfo } from './api'
 import type { WeaverSession, WeaverStage, WeaverExtraction, WeaverSpineSlot, WeaverSynthesisGroup, WeaverBookRole, WeaverBuildType, WeaverNarrationMode, WeaverPersonaRegister, WeaverPersonaPlan, PersonaDraft, CreateWeaverSessionInput, WeaverCommittedFact, WeaverGap, WeaverInterviewQuestion, WeaverInterviewState, WeaverResponseKind, WeaverCandidate, WeaverBible, UpdateWeaverBibleInput, WeaverFieldDef, WeaverField, WeaverFinalizeResult, WeaverFinalizeInput, WeaverStartChatResult } from '@/api/weaver'
@@ -20,6 +21,8 @@ export interface ChatSlice {
    * write).
    */
   activeChatMetadata: Record<string, any> | null
+  /** null while opening; IDs whose character data was refreshed for this chat. */
+  activeChatLoadedCharacterIds: string[] | null
   activeChatDisplayOwner: string | null
   /** The chat row's `name` for the currently-open chat (group chats display it as the group name) */
   activeChatName: string | null
@@ -57,6 +60,7 @@ export interface ChatSlice {
    * it when applied, so later mounts and WS-driven refreshes always refetch.
    */
   landingRecentChats: PaginatedResult<GroupedRecentChat> | null
+  landingRecentChatsScope: number | null
   setLandingRecentChats: (result: PaginatedResult<GroupedRecentChat> | null) => void
   setActiveChat: (
     chatId: string | null,
@@ -73,6 +77,7 @@ export interface ChatSlice {
   setActiveChatWallpaper: (wallpaper: WallpaperRef | null) => void
   setActiveChatAvatarId: (imageId: string | null) => void
   setActiveChatMetadata: (metadata: Record<string, any> | null) => void
+  setActiveChatLoadedCharacterIds: (ids: string[]) => void
   setActiveChatDisplayOwner: (owner: string | null) => void
   setActiveChatName: (name: string | null) => void
   setMessages: (messages: Message[], total?: number) => void
@@ -158,6 +163,13 @@ export interface StartupSettings {
 }
 
 export interface CharactersSlice {
+  characterIndex: CharacterIndexItem[]
+  characterIndexLoaded: boolean
+  characterIndexRevision: number
+  characterIndexGeneration: number
+  invalidateCharacterIndex: () => void
+  characterIndexChanges: Record<string, number>
+  setCharacterIndex: (items: CharacterIndexItem[], startedAtRevision: number) => void
   characters: Character[]
   charactersLoaded: boolean
   favorites: string[]
@@ -523,6 +535,7 @@ export interface SavedThemeConfigEntry {
 }
 /** A user-saved theme made from a .lumitheme bundle import — preserves CSS, components, and assets. */
 export interface SavedThemePackEntry {
+  authoringSnapshot?: { version: 1; globalEnabled: boolean; themeWasNull: boolean }
   kind: 'pack'
   id: string
   name: string
@@ -886,7 +899,7 @@ export interface SettingsSlice {
   addSavedTheme: (input: SavedThemeInput) => SavedTheme
   renameSavedTheme: (id: string, name: string) => void
   deleteSavedTheme: (id: string) => Promise<void>
-  applySavedTheme: (id: string) => void
+  applySavedTheme: (id: string) => void | Promise<void>
   /** Replace a saved theme with the complete current theme snapshot and persist it. */
   updateSavedTheme: (id: string) => Promise<void>
   loadSettings: () => Promise<void>
@@ -972,6 +985,7 @@ export interface SpindleSettings {
 
 // ---- Loom Registry Entry ----
 export interface LoomRegistryEntry {
+  cacheRevision?: number
   name: string
   blockCount: number
   coverUrl: string | null
@@ -985,6 +999,7 @@ export interface PresetsSlice {
   activePresetId: string | null
   activeLoomPresetId: string | null
   loomRegistry: Record<string, LoomRegistryEntry>
+  loomRegistryLoaded: boolean
   setActiveLoomPreset: (id: string | null) => void
   setPresets: (presets: Record<string, Preset>) => void
   setActivePreset: (id: string | null) => void

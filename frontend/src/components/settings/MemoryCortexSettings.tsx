@@ -622,6 +622,30 @@ export default function MemoryCortexSettings() {
           {/* ── Context Formatting ── */}
           <div className={styles.section}>
             <div className={styles.sectionHeader}>
+              <BookOpen size={14} />
+              <span>{t("memoryCortex.historyReplacement")}</span>
+            </div>
+            <div className={styles.toggleRow}>
+              <Toggle.Checkbox
+                checked={config.replaceConsolidatedMessagesInContext ?? false}
+                onChange={(v) => updateConfig({ replaceConsolidatedMessagesInContext: v })}
+                label={t("memoryCortex.replaceConsolidatedMessagesInContext")}
+                hint={t("memoryCortex.replaceConsolidatedMessagesInContextHint")}
+              />
+            </div>
+            <div className={styles.toggleRow}>
+              <Toggle.Checkbox
+                checked={config.replaceArcSummariesInContext ?? false}
+                onChange={(v) => updateConfig({ replaceArcSummariesInContext: v })}
+                label={t("memoryCortex.replaceArcSummariesInContext")}
+                hint={t("memoryCortex.replaceArcSummariesInContextHint")}
+              />
+            </div>
+            <div className={styles.hintText}>{t("memoryCortex.historyReplacementHint")}</div>
+          </div>
+
+          <div className={styles.section}>
+            <div className={styles.sectionHeader}>
               <Sparkles size={14} />
               <span>{t("memoryCortex.formattingSection")}</span>
             </div>
@@ -1029,6 +1053,20 @@ export default function MemoryCortexSettings() {
                     <div className={styles.toggleRow}>
                       <Toggle.Checkbox checked={config.consolidation.enabled} onChange={(v) => updateConfig({ consolidation: { ...config.consolidation, enabled: v } })} label={t("memoryCortex.enableConsolidation")} hint={t("memoryCortex.enableConsolidationHint")} />
                     </div>
+                    <div className={styles.whitelistHint}>{t("memoryCortex.consolidationIntervalHint")}</div>
+                    {([
+                      ["chunkThreshold", "consolidationThreshold"],
+                      ["chunksPerConsolidation", "consolidationBatchSize"],
+                      ["arcThreshold", "consolidationArcThreshold"],
+                    ] as const).map(([field, label]) => (
+                      <label className={styles.infoRow} key={field}>
+                        <span className={styles.infoLabel}>{t(`memoryCortex.${label}`)}</span>
+                        <NumericInput className={styles.numberInput} value={config.consolidation[field]}
+                          aria-label={t(`memoryCortex.${label}`)} data-testid={`cortex-consolidation-${field}`}
+                          min={1} step={1} integer commitOnBlur disabled={!config.consolidation.enabled}
+                          onChange={(value) => updateConfig({ consolidation: { ...config.consolidation, [field]: value ?? config.consolidation[field] } })} />
+                      </label>
+                    ))}
                   </div>
 
                   <div className={styles.section}>

@@ -345,6 +345,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
           break;
         case "response.function_call_arguments.delta":
         case "response.function_call_arguments.done": {
+          request.onResponseActivity?.();
           const itemId = parsed.item_id || parsed.output_index?.toString() || "0";
           const existing = fnCallBuffer.get(itemId);
           if (existing) {

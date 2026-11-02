@@ -4,6 +4,8 @@ export interface CortexParticipant {
   role: "user" | "character";
   /** Stored author labels may contain card decorations removed from the name. */
   aliases?: string[];
+  /** Shared routing label, not an alias or the identity of the local speaker. */
+  authorLabel?: string;
 }
 
 export function getConversationMessages(content: string) {
@@ -32,13 +34,18 @@ export function resolveConversationParticipants(
   const messages = getConversationMessages(content);
   const explicitRoles = new Set(messages.map((message) => message.role));
   for (const participant of [...storedParticipants.filter((participant) => !explicitRoles.has(participant.role)), ...messages]) {
-    const name = canonicalize(participant.name);
-    participants.set(`${participant.role}:${name.toLowerCase()}`, { name, role: participant.role });
+    const shared = storedParticipants.filter((stored) => stored.role === participant.role
+      && stored.authorLabel?.toLowerCase() === participant.name.toLowerCase());
+    for (const member of shared.length ? shared : [participant]) {
+      const name = canonicalize(member.name);
+      participants.set(`${member.role}:${name.toLowerCase()}`, { name, role: member.role,
+        ...("authorLabel" in member && member.authorLabel ? { authorLabel: member.authorLabel } : {}) });
+    }
   }
   return [...participants.values()];
 }
 
 export function buildConversationHint(content: string, characterNames: string[], aliases?: Array<{ alias: string; canonicalName: string }>, storedParticipants?: CortexParticipant[]): string {
   const participants = resolveConversationParticipants(content, characterNames, aliases, storedParticipants);
-  return participants.length ? `\n\n<conversation_participants>\n${JSON.stringify(participants)}\nIdentity metadata only, not relationship evidence. A message prefix identifies its author. In a direct first-person exchange, you/your addresses the unique opposite-role participant unless the passage explicitly addresses someone else. Group scenes and quoted third-party dialogue require local attribution. Use canonical names, including for {{user}}/{{char}} when their identity is unambiguous.\n</conversation_participants>` : "";
+  return participants.length ? `\n\n<conversation_participants>\n${JSON.stringify(participants)}\nIdentity metadata only, not evidence of presence, actions or relationships. A message prefix identifies the author label, which may route multiple characters (authorLabel). Shared labels are not individual entities or aliases. Attribute each action, dialogue, thought and reference from local names, narration and viewpoint in any POV. A shared author label does not identify a speaker or thinker; ambiguous references stay unresolved. Use individual canonical names, including for {{user}}/{{char}} only when unambiguous.\n</conversation_participants>` : "";
 }

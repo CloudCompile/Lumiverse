@@ -20,7 +20,24 @@ function getLocalStreamingType(generationType?: string) {
  * lightweight watchdog poll while a generation is active, and immediately
  * when a live segment's offset reveals a gap in the local buffer.
  */
-export async function recoverPooledGeneration(chatId: string): Promise<void> {
+const pendingRecoveries = new Map<string, Promise<void>>()
+
+export function recoverPooledGeneration(chatId: string): Promise<void> {
+  const state = useStore.getState()
+  const buffers = state.getStreamBuffers()
+  const key = JSON.stringify([state.user?.id, chatId, state.getGenerationEpoch(),
+    state.isStreaming, state.activeGenerationId, buffers.content.length, buffers.reasoning.length,
+    state.streamingNavigationPaused, state.mpRoomId, state.mpIsHost])
+  const pending = pendingRecoveries.get(key)
+  if (pending) return pending
+  const work = recoverPooledGenerationOnce(chatId).finally(() => {
+    if (pendingRecoveries.get(key) === work) pendingRecoveries.delete(key)
+  })
+  pendingRecoveries.set(key, work)
+  return work
+}
+
+async function recoverPooledGenerationOnce(chatId: string): Promise<void> {
   if (!chatId) return
   const state = useStore.getState()
   if (state.activeChatId !== chatId) return

@@ -21,9 +21,11 @@ export default function SortableFolderSection({
     <div ref={setNodeRef} style={style} hidden={hidden}
       data-drop-target={receiving || undefined} data-sortable-folder={id}
       className={`${styles.folder} ${isDragging ? styles.dragging : ''}`}>
+      {/* The delayed TouchSensor reserves long presses for dragging; ordinary
+          swipes over a header must still pan lists filled with folders. */}
       <FolderSection {...section} keepMounted
         headerDragProps={{ ...attributes, ...listeners, 'aria-disabled': undefined,
-          style: { cursor: disabled || reorderDisabled ? undefined : 'grab', touchAction: 'none' } }} />
+          style: { cursor: disabled || reorderDisabled ? undefined : 'grab' } }} />
     </div>
   )
 }

@@ -19,7 +19,8 @@ import '../src/theme/global.css'
 // Real managers, cards, forms, API clients, settings and drag sensors. Only the
 // HTTP boundary is replaced so interaction tests cannot modify a user's data.
 const kinds = ['llm', 'imageGen', 'stt', 'tts', 'decision', 'embedding'] as const
-const profiles = Array.from({ length: 15 }, (_, index) => ({
+const stress = new URL(location.href).searchParams.has('stress')
+const profiles = Array.from({ length: stress ? 90 : 15 }, (_, index) => ({
   id: `connection-${index}`, name: ['Vertex Argon', 'Vertex Flash', 'Opus', 'Sonnet'][index % 4] + ` ${index + 1}`,
   provider: 'openai', model: `model-${index}`, api_url: 'https://example.test/v1',
   is_default: index === 0, has_api_key: true, preset_id: null,
@@ -28,9 +29,13 @@ const profiles = Array.from({ length: 15 }, (_, index) => ({
 }))
 const providers = [{ id: 'openai', name: 'OpenAI', default_url: 'https://example.test/v1',
   capabilities: { apiKeyRequired: true, defaultUrl: 'https://example.test/v1', modelListStyle: 'dynamic' } }]
-const key = 'connection-manager-layout'
-const library = { folders: [{ id: 'local', name: 'Local' }, { id: 'hosted', name: 'Hosted' }],
-  folderOrder: ['local', 'hosted', ''], assignments: {} }
+const key = stress ? 'connection-manager-scroll' : 'connection-manager-layout'
+const folders = stress
+  ? Array.from({ length: 30 }, (_, index) => ({ id: `folder-${index}`, name: `Folder ${index + 1}` }))
+  : [{ id: 'local', name: 'Local' }, { id: 'hosted', name: 'Hosted' }]
+const library = { folders, folderOrder: [...folders.map(folder => folder.id), ''],
+  assignments: stress ? Object.fromEntries(profiles.slice(0, 89).map((profile, index) =>
+    [profile.id, index < 60 ? 'folder-0' : `folder-${index - 59}`])) : {} }
 if (!localStorage.getItem(key)) localStorage.setItem(key, JSON.stringify({
   activeProfileId: profiles[0].id,
   recentConnections: Object.fromEntries(kinds.map(kind => [kind, profiles.slice(0, 8).map(profile => profile.id)])),

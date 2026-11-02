@@ -26,6 +26,21 @@ describe("getToolChoiceParams", () => {
 });
 
 describe("parseToolCallResults", () => {
+  test("resolves trusted labels before validating names across all entity categories", () => {
+    const names = ["Still in Love", "New Eridu", "Dawnbreaker", "Azure Guard", "Black Tide Incident", "Silver Oath"];
+    const types = ["character", "location", "item", "faction", "event", "concept"];
+    const labels = names.map((name) => `${name} | A Very Long Descriptive Display Title`);
+    const result = parseToolCallResults([
+      { name: "extract_entities", args: { entities: [...labels.map((name, i) => ({ name, type: types[i] })),
+        { name: "Unknown | A Very Long Descriptive Display Title", type: "character" }] } },
+      { name: "extract_relationships", args: { relationships: [{ source: labels[0], target: labels[1], type: "located_in", label: "arrived", sentiment: 0 }] } },
+      { name: "extract_font_colors", args: { color_attributions: [{ hex_color: "#abc", character_name: labels[0], usage_type: "speech" }] } },
+    ], { knownEntities: names.map((name, i) => ({ name, type: types[i]!, aliases: [labels[i]!] })) });
+    expect(result.entitiesPresent.map((entity) => entity.name)).toEqual(names);
+    expect(result.relationshipsShown[0]).toMatchObject({ source: names[0], target: names[1], type: "located_in" });
+    expect(result.fontColors[0]?.characterName).toBe(names[0]);
+  });
+
   test("normalizes actual font colors and rejects invalid colors or usage types", () => {
     const result = parseToolCallResults([{ name: "extract_font_colors", args: { color_attributions: [
       { hex_color: "#abc", character_name: "Melina", usage_type: "thought" },
@@ -125,7 +140,7 @@ test("live and batch extraction receive the same thought-channel rules and confi
   for (const prompt of prompts) {
     expect(prompt.system).toContain("a thought/italic wrapper takes precedence over quotation marks");
     expect(prompt.system).toContain("report both usage types");
-    expect(prompt.system).toContain("standalone first-person thought paragraph continues");
+    expect(prompt.system).toContain("established narrative viewpoint in any POV");
     expect(prompt.system).toContain("including message prefixes, supplied aliases, and unambiguous pronouns");
     expect(prompt.system).toContain("Include both resolved endpoints in entities_present");
     expect(prompt.system).toContain("serves = subordinate to superior");
@@ -153,6 +168,54 @@ test("live and batch extraction retain configured participants alongside known e
     expect(prompt.user).toContain("<known_characters>\nMara, Prolix");
     expect(prompt.user).toContain('"name":"Prolix","role":"user"');
     expect(prompt.system).toContain("A love interest is a relationship even before a formal partnership");
+  }
+});
+
+test("live and batch requests check interpersonal coverage before accepting item/location-only results", async () => {
+  const requests: Array<Parameters<Parameters<typeof extractWithSidecar>[1]>[0]> = [];
+  const entry = { importance: 2, emotional_tones: [], narrative_flags: [], key_facts: [], entities_present: [],
+    relationships_shown: [], status_changes: [], color_attributions: [], discovered_aliases: [] };
+  const generate: Parameters<typeof extractWithSidecar>[1] = async (request) => {
+    requests.push(request);
+    return { content: JSON.stringify(request.requestPurpose === "batch extraction"
+      ? { results: [{ ...entry, index: 0 }, { ...entry, index: 1 }] } : entry) };
+  };
+  const passage = '[CHARACTER | Mara]: At Silver Inn, I carry Dawnblade. "I trust you to watch my back, Prolix."';
+  const options = { participants: [{ name: "Mara", role: "character" as const }, { name: "Prolix", role: "user" as const }] };
+  await extractWithSidecar(passage, generate, "fixture", options);
+  await extractBatchWithSidecar([{ index: 0, content: passage }, { index: 1, content: "Quiet weather." }], generate, "fixture", options);
+  expect(requests).toHaveLength(2);
+  const relationshipSections = requests.map((request) => request.messages[0]!.content.split("RELATIONSHIPS\n")[1]!.split("\nFACTS AND IMPORTANCE")[0]);
+  expect(relationshipSections[0]).toBe(relationshipSections[1]);
+  for (const request of requests) {
+    const system = request.messages[0]!.content;
+    expect(system).not.toContain("Missing data is acceptable");
+    expect(system).toContain("still extract every clearly supported claim");
+    expect(system).toContain("First check person-to-person connections");
+    expect(system).toContain("The user persona is an in-story character");
+    expect(system).toContain("including established bonds reaffirmed in this passage");
+    expect(system).toContain("Ownership or location links do not replace person-to-person connections");
+    expect(system).toContain("no supported interpersonal connection was omitted or recorded only in key_facts");
+    expect(system).toContain("overlapping dimensions, not an exhaustive checklist");
+    expect(system).toContain("without requiring particular words or behaviors");
+    expect(system).toContain("Use the full relationship type vocabulary as broad categories");
+    expect(system).toContain("Use custom with a precise label when no standard type fits");
+    expect(system).toContain("Co-presence and routine conversation alone establish no interpersonal bond");
+    expect(system).not.toContain("RELATIONSHIP EXAMPLES");
+    expect(system).not.toContain("Silver Inn");
+    expect(system).not.toContain("I trust you to watch my back");
+    const tool = request.tools![0]!;
+    const relationshipSchema = request.requestPurpose === "batch extraction"
+      ? (tool.parameters as any).properties.results.items.properties.relationships_shown
+      : (request.tools!.find((tool) => tool.name === "extract_relationships")!.parameters as any).properties.relationships;
+    expect(relationshipSchema.description).toContain("Do not omit a supported person-to-person connection");
+    expect(relationshipSchema.items.properties.type.enum).toEqual([
+      "ally", "enemy", "lover", "parent", "child", "sibling", "mentor", "rival", "owns", "member_of", "located_in", "fears", "serves", "custom",
+    ]);
+    expect(relationshipSchema.items.properties.type.description).toContain("Categories describe broad connections, not fixed behaviors or required wording");
+    expect(relationshipSchema.items.properties.type.description).toContain("ally includes friendship");
+    expect(relationshipSchema.items.properties.type.description).toContain("All other standard types are equally eligible");
+    expect(relationshipSchema.items.properties.label.description).not.toContain("e.g.");
   }
 });
 
@@ -390,4 +453,25 @@ describe("sidecar failure diagnostics", () => {
       expect(text).toContain("socket closed");
     } finally { warn.mockRestore(); }
   });
+});
+
+test("shared labels never become an individual relationship, alias, status or color owner", () => {
+  const label = "Pulchra Fellini and Jane Doe";
+  const names = ["Pulchra Fellini", "Jane Doe"];
+  const result = parseToolCallResults([
+    { name: "extract_entities", args: { entities: [label, ...names].map((name) => ({ name, type: "character" })),
+      discovered_aliases: [{ canonical_name: label, alias: "Jane" }, { canonical_name: names[0], alias: label }],
+      status_changes: [{ entity: label, change: "arrived", detail: "arrived" }] } },
+    { name: "extract_relationships", args: { relationships: [
+      { source: label, target: "Darran", type: "ally", label: "cooperation", sentiment: 0.5 },
+      { source: names[0], target: names[1], type: "ally", label: "cooperation", sentiment: 0.5 },
+    ] } },
+    { name: "extract_font_colors", args: { color_attributions: [{ character_name: label, hex_color: "#abc", usage_type: "speech" }] } },
+  ], { characterNames: names, participants: names.map((name) => ({ name, role: "character", authorLabel: label })) });
+  expect(result.entitiesPresent.map((entity) => entity.name)).toEqual(names);
+  expect(result.relationshipsShown).toHaveLength(1);
+  expect(result.relationshipsShown[0]).toMatchObject({ source: names[0], target: names[1] });
+  expect(result.statusChanges).toEqual([]);
+  expect(result.fontColors).toEqual([]);
+  expect(result.discoveredAliases).toEqual([]);
 });
